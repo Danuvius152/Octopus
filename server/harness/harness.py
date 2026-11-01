@@ -56,15 +56,25 @@ class Harness:
 
     def create_run(self, config: RunConfig | None = None) -> HarnessRun:
         """Build the per-turn streaming run engine for this harness."""
-        return HarnessRun(self.profile, config)
+        return HarnessRun(self.runtime_profile(config), config)
+
+    def runtime_profile(self, config: RunConfig | None) -> RuntimeProfile:
+        """Select the same capabilities for runtime creation and API views."""
+        profile = self.profile
+        if config is not None and config.transport is not None:
+            if profile.select_transport is None:
+                raise ValueError(f"{profile.backend} does not select transports")
+            profile = profile.select_transport(profile, config.transport)
+        return profile
 
     def validate_configuration(self, config: RunConfig) -> None:
         """Validate the known static render without resolving or launching a CLI.
         Final dynamic instructions, MCP entries and environment are checked again
         by prepare_spawn with the actual invocation.
         """
-        ctx = assemble_turn(self.profile, config, "", ".", work_id=config.work_id)
-        argv, kwargs = self.profile.build_turn_argv(ctx)
+        profile = self.runtime_profile(config)
+        ctx = assemble_turn(profile, config, "", ".", work_id=config.work_id)
+        argv, kwargs = profile.new_driver(profile).build_argv(ctx)
         validate_launch(argv, kwargs.get("env"))
 
     def is_auth_error(self, text: str, *, code: str | None = None) -> bool:

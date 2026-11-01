@@ -13,7 +13,7 @@ from server.app_agent import AppAgentError, AppAgentManager
 from server.applications import ApplicationManager
 from server.config import settings
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from tests import test_session_owner_publication as publication_tests
 
 notices = publication_tests.notices
@@ -51,7 +51,7 @@ async def test_app_answer_waits_for_the_original_terminal_notification_prefix(
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model)], {"cwd": context.working_dir}),
     ))
     entered, release = asyncio.Event(), asyncio.Event()

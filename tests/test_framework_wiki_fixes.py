@@ -12,7 +12,7 @@ from server.app_agent import AppAgentManager
 from server.config import settings
 from server.database import Database
 from server.harness import HarnessEvent, get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.sessions import SessionManager
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
@@ -238,7 +238,7 @@ async def test_concurrent_delete_callers_share_one_retirement_owner(runtime, mon
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(identity), str(entered), str(release), str(original_input)],
             {"cwd": context.working_dir},

@@ -10,10 +10,10 @@ for (const noCrypto of [false, true]) {
     : "submits over insecure HTTP and keeps the rejected draft", async ({ page, request }) => {
     const origin = "http://192.0.2.10:5174";
     // Serve the actual application at an insecure, non-loopback origin. All
-    // network traffic stays on the isolated Playwright servers.
+    // network traffic stays on the isolated Playwright servers. Only the
+    // destination changes; let the browser receive the response directly.
     await page.route(`${origin}/**`, async (route) => {
-      const response = await route.fetch({ url: route.request().url().replace(origin, "http://localhost:5174") });
-      await route.fulfill({ response });
+      await route.continue({ url: route.request().url().replace(origin, "http://localhost:5174") });
     });
     const submissions: Record<string, unknown>[] = [];
     await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {

@@ -171,7 +171,10 @@ async def wait_dispatch_idle(manager, session_id):
 ])
 async def test_preparation_failures_use_bounded_classification(runtime, monkeypatch, diagnostic, code, preparations):
     manager, _, session, _, _, events = runtime
-    session.claude_session_id = "review-thread"
+    seed = await manager.start_message(session.id, "Create the original history before testing resume preparation")
+    assert (await asyncio.wait_for(seed.wait(), 5)).outcome.status == "success"
+    await wait_dispatch_idle(manager, session.id)
+    events.clear()
     calls = []
     async def prepare(*args):
         calls.append(args)

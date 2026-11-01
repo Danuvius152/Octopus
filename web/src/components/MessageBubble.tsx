@@ -24,7 +24,7 @@ import {
   parseDelegationEvent,
 } from "./AgentDelegationEventCard";
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
-import { SubagentCard } from "./SubagentCard";
+import { NativeSubagentCard, SubagentCard } from "./SubagentCard";
 import { projectToolCall, readRuntimeMetadata } from "../lib/toolIdentity";
 import { requestSource } from "../lib/injectedTurns";
 
@@ -164,6 +164,9 @@ export function MessageBubble({
   // back to the default octopus when an agent exists but set no avatar.
   const assistantAvatar = agentName ? agentAvatar || "🐙" : null;
   switch (message.type) {
+    case "native_subagent":
+      return typeof message.tool_input?.card_id === "string"
+        ? <NativeSubagentCard sessionId={sessionId} cardId={message.tool_input.card_id} /> : null;
     case "text":
       if (message.role === "user") {
         const source = requestSource(message);
@@ -221,7 +224,7 @@ export function MessageBubble({
               <div className="msg-content inline-block whitespace-pre-wrap break-words rounded-[14px] rounded-br-[4px] bg-primary px-4 py-3 text-[14px] leading-relaxed text-white">
                 {message.content}
               </div>
-              {message.steered && (
+              {(message.steered || message.tool_input?.native_steer === true) && (
                 /* Sent INTO the turn that was already running, rather than
                  * queued behind it (inline-steering.md §12). Worth saying so:
                  * the two look identical in the transcript but behave very
@@ -230,7 +233,8 @@ export function MessageBubble({
                 <div className="msg-steered-marker flex justify-end">
                   <span className="inline-flex items-center gap-1 font-mono text-[10.5px] text-primary-300">
                     <IconArrowBarToRight size={11} />
-                    sent to the running turn
+                    {message.tool_input?.native_steer === true
+                      ? "native input · processing unconfirmed" : "sent to the running turn"}
                   </span>
                 </div>
               )}

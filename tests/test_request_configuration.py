@@ -16,8 +16,9 @@ from server.codex_login import codex_home_for
 from server.database import Database
 from server.deps import get_session_manager
 from server.harness import get_harness
+from server.harness.claude_code import ClaudeDriver
+from server.harness.driver import ArgvDriver
 from server.harness.model_settings import ModelSettings
-from server.harness.profile import StdinMode
 from server.routers import agents, credentials, sessions
 from server.sessions import SessionManager
 from tests.accounts import create_account
@@ -53,7 +54,7 @@ async def configuration_host(tmp_path, monkeypatch):
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, build_turn_argv=argv,
-        activity_observer=None, prepare_resume=None, stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        activity_observer=None, prepare_resume=None, new_driver=ArgvDriver,
         model_settings=lambda credential: ModelSettings(reasoning_efforts=["low", "high"], service_tiers=["default", "fast"]),
     ))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
@@ -270,7 +271,7 @@ async def test_credential_deleted_after_spawn_cannot_receive_initial_input(confi
     )
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        harness.profile, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model), str(effects)], {"cwd": context.working_dir}),
     ))
     spawn = asyncio.create_subprocess_exec
@@ -437,7 +438,7 @@ async def test_next_request_uses_the_new_credential_instead_of_a_held_process(co
     )
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True, credential_style=credential_style,
+        harness.profile, new_driver=ClaudeDriver, can_steer=True, reusable=True, credential_style=credential_style,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(effects),
              Path(context.credential.home_dir).name if context.credential.home_dir else context.credential.secret],

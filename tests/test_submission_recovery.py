@@ -649,7 +649,7 @@ async def _submission_commit_failure_child(tmp_path, monkeypatch):
 
 
 async def test_uncertain_steer_write_is_owned_saved_and_never_requeued(runtime, tmp_path, monkeypatch):
-    from server.harness.profile import StdinMode
+    from server.harness.claude_code import ClaudeDriver
     from server.harness.run import HarnessRun
 
     manager, db, session, _, starts, _ = runtime
@@ -673,21 +673,21 @@ async def test_uncertain_steer_write_is_owned_saved_and_never_requeued(runtime, 
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=argv, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        harness.profile, build_turn_argv=argv, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         prepare_resume=None, activity_observer=None,
     ))
     attempted = []
-    send = HarnessRun.send_user_frame
+    send = HarnessRun.send_input
     initial = None
 
-    async def lose_frame_ack(backend, text, *, frame_uuid=None):
+    async def lose_frame_ack(backend, text, *, input_id=None):
         if text != "Do not send twice":
-            return await send(backend, text, frame_uuid=frame_uuid)
+            return await send(backend, text, input_id=input_id)
         stored = await db.get_client_submission(session.id, "live-steer")
         assert stored["execution_owner"] == initial.request_id
         assert stored["reason_code"] == "steer_delivery_unknown"
         attempted.append(text)
-        await send(backend, text, frame_uuid=frame_uuid)
+        await send(backend, text, input_id=input_id)
         raise OSError("write acknowledgement lost")
 
     async def observe(event):
@@ -697,7 +697,7 @@ async def test_uncertain_steer_write_is_owned_saved_and_never_requeued(runtime, 
             if event.get("type") == "dispatch_state":
                 changed.set()
 
-    monkeypatch.setattr(HarnessRun, "send_user_frame", lose_frame_ack)
+    monkeypatch.setattr(HarnessRun, "send_input", lose_frame_ack)
     manager.on_broadcast("uncertain-steer-observer", observe)
     try:
         initial = await manager.start_message(session.id, "Original task")

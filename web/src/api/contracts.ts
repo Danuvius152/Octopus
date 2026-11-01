@@ -4084,6 +4084,18 @@ export interface components {
             extra_roots: string[];
         };
         /**
+         * FinalAnswerRef
+         * @description Ordered original message rows selected from one bound native root.
+         */
+        FinalAnswerRef: {
+            /** Thread Id */
+            thread_id: string;
+            /** Turn Id */
+            turn_id: string;
+            /** Message Seqs */
+            message_seqs?: number[];
+        };
+        /**
          * FollowUpDelegationRequest
          * @description Body for the continuation mode of `mcp__ask_agent__ask`
          *     (delegation_id passed in place of name): continue a prior
@@ -4610,6 +4622,75 @@ export interface components {
             /** Default Service Tier */
             default_service_tier?: string | null;
         };
+        /**
+         * NativeInputEvidence
+         * @description Protocol facts for one original input attempt, never proof of consumption.
+         */
+        NativeInputEvidence: {
+            /**
+             * Version
+             * @default 1
+             * @constant
+             */
+            version: 1;
+            /**
+             * Transport
+             * @default codex-app-server
+             * @constant
+             */
+            transport: "codex-app-server";
+            /** Attempt Id */
+            attempt_id: string;
+            /** Input Id */
+            input_id: string;
+            /**
+             * Kind
+             * @default start
+             * @enum {string}
+             */
+            kind: "start" | "steer";
+            /** Connection Generation */
+            connection_generation?: string | null;
+            /** Target Turn Id */
+            target_turn_id?: string | null;
+            /** Rpc Id */
+            rpc_id?: string | null;
+            /** Thread Id */
+            thread_id?: string | null;
+            /** Turn Id */
+            turn_id?: string | null;
+            /**
+             * State
+             * @default not_sent
+             * @enum {string}
+             */
+            state: "not_sent" | "unknown" | "accepted" | "rejected";
+            /** Acceptance Source */
+            acceptance_source?: ("start_response" | "user_message" | "steer_response") | null;
+            /**
+             * Controller
+             * @default not_needed
+             * @enum {string}
+             */
+            controller: "not_needed" | "unknown" | "confirmed";
+        };
+        /** NativeSource */
+        NativeSource: {
+            /** Thread Id */
+            thread_id: string;
+            /** Turn Id */
+            turn_id: string;
+            /** Item Id */
+            item_id?: string | null;
+            /** Root Thread Id */
+            root_thread_id: string;
+            /** Root Turn Id */
+            root_turn_id: string;
+            /** Parent Thread Id */
+            parent_thread_id?: string | null;
+            /** Phase */
+            phase?: string | null;
+        };
         /** NoChangeRevision */
         NoChangeRevision: {
             /** Doc */
@@ -4972,8 +5053,9 @@ export interface components {
             /** Attempt Id */
             attempt_id: string;
             /** Tool Call Id */
-            tool_call_id: string;
+            tool_call_id?: string | null;
             receipt?: components["schemas"]["ToolReceipt"] | null;
+            native?: components["schemas"]["NativeSource"] | null;
         };
         /** SavedAttachment */
         SavedAttachment: {
@@ -5486,6 +5568,15 @@ export interface components {
             tool_use_id?: string | null;
             /** Tool Call Id */
             tool_call_id?: string | null;
+            /** Card Id */
+            card_id?: string | null;
+            /** Native Thread Id */
+            native_thread_id?: string | null;
+            /** Native Turn Id */
+            native_turn_id?: string | null;
+            /** Parent Thread Id */
+            parent_thread_id?: string | null;
+            runtime_metadata?: components["schemas"]["RuntimeMetadata"] | null;
             /**
              * Status
              * @default running
@@ -5549,6 +5640,8 @@ export interface components {
             execution_owner_request_id: string;
             /** Recoverable Input */
             recoverable_input: boolean;
+            /** Native Inputs */
+            native_inputs?: components["schemas"]["NativeInputEvidence"][];
         };
         /** SubmissionInput */
         SubmissionInput: {
@@ -5647,6 +5740,9 @@ export interface components {
             recording_locations?: {
                 [key: string]: unknown;
             }[];
+            final_answer?: components["schemas"]["FinalAnswerRef"] | null;
+            /** Native Status */
+            native_status?: ("completed" | "failed" | "interrupted") | null;
         };
         /** UpdateConnectorRequest */
         UpdateConnectorRequest: {

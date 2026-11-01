@@ -2,12 +2,51 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ClientSubmissionStatus, ClientSubmissionSummary } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
+import { handleWsMessage } from "../hooks/useWebSocket";
 import { RecoverableInputs } from "./RecoverableInputs";
 
 const execution = { state: "withdrawn" as const, delivery_state: "none" as const, state_version: 2, execution_owner_request_id: "request", recoverable_input: true };
 const item: ClientSubmissionSummary = { client_request_id: "original", request_id: "request", execution, preview: "Saved original", attachment_count: 0 };
 const saved: ClientSubmissionStatus = { session_id: "s", client_request_id: "original", request_id: "request", accepted: true,
   execution, input: { content: "Saved original in full 中文", attachment_ids: [], attachments: [] } };
+
+it("distinguishes native acceptance from processing when execution is unknown", async () => {
+  const native = { ...item, execution: { ...execution, state: "unknown", recoverable_input: false,
+    native_inputs: [{ version: 1, transport: "codex-app-server", attempt_id: "attempt", input_id: "request",
+      rpc_id: "rpc-1", thread_id: "thread-1", turn_id: "turn-1", state: "accepted", controller: "confirmed" }] } };
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ items: [native] })));
+  render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={vi.fn()} />);
+  expect(await screen.findByText(/Native input was accepted; model processing and the result remain unconfirmed/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Restore to input" })).toBeNull();
+});
+
+it("keeps accepted steer visible after a successful root without offering replay", async () => {
+  const native = { ...item, execution: { ...execution, state: "done", recoverable_input: false,
+    native_inputs: [{ kind: "steer", state: "accepted" }] } };
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ items: [native] })));
+  render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={vi.fn()} />);
+  expect(await screen.findByText("Accepted by runtime · processing unconfirmed")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Restore to input" })).toBeNull();
+});
+
+it.each(["empty", "pending", "unknown"])("refreshes %s input to accepted while its root is still active", async (previous) => {
+  let accepted = false;
+  const fetch = vi.fn(async () => Response.json({ items: previous === "empty" && !accepted ? [] : [{ ...item, execution: {
+    ...execution, state: "running", recoverable_input: false,
+    native_inputs: [{ kind: "steer", state: accepted ? "accepted" : previous === "pending" ? "not_sent" : "unknown" }],
+  } }] }));
+  vi.stubGlobal("fetch", fetch);
+  render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={vi.fn()} />);
+  if (previous === "empty") await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+  else await screen.findByText(previous === "pending" ? "Added to active turn · acceptance pending" : "Execution result unknown");
+  accepted = true;
+  act(() => handleWsMessage({ type: "dispatch_state", session_id: "s", dispatch_state: {
+    generation: "steer-evidence-service", revision: 10, paused: false, active_request_id: "root", items: [],
+  } }));
+  expect(await screen.findByText("Accepted by runtime · processing unconfirmed")).toBeTruthy();
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole("button", { name: "Restore to input" })).toBeNull();
+});
 
 beforeEach(() => useSessionStore.setState({ token: "recovery-test", activeSessionId: "s", dispatchStates: {}, dispatchGeneration: null }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });

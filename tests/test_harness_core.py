@@ -21,13 +21,14 @@ from server.harness import (
     ParseOutput,
     RunConfig,
     RuntimeProfile,
-    StdinMode,
     TurnContext,
     assembly,
     available_backends,
     get_harness,
     register,
 )
+from server.harness.claude_code import ClaudeDriver
+from server.harness.driver import ArgvDriver, RunDriver
 from server.harness.registry import _REGISTRY
 
 FAKE_CLI = Path(__file__).parent / "_fixtures" / "fake_cli.py"
@@ -49,7 +50,7 @@ class _RawParser(EventParser):
 
 
 def _stream_profile(
-    *lines: str, stdin_mode: StdinMode = StdinMode.STREAM_JSON
+    *lines: str, new_driver: type[RunDriver] = ClaudeDriver
 ) -> RuntimeProfile:
     def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
         return ([sys.executable, str(FAKE_CLI), "emit-lines", *lines], {"cwd": ctx.working_dir})
@@ -60,7 +61,7 @@ def _stream_profile(
         tools_prompt="TOOLS",
         credential_style="env_secret",
         premature_exit_recovery=False,
-        stdin_mode=stdin_mode,
+        new_driver=new_driver,
         can_steer=True,
         reusable=True,
         build_turn_argv=build_turn_argv,
@@ -124,12 +125,12 @@ async def test_unknown_extension_and_diagnostics_preserve_integrity(tmp_path):
 
 async def test_parser_exception_has_bounded_noncontent_evidence(tmp_path):
     run = Harness(_stream_profile('{"type":"bad"}', '{"type":"result"}')).create_run()
-    original = run._parser.parse
+    original = run._driver.parser.parse
     def parse(obj):
         if obj.get("type") == "bad":
             raise ValueError("fixture")
         return original(obj)
-    run._parser.parse = parse
+    run._driver.parser.parse = parse
     await run.start("p", str(tmp_path))
     await asyncio.wait_for(_drain(run), 3)
     await run.stop()
@@ -154,7 +155,7 @@ async def test_oversized_protocol_line_marks_interrupted_recording(tmp_path, mon
 async def test_engine_close_stdin_flag(tmp_path):
     # CLOSE_AFTER_SPAWN must not break a normal run (codex's behaviour).
     profile = _stream_profile(
-        '{"type":"result"}', stdin_mode=StdinMode.CLOSE_AFTER_SPAWN
+        '{"type":"result"}', new_driver=ArgvDriver
     )
     run = Harness(profile).create_run()
     assert run.input_may_have_run is False
@@ -165,8 +166,8 @@ async def test_engine_close_stdin_flag(tmp_path):
     assert [e.type for e in events] == ["result"]
 
 
-@pytest.mark.parametrize("stdin_mode", list(StdinMode))
-async def test_resume_preparation_refusal_proves_no_input_submission(tmp_path, stdin_mode):
+@pytest.mark.parametrize("new_driver", [ArgvDriver, ClaudeDriver])
+async def test_resume_preparation_refusal_proves_no_input_submission(tmp_path, new_driver):
     from dataclasses import replace
 
     from server.harness.events import HarnessPreparationError
@@ -174,7 +175,7 @@ async def test_resume_preparation_refusal_proves_no_input_submission(tmp_path, s
     async def refuse(*args):
         raise RuntimeError("unavailable before spawn")
 
-    profile = replace(_stream_profile(stdin_mode=stdin_mode), prepare_resume=refuse)
+    profile = replace(_stream_profile(new_driver=new_driver), prepare_resume=refuse)
     run = Harness(profile).create_run()
     try:
         with pytest.raises(HarnessPreparationError):
@@ -724,7 +725,7 @@ async def test_stream_json_writes_the_prompt_to_stdin(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_every_frame_uuid_is_distinct(tmp_path):
+async def test_every_input_id_is_distinct(tmp_path):
     """The real CLI reports our frame uuid back as `command_uuid` and
     deduplicates on it: two frames sharing a uuid means the second command is
     silently dropped and the turn hangs waiting for a reply that never comes.
@@ -736,25 +737,27 @@ async def test_every_frame_uuid_is_distinct(tmp_path):
     profile = _mode_profile("echo-stdin")
     run = Harness(profile).create_run()
     await run.start("first", str(tmp_path))
-    second = await run.send_user_frame("second")
-    third = await run.send_user_frame("third")
+    second = await run.send_input("second")
+    third = await run.send_input("third")
 
-    assert run._initial_uuid is not None
-    assert len({run._initial_uuid, second, third}) == 3
+    events = await asyncio.wait_for(_drain(run), 3)
+    first = next(event.raw["uuid"] for event in events if event.raw.get("type") == "frame_seen")
+    assert first is not None
+    assert len({first, second, third}) == 3
     await run.stop()
 
 
 @pytest.mark.asyncio
-async def test_send_user_frame_refused_on_argv_backends(tmp_path):
+async def test_send_input_refused_on_argv_backends(tmp_path):
     """A backend whose prompt lives in argv has no input channel; asking it to
     take one must fail loudly rather than write into a closed pipe."""
     profile = _stream_profile(
-        '{"type":"result"}', stdin_mode=StdinMode.CLOSE_AFTER_SPAWN
+        '{"type":"result"}', new_driver=ArgvDriver
     )
     run = Harness(profile).create_run()
     await run.start("p", str(tmp_path))
     with pytest.raises(RuntimeError, match="does not take input on stdin"):
-        await run.send_user_frame("late")
+        await run.send_input("late")
     await run.stop()
 
 

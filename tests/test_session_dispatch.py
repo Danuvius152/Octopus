@@ -56,7 +56,7 @@ async def dispatch(monkeypatch, request, tmp_path):
             holds["resume ids"].append("context")
             self.input_ready.set()
 
-        async def send_user_frame(self, prompt):
+        async def send_input(self, prompt):
             holds["frame entered"].set()
             await holds["frame"].wait()
 

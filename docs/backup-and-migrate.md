@@ -32,7 +32,7 @@ content and applications. It does not use a fixed instance-specific file list.
 | Account files | Preserve private agent memory and the same account's `agents/shared-memory/`, ordinary workspace files, attachments, research materials, application code/configuration and `.data`; reinstall rebuildable `.runtime` dependencies |
 | Wiki | Preserve registered vault content, sources/proofs, content history, business identities and the durable facts needed for query and maintenance, including a registered external vault within the supported home layout |
 | API configuration | Preserve account-stored endpoints/keys and saved credential associations |
-| Chats and native continuity | Exclude old sessions/messages, native transcripts/resume state, BG/delegation execution history and their return diagnostics, and extra external/fork work trees collected solely for old conversations; ordinary files already inside the account's included roots remain included |
+| Chats and native continuity | Exclude old sessions/messages, input receipts and native input evidence, native transcripts/resume state, BG/delegation execution history and their return diagnostics, and extra external/fork work trees collected solely for old conversations; ordinary files already inside the account's included roots remain included |
 | Schedules and execution | Exclude recurring/one-shot definitions, enablement, pending triggers and live process/PID/socket/lease state; no post-import schedule activation step |
 | Login state | Exclude model CLI subscription tokens, refresh tokens and authentication caches wherever stored; target credentials require reauthorization. Octopus account password/key material remains included; sign in again on the target |
 | Host network entry | Host-level tunnel binaries, systemd units and proxy settings outside account roots are not account resources. Reinstall them separately; importing an account does not open a public tunnel |
@@ -47,6 +47,25 @@ archives. A complete consistent backup retains that JSON and its original form
 associations; restoring it does not revive callbacks or infer missing legacy
 structure/provenance from text. Compatibility is described in the
 [current storage contract](implemented/current-storage-format.md#publication-boundary).
+
+App Server native source, child text/tool messages, `native_subagent` status
+facts and original question bindings use the same existing chat-message JSON
+and follow that same archive exclusion. Complete backup/restore retains their
+original request/attempt/thread/turn/item and question associations without
+creating another body or storage root. Restoring those facts does not revive
+reply eligibility, run leases, pending native work or the in-memory card cache.
+Native result `final_answer` references and `native_status` also stay within that
+message JSON. A complete backup keeps original seqs and their referenced rows;
+account archives exclude them with the chat. No new collection root is added,
+and an unavailable reference is not recovered from another session's history.
+
+App Server input evidence belongs to `client_submissions` in the main database,
+with no new filesystem root. Account archives exclude it with the owning chat;
+import does not restore a native writer or pending execution. A complete backup
+retains the evidence, original input/attempt/RPC/thread/turn associations and the
+matching provider history. Restoration preserves unknown acceptance and preparation
+changes; it does not infer consumption from a saved terminal or automatically
+replay an input. An absent original transcript remains a visible resume failure.
 
 ### Prepare and export
 

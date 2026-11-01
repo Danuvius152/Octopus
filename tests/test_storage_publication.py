@@ -70,7 +70,7 @@ async def test_publication_rejects_incompatible_current_structure_or_facts_witho
 async def test_publication_verification_leaves_current_messages_and_input_facts_unchanged(installation):
     path = Path(installation.db_path)
     before = path.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 6
+    assert verify_storage(installation)['main_format_version'] == 7
     assert path.read_bytes() == before
     database = Database(str(path))
     await database.initialize()
@@ -89,7 +89,7 @@ async def test_publication_uses_the_same_main_database_alias_as_current_startup(
     alias.symlink_to(original)
     installation.db_path = str(alias)
     before = original.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 6
+    assert verify_storage(installation)['main_format_version'] == 7
     assert original.read_bytes() == before
 
 
@@ -113,5 +113,23 @@ async def test_publication_rejects_invalid_current_return_diagnostics_without_re
         db.execute('UPDATE sessions SET delegation_state=? WHERE id=?', (json.dumps(snapshot), 'original'))
     before = path.read_bytes()
     with pytest.raises(RuntimeError, match='invalid current delegation snapshot'):
+        verify_storage(installation)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize('damage', ['missing-root', 'wrong-input', 'repeated-attempt'])
+async def test_publication_checks_native_input_correlations_without_backfilling(installation, damage):
+    evidence = {'attempt_id': 'attempt-1', 'input_id': 'original-request', 'state': 'accepted',
+                'rpc_id': 'rpc-1', 'thread_id': 'thread-1', 'turn_id': 'turn-1', 'acceptance_source': 'start_response'}
+    if damage == 'missing-root':
+        evidence.pop('turn_id')
+    elif damage == 'wrong-input':
+        evidence['input_id'] = 'another-request'
+    entries = [evidence, evidence] if damage == 'repeated-attempt' else [evidence]
+    path = Path(installation.db_path)
+    with sqlite3.connect(path) as db:
+        db.execute('UPDATE client_submissions SET native_inputs=?', (json.dumps(entries),))
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match='invalid current native input evidence'):
         verify_storage(installation)
     assert path.read_bytes() == before

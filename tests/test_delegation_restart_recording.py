@@ -18,7 +18,7 @@ from server.agent_manager import AgentManager
 from server.database import Database
 from server.delegations import DelegationManager
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.mcp_identity import revoke_run, scope_is_live, verify
 from server.sessions import SessionManager
 from server.users import UserManager
@@ -85,7 +85,7 @@ async def _seed_running_round(path: Path, request: str, agents_dir: Path) -> Non
     harness = get_harness("codex")
     harness.profile = replace(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
-        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", "-c", code], {"cwd": context.working_dir}),
     )
 

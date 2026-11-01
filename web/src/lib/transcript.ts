@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "./accountFetch";
-import { useSessionStore, type Message } from "../stores/sessionStore";
+import { useSessionStore, type Message, type StreamingItem } from "../stores/sessionStore";
 import type { MessageInput } from "./turnOutcome";
 import { sessions } from "./sessionList";
 
@@ -15,7 +15,8 @@ const API = window.location.origin;
  */
 export function applyTranscript(
   sessionId: string,
-  data: Record<string, unknown>
+  data: Record<string, unknown>,
+  nativeBaseline?: Record<string, StreamingItem>,
 ): void {
   const store = useSessionStore.getState();
   if (data.transcript_integrity === "duplicate_seq") {
@@ -45,7 +46,8 @@ export function applyTranscript(
   const sequenced = new Map(merged.filter((m) => typeof m.seq === "number").map((m) => [m.seq!, m]));
   const rows = [...sequenced.values()].sort((a, b) => a.seq! - b.seq!);
   rows.push(...messages.filter((m) => typeof m.seq !== "number"));
-  store.setMessages(sessionId, rows, currentHigh >= snapshotHigh && Boolean(store.streamingText[sessionId]));
+  store.setMessages(sessionId, rows, currentHigh >= snapshotHigh && Boolean(
+    store.streamingText[sessionId] || Object.keys(store.streamingItems[sessionId] || {}).length), nativeBaseline);
   store.setMessageWindow(
     sessionId,
     preservePrefix ? currentOldest : oldest,

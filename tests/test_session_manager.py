@@ -2571,7 +2571,7 @@ class _SteerRun(_QueuedRun):
         await self.release.wait()
         yield HarnessEvent(type="result", session_id="steer-thread")
 
-    async def send_user_frame(self, text, frame_uuid=None):
+    async def send_input(self, text, input_id=None):
         self.frame_entered.set()
         await self.release_frame.wait()
         self.frames.append(text)
@@ -2697,11 +2697,11 @@ async def test_writer_confirms_steers_before_handing_them_to_the_backend(manager
     steered = asyncio.Event()
 
     class ConfirmedRun(_SteerRun):
-        async def send_user_frame(self, text, frame_uuid=None):
+        async def send_input(self, text, input_id=None):
             rows = await manager.db.load_messages(session.id)
             assert [row["content"] for row in rows if row["role"] == "user"] == ["original request", text]
             assert rows[-1]["tool_input"]["request_context"]["source"] == "human"
-            return await super().send_user_frame(text, frame_uuid)
+            return await super().send_input(text, input_id)
 
     async def observe(event):
         if event.get("session_id") == session.id and event["type"] == "steered":

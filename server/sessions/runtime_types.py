@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..harness import Harness, HarnessEvent, HarnessRun
-from ..models import MessageContent, TurnOutcome
+from ..models import FinalAnswerRef, MessageContent, TurnOutcome
 
 if TYPE_CHECKING:
     from .owner_questions import QuestionNotification
@@ -59,6 +59,7 @@ class _Attempt:
     reused: bool
     attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     result: HarnessEvent | None = None
+    final_answer: FinalAnswerRef | None = None
     saw_tool_use: bool = False
     # Observed on this attempt, rather than inherited from an earlier request.
     conversation_id: str | None = None
@@ -74,6 +75,7 @@ class _Attempt:
     # where a human sees stepping, and flush before any non-delta event so
     # ordering with tool calls and the final block is exact.
     delta_buf: list[str] = field(default_factory=list)
+    delta_metadata: dict[str, Any] | None = None
     delta_last_flush: float = 0.0
     # Per-turn watchdog state (turn-safety.md §3): the watchdog stops a turn
     # that goes silent (idle) or runs too long (overall) so it can never hang

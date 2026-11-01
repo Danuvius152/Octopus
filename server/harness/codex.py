@@ -28,6 +28,7 @@ from typing import Any
 
 from .codex_activity import CodexActivityObserver, diagnostic_environment
 from .codex_control import controller_message, refresh_instructions, turn_message
+from .driver import ArgvDriver
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
 from .harness import Harness
 from .login import LoginMethod
@@ -37,7 +38,6 @@ from .profile import (
     OneShotContext,
     ParseOutput,
     RuntimeProfile,
-    StdinMode,
     TurnContext,
     WebCapability,
 )
@@ -305,10 +305,9 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
         "features.retain_client_developer_messages=true",
     ]
     if ctx.web_research:
-        # A research leaf: enable codex's native web_search and run READ-ONLY so
-        # it can search the web but can't write/exec on the host — codex's
-        # honest equivalent of Claude's web-leaf denylist (no per-tool allowlist
-        # exists). native-deep-research.md §4.
+        # A research leaf: native web_search and a read-only sandbox. Native
+        # functions/collaboration remain available; this does not enforce a
+        # strict web-only whitelist. native-deep-research.md §4.
         argv += ["--sandbox", "read-only", "-c", "tools.web_search=true"]
     else:
         # Analog of Claude's --dangerously-skip-permissions for a full turn.
@@ -1077,6 +1076,15 @@ _CODEX_TRANSIENT_ERROR_PATTERNS = (
 )
 
 
+def select_transport(base: RuntimeProfile, transport: str) -> RuntimeProfile:
+    if transport == "exec":
+        return base
+    if transport == "app-server":
+        from .codex_app_server import profile
+        return profile(base)
+    raise ValueError(f"Unknown Codex transport: {transport}")
+
+
 CODEX = RuntimeProfile(
     separate_turn_instructions=True,
     model_settings=read_model_settings,
@@ -1091,7 +1099,8 @@ CODEX = RuntimeProfile(
     # Single combined search-and-read tool, enabled per-leaf via the
     # web_research render path (-c tools.web_search=true). native-deep-research.md §4.
     web=WebCapability(tool_names=("web_search",), combined=True),
-    stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+    new_driver=ArgvDriver,
+    select_transport=select_transport,
     can_steer=False,
     reusable=False,
     can_continue=True,

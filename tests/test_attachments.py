@@ -25,7 +25,7 @@ from server.attachments import (
 from server.config import settings
 from server.database import Database
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.main import app
 from server.session_manager import session_manager
 from server.users import UserManager
@@ -95,7 +95,7 @@ def runtime_input(tmp_path, monkeypatch):
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(received)], {"cwd": context.working_dir},
         ),

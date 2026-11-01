@@ -27,8 +27,10 @@ from ..harness import (
 )
 from ..harness.model_settings import effective_settings
 from ..models import (
+    FinalAnswerRef,
     MessageContent,
     MessageRole,
+    RuntimeMetadata,
     TurnRecovery,
 )
 from ..monitor import Event as _MonEvent
@@ -136,6 +138,7 @@ class TurnsMixin(SessionManagerBase):
         phase: Literal["diagnostic", "retrying", "recovered"] = "retrying",
         attempt: int | None = None, maximum: int | None = None,
         delay: float | None = None,
+        source: HarnessEvent | None = None,
     ) -> dict[str, Any]:
         settlement = session._run.settlement
         payload = TurnRecovery(
@@ -143,10 +146,13 @@ class TurnsMixin(SessionManagerBase):
             phase=phase, code=code, message=safe_diagnostic(message) or "Backend notification",
             attempt=attempt, maximum=maximum, delay=delay,
         )
-        stored = MessageContent(role=MessageRole.system, type="recovery", content=payload.model_dump())
+        stored = MessageContent(role=MessageRole.system, type="recovery", content=payload.model_dump(),
+            runtime_metadata=RuntimeMetadata.model_validate(source.runtime_metadata) if source and source.runtime_metadata else None)
         if settlement and settlement.attempt_id:
             stored.tool_input = {"attempt_context": {"request_id": settlement.request_id,
                                                       "attempt_id": settlement.attempt_id}}
+        if source is not None and source.error_details is not None:
+            stored.tool_input = {**(stored.tool_input or {}), "provider_error": source.error_details}
         seq = await self._persist_message(session, stored)
         return self._tag_persisted(
             {"type": "recovery", "session_id": session.id,
@@ -716,13 +722,19 @@ class TurnsMixin(SessionManagerBase):
         self, session: Session, attempt: _Attempt, event: HarnessEvent
     ) -> dict[str, Any] | None:
         """Buffer a token delta, emitting a frame at most every flush window."""
+        flushed = None
+        if attempt.delta_metadata != event.runtime_metadata:
+            flushed = self._flush_text_deltas(session.id, attempt.delta_buf, attempt.delta_metadata)
+            attempt.delta_metadata = event.runtime_metadata
         if event.content:
             attempt.delta_buf.append(event.content)
+        if flushed is not None:
+            return flushed
         now = time.monotonic()
         if now - attempt.delta_last_flush < _DELTA_FLUSH_SECONDS:
             return None
         attempt.delta_last_flush = now
-        return self._flush_text_deltas(session.id, attempt.delta_buf)
+        return self._flush_text_deltas(session.id, attempt.delta_buf, attempt.delta_metadata)
 
     async def _remember_resume_id(self, session: Session, resume_id: str) -> None:
         """Persist the engine-side conversation id this session resumes from."""
@@ -811,7 +823,7 @@ class TurnsMixin(SessionManagerBase):
                                               agent_id=session.agent_id, backend="codex",
                                               duration_ms=event.duration_ms, detail=detail))
             return []
-        if event.type == "subagent" and session._run.backend is not attempt.backend:
+        if event.type == "subagent" and session._run.backend is not attempt.backend and not (event.runtime_metadata or {}).get("native"):
             return []
         from ..harness.tool_identity import ToolIdentityTracker
         tracker = getattr(attempt.backend, "_tool_identity_tracker", None)
@@ -820,6 +832,9 @@ class TurnsMixin(SessionManagerBase):
             attempt.backend._tool_identity_tracker = tracker
         tracker.normalize(event, session._run.settlement.request_id if session._run.settlement else "untracked",
                           attempt.attempt_id)
+        native = (event.runtime_metadata or {}).get("native")
+        if native and attempt.final_answer is None:
+            attempt.final_answer = FinalAnswerRef(thread_id=native["root_thread_id"], turn_id=native["root_turn_id"])
         if event.type == "text_delta":
             flushed = self._coalesce_delta(session, attempt, event)
             return [flushed] if flushed is not None else []
@@ -828,7 +843,7 @@ class TurnsMixin(SessionManagerBase):
         # Anything else ends the current delta run: flush it first so the
         # partial text can never arrive after the completed block that
         # supersedes it.
-        flushed = self._flush_text_deltas(session.id, attempt.delta_buf)
+        flushed = self._flush_text_deltas(session.id, attempt.delta_buf, attempt.delta_metadata)
         if flushed is not None:
             attempt.delta_last_flush = time.monotonic()
             frames.append(flushed)
@@ -859,6 +874,11 @@ class TurnsMixin(SessionManagerBase):
             await self._handle_result_event(session, attempt, event)
             if event.is_error:
                 self._capture_error_text(attempt, event)
+                if (event.runtime_metadata or {}).get("native") and (event.content or event.error_details):
+                    frames.append(await self._recovery_frame(
+                        session, code=event.error_code or "backend_diagnostic", phase="diagnostic",
+                        message=event.content or "Backend notification", source=event,
+                    ))
             return frames
         if event.type == "error":
             self._capture_error_text(attempt, event)
@@ -878,7 +898,8 @@ class TurnsMixin(SessionManagerBase):
         msg_content = self._event_to_message_content(event)
         msg_seq: int | None = None
         if msg_content is not None:
-            if event.type == "text":
+            source = (event.runtime_metadata or {}).get("native")
+            if event.type == "text" and (not source or source["thread_id"] == source["root_thread_id"]):
                 msg_content.tool_input = {**(msg_content.tool_input or {}), "attempt_context": {
                     "request_id": session._run.settlement.request_id if session._run.settlement else "untracked",
                     "attempt_id": attempt.attempt_id,
@@ -892,6 +913,11 @@ class TurnsMixin(SessionManagerBase):
                     "work_id": pending_question.work_id,
                 }
             msg_seq = await self._persist_message(session, msg_content)
+            if (event.type == "text" and msg_seq is not None and source
+                    and source["thread_id"] == source["root_thread_id"]
+                    and source["turn_id"] == source["root_turn_id"] and source.get("phase") == "final_answer"):
+                assert attempt.final_answer is not None
+                attempt.final_answer.message_seqs.append(msg_seq)
         # Translate into the WS message shape the front-end expects.
         ws_event = self._event_to_ws_message(session.id, event)
         if ws_event is not None and pending_question is not None:
@@ -931,7 +957,9 @@ class TurnsMixin(SessionManagerBase):
             return None
         reason, limit = attempt.timeout
         overall = settings.turn_max_seconds
-        if overall > 0 and time.monotonic() - turn.started_at >= overall:
+        ended_at = (attempt.backend.admission_closed_at
+                    if getattr(attempt.backend, "captures_retirement_output", False) else None)
+        if overall > 0 and self._remaining_turn_time(turn, at=ended_at) == 0:
             reason, limit = "overall", overall
         maximum = max(0, settings.turn_idle_max_retries)
         recovery = turn.settlement.recovery
@@ -1141,10 +1169,18 @@ class TurnsMixin(SessionManagerBase):
         Premature-exit recovery is last and always answers, because "the CLI
         just stopped" is only knowable once nothing else claimed the failure.
         """
-        if self._remaining_turn_time(turn) == 0 and attempt.timeout is None:
+        if getattr(attempt.backend, "protocol_issues", {}).get("fatal_protocol_error"):
+            return _Decision.stop({"code": "protocol_failed", "message": "Backend protocol ownership could not be established; execution stopped."})
+        ended_at = (attempt.backend.admission_closed_at
+                    if getattr(attempt.backend, "captures_retirement_output", False) else None)
+        if self._remaining_turn_time(turn, at=ended_at) == 0 and attempt.timeout is None:
             attempt.watchdog["tripped"] = ("overall", settings.turn_max_seconds)
             if session._run.backend is attempt.backend:
                 self._session_owners[id(session)].runtime.retire(attempt.backend, "parent_timeout")
+        elif (ended_at is not None and attempt.timeout is None and settings.turn_idle_timeout_seconds > 0
+              and not attempt.watchdog.get("waiting_questions")
+              and ended_at - attempt.watchdog["last"] >= settings.turn_idle_timeout_seconds):
+            attempt.watchdog["tripped"] = ("idle", settings.turn_idle_timeout_seconds)
         decision = await self._timeout_decision(session, turn, attempt)
         if decision is not None:
             return decision
@@ -1176,9 +1212,9 @@ class TurnsMixin(SessionManagerBase):
         return await self._premature_exit_decision(session, turn, attempt)
 
     @staticmethod
-    def _remaining_turn_time(turn: _Turn) -> float | None:
+    def _remaining_turn_time(turn: _Turn, *, at: float | None = None) -> float | None:
         limit = settings.turn_max_seconds
-        return max(0.0, limit - (time.monotonic() - turn.started_at)) if limit > 0 else None
+        return max(0.0, limit - ((time.monotonic() if at is None else at) - turn.started_at)) if limit > 0 else None
 
 
 
@@ -1318,6 +1354,7 @@ class TurnsMixin(SessionManagerBase):
 
         return RunConfig(
             session_id=session.id,
+            transport=settings.codex_transport if session.backend == "codex" else None,
             credential_id=credential_id,
             user_id=session.user_id,
             wiki_task_id=session._run.wiki_task_id,

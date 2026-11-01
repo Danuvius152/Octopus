@@ -21,10 +21,13 @@ class FakeRunBase:
     reusable = False
     can_steer = False
 
+    def close_admission(self) -> None:
+        """Stand-ins own no native process or live tool scope to close."""
+
     async def steer(self, text: str):
         if not self.can_steer:
             raise RuntimeError("This test runtime does not support steering")
-        return await self.send_user_frame(text)
+        return await self.send_input(text)
 
     def is_alive(self) -> bool:
         return True
@@ -34,6 +37,10 @@ class FakeRunBase:
 
     def spawn_signature(self, working_dir, credential) -> str:
         return "fake-signature"
+
+    def matches_configuration(self, config, working_dir, credential) -> bool:
+        """These stand-ins bake no settings into a real process."""
+        return True
 
     async def send_turn(self, prompt: str) -> None:
         self.sent_turns = getattr(self, "sent_turns", [])

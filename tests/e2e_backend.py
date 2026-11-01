@@ -17,7 +17,7 @@ record = install(Path(os.environ["OCTOPUS_E2E_AUDIT_FILE"]))
 from server import fork_helpers
 from server.harness import all_backends, get_harness
 from server.harness.claude_code import CLAUDE_CODE
-from server.harness.profile import StdinMode
+from server.harness.driver import ArgvDriver
 
 
 def offline_argv(ctx):
@@ -43,7 +43,7 @@ for backend in all_backends():
         build_oneshot_argv=offline_argv,
         parse_oneshot_stdout=lambda _stdout: "Offline UI",
         new_event_parser=CLAUDE_CODE.new_event_parser,
-        stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        new_driver=ArgvDriver,
         premature_exit_recovery=False,
         activity_observer=None,
         prepare_resume=None,

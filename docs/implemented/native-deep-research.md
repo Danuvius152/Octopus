@@ -27,6 +27,14 @@ interactive RunConfig. Profile-level rendering supplies the scoped web policy;
 unsupported configurations fail explicitly. This is a concrete runtime contract,
 not a promise that a future CLI preserves today's tool set.
 
+The Codex web leaf uses its independent `codex exec` path with read-only sandbox
+and no injected Octopus MCP or connectors. This is separate from ordinary
+interactive transport selection and is retained when that transport changes.
+Read-only and empty injected tools do not establish a strict web-only whitelist:
+the verified native tool surface also exposes non-web functions and collaboration
+tools. The leaf's prompt requests web research, but is not an enforcement boundary.
+Reasoning leaves use the distinct tool-free text worker below.
+
 Leaves are not delegation sessions: stateless extraction does not need named-agent
 conversations, parent questions, retained memory or collaboration UI. Each leaf is
 bounded and its original process remains owned until retirement is confirmed.

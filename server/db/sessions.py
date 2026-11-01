@@ -44,6 +44,14 @@ async def insert_session(tx: Transaction, record: dict[str, Any]) -> None:
 
 class SessionsMixin(DatabaseBase):
 
+    async def get_session_resume_id(self, session_id: str) -> str | None:
+        """Read the committed history after the preceding writer has retired."""
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one("SELECT claude_session_id FROM sessions WHERE id=?", (session_id,))
+            if row is None:
+                raise ValueError("Session no longer exists")
+            return row[0]
+
     async def get_session_binding(self, session_id: str) -> dict[str, Any] | None:
         """Internal relationship lookup; callers must compare the exact owner."""
         async with self.transaction(write=False) as tx:
@@ -522,8 +530,9 @@ class SessionsMixin(DatabaseBase):
             # This request's ordinary input and terminal are one committed
             # fact. Notification and resource retirement cannot split them.
             await tx.execute(
-                "UPDATE client_submissions SET execution_state='done',execution_owner=?,"
-                "reason_code=NULL,state_version=state_version+1,updated_at=? "
+                "UPDATE client_submissions SET execution_state=CASE WHEN delivery_state='unknown' THEN 'unknown' "
+                "WHEN delivery_state='none' AND json_array_length(native_inputs)>0 THEN 'withdrawn' ELSE 'done' END,execution_owner=?,"
+                "reason_code=CASE WHEN delivery_state='unknown' THEN reason_code ELSE NULL END,state_version=state_version+1,updated_at=? "
                 "WHERE session_id=? AND request_id=? AND execution_state IN ('pending','running') "
                 "AND (execution_owner IS NULL OR execution_owner=?)",
                 (request_id, message["created_at"], session_id, request_id, request_id),
@@ -554,13 +563,15 @@ class SessionsMixin(DatabaseBase):
     @staticmethod
     async def _request_messages(tx: Transaction, session_id: str, request_id: str) -> list[dict[str, Any]]:
         cursor = await tx.execute(
-            "SELECT role,type,content,tool_input,cost FROM messages WHERE session_id=? AND "
+            "SELECT role,type,content,tool_input,cost,seq,runtime_metadata FROM messages WHERE session_id=? AND "
             "(terminal_request_id=? OR (role='assistant' AND type='text' "
-            "AND json_extract(tool_input,'$.attempt_context.request_id')=?)) ORDER BY seq",
-            (session_id, request_id, request_id),
+            "AND (json_extract(tool_input,'$.attempt_context.request_id')=? "
+            "OR json_extract(runtime_metadata,'$.request_id')=?))) ORDER BY seq",
+            (session_id, request_id, request_id, request_id),
         )
         return [{"role": row[0], "type": row[1], "content": json.loads(row[2]) if row[2] else None,
-                 "tool_input": json.loads(row[3]) if row[3] else None, "cost": row[4]}
+                 "tool_input": json.loads(row[3]) if row[3] else None, "cost": row[4], "seq": row[5],
+                 "runtime_metadata": json.loads(row[6]) if row[6] else None}
                 for row in await cursor.fetchall()]
 
     async def read_session_result(self, session_id: str, input_request_id: str) -> SessionResult:

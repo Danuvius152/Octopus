@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..config import settings
 from ..harness import HarnessRun
+from ..harness.events import HarnessEvent
 from ..mcp_identity import McpScope, require_live_scope
 from ..models import MessageContent, MessageRole
 from ..question_resolution import (
@@ -27,6 +28,8 @@ from .runtime_types import SessionMailboxFull
 
 if TYPE_CHECKING:
     from .owner import SessionOwner
+
+_MAX_NATIVE_QUESTIONS = 64
 
 
 class QuestionClosedError(ValueError):
@@ -45,6 +48,8 @@ class RegisterNativeQuestion:
     question_id: str
     attempt_id: str
     questions: list[dict[str, Any]]
+    backend: HarnessRun | None = None
+    event: HarnessEvent | None = None
 
 
 @dataclass(frozen=True)
@@ -194,8 +199,15 @@ class OwnerQuestions:
         return self.owner.session._questions.get(pending.question_id) is pending
 
     def _current(self, pending: PendingQuestion) -> bool:
-        return (pending.attempt_id is None
-                or pending.attempt_id == self.owner.session._run.question_attempt_id)
+        if pending.attempt_id is not None and pending.attempt_id != self.owner.session._run.question_attempt_id:
+            return False
+        backend = pending.backend
+        if backend is not None and backend.captures_retirement_output and not backend.question_admission_open:
+            return False
+        if pending.native_ref is not None:
+            assert backend is not None
+            return backend.question_open(pending.native_ref)
+        return True
 
     async def _create(self, command: CreateQuestion | RegisterNativeQuestion) -> PendingQuestion | None:
 
@@ -210,8 +222,17 @@ class OwnerQuestions:
                     or command.scope.work_id != session._run.settlement.work_id
                     or session._run.question_attempt_id is None):
                 raise ValueError("Model run is no longer active")
-        if command.attempt_id is not None and command.attempt_id != session._run.question_attempt_id:
+        native_ref = command.event.native_question if isinstance(command, RegisterNativeQuestion) and command.event else None
+        if command.attempt_id is not None and command.attempt_id != session._run.question_attempt_id and native_ref is None:
             return None
+        if native_ref is not None:
+            retained = [record for record in session._questions.values() if record.native_ref is not None]
+            payload = sum(len(json.dumps([record.questions, record.answer], ensure_ascii=True).encode()) for record in retained)
+            incoming = len(json.dumps(command.questions, ensure_ascii=True).encode())
+            if len(retained) >= _MAX_NATIVE_QUESTIONS or payload + incoming > 1024 * 1024:
+                assert isinstance(command, RegisterNativeQuestion) and command.backend is not None
+                command.backend.fail_stream("native_question_overflow", "Retained native questions exceeded capacity")
+                return None
         question_id = command.question_id if isinstance(command, RegisterNativeQuestion) else uuid.uuid4().hex[:16]
         if (existing := session._questions.get(question_id)) is not None:
             return existing
@@ -220,22 +241,28 @@ class OwnerQuestions:
             question_id=question_id, questions=command.questions,
             deadline=(datetime.now(UTC) + timedelta(seconds=timeout)).isoformat() if timeout > 0 else None,
             expires_at=time.monotonic() + timeout if timeout > 0 else None,
-            request_id=session._run.settlement.request_id if session._run.settlement else None,
-            attempt_id=session._run.question_attempt_id,
+            request_id=native_ref.request_id if native_ref else session._run.settlement.request_id if session._run.settlement else None,
+            attempt_id=native_ref.attempt_id if native_ref else session._run.question_attempt_id,
             work_id=session._run.settlement.work_id if session._run.settlement else None,
+            backend=command.backend if isinstance(command, RegisterNativeQuestion) and command.backend is not None else
+                session._run.backend if isinstance(session._run.backend, HarnessRun) else None,
+            native_ref=command.event.native_question if isinstance(command, RegisterNativeQuestion) and command.event else None,
         )
-        details = {
+        details: dict[str, Any] = {
             "questions": pending.questions, "deadline": pending.deadline,
             "request_id": pending.request_id, "attempt_id": pending.attempt_id, "work_id": pending.work_id,
         }
+        if pending.native_ref is not None:
+            from dataclasses import asdict
+            details["native_question"] = asdict(pending.native_ref)
         event = {"type": "question_request", "session_id": session.id, "question_id": question_id, **details}
         if (isinstance(command, CreateQuestion)
                 and (self.has_waiting_notifications or not self.owner.publisher.can_offer(event))):
             raise SessionMailboxFull("Session notification capacity is full; retry this question later")
         session._questions[question_id] = pending
-        if session._run.question_watchdog is not None:
+        if session._run.question_watchdog is not None and (native_ref is None or native_ref.blocking):
             session._run.question_watchdog.setdefault("waiting_questions", set()).add(question_id)
-        if isinstance(command, CreateQuestion):
+        if isinstance(command, CreateQuestion) or pending.native_ref is not None:
             message = MessageContent(role=MessageRole.assistant, type="question_request",
                                      tool_name="AskUserQuestion", tool_use_id=question_id, tool_input=details)
             await self._persist(pending, message, event, request=True)
@@ -247,6 +274,8 @@ class OwnerQuestions:
             # The task owns only time. Its original record remains the fact;
             # the callback neither mutates it nor starts an enqueue task.
             pending.timer.add_done_callback(lambda _done: self.owner.wake())
+        if pending.backend is not None and pending.backend.captures_retirement_output and not self._current(pending):
+            await self._close(pending, "attempt_ended")
         return pending
 
     async def _persist(
@@ -261,7 +290,7 @@ class OwnerQuestions:
             raise RuntimeError("Question recording failed") from error
         manager._tag_persisted(event, seq, message)
         self._notice_order += 1
-        notice = QuestionNotification(event, self._notice_order, session._run.backend)
+        notice = QuestionNotification(event, self._notice_order, pending.backend or session._run.backend)
         if request:
             pending.request_publication = notice
         else:
@@ -307,6 +336,14 @@ class OwnerQuestions:
 
     async def _answer(self, pending: PendingQuestion, answer: str, *, auto: bool,
                       source: AnswerSource = SYSTEM_SOURCE, answers: list[dict[str, Any]] | None = None) -> bool:
+        if pending.native_ref is not None:
+            assert pending.backend is not None
+            retained = sum(len(json.dumps([record.questions, record.answer], ensure_ascii=True).encode())
+                           for record in self.owner.session._questions.values() if record.native_ref is not None)
+            if retained + len(json.dumps(answer, ensure_ascii=True).encode()) > 1024 * 1024:
+                pending.backend.fail_stream("native_question_overflow", "Retained native answers exceeded capacity")
+                await self._close(pending, "response_overflow")
+                return False
         if not self._claim(pending, "answered"):
             return False
         message = MessageContent(role=MessageRole.user, type="question_answer",
@@ -319,6 +356,9 @@ class OwnerQuestions:
         if auto:
             event["auto"] = True
         await self._persist(pending, message, event)
+        if pending.native_ref is not None:
+            assert pending.backend is not None
+            pending.backend.reply_question(pending.native_ref, answers)
         pending.answer = answer
         pending.ready.set()
         return True
@@ -335,6 +375,9 @@ class OwnerQuestions:
             "question_id": pending.question_id, "message": human, "reason": reason, "tool_input": message.tool_input,
         }
         await self._persist(pending, message, event)
+        if pending.native_ref is not None:
+            assert pending.backend is not None
+            pending.backend.reply_question(pending.native_ref, None)
         pending.ready.set()
         pending.retirement_requested = True
         self._retire_if_finished(pending)
@@ -349,6 +392,23 @@ class OwnerQuestions:
         return await self._answer(pending, self.owner.manager.AUTO_ANSWER_TEXT, auto=True)
 
     async def deadlines(self) -> None:
+        backend = self.owner.session._run.backend
+        execution = self.owner.runtime.current
+        if backend is None and execution is not None and execution.attempt is not None:
+            backend = execution.attempt.backend
+        if isinstance(backend, HarnessRun):
+            event = backend.take_question()
+            if event is not None:
+                assert event.native_question is not None
+                await self._create(RegisterNativeQuestion(event.tool_use_id or "", event.native_question.attempt_id,
+                    (event.tool_input or {})["questions"], backend, event))
+                self.owner.wake()
+        for pending in tuple(self.owner.session._questions.values()):
+            if (pending.backend is not None and pending.backend.captures_retirement_output
+                    and pending.state == "pending" and not self._current(pending)):
+                await self._close(pending, "attempt_ended")
+                self.owner.wake()
+                return
         for pending in tuple(self.owner.session._questions.values()):
             timer = pending.timer
             if timer is not None and timer.done() and not timer.cancelled():

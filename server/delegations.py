@@ -1558,15 +1558,15 @@ class DelegationManager:
                 if rec.state == "completed":
                     assert self.db is not None and request_id is not None
                     result = await self.db.read_session_result(rec.delegation_id, request_id)
-                    if result.outcome is None:
-                        if result.missing != "session_missing":
+                    if result.outcome is None or result.missing is not None:
+                        if result.missing not in {"session_missing", "answer_reference_invalid"}:
                             raise RuntimeError("The committed delegation terminal is missing from its retained conversation")
                         delivery_failure = (
                             "reply_unavailable",
-                            "The child completed, but its conversation was deleted before its reply text could be delivered.",
+                            f"The child completed, but its recorded reply is unavailable ({result.missing}).",
                         )
                     else:
-                        body = "".join(result.fragments).strip()
+                        body = result.reply_text() if result.outcome.final_answer is not None else "".join(result.fragments).strip()
                         if not body:
                             body = "(child session ended without producing any text)"
                         return ReturnBody(

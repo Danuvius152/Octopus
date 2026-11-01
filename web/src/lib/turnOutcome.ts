@@ -1,4 +1,5 @@
 import type { Message } from "../stores/sessionStore";
+import type { components } from "../api/contracts";
 
 export interface TurnOutcome {
   status: "success" | "failed" | "interrupted" | "unknown";
@@ -7,6 +8,8 @@ export interface TurnOutcome {
   code?: string;
   provider_code?: string;
   recovery: Record<string, number>;
+  final_answer?: components["schemas"]["FinalAnswerRef"] | null;
+  native_status?: "completed" | "failed" | "interrupted" | null;
 }
 
 export interface TurnRecovery {
@@ -42,6 +45,8 @@ export function normalizeMessage(message: MessageInput): Message {
       request_id: text(data.request_id),
       message: text(data.message) ?? text(message.content),
       code: text(data.code), provider_code: text(data.provider_code), recovery,
+      final_answer: data.final_answer as TurnOutcome["final_answer"],
+      native_status: data.native_status as TurnOutcome["native_status"],
     };
     return { ...message, content: outcome.message, outcome };
   }

@@ -27,14 +27,17 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ..aio import complete_cleanup
 from ..config import settings
 from ..diagnostics import diagnostic_text, exception_diagnostic
 from ..process_groups import group_exists, wait_group_exit
+from ..submission_models import NativeInputEvidence
 from . import assembly
-from .events import HarnessCredential, HarnessEvent
+from .driver import ActiveTurnRef, SteerNotAccepted
+from .events import HarnessCredential, HarnessEvent, NativeQuestionRef
 from .launch_limits import validate_launch
 from .private_settings import PrivateSettings
-from .profile import ActivityObserver, RuntimeProfile, StdinMode, TurnContext
+from .profile import ActivityObserver, RuntimeProfile, TurnContext
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +171,7 @@ class RunConfig:
     resume_id/credential), which arrive per invocation."""
 
     session_id: str | None = None
+    transport: str | None = None
     # Whose turn this is (multi-tenancy.md §7). Travels into the MCP bearer, so
     # a tool call carries an owner without a round trip and the signature
     # covers it.
@@ -192,7 +196,7 @@ class RunConfig:
     # otherwise. NOT the replay transcript (that lives in the user channel).
     fork_note: str | None = None
     # Native-deep-research web leaf (native-deep-research.md §4): render a
-    # scoped, web-enabled, read-only-ish turn (no destructive/fan-out tools).
+    # scoped web-enabled turn (Codex exec read-only; Claude tool restrictions).
     web_research: bool = False
     # Sub-agents the owning agent brings with it (native-subagents.md §6).
     # Rendered by the profile if it has a surface for them; ignored otherwise,
@@ -218,17 +222,24 @@ class HarnessRun:
         self.run_lease_id = uuid_module.uuid4().hex
         self.work_id = self._config.work_id
         self._lease_closed = False
+        self.admission_closed_at: float | None = None
         # Harness owns this local submission boundary. False proves that no
         # business input was submitted by this attempt; True is uncertainty,
         # not a provider acknowledgment. Reset only before a reused turn.
         self.input_may_have_run = False
         self._spawn_task: asyncio.Task[asyncio.subprocess.Process | None] | None = None
         self._spawn_cleanup: asyncio.Task[None] | None = None
-        self._preparation_task: asyncio.Task[None] | None = None
+        self._preparation_task: asyncio.Task[tuple[TurnContext, list[str], dict[str, Any]]] | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._retirement_started = asyncio.Event()
         self._activity_observer: ActivityObserver | None = None
-        self._parser = profile.new_event_parser()
+        self._driver = profile.new_driver(profile)
+        self._write_lock = asyncio.Lock()
+        self._question_events: deque[HarnessEvent] = deque()
+        self._question_bytes = 0
+        self._question_wake: Callable[[], None] | None = None
+        self._question_replies: set[asyncio.Task[None]] = set()
+        self._input_recorder: Callable[[NativeInputEvidence], Awaitable[None]] | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._private_settings: PrivateSettings | None = None
         self._spawn_identity: str | None = None
@@ -244,18 +255,11 @@ class HarnessRun:
         self.protocol_locations: list[dict[str, Any]] = []
         self._stdout_line_number = 0
         self._stream_closed: bool = False
+        self._stream_failure: HarnessEvent | None = None
+        self._failure_delivered = False
+        self.native_end_reason = "process_ended"
         self._activity_generation = 0
         self._activity_callback: Callable[[float | None], None] | None = None
-        # The uuid of this run's opening prompt frame, remembered so S3 can
-        # tell the CLI's echo of our own prompt from a genuine user message.
-        #
-        # Every frame uuid MUST be unique: the CLI reports it back as
-        # `command_uuid` on `command_lifecycle` and deduplicates on it, so
-        # reusing one silently drops the command and the turn hangs waiting
-        # for a reply that will never come. A derived id (session + turn
-        # counter) is exactly the kind of thing that repeats — this is
-        # random per frame, and we simply remember what we sent.
-        self._initial_uuid: str | None = None
         # Events that arrive with no turn in flight (native-subagents.md §7):
         # an asynchronous sub-agent finishing, the follow-up turn the CLI
         # wakes to report it, a native cron tick. Without a handler they are
@@ -267,6 +271,10 @@ class HarnessRun:
     @property
     def profile(self) -> RuntimeProfile:
         return self._profile
+
+    @property
+    def captures_retirement_output(self) -> bool:
+        return self._driver.multiplexed
 
     @property
     def process_group_id(self) -> int | None:
@@ -306,7 +314,7 @@ class HarnessRun:
         without FS side effects — `start()` calls this then spawns; tests call
         it to inspect the command/env a turn would use."""
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
-        return self._profile.build_turn_argv(ctx)
+        return self._driver.build_argv(ctx)
 
     async def start(
         self,
@@ -322,34 +330,38 @@ class HarnessRun:
 
         self._diagnostic_secrets = (settings.auth_token, credential.secret if credential else "")
         self._started_at = time.monotonic()
-        self._parser.begin_turn()
+        self._driver.begin_turn()
 
         from ..mcp_identity import work_is_open
         if not work_is_open(self.work_id):
             raise RuntimeError("Delegated work is closed")
 
-        ctx = self._make_context(prompt, working_dir, resume_id, credential)
-        spawn_identity = self._context_signature(ctx)
-        argv, kwargs = self._profile.build_turn_argv(ctx)
-        self._private_settings = kwargs.pop("private_settings", None)
-        argv, kwargs = prepare_spawn(argv, kwargs)
-        if ctx.resume_id and self._profile.prepare_resume is not None:
-            preparation = asyncio.create_task(self._profile.prepare_resume(ctx, argv, kwargs), name="harness-controller-update")
-            self._preparation_task = preparation
+        async def prepare() -> tuple[TurnContext, list[str], dict[str, Any]]:
+            await self._driver.begin_input(self, resume_id)
+            context = self._make_context(prompt, working_dir, resume_id, credential)
+            argv, kwargs = self._driver.build_argv(context)
+            self._private_settings = kwargs.pop("private_settings", None)
+            argv, kwargs = prepare_spawn(argv, kwargs)
             try:
-                await preparation
+                await self._driver.prepare(self, context, argv, kwargs)
             except Exception as exc:
                 from .events import HarnessPreparationError
-                self._begin_retirement()
                 raise HarnessPreparationError(str(exc), error_code=getattr(exc, "error_code", None)) from exc
-            except BaseException:
-                self._begin_retirement()
-                raise
-            finally:
-                if preparation.done():
-                    self._preparation_task = None
+            return context, argv, kwargs
+
+        preparation = asyncio.create_task(prepare(), name="harness-preparation")
+        self._preparation_task = preparation
+        try:
+            ctx, argv, kwargs = await preparation
+        except BaseException:
+            self._begin_retirement()
+            raise
+        finally:
+            if preparation.done():
+                self._preparation_task = None
         if self._lease_closed or not work_is_open(self.work_id):
             raise asyncio.CancelledError
+        spawn_identity = self._context_signature(ctx)
         if self._profile.activity_observer is not None:
             generation = self._activity_generation
             self._activity_observer = self._profile.activity_observer(
@@ -390,7 +402,7 @@ class HarnessRun:
             # No await separates current authority from submitting the spawn.
             try:
                 validate_launch(launch_argv, kwargs.get("env"))
-                if self._profile.stdin_mode is StdinMode.CLOSE_AFTER_SPAWN:
+                if self._driver.input_in_argv:
                     self.input_may_have_run = True
                 return await asyncio.create_subprocess_exec(
                     *launch_argv,
@@ -463,71 +475,189 @@ class HarnessRun:
             self._read_stderr(), name=f"{self._profile.backend}-stderr"
         )
 
-        # CLOSE_AFTER_SPAWN: the prompt is in argv and the CLI must not wait
-        # on stdin. Codex reads stdin even with a positional prompt and blocks
-        # forever waiting on EOF, so the close is what lets the turn proceed.
-        # STREAM_JSON leaves the pipe open — the prompt is written to it.
-        if (
-            self._profile.stdin_mode is StdinMode.CLOSE_AFTER_SPAWN
-            and self._process.stdin is not None
-        ):
+        await self._driver.start_input(self, ctx)
+
+    def close_stdin(self) -> None:
+        """Give the captured process EOF; the run retains retirement ownership."""
+        if self._process is not None and self._process.stdin is not None:
             try:
                 self._process.stdin.close()
             except Exception as error:
                 logger.debug("Harness stdin close failed provider=%s run=%s error_type=%s\n%s",
                              self._profile.backend, self.run_lease_id, type(error).__name__,
                              exception_diagnostic(error, secrets=self._diagnostic_secrets))
-        elif self._profile.stdin_mode is StdinMode.STREAM_JSON:
-            # Write the prompt immediately. The pipe must never sit open and
-            # idle: that is what made the CLI stall ~3s per turn waiting for
-            # input that wasn't coming (inline-steering.md §10).
-            self._initial_uuid = await self.send_user_frame(prompt)
 
-    async def send_user_frame(self, text: str, *, frame_uuid: str | None = None) -> str:
-        """Write one user message to the CLI's stdin as a JSON line.
+    async def send_input(self, text: str, *, input_id: str | None = None) -> str:
+        """Ask the driver to encode input; return is local delivery evidence."""
+        return await self._driver.send_input(self, text, input_id=input_id)
 
-        This is the whole input channel under `STREAM_JSON`: the opening
-        prompt goes through it, and (S3) so does anything the user says while
-        the turn is running. Returns the frame's uuid so the caller can match
-        the CLI's echo of it.
+    async def write_input(self, data: bytes, *, target: ActiveTurnRef | None = None) -> None:
+        """Check authority immediately before a driver's business write.
 
-        Return proves local write/drain only, not provider acceptance. A
-        failed or cancelled write can have delivered part or all of the frame.
+        Write/drain is not an ACK; a failed write can have delivered input.
         """
-        if self._profile.stdin_mode is not StdinMode.STREAM_JSON:
-            raise RuntimeError(
-                f"{self._profile.backend} does not take input on stdin"
-            )
+        try:
+            await self._write_lock.acquire()
+        except asyncio.CancelledError as error:
+            if target is not None:
+                raise SteerNotAccepted("Native input was cancelled before writing") from error
+            raise
+        try:
+            try:
+                await self.authorize_input()
+                proc = self._process
+                if target is not None and self.active_turn != target:
+                    raise SteerNotAccepted("The original native target is closed")
+                if proc is None or proc.stdin is None or proc.stdin.is_closing():
+                    raise RuntimeError("CLI stdin is not open")
+            except (Exception, asyncio.CancelledError) as error:
+                if target is not None:
+                    raise SteerNotAccepted(str(error)) from error
+                raise
+            self.input_may_have_run = True
+            # No await between the final target/lease check and write. Close
+            # and terminal observation share this event-loop serialization.
+            proc.stdin.write(data)
+            await proc.stdin.drain()
+        finally:
+            self._write_lock.release()
+
+    async def authorize_input(self) -> None:
         if self._config.authorize_spawn is not None:
             await self._config.authorize_spawn()
         if self._lease_closed:
             raise RuntimeError("HarnessRun has been retired")
-        proc = self._process
-        if proc is None or proc.stdin is None or proc.stdin.is_closing():
-            raise RuntimeError("CLI stdin is not open")
-        frame_uuid = frame_uuid or str(uuid_module.uuid4())
-        line = json.dumps(
-            {
-                "type": "user",
-                "uuid": frame_uuid,
-                "parent_tool_use_id": None,
-                "message": {"role": "user", "content": text},
-            }
-        ) + "\n"
-        self.input_may_have_run = True
-        proc.stdin.write(line.encode())
-        await proc.stdin.drain()
-        return frame_uuid
+
+    def bind_input_recorder(self, recorder: Callable[[NativeInputEvidence], Awaitable[None]]) -> None:
+        self._input_recorder = recorder
+
+    @property
+    def input_identity(self) -> tuple[str, str]:
+        if self._tool_context is None:
+            raise RuntimeError("Native input requires an original request and attempt")
+        return self._tool_context
+
+    async def record_input(self, evidence: NativeInputEvidence) -> None:
+        recorder = self._input_recorder
+        if recorder is None:
+            raise RuntimeError("Native input requires its original submission recorder")
+        if evidence.state in {"accepted", "rejected"}:
+            # An already observed proof outlives cancellation of its reader.
+            # Database transactions retain their own existing total deadline;
+            # process retirement starts independently of this commit.
+            async def commit_proof() -> None:
+                await recorder(evidence)
+            await complete_cleanup(commit_proof())
+        else:
+            await recorder(evidence)
+
+    async def write_control(self, data: bytes) -> None:
+        """Protocol control carries no business input and grants no execution lease."""
+        async with self._write_lock:
+            proc = self._process
+            if proc is None or proc.stdin is None or proc.stdin.is_closing():
+                raise RuntimeError("CLI stdin is not open")
+            proc.stdin.write(data)
+            await proc.stdin.drain()
+
+    def bind_questions(self, wake: Callable[[], None]) -> None:
+        self._question_wake = wake
+
+    def offer_question(self, event: HarnessEvent) -> None:
+        size = len(json.dumps(event.tool_input, ensure_ascii=True).encode())
+        if len(self._question_events) >= 64 or self._question_bytes + size > _EVENT_BUFFER_BYTES:
+            raise RuntimeError("Native question handoff exceeded capacity")
+        self._question_events.append(event)
+        self._question_bytes += size
+        self.questions_changed()
+
+    def questions_changed(self) -> None:
+        if self._question_wake is not None:
+            self._question_wake()
+
+    def take_question(self) -> HarnessEvent | None:
+        if not self._question_events:
+            return None
+        event = self._question_events.popleft()
+        self._question_bytes -= len(json.dumps(event.tool_input, ensure_ascii=True).encode())
+        return event
+
+    @property
+    def has_question_events(self) -> bool:
+        return bool(self._question_events)
+
+    def question_open(self, ref: NativeQuestionRef) -> bool:
+        return self.question_admission_open and self._driver.question_open(ref)
+
+    @property
+    def question_admission_open(self) -> bool:
+        return not self._lease_closed
+
+    async def write_question(self, data: bytes, ref: NativeQuestionRef) -> None:
+        async with self._write_lock:
+            # Final eligibility check and write share event-loop serialization.
+            # A persisted answer is not permission to answer a resolved request.
+            if not self.question_open(ref):
+                return
+            proc = self._process
+            if proc is None or proc.stdin is None or proc.stdin.is_closing():
+                return
+            self._driver.question_sent(ref)
+            proc.stdin.write(data)
+            await proc.stdin.drain()
+
+    def reply_question(self, ref: NativeQuestionRef, answers: list[dict[str, Any]] | None) -> None:
+        self._control_reply(lambda: self._driver.answer_question(self, ref, answers))
+
+    def reply_control(self, data: bytes) -> None:
+        self._control_reply(lambda: self.write_control(data))
+
+    def _control_reply(self, operation: Callable[[], Awaitable[None]]) -> None:
+        if len(self._question_replies) >= 64:
+            self.fail_stream("native_control_overflow", "Native response handoff exceeded capacity")
+            return
+        async def send() -> None:
+            try:
+                async with asyncio.timeout(0.5):
+                    await operation()
+            except Exception as error:
+                self.fail_stream("native_response_failed", self.format_exception(error))
+        task = asyncio.create_task(send(), name="native-control-response")
+        self._question_replies.add(task)
+        task.add_done_callback(self._question_replies.discard)
+
+    def retire(self, reason: str | None = None) -> None:
+        """Freeze admission and start the existing owned retirement immediately."""
+        if reason is not None and self.native_end_reason == "process_ended":
+            self.native_end_reason = reason
+        self._begin_retirement()
 
     @property
     def can_steer(self) -> bool:
         return self._profile.can_steer
 
-    async def steer(self, text: str) -> str:
-        """Deliver a mid-request frame; confirmation is local write/drain."""
+    @property
+    def active_turn(self) -> ActiveTurnRef | None:
+        return None if self._lease_closed else self._driver.active_turn
+
+    @property
+    def observed_root(self) -> ActiveTurnRef | None:
+        return self._driver.observed_root
+
+    @property
+    def native_terminal_status(self) -> str | None:
+        return self._driver.native_terminal_status
+
+    @property
+    def steering_open(self) -> bool:
+        return not self._lease_closed and self._driver.steering_open
+
+    async def steer(self, text: str, *, input_id: str | None = None,
+                    target: ActiveTurnRef | None = None) -> str:
+        """Deliver to the captured target with the driver's native evidence."""
         if not self.can_steer:
             raise RuntimeError(f"{self._profile.backend} does not support steering")
-        return await self.send_user_frame(text)
+        return await self._driver.steer(self, text, input_id=input_id, target=target)
 
     def spawn_signature(
         self, working_dir: str, credential: HarnessCredential | None
@@ -550,18 +680,32 @@ class HarnessRun:
             return self._spawn_identity
         return self._context_signature(self._make_context("", working_dir, None, credential))
 
-    def _context_signature(self, ctx: TurnContext) -> str:
+    def matches_configuration(self, config: RunConfig, working_dir: str,
+                              credential: HarnessCredential | None) -> bool:
+        """Compare the requested assembly with what this process captured."""
+        from dataclasses import replace
+
+        # Human additions revise request instructions through the existing
+        # steer contract; they do not replace spawn-time configuration.
+        config = replace(config, turn_instructions=self._config.turn_instructions, fork_note=self._config.fork_note)
+        context = assembly.assemble_turn(self._profile, config, "", working_dir, credential=credential,
+                                        run_lease_id=self.run_lease_id, work_id=config.work_id)
+        return self.spawn_signature(working_dir, credential) == self._context_signature(context, config)
+
+    def _context_signature(self, ctx: TurnContext, config: RunConfig | None = None) -> str:
         """Hash the same assembled inputs the renderer receives. Prompt/resume
         and separately delivered instructions are per request. Minted HTTP
         bearers/leases vary without changing the process configuration.
         """
+        config = config or self._config
         parts = {
             "backend": self._profile.backend,
-            "session_id": self._config.session_id,
-            "user_id": self._config.user_id,
-            "work_id": self.work_id,
-            "credential_id": self._config.credential_id,
-            "wiki_scope": "run-bound-wiki" if self.reusable and self._config.session_id and self._config.wiki_task_id else self._config.wiki_task_id,
+            "transport": config.transport,
+            "session_id": config.session_id,
+            "user_id": config.user_id,
+            "work_id": config.work_id,
+            "credential_id": config.credential_id,
+            "wiki_scope": "run-bound-wiki" if self.reusable and config.session_id and config.wiki_task_id else config.wiki_task_id,
             "system_prompt": ctx.system_prompt,
             "model": ctx.model,
             "reasoning_effort": ctx.reasoning_effort,
@@ -571,7 +715,7 @@ class HarnessRun:
             "subagents": ctx.subagents,
             "mcp_servers": [{key: value for key, value in asdict(entry).items() if key != "credential"} for entry in ctx.mcp_servers],
             # A rotated installation token invalidates existing signed bearers.
-            "callback_env": assembly.build_callback_env(self._config.session_id),
+            "callback_env": assembly.build_callback_env(config.session_id),
             "memory_dir": ctx.memory_dir,
             "web_research": ctx.web_research,
             "working_dir": ctx.working_dir,
@@ -615,12 +759,12 @@ class HarnessRun:
         self._event_changed.set()
         self.protocol_issues.clear()
         self.protocol_locations.clear()
-        self._parser.begin_turn()
+        self._driver.begin_turn()
         self.input_may_have_run = False
 
     async def write_turn_input(self, prompt: str) -> None:
         """Write the initial input after the owner has opened its reader."""
-        self._initial_uuid = await self.send_user_frame(prompt)
+        await self.send_input(prompt)
 
     def bind_wiki_task(self, task_id: str | None) -> None:
         if self.reusable and self._config.session_id:
@@ -637,23 +781,65 @@ class HarnessRun:
                 self._event_changed.set()
                 yield event
             elif self._stream_closed:
+                # The original projection already bounds these identities.
+                # Derive retirement facts only after the accepted output prefix
+                # and proven shutdown, without sending them through a saturated
+                # presentation queue or dropping them with its failure marker.
+                if not self._driver.multiplexed or self.retirement_state == "proven":
+                    for event in self._driver.retirement_events(
+                        self.native_end_reason, reconcile=self._stream_failure is not None,
+                    ):
+                        yield event
+                if self._stream_failure is not None and not self._failure_delivered:
+                    self._failure_delivered = True
+                    yield self._stream_failure
+                if self._driver.multiplexed:
+                    self._tool_context = None
+                    self._tool_identity_tracker = None
+                    self._driver.release_output()
                 return
             else:
                 self._event_changed.clear()
                 await self._event_changed.wait()
 
-    def _begin_retirement(self) -> asyncio.Task[None]:
+    def close_admission(self) -> None:
+        """Revoke new tool/input authority while retaining original proof readers.
+
+        Stop uses this before settlement can await storage; owned cleanup still
+        starts at its existing boundary so late native input evidence survives.
+        """
+        if not self._lease_closed:
+            self.admission_closed_at = time.monotonic()
         self._lease_closed = True
-        self._tool_context = None
+        if self._question_wake is not None:
+            self._question_wake()
+        if not self._driver.multiplexed:
+            self._tool_context = None
         self.invalidate_activity()
         from ..mcp_identity import revoke_run
         revoke_run(self.run_lease_id)
         from ..wiki.tasks import tasks
         tasks.unbind_run(self.run_lease_id)
+
+    def _begin_retirement(self) -> asyncio.Task[None]:
+        self.close_admission()
         if self._stop_task is None:
             self._stop_task = asyncio.create_task(self._stop(), name="harness-retirement")
+            self._stop_task.add_done_callback(self._retirement_finished)
             self._retirement_started.set()
         return self._stop_task
+
+    def _retirement_finished(self, task: asyncio.Task[None]) -> None:
+        if not self._driver.multiplexed:
+            return
+        if task.cancelled() or (error := task.exception()) is not None:
+            detail = "Native retirement was cancelled" if task.cancelled() else self.format_exception(error)
+            self.fail_stream("native_retirement_failed", detail)
+            # A failed original retirement is an explicit collection cutoff,
+            # never proof of exit. Let the Owner take over the failed resource
+            # instead of leaving its reader and completion pending forever.
+            self._close_stream()
+            self.questions_changed()
 
     @property
     def retirement_state(self) -> str:
@@ -714,6 +900,15 @@ class HarnessRun:
                 await self._activity_observer.close()
             return
 
+        if self._driver.multiplexed and self._question_replies:
+            await asyncio.wait(tuple(self._question_replies), timeout=0.6)
+        try:
+            async with asyncio.timeout(0.5):
+                await self._driver.interrupt(self)
+        except Exception as error:
+            logger.debug("Harness protocol interrupt failed: %s", self.format_exception(error))
+        if not self._driver.multiplexed:
+            self._driver.connection_closed()
         # Closing stdin lets the CLI exit gracefully (flush its result first).
         if proc.stdin and not proc.stdin.is_closing():
             try:
@@ -752,6 +947,13 @@ class HarnessRun:
         ):
             if task is None:
                 continue
+            if self._driver.multiplexed and name == "stdout reader" and not task.done():
+                # Native delivery never waits for presentation. Let the original
+                # reader parse the finite pipe prefix after execution admission
+                # is revoked; raw drain below is only descriptor cleanup.
+                done, _ = await asyncio.wait({task}, timeout=2.0)
+                if not done:
+                    self.fail_stream("native_collection_incomplete", "Native reader did not record the complete shutdown prefix")
             if not task.done():
                 task.cancel()
             try:
@@ -780,6 +982,7 @@ class HarnessRun:
                     int((time.monotonic() - self._started_at) * 1000) if self._started_at is not None else None,
                     proc.returncode)
 
+        await self._driver.finish_observations()
         self._close_stream()
 
         self._process = None
@@ -799,6 +1002,8 @@ class HarnessRun:
     async def _emit(self, event: HarnessEvent) -> None:
         if self._stream_closed:
             return
+        if self._driver.multiplexed and self._stream_failure is not None:
+            return
         # Include raw protocol data and normalized fields. This is a payload
         # budget, not an RSS claim; the count cap bounds small-event overhead.
         size = sum(len(part) for part in json.JSONEncoder(
@@ -811,12 +1016,35 @@ class HarnessRun:
                 self._event_bytes += size
                 self._event_changed.set()
                 return
+            if self._driver.multiplexed:
+                if event.type == "text_delta" and self._event_queue:
+                    older, old_size = self._event_queue[-1]
+                    if older.type == "text_delta" and older.runtime_metadata == event.runtime_metadata:
+                        combined = (older.content or "") + (event.content or "")
+                        extra = len(json.dumps(event.content or "", ensure_ascii=True))
+                        if self._event_bytes + extra <= _EVENT_BUFFER_BYTES:
+                            older.content, older.raw = combined, None
+                            self._event_queue[-1] = older, old_size + extra
+                            self._event_bytes += extra
+                            return
+                self.fail_stream("native_output_overflow", "Necessary native output exceeded the bounded handoff capacity")
+                return
             self._event_changed.clear()
             await self._event_changed.wait()
 
+    def fail_stream(self, code: str, detail: str) -> None:
+        """One reliable failure slot outside the bounded accepted prefix.
+
+        A saturated queue cannot carry its own failure notification. Consumers
+        read its accepted prefix first, then this failure after reader closure.
+        """
+        if self._stream_failure is None:
+            self._stream_failure = HarnessEvent(type="result", is_error=True, error_code=code, content=detail)
+            self._note_protocol_issue(code, detail)
+        self.retire(reason="parent_error")
+
     def _close_stream(self) -> None:
-        """Signal end-of-stream to `stream()` consumers at a logical boundary
-        (the terminal `result` event) before the subprocess actually exits."""
+        """Close delivery; native runs reach this only after proven retirement."""
         if self._stream_closed:
             return
         self._stream_closed = True
@@ -902,11 +1130,16 @@ class HarnessRun:
                              diagnostic_text(line, secrets=self._diagnostic_secrets))
             else:
                 self._note_protocol_issue("invalid_json", line)
+                if self._driver.multiplexed:
+                    self.fail_stream("native_protocol_failed", "Native stdout contained an unreadable protocol record")
             return
         if self._activity_observer is not None:
             self._activity_observer.observe_stdout(obj)
-        out = self._parser.parse(obj)
-        request_id, attempt_id = self._tool_context or (None, None)
+        # A terminal may synchronously revoke the lease while releasing an
+        # already accepted prefix. Revocation cannot erase that prefix's owner.
+        context = self._tool_context
+        out = await self._driver.receive(obj)
+        request_id, attempt_id = context or (None, None)
         for level, message in out.diagnostics:
             logger.log(level, "Harness parser diagnostic provider=%s run=%s request=%s attempt=%s: %s",
                        self._profile.backend, self.run_lease_id, request_id, attempt_id,
@@ -917,20 +1150,19 @@ class HarnessRun:
             # Consume the adapter's finite, already-written native prefix
             # before revoking the attempt and publishing the parent result.
             await self._drain_observations()
-        context = self._tool_context
         if self._tool_identity_tracker is not None:
             for event in out.events:
                 if context is not None:
                     self._tool_identity_tracker.normalize(event, *context)
                 else:
                     self._tool_identity_tracker.normalize_idle(event)
-        if out.end_of_stream:
+        if out.end_of_stream and not self._driver.multiplexed:
             self._tool_context = None
             self.invalidate_activity()
         for event in out.events:
-            if self._lease_closed and event.type == "subagent":
+            if self._lease_closed and event.type == "subagent" and not self._driver.multiplexed:
                 continue
-            if self._stream_closed and self._idle_handler is not None:
+            if self._stream_closed and self._idle_handler is not None and not self._driver.multiplexed:
                 # Out of turn: hand it to the session rather than dropping it.
                 try:
                     await self._idle_handler(event)
@@ -940,7 +1172,7 @@ class HarnessRun:
                                  exception_diagnostic(error, secrets=self._diagnostic_secrets))
             else:
                 await self._emit(event)
-        if out.end_of_stream:
+        if out.end_of_stream and not self._driver.multiplexed:
             self._close_stream()
 
     def _note_protocol_issue(self, kind: str, line: str = "", *, error: Exception | None = None) -> None:
@@ -967,12 +1199,20 @@ class HarnessRun:
                     await self._handle_line(line)
                 except Exception as error:
                     self._note_protocol_issue("parser_exception", line, error=error)
+                    if self._driver.multiplexed:
+                        self.fail_stream("native_protocol_failed", self.format_exception(error))
         except asyncio.CancelledError:
             raise
         except Exception as error:
             self._note_protocol_issue("stdout_interrupted", error=error)
+            if self._driver.multiplexed:
+                self.fail_stream("native_collection_incomplete", self.format_exception(error))
         finally:
-            if not self._stream_closed:
+            self._driver.connection_closed()
+            if self._driver.multiplexed:
+                self.retire()
+            await self._driver.finish_observations()
+            if not self._driver.multiplexed and not self._stream_closed:
                 try:
                     await self._drain_observations()
                 finally:

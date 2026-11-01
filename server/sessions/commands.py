@@ -21,6 +21,10 @@ class CorrelatedControl:
     source: AnswerSource = AnswerSource()
 
 
+def command_digest(data: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 async def process_command(manager: SessionManager, data: dict[str, Any], user_id: str | None, *,
                           source: AnswerSource = UNKNOWN_SOURCE) -> dict[str, Any]:
     sid = data.get("session_id")
@@ -32,6 +36,24 @@ async def process_command(manager: SessionManager, data: dict[str, Any], user_id
     return await manager._session_owner(session).call_runtime(CorrelatedControl(dict(data), user_id, source))
 
 
+def current_interrupt(manager: SessionManager, session: Any, data: dict[str, Any], user_id: str | None) -> bool:
+    """Validate the captured Stop target without awaiting its storage/publication."""
+    identifier = data.get("client_command_id")
+    if (data.get("type") != "interrupt" or data.get("session_id") != session.id or session.user_id != user_id
+            or not isinstance(identifier, str) or not identifier or len(identifier) > 128
+            or identifier in session._command_receipts or "request_id" not in data or "attempt_id" not in data):
+        return False
+    owner = manager._session_owners.get(id(session))
+    if owner is not None and owner.control_conflicts(data):
+        return False
+    request = session._run.request
+    request_id = request.request_id if request else None
+    snapshot = manager.dispatch_snapshot(session.id)
+    return (data["request_id"] == request_id and data["attempt_id"] == session._run.question_attempt_id
+            and data.get("generation") == snapshot["generation"]
+            and (request_id is not None or data.get("revision") == snapshot["revision"]))
+
+
 async def _process_owned_command(manager: SessionManager, session: Any, data: dict[str, Any], user_id: str | None,
                                  source: AnswerSource = UNKNOWN_SOURCE) -> dict[str, Any]:
     command_id, sid, operation = data.get("client_command_id"), data.get("session_id"), data.get("type")
@@ -41,23 +63,20 @@ async def _process_owned_command(manager: SessionManager, session: Any, data: di
     session = manager.get_session(sid)
     if session is None or session.user_id != user_id:
         return {**response, "code": "not_found", "message": "Session not found"}
-    digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    digest = command_digest(data)
     previous = session._command_receipts.get(command_id)
     if previous:
         return previous[1] if previous[0] == digest else {**response, "code": "command_conflict", "message": "Command identity was reused for a different operation"}
+    owner = manager._session_owners.get(id(session))
+    if owner is not None and owner.control_conflicts(data):
+        return {**response, "code": "command_conflict", "message": "Command identity is owned by a different in-flight operation"}
     stale = {**response, "code": "stale_command", "message": "The execution target changed. Refresh this conversation before trying again."}
-    current = session._run.request
-    request_id = current.request_id if current else None
-    attempt_id = session._run.question_attempt_id
     if operation not in ("interrupt", "answer_question"):
         result = {**response, "code": "invalid_command", "message": "Unsupported command"}
     elif manager.get_session(sid) is not session or "request_id" not in data or "attempt_id" not in data:
         result = stale
     elif operation == "interrupt":
-        snapshot = manager.dispatch_snapshot(sid)
-        if (data["request_id"] != request_id or data["attempt_id"] != attempt_id
-                or data.get("generation") != snapshot["generation"]
-                or (request_id is None and data.get("revision") != snapshot["revision"])):
+        if not current_interrupt(manager, session, data, user_id):
             result = stale
         else:
             await manager.interrupt(sid)

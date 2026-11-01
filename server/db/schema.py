@@ -9,7 +9,7 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 6
+CURRENT_VERSION = 7
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -196,6 +196,7 @@ CREATE TABLE client_submissions (
     updated_at TEXT,
     recovery_of TEXT,
     dismissed INTEGER NOT NULL DEFAULT 0,
+    native_inputs TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(native_inputs) AND json_type(native_inputs)='array'),
     PRIMARY KEY (session_id, client_id)
 );
 

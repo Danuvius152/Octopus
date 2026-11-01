@@ -24,7 +24,9 @@
           "kind": "outcome",
           "recording_integrity": "complete",
           "recording_issues": {},
-          "recording_locations": []
+          "recording_locations": [],
+          "final_answer": null,
+          "native_status": null
         },
         "is_error": false
       }
@@ -52,7 +54,9 @@
       "kind": "outcome",
       "recording_integrity": "complete",
       "recording_issues": {},
-      "recording_locations": []
+      "recording_locations": [],
+      "final_answer": null,
+      "native_status": null
     },
     "is_error": false
   }

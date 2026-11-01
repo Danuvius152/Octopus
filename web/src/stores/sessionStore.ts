@@ -6,6 +6,7 @@ import { unreadList, type ListReadState } from "../lib/listState";
 import type { ControlCommandStatus } from "../lib/submission";
 import { normalizeMessage, type MessageInput } from "../lib/turnOutcome";
 import { readDispatchState, type DispatchState } from "../lib/sessionDispatch";
+import { nativeItemKey } from "../lib/nativeOutput";
 import type {
   AgentRead as ApiAgentRead,
   ApplicationRead as ApiApplicationRead,
@@ -88,6 +89,11 @@ export interface Message {
   // Absent for messages written before the column existed and for anything
   // not persisted — both render no time rather than a made-up one.
   created_at?: string;
+}
+
+export interface StreamingItem {
+  content: string;
+  runtime_metadata: RuntimeMetadata;
 }
 
 export interface QuestionOption {
@@ -266,7 +272,7 @@ interface SessionStore {
 
   messages: Record<string, Message[]>;
   addMessage: (sessionId: string, msg: MessageInput) => void;
-  setMessages: (sessionId: string, msgs: MessageInput[], preserveStreaming?: boolean) => void;
+  setMessages: (sessionId: string, msgs: MessageInput[], preserveStreaming?: boolean, nativeBaseline?: Record<string, StreamingItem>) => void;
   // The transcript arrives windowed to the most recent messages
   // (polish-2026-09.md §4 B2): `oldestSeq` is the lowest seq held for a
   // session and the cursor the next page asks from, `hasMoreMessages` whether
@@ -316,7 +322,8 @@ interface SessionStore {
   // `assistant_delta` frames and dropped the moment the completed block
   // arrives. Never persisted, never part of `messages`.
   streamingText: Record<string, string>;
-  appendStreamingText: (sessionId: string, chunk: string) => void;
+  streamingItems: Record<string, Record<string, StreamingItem>>;
+  appendStreamingText: (sessionId: string, chunk: string, metadata?: RuntimeMetadata) => void;
   clearStreamingText: (sessionId: string) => void;
 
   // Sub-agents running inside the current turn, per session, keyed by the
@@ -629,11 +636,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   messages: {},
   addMessage: (sessionId, msg) =>
     set((s) => {
+      const itemKey = nativeItemKey(msg.runtime_metadata);
       // A completed assistant text block supersedes whatever was streaming:
       // drop the buffer in the same update that appends the real message, so
       // the UI never paints both for a frame.
       const streaming =
-        msg.type === "text" && msg.role === "assistant" && s.streamingText[sessionId]
+        !itemKey && msg.type === "text" && msg.role === "assistant" && s.streamingText[sessionId]
           ? dropKey(s.streamingText, sessionId)
           : s.streamingText;
       return {
@@ -642,9 +650,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           [sessionId]: [...(s.messages[sessionId] || []), normalizeMessage(msg)],
         },
         streamingText: streaming,
+        streamingItems: itemKey && msg.type === "text" ? {
+          ...s.streamingItems, [sessionId]: dropKey(s.streamingItems[sessionId] || {}, itemKey),
+        } : s.streamingItems,
       };
     }),
-  setMessages: (sessionId, msgs, preserveStreaming = false) =>
+  setMessages: (sessionId, msgs, preserveStreaming = false, nativeBaseline) =>
     set((s) => ({
       messages: { ...s.messages, [sessionId]: msgs.map(normalizeMessage) },
       closedQuestionIds: {
@@ -659,6 +670,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       // A snapshot reload is authoritative; any half-streamed text it doesn't
       // contain is stale by definition.
       streamingText: preserveStreaming ? s.streamingText : dropKey(s.streamingText, sessionId),
+      streamingItems: preserveStreaming || nativeBaseline ? { ...s.streamingItems, [sessionId]: Object.fromEntries(
+        Object.entries(s.streamingItems[sessionId] || {}).filter(([key, item]) =>
+          (preserveStreaming || item !== nativeBaseline?.[key]) &&
+          !msgs.some((message) => message.type === "text" && nativeItemKey(message.runtime_metadata) === key)))
+      } : dropKey(s.streamingItems, sessionId),
     })),
 
   oldestSeq: {},
@@ -707,24 +723,32 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   // completed block that follows is the real message, and this is only what
   // lets the UI paint before it arrives.
   streamingText: {},
-  appendStreamingText: (sessionId, chunk) =>
-    set((s) => ({
+  streamingItems: {},
+  appendStreamingText: (sessionId, chunk, metadata) =>
+    set((s) => {
+      const key = nativeItemKey(metadata);
+      if (key && metadata) return { streamingItems: { ...s.streamingItems, [sessionId]: {
+        ...s.streamingItems[sessionId], [key]: { runtime_metadata: metadata,
+          content: (s.streamingItems[sessionId]?.[key]?.content || "") + chunk },
+      } } };
+      return {
       streamingText: {
         ...s.streamingText,
         [sessionId]: (s.streamingText[sessionId] || "") + chunk,
       },
-    })),
+      };
+    }),
   clearStreamingText: (sessionId) =>
     set((s) =>
-      s.streamingText[sessionId] === undefined
+      s.streamingText[sessionId] === undefined && s.streamingItems[sessionId] === undefined
         ? s
-        : { streamingText: dropKey(s.streamingText, sessionId) }
+        : { streamingText: dropKey(s.streamingText, sessionId), streamingItems: dropKey(s.streamingItems, sessionId) }
     ),
 
   subagents: {},
   upsertSubagent: (sessionId, run) =>
     set((s) => {
-      const key = run.tool_call_id;
+      const key = run.card_id || run.tool_call_id;
       if (!key) return s;
       const forSession = s.subagents[sessionId] || {};
       const prev = forSession[key];
@@ -737,11 +761,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         ? run.steps
         : appendStep(prev?.steps, run.description);
       const updated = { ...prev, ...prune(run), steps };
+      if (run.card_id && prev && ["completed", "failed", "cancelled", "interrupted"].includes(prev.status)) updated.status = prev.status;
       subagentUpdates.set(updated, Symbol());
       return {
         subagents: {
           ...s.subagents,
-          [sessionId]: { ...forSession, [key]: updated },
+          [sessionId]: Object.fromEntries(Object.entries({ ...forSession, [key]: updated }).slice(-64)),
         },
       };
     }),
@@ -750,10 +775,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       subagents: {
         ...s.subagents,
         [sessionId]: Object.fromEntries(
-          mergeCardSnapshot(runs.filter((r) => r.tool_call_id), Object.values(s.subagents[sessionId] || {}),
-            baseline === undefined ? undefined : Object.values(baseline), (r) => r.tool_call_id!,
+          mergeCardSnapshot(runs.filter((r) => r.card_id || r.tool_call_id), Object.values(s.subagents[sessionId] || {}),
+            baseline === undefined ? undefined : Object.values(baseline), (r) => (r.card_id || r.tool_call_id)!,
             subagentUpdates, (r) => r.status === "running", advanceOnly)
-            .map((r) => [r.tool_call_id!, r])
+            .map((r) => [(r.card_id || r.tool_call_id)!, r]).slice(-64)
         ),
       },
     })),
@@ -856,7 +881,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       applied = true;
       return {
         dispatchGeneration: snapshot.generation,
-        ...(changed ? { closedQuestionIds: {}, pendingQuestions: {}, sessionMembership: {}, sessionAuxiliaryErrors: {} } : {}),
+        ...(changed ? { closedQuestionIds: {}, pendingQuestions: {}, sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingItems: {} } : {}),
         retiredDispatchGenerations: changed
           ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
         // An equal revision confirms the existing content and invalidates

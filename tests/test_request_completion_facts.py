@@ -297,7 +297,7 @@ async def test_owner_failure_does_not_assign_a_terminal_to_an_unconfirmed_steer(
     session = await runtime.manager.create_session(agent["id"], "Unconfirmed correction", str(runtime.root), backend="codex")
     correction = "Keep this correction unknown while its original write has no result."
     sent, cancelled, release_write = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    send = HarnessRun.send_user_frame
+    send = HarnessRun.send_input
     original_writes = []
 
     async def hold_original_write(backend, text, **kwargs):
@@ -321,7 +321,7 @@ async def test_owner_failure_does_not_assign_a_terminal_to_an_unconfirmed_steer(
             raise RuntimeError("Original correction writer ended before its write result")
         return exists
 
-    monkeypatch.setattr(HarnessRun, "send_user_frame", hold_original_write)
+    monkeypatch.setattr(HarnessRun, "send_input", hold_original_write)
     try:
         initial = await runtime.manager.start_message(session.id, "Continue until interrupted.")
         async with asyncio.timeout(2):

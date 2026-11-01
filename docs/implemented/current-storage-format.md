@@ -2,7 +2,7 @@
 
 > **Status:** implemented — Validation and release handoff are tracked separately from production deployment.
 
-The main database uses format **6**, and Wiki uses format **17**. Each database
+The main database uses format **7**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -46,11 +46,31 @@ conversion. Legacy messages without it retain unknown structure/source; no text
 parsing or provenance backfill is performed. Text and `question_closed.reason`
 remain compatible projections. Older consumers can ignore the nested facts;
 retaining original message JSON retains them, while stripped/legacy text cannot
-reconstruct them. Live question callbacks and resource observations are not
+reconstruct them. Live question callbacks and reply authority are not
 persisted or restored. Backup and transfer scope remains with
 [account portability](../backup-and-migrate.md#account-export-and-import).
 
-Main format 6 adds nullable `bg_tasks.delivery_disposition` (`stopped`/`unknown`)
+Opt-in App Server adds typed native source to the existing nullable
+`messages.runtime_metadata` JSON: original request/attempt plus native
+thread/turn/item, root thread/turn, known parent and phase. `tool_call_id` is
+independent optional tool provenance; text does not fabricate it. Turn facts
+may omit item identity. Complete child text/tool messages keep their original
+rows; `native_subagent` status messages retain card/work association in existing
+`tool_input` and native source at the message level, without copying body text.
+Native question requests retain their immutable original binding in the
+existing request message's `tool_input.native_question`; the original resolution
+keeps structured answers and provenance. These are additive JSON facts: no DDL,
+format-marker increment, startup conversion or additional collection root.
+
+Legacy metadata remains readable without inventing native ancestry. History,
+fork/message copying and a complete backup preserve the original JSON, seq and
+associations; a stripped text projection cannot reconstruct them. Runtime
+callbacks, reply eligibility and the bounded card cache are not restored as
+execution authority. A reloaded card derives its body/status from collected
+messages; the live snapshot is only an additional bounded view. Main-chat
+filtering does not delete child rows or change the global high water.
+
+Main format 6 introduced nullable `bg_tasks.delivery_disposition` (`stopped`/`unknown`)
 and `delivery_error` after `knowledge_context`. Delegation round JSON requires
 an independent nullable `terminal_delivery_error` and validates the finite
 terminal-disposition vocabulary, including `stopped` and `unknown`. These are
@@ -59,28 +79,60 @@ results, duplicate input receipts or prove parent processing. Empty diagnostics
 do not authorize replay. Live question delivery controls stay with the original
 round/question and are not a new persistent queue.
 
-A format-5 installation requires this release's finite publication conversion
-after its original writers retire: append the two BG columns as NULL, add only
-`terminal_delivery_error: null` to validated old round JSON, and commit marker 6
-in the same SQLite transaction. Old round dispositions and all other facts
-remain unchanged; malformed or unrecognized old state blocks conversion.
-Ordinary startup never performs it. Real read-only preflight checks complete
-declarations, integrity, foreign keys and exact `table_xinfo` against both the
-declared baseline and the four verified historical column orders. The writer
-transaction repeats those checks, preserves every original column's metadata
-and compares typed row multisets, including duplicate counts and NULL/TEXT/BLOB/
-numeric distinctions. Round JSON differs only by the explicitly added nullable
-field. The candidate's complete verifier runs before COMMIT. Current-format
-reentry verifies and retains already committed diagnostics; an uncertain COMMIT
-keeps the publisher closed for fresh inspection, without rollback to old data.
+Main format 7 adds `client_submissions.native_inputs`, a checked JSON array with
+default `[]`. Each version-1 entry belongs to the original product input and one
+attempt, retaining separate RPC/thread/turn identities, acceptance proof and
+controller uncertainty. Additive version-1 fields distinguish start from steer,
+retain connection generation and the expected target turn, and identify a steer
+response as an acceptance source. Existing entries without those fields remain
+readable as start evidence. A rejected or unsent steer returned to ordinary
+dispatch retains its old evidence alongside the later attempt; its current
+receipt and execution owner determine whether a steer notice still applies.
+The declaration and `NativeInputEvidence` own its shape;
+the verifier checks typed entries, input association and attempt uniqueness.
+Legacy rows remain `[]`: local write/drain or an old confirmed receipt does not
+become native acceptance or model consumption. Lifecycle and recovery semantics
+are in [the input contract](architecture-contract.md#codex-native-input-evidence).
+No additional storage root, execution queue or answer ledger is introduced.
 
-The format boundary was checked against an isolated snapshot of the actual
-main-5 installation, including its retained BG rows and historical column orders;
-every original table's typed row multiset survived. Temporary private acceptance
-also covers populated round JSON, both layouts, process loss before COMMIT and
-lost COMMIT acknowledgment. Current verification tests cover fresh creation,
-unsupported-marker refusal, diagnostic JSON validation and reopen preservation.
-These are implementation/validation facts, not a production conversion claim.
+New App Server outcomes add nullable `final_answer` and `native_status` within
+existing result-message JSON. `final_answer` contains the bound root thread/turn
+and ordered original message seqs; it stores no copied body. `native_status`
+retains completed/failed/interrupted provider evidence independently of the
+Owner's business outcome. This adds no column, storage root or format transition.
+Missing fields remain legacy records. Result readers validate referenced rows in
+the same session/request/attempt and report invalid/missing refs explicitly;
+an empty reference list is a legal empty answer. They never repair a bad reference
+from another request, child, turn or session. Typed metadata on ordinary text does
+not require tool provenance. Timing and consumers belong to the
+[execution/result contract](architecture-contract.md#原请求结果读取).
+
+Provider failure diagnostics use the existing recovery-message JSON. Its typed
+runtime metadata retains original request/attempt/native source, and
+`tool_input.provider_error` retains the driver's structured error payload. The
+diagnostic remains independent of the selected business status and answer refs.
+
+A format-6 installation requires this release's finite publication conversion
+after its original writers retire: append only `native_inputs` as `[]` and commit
+marker 7 in the same SQLite transaction. Ordinary startup never performs it.
+Read-only preflight checks complete declarations, integrity, foreign keys and
+exact `table_xinfo` against the declared baseline and the four verified historical
+column orders. The writer transaction repeats those checks, preserves original
+column metadata and compares every original table's typed row multiset, including
+duplicate counts and NULL/TEXT/BLOB/numeric distinctions. The candidate's complete
+verifier runs before COMMIT. Format-7 reentry verifies and retains already committed
+native evidence; uncertain COMMIT keeps the publisher closed for fresh inspection
+without restoring old data or replaying inputs. This conversion does not admit
+arbitrary historical/intermediate layouts or revive deleted conversations.
+
+The 6→7 boundary was checked on an isolated fresh snapshot of the actual retained
+installation; all twenty original tables preserved their metadata and typed facts.
+Temporary private checks cover populated canonical/historical layouts, malformed
+baseline refusal, process loss before COMMIT, lost COMMIT acknowledgment, current
+reentry and the real preflight entry before consuming a publication permit.
+Current regressions cover native proof validity, terminal/restart preservation,
+fresh creation and mismatch refusal. These are implementation/validation facts;
+the production database has not been converted by this development task.
 
 The nullable, checked `applications.deletion` JSON column records only
 unfinished deletion (`retiring`/`files`,

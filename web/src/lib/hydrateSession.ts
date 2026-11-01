@@ -220,7 +220,7 @@ export function applySessionSnapshot(
   advanceOnly = false,
 ): boolean {
   if (!applyDispatchSnapshot(sessionId, detail, start)) return false;
-  applyTranscript(sessionId, detail);
+  applyTranscript(sessionId, detail, start.streamingItems[sessionId] || {});
   const store = useSessionStore.getState();
   const active = detail.active_attempt as { request_id?: unknown; attempt_id?: unknown } | undefined;
   if (!advanceOnly && !store.activeAttempts[sessionId] && typeof active?.request_id === "string" && typeof active.attempt_id === "string" &&

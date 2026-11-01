@@ -51,6 +51,12 @@ Delivery evidence has its own `delivery_state`. An uncertain steer remains
 unknown even when the carrying request has a successful result. For ordinary
 single-input execution, the exact terminal and input settlement commit in one
 transaction. Notification failure cannot reverse a committed outcome.
+For opt-in Codex App Server, `native_inputs` separates accepted native steer
+from its carrier's business result. Accepted does not prove model processing,
+even when the carrier succeeds. Only a proven unaccepted steer may return to
+the ordinary queue under its original identity and order; unknown inputs stay
+out of automatic dispatch. Details and target qualification follow
+[the native input contract](implemented/architecture-contract.md#codex-native-input-evidence).
 
 On restart, unclaimed inputs become withdrawn and claimed inputs become
 unknown. Missing legacy payloads and completed legacy rows without an exact
@@ -72,6 +78,10 @@ that the input was never accepted.
 input, attachment evidence and execution result. The collection GET returns
 saved-input notices with a stable `before` cursor. It associates exact
 terminals, filters and sorts before applying the page limit in SQL.
+Committed native input changes trigger the original Owner's dispatch revision,
+so this collection refreshes while a root is still active. A delayed acceptance
+can replace a pending/unknown notice without waiting for another submission or
+root completion; it does not resume execution or change an existing outcome.
 
 ## Independent returns and one-shot schedules
 
@@ -110,6 +120,9 @@ input whose single `recovery_of` link identifies its source; source eligibility
 and the unique direct successor are checked in the admission transaction.
 Legacy forward links are read during migration and have no runtime writer.
 An unknown input has no one-click restore-and-run action.
+Accepted native steer also retains a review notice when model processing is
+unconfirmed, with no restore-and-run action. An old unsent/rejected steer that
+subsequently executes as an ordinary request does not leave a stale notice.
 
 Saved inputs **Dismiss notice** commits only a persistent visibility edit,
 then best-effort notifies the original Owner. An unavailable or retired Owner

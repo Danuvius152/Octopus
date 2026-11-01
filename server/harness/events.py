@@ -13,6 +13,22 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+@dataclass(frozen=True)
+class NativeQuestionRef:
+    """Immutable destination; neither a product answer nor a new execution grant."""
+
+    question_id: str
+    connection_generation: str
+    server_request_id: str | int
+    request_id: str
+    attempt_id: str
+    thread_id: str
+    turn_id: str
+    item_id: str
+    question_ids: tuple[str, ...]
+    blocking: bool
+
+
 class HarnessPreparationError(RuntimeError):
     """Preparation failed before model execution; no prompt was dispatched."""
 
@@ -51,14 +67,20 @@ class SubagentUpdate:
     normalize onto this one shape so the UI never learns which CLI it is
     talking to (native-subagents.md §3).
 
-    A sub-agent is deliberately NOT a session: it is ephemeral, anonymous and
-    scoped to one tool call, unlike a delegation, which is a real session
-    owned by another agent (agent-collaboration.md).
+    A sub-agent is not a runnable Octopus session. Legacy observations attach
+    to one tool call; App Server observations retain original child/work identity
+    across collected items. Delegations have their own real sessions and owners
+    (agent-collaboration.md).
     """
 
     task_id: str                     # the harness's own id for the run
     tool_use_id: str | None = None   # the parent tool call it belongs to
     tool_call_id: str | None = None
+    card_id: str | None = None
+    native_thread_id: str | None = None
+    native_turn_id: str | None = None
+    parent_thread_id: str | None = None
+    runtime_metadata: dict[str, Any] | None = None
     status: str = "running"          # running | completed | failed | cancelled | interrupted | unknown
     stop_reason: str | None = None
     name: str = ""                   # "Explore", "general-purpose", a thread id…
@@ -93,6 +115,11 @@ class SubagentUpdate:
             task_id=self.task_id or older.task_id,
             tool_use_id=self.tool_use_id or older.tool_use_id,
             tool_call_id=self.tool_call_id or older.tool_call_id,
+            card_id=self.card_id or older.card_id,
+            native_thread_id=self.native_thread_id or older.native_thread_id,
+            native_turn_id=self.native_turn_id or older.native_turn_id,
+            parent_thread_id=self.parent_thread_id or older.parent_thread_id,
+            runtime_metadata=self.runtime_metadata or older.runtime_metadata,
             status=self.status or older.status,
             stop_reason=self.stop_reason or older.stop_reason,
             name=self.name or older.name,
@@ -148,6 +175,7 @@ class HarnessEvent:
     tool_input: dict[str, Any] | None = None
     tool_use_id: str | None = None
     runtime_metadata: dict[str, Any] | None = None
+    native_question: NativeQuestionRef | None = None
     identity_checked: bool = field(default=False, repr=False)
     is_error: bool = False
     error_code: str | None = None
@@ -158,6 +186,9 @@ class HarnessEvent:
     # Set only on `subagent` events.
     subagent: SubagentUpdate | None = None
     raw: dict[str, Any] | None = field(default=None, repr=False)
+    # Provider error payload, interpreted by the driver and retained as a
+    # diagnostic even when the business outcome was selected before it arrived.
+    error_details: dict[str, Any] | None = field(default=None, repr=False)
 
 
 class HarnessOneshotError(Exception):

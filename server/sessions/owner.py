@@ -14,7 +14,7 @@ from ..diagnostics import exception_diagnostic
 from ..harness import HarnessRun
 from ..models import MessageContent, MessageRole
 from .base import BackendRetirement, ForkError, Session, SessionManagerBase, logger
-from .commands import CorrelatedControl
+from .commands import CorrelatedControl, command_digest
 from .owner_questions import (
     CreateQuestion,
     OwnerQuestions,
@@ -161,6 +161,14 @@ class SessionOwner:
     def wake(self) -> None:
         self._wake.set()
 
+    def control_conflicts(self, data: dict[str, Any]) -> bool:
+        """The first original envelope owns its ID before a receipt can commit."""
+        for entry in (self._current, *self._controls):
+            if (isinstance(entry, _RuntimeCommand) and isinstance(entry.command, CorrelatedControl)
+                    and entry.command.data.get("client_command_id") == data.get("client_command_id")):
+                return command_digest(entry.command.data) != command_digest(data)
+        return False
+
     async def call_runtime(self, command: RuntimeCommand) -> Any:
         if asyncio.current_task() is self.task:
             return await self.runtime.handle(command)
@@ -187,6 +195,7 @@ class SessionOwner:
         else:
             self._controls.append(envelope)
             self._control_bytes += size
+            self.runtime.freeze_native_control(command)
         self._idle.clear()
         self._commands_drained.clear()
         self._wake.set()
@@ -291,16 +300,23 @@ class SessionOwner:
                             self.session.id, type(publication.error).__name__,
                             detail,
                         )
-                await self.questions.deadlines()
-                self.questions.flush_notifications()
-                await self.runtime.advance()
+                native_stop = next((entry for entry in self._controls if isinstance(entry, _RuntimeCommand)
+                                    and self.runtime.native_control_matches(entry.command)), None)
+                # The accepted Stop already sealed this native host. Apply its
+                # original control before interpreting responses caused by that
+                # retirement; otherwise an early EOF/refusal can steal outcome
+                # selection while the Owner was recording an answer.
+                if native_stop is None:
+                    await self.questions.deadlines()
+                    self.questions.flush_notifications()
+                    await self.runtime.advance()
                 self.questions.flush_notifications()
                 self.runtime.flush_ready()
-                control = next((entry for entry in self._controls
+                control = native_stop or next((entry for entry in self._controls
                                 if not isinstance(entry, _RuntimeCommand) or self.runtime.can_handle(entry.command)), None)
                 if control is not None or self._commands:
                     current: _NoticeCommand | _QuestionCommand | _RuntimeCommand
-                    if control is not None and (not self._commands or self._control_burst < 8):
+                    if control is not None and (native_stop is not None or not self._commands or self._control_burst < 8):
                         self._controls.remove(control)
                         current = self._current = control
                         self._control_bytes -= current.size

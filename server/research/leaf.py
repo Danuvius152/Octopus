@@ -71,6 +71,7 @@ async def run_web_leaf(
     stop (turn-safety.md §2)."""
     config = RunConfig(
         session_id=None,        # no callback env → no bg/ask/ask_agent wiring
+        transport="exec" if getattr(harness, "backend", None) == "codex" else None,
         system_prompt=_LEAF_SYSTEM,
         model=model,
         mcp_servers=[],         # [] (not None) = NO servers (None = all defaults)

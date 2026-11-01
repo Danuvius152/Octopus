@@ -1,24 +1,27 @@
 # Input steering, streaming and held processes
 
-> **Status:** implemented — Claude stream-JSON steering and process reuse; Codex exec queues later input.
+> **Status:** implemented — Claude stream-JSON steering and process reuse; opt-in Codex App Server steers its bound active root; Codex exec queues later input.
 
 ## Current capability and delivery
 
-Steering follows `RuntimeProfile.can_steer`, independently of `reusable` and
-tool-policy support. Claude declares steering and reuse with `STREAM_JSON`;
-Codex exec declares neither with `CLOSE_AFTER_SPAWN`. Session API views expose
-the explicit steering capability; Owner dispatch also checks the active phase
-and input eligibility. A native stdin channel grants no capability by itself.
+Steering follows the selected `RuntimeProfile.can_steer`, independently of
+`reusable` and tool-policy support. Claude declares steering and reuse; Codex
+App Server declares steering without process reuse; Codex exec declares neither.
+Session API views use the same transport selection as run creation. Owner
+dispatch also checks the active phase and input eligibility. A native stdin
+channel grants no capability by itself.
 
 | Evidence | Current guarantee |
 | --- | --- |
 | Committed input claim | The original input has an execution identity; delivery is not proven. |
 | Steer `confirmed` | The complete local frame write/drain returned; provider acceptance or processing is not proven. |
+| App Server `accepted` | The original steer response or complete user-message client ID proves native acceptance; model processing is unconfirmed. |
 | Codex exec `turn.completed` | The current parser's root ended; complete native descendants and parent continuation are not proven. |
 
 A failed or cancelled frame write may have sent part or all of its input.
 The original input keeps its unknown delivery fact; a successful root does not
-upgrade that fact. These fields remain compatible without a new provider ACK layer.
+upgrade that fact. Claude retains its local delivery evidence; App Server adds
+native evidence to the same original submission.
 
 All user input first follows the durable [input contract](../input-reliability.md).
 SessionOwner owns dispatch eligibility and ordering. A supported steer is sent by
@@ -32,6 +35,50 @@ BG, Research and delegation returns remain separate inputs in successful-admissi
 order. They are not automatically batched or converted to native steer. Current
 boundaries are maintained in the
 [execution contract](architecture-contract.md#输入完成与资源退休).
+
+## Bound Codex root and queue qualification
+
+An App Server attempt owns one accepted root. The driver supplies an immutable
+`ActiveTurnRef` with connection generation, original attempt, thread and turn.
+Owner captures it when taking over a steer; the RPC sends that thread and
+`expectedTurnId`, never a native child or a replacement root. Native wait and
+its return leave the target eligible while that same root remains active.
+Validated root terminal and Stop close eligibility immediately, before resource
+retirement or receipt publication.
+
+Only human text without attachments, with compatible automatic Wiki constraints
+and configuration, can steer. Explicit read/maintenance inputs, attachments,
+preparation, no target and retirement use ordinary queue dispatch. Compatibility
+uses the actual run configuration, connector assembly and existing spawn
+signature; request instructions retain their separate steering semantics. Free
+text is not parsed for model or setting changes, and steering cannot replace
+spawn-time configuration or extend authorization.
+
+The pending budget is eight inputs including the current write. Overflow enters
+the ordinary queue, and a later human input cannot overtake older queued human
+work. The existing paused-backlog exception still permits a new human request
+and corrections to that request; it does not resume the old backlog.
+
+The writer runs from input admission, independently of stdout and subscriber
+progress. Complete business and control frames share a write lock. After the
+last authorization await, target/lease validation and the business write have no
+intervening await; terminal/Stop closure uses the same event-loop ordering.
+Before writing, the original submission commits its possible-send marker.
+The pinned server's explicit rejection, or proof that no send marker exists,
+permits Owner to return the original input and order to ordinary dispatch.
+Generic internal errors and missing acknowledgments remain unknown. They cannot
+trigger replay, a different target or automatic resumption after Stop.
+
+Observed acceptance/rejection commits survive reader cancellation through the
+existing cleanup protection and database deadline. Resource cancellation starts
+independently; a late proof updates only its original input. Owner coalesces
+committed evidence notifications into its existing dispatch revision so Saved
+inputs refreshes during an active root, including an unknown-to-accepted change.
+Accepted steer remains reviewable with a processing-unconfirmed notice after
+root success; it has no restore-and-run action. Requeued input that later runs
+normally does not retain a stale steer notice. Full identity, evidence and
+recovery rules belong to the
+[input contract](architecture-contract.md#codex-native-input-evidence).
 
 ## Output and process lifetime
 
@@ -48,8 +95,8 @@ Codex exec does not acquire held-process steering by sharing this public Harness
 
 Process reuse, within-turn steering, business completion and native descendant
 completion are separate capabilities. In particular, the first parent result does
-not prove its native tail is complete. The selected app-server migration and
-complete-tail work remain [future scope](../plans/engineering-runtime-roadmap.md).
+not prove its native tail is complete. Remaining native output, resource and
+default-cutover work follows the [R2 roadmap](../plans/engineering-runtime-roadmap.md#codex-app-server-scope).
 
 ## Rationale and verification
 
@@ -64,7 +111,12 @@ Code: [Owner runtime](../../server/sessions/owner_runtime.py),
 [Claude profile](../../server/harness/claude_code.py).
 Verification entry points include `tests/test_session_dispatch.py`,
 `tests/test_harness_claude.py`, `tests/test_harness_flow_control.py` and
-`tests/test_session_capability_projection.py`.
+`tests/test_session_capability_projection.py`. App Server regressions in
+`tests/test_codex_app_server_steering.py` cover active wait, overflow and order,
+configuration/connector changes, rejection, write/Stop/terminal races, lost and
+late proof, and quiet stdout under subscriber pressure. Saved-input frontend
+tests cover empty, pending and unknown snapshots becoming accepted through the
+normal WebSocket dispatch revision while the root stays active.
 
 The [original experiments and rationale](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/inline-steering.md)
 retain their tested CLI version and conditions. Current test policy is in

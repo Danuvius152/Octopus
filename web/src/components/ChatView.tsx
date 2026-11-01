@@ -31,6 +31,7 @@ import { SessionAuxiliaryNotice } from "./SessionAuxiliaryNotice";
 import { MessageTime } from "./MessageTime";
 import { ModelPickerDialog } from "./ModelPickerDialog";
 import { isImeComposing } from "../lib/composerKeys";
+import { isNativeChild, nativeChatMessages } from "../lib/nativeOutput";
 import { isAutoInjectedPrompt } from "../lib/injectedTurns";
 import {
   IDLE as HISTORY_IDLE,
@@ -139,8 +140,12 @@ export function ChatView({
     readyIds: readyAttachmentIds } = useDraftAttachments(activeSessionId);
   const messagesMap = useSessionStore((s) => s.messages);
   const streamingMap = useSessionStore((s) => s.streamingText);
+  const streamingItems = useSessionStore((s) => s.streamingItems);
   const messages = activeSessionId ? (messagesMap[activeSessionId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES;
   const streamingText = activeSessionId ? (streamingMap[activeSessionId] ?? "") : "";
+  const subagentSnapshots = useSessionStore((s) => s.subagents);
+  const nativeStreaming = useMemo(() => Object.entries(activeSessionId ? streamingItems[activeSessionId] || {} : {})
+    .filter(([, item]) => !isNativeChild(item.runtime_metadata)), [activeSessionId, streamingItems]);
   const sessions = useSessionStore((s) => s.sessions);
   const archivedSessions = useSessionStore((s) => s.archivedSessions);
   const agents = useSessionStore((s) => s.agents);
@@ -169,6 +174,10 @@ export function ChatView({
     textareaRef.current?.focus();
   }, [activeSessionId, input, pendingAttachments, isArchived, transcriptDamaged, addFiles]);
   const dispatchStates = useSessionStore((s) => s.dispatchStates);
+  const chatMessages = useMemo(() => nativeChatMessages(messages,
+    Object.values(activeSessionId ? subagentSnapshots[activeSessionId] || {} : {}),
+    activeSessionId ? dispatchStates[activeSessionId]?.active_request_id : undefined),
+  [messages, activeSessionId, subagentSnapshots, dispatchStates]);
   const dispatchUnavailable = useSessionStore((s) => s.dispatchUnavailable);
   const dispatchPaused = activeSessionId ? dispatchStates[activeSessionId]?.paused ?? false : false;
   const pendingQuestionsMap = useSessionStore((s) => s.pendingQuestions);
@@ -237,12 +246,17 @@ export function ChatView({
   const loadOlder = useCallback(() => {
     const sid = activeSessionId;
     if (!sid) return;
+    const visibleCount = () => {
+      const current = useSessionStore.getState();
+      return nativeChatMessages(current.messages[sid] || [], Object.values(current.subagents[sid] || {}),
+        current.dispatchStates[sid]?.active_request_id).length;
+    };
+    const visibleBefore = visibleCount();
     setLoadingOlder(true);
     void loadOlderMessages(sid).then((added) => {
       setLoadingOlder(false);
-      // Exactly the number added, in the same tick the longer list lands in,
-      // or the list jumps by however far the two disagree.
-      if (added > 0) setFirstItemIndex((i) => i - added);
+      const visibleAdded = visibleCount() - visibleBefore;
+      if (added > 0) setFirstItemIndex((i) => i - visibleAdded);
       else setOlderStalled(true);
     });
   }, [activeSessionId]);
@@ -474,16 +488,19 @@ export function ChatView({
 
   const footer = useCallback(() => {
     if (!isRunning) return null;
-    if (streamingText) {
+    if (streamingText || nativeStreaming.length) {
       return (
         <div className="msg-streaming" data-testid="streaming-text">
-          <MessageBubble
+          {streamingText && <MessageBubble
             message={{ role: "assistant", type: "text", content: streamingText }}
             sessionId={activeSessionId ?? ""}
             agentName={activeAgent?.name}
             agentAvatar={activeAgent?.avatar}
             plain
-          />
+          />}
+          {nativeStreaming.map(([key, item]) => <MessageBubble key={key}
+            message={{ role: "assistant", type: "text", ...item }} sessionId={activeSessionId || ""}
+            agentName={activeAgent?.name} agentAvatar={activeAgent?.avatar} plain />)}
         </div>
       );
     }
@@ -497,6 +514,7 @@ export function ChatView({
   }, [
     isRunning,
     streamingText,
+    nativeStreaming,
     activeSessionId,
     activeAgent?.name,
     activeAgent?.avatar,
@@ -1603,7 +1621,7 @@ export function ChatView({
       <Virtuoso
         key={`${activeSessionId}:${hasMessages}`}
         className="chat-messages flex-1 min-h-0"
-        data={messages}
+        data={chatMessages}
         itemContent={renderMessage}
         initialTopMostItemIndex={{ index: "LAST", align: "end" }}
         firstItemIndex={firstItemIndex}

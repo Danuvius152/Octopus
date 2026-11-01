@@ -156,7 +156,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     // Partial text, still being written. `addMessage` drops the buffer when
     // the completed block lands, so there's nothing to clear here.
     case "assistant_delta":
-      appendStreamingText(sessionId, data.content as string);
+      appendStreamingText(sessionId, data.content as string, readRuntimeMetadata(data.runtime_metadata));
       break;
 
     // A schedule was created, changed or deleted — by this browser, another
@@ -178,8 +178,17 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     // Live state only — the Task / collab tool call in `messages` is the
     // durable record, so nothing is added to the transcript here.
     case "subagent":
+      if (typeof data.card_id === "string") addMessage(sessionId, {
+        role: "system", type: "native_subagent", tool_input: Object.fromEntries(Object.entries(data).filter(([key]) =>
+          !["type", "session_id", "seq", "created_at", "runtime_metadata", "summary", "prompt"].includes(key))),
+      });
       upsertSubagent(sessionId, {
         task_id: data.task_id as string,
+        card_id: (data.card_id as string) ?? null,
+        native_thread_id: (data.native_thread_id as string) ?? null,
+        native_turn_id: (data.native_turn_id as string) ?? null,
+        parent_thread_id: (data.parent_thread_id as string) ?? null,
+        runtime_metadata: readRuntimeMetadata(data.runtime_metadata),
         tool_call_id: (data.tool_call_id as string) ?? null,
         tool_use_id: (data.tool_use_id as string) ?? null,
         status: (data.status as SubagentRun["status"]) ?? "running",

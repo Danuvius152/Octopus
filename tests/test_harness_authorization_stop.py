@@ -21,9 +21,9 @@ from server.harness import (
     ParseOutput,
     RunConfig,
     RuntimeProfile,
-    StdinMode,
     get_harness,
 )
+from server.harness.driver import ArgvDriver
 from server.session_manager import session_manager
 from server.workspace import paths_for
 from tests import test_live_account_authorization as live_authorization
@@ -69,7 +69,7 @@ def _profile(model: Path, marker: Path, observer: _Observer) -> RuntimeProfile:
         tools_prompt="",
         credential_style="env_secret",
         premature_exit_recovery=False,
-        stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        new_driver=ArgvDriver,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(marker)],
             {"cwd": context.working_dir},
@@ -182,7 +182,7 @@ async def test_spawn_authorization_reads_account_and_credential_as_one_view(acco
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        new_driver=ArgvDriver,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model), str(marker)], {"cwd": context.working_dir}),
     ))
     auth_task = disable_task = None
@@ -283,7 +283,7 @@ async def test_session_stopped_during_spawn_authorization_can_run_again_without_
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, build_turn_argv=argv,
         activity_observer=observer_factory, prepare_resume=None,
-        stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        new_driver=ArgvDriver,
     ))
     original_create_run = harness.create_run
     gated = False

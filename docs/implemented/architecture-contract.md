@@ -65,6 +65,38 @@ Owner 串行修改活动状态；慢准备、spawn、stdin、reader 和退休在
 中执行，结果携带原 request/attempt/work/backend 身份回报，不能在出队时改绑
 到“当前请求”。Owner 不等待另一个 Owner；广播负责通知，不驱动第二套权威终结。
 
+Stop 在等待终态入库前同步关闭原 HarnessRun 的新输入与受控工具准入，撤销
+run lease 和 Wiki 绑定。关闭准入不取消原输入证明 reader，也不表示资源已退出；
+原 Owner 继续记录结算并沿原边界启动和确认清理，迟到接受/拒绝证明仍只细化
+原输入。App Server 的已绑定根 terminal 则立即关闭准入并启动退休，存储或通知
+背压不能延长工具授权。材料仍可保留到原资源退休，但材料和历史都不能恢复 grant。
+
+App Server 的根 terminal 是 provider 候选。一个 attempt 只接纳一个根 turn；
+活动轮内的多次采样、原生等待、嵌套等待和 child followup 均沿原预算。校验根
+terminal 后，Run 同步冻结 target、问题回答和工具准入，启动原有界退休；同一
+reader 仍以原 connection/request/attempt/work 和 native 身份采集完整晚事件，
+不转入 Claude held/idle，也不恢复 grant。EOF、原采集截止和真实退出分别取证；
+raw drain 不证明完整 item 已保存。已观察的根 started/delta 缺少完整 item 时
+不能成功，未承诺采集或取消前从未产生的 child 答案则不成为成功依赖。
+
+正常结算等待必要前缀和原资源退出。Stop 与 start 等待失败可以先由原 Owner
+唯一选定 interrupted/failed，待有限前缀结束后再一次定稿引用、分配 terminal
+seq 和入库；迟到终态不改选业务状态。`native_status` 保留实际根终态，与业务
+status 独立。选定后的 Stop 不改写原结论，仍暂停派发和关闭准入。退休失败唤醒
+原 Owner 并沿 Manager 的既有失败接管和 health 边界结束等待，保留原资源引用，
+不靠无限 pending 或新 writer 代替退出证明。记录/通知失败也不重跑模型。
+
+原生根失败携带的错误正文、provider 错误结构和原 request/attempt/native 来源
+沿既有 recovery 诊断消息保存，位于 terminal 之前。即使 Stop 或 start 等待失败
+已选定业务状态，迟到 provider 错误仍可在刷新后读取；保存诊断不替换已选状态，
+不把错误文本纳入根答案，也不触发重跑。
+
+活动计时以首次撤权为截止，退休宽限沿原有界清理记账；原请求仍占槽直到收束。
+迟于总预算或 idle 的 terminal 不能因 Owner 存储等待而消除超时。根/子真实进展
+可更新活动，重复 started/completed、ACK、详情和轮询不续命；撤权后的晚事件
+不重启活动计时。helper 的实际状态和取消原因按原资源事实保留，不证明父已消费
+全部结果；独立 BG、Research 和命名委派仍归各自 owner。
+
 单轮结算由原 Owner 的 `OwnerRuntime.settle(execution)` 使用原 Execution、
 settlement 和发布上下文完成。Manager 不再回取 `runtime.current/frames` 解释
 旧结果，只保留入口、注册、跨会话配额和故障接管。重复结算返回原选定事件；
@@ -83,6 +115,46 @@ Manager 接管原对象的完成与资源责任。`done` 表示已结算，可�
 | `recording_state` / 业务 outcome | terminal 事务确认后保留 committed；缺少确认时返回 unavailable，不伪造成功或失败 terminal |
 | `notification_state` | delivered、failed、unavailable 独立于业务结果；通知失败不抹掉已提交结果 |
 | 原 execution/preparation/reader/retirement 引用 | CloseWork、归档与撤权等待真实资源；外部关闭另行排空 publisher，不能反向等待正在调用自己的 subscriber |
+
+<a id="codex-native-input-evidence"></a>
+### Codex 首输入证据与准备边界
+
+opt-in App Server 的首输入和人工 steer 继续使用原 `client_submissions`，不另建投递或结果账本。
+Owner 在标记请求 started、启动异步 claim/附件/凭据/配置准备之前，以短事务记录
+初始 `not_sent` 并保留首 attempt 身份；真正执行沿用该身份。pending 行只允许初始
+未发送证据，不能写发送事实；已证明未接纳的 steer 回队后，原输入可记录后续
+普通执行的新 attempt。准备失败与早期 Stop 由此保留恢复
+入口；driver 的直接 Harness 调用仍自行初始化同类事实。
+
+| 原生证据 | 含义与后续行为 |
+| --- | --- |
+| `not_sent` | 未记录业务帧可能发送；spawn、握手、只读查询不算首输入执行。controller 修改的不确定性独立保留。 |
+| `unknown` | 原 submission 已先提交可能发送边界及 RPC 身份，随后才能写业务帧。写前存储失败不发送，写后 ACK 丢失不自动重放。 |
+| `accepted` | 原 start/steer 响应或匹配的完整 user-message client ID 证明接纳并关联原根 turn；不证明模型消费。 |
+| `rejected` | 锁版协议明确未接纳。当前 Owner 的未接纳 steer 可按原身份和顺序回普通队列；首输入或迟到拒绝按原恢复合同处理。通用内部错误不证明拒绝。 |
+
+产品 input、attempt、RPC、native thread 与 turn 身份分别解释；细化不能覆盖已知
+身份或倒退证据。thread 与输入证据一起提交，后续 writer 在原资源退休后读取
+持久事实，不依赖一次实时事件被消费。driver 报告协议事实，原 Owner 唯一结算。
+steer 另保留 `kind`、连接 generation 与预期 target turn；接受证明的 turn 必须与
+该 target 相同。连接代次与原生身份共同隔离编号复用，原输入不能迁往下一轮。
+写前 marker 与最终 target/lease 校验分别拥有持久不确定性和实际写入资格；原事务
+仅在没有 marker 或证据均为 `not_sent/rejected` 时允许当前 steer 回队。
+
+terminal 事务与查询保留未澄清的 unknown；成功根 terminal 不能替输入确认。
+Stop 后仅允许细化原来已可能发送的输入的接受/拒绝证明，不能登记新 attempt、
+重新发送或改写已提交的 interrupted outcome。已观察的接受/拒绝记录复用现有
+取消保护和数据库总时限，不能因 reader 退休取消而丢失，亦不阻断进程取消启动。
+除当前 Owner 尚未交付的已证明未接纳 steer 按原序回队外，明确未发送/拒绝者
+进入既有恢复列表，用户检查原文和附件后，以带 `recovery_of` 的新身份明确提交。重启按已有
+证据区分未发送与未知；旧行的空证据不回填为原生接纳或模型消费。重复浏览器
+身份仍返回原回执，界面分别说明原生确认未知与准备变更未知。
+原生证据提交只唤醒原 Owner 的合并通知信号；Owner 推进现有 dispatch revision，
+使活动中的 Saved inputs 也可刷新为 accepted。接受但没有消费证据的 steer 在根
+成功后仍保留限制说明，没有自动恢复执行按钮；回队后已作为普通请求执行的
+输入不因旧 steer 证据留下错误通知。资格、顺序和容量见[steer 合同](inline-steering.md)。
+
+### 共享输入与执行观察
 
 执行输入只在 `SessionManager.initialize()` 的输入恢复、会话载入与 fork 恢复全部
 成功后开放。数据库引用非空不证明就绪；未初始化、初始化中或恢复失败明确返回
@@ -129,15 +201,25 @@ attempt、有序正文、成本和可识别缺失。确认的 inline 输入沿�
 unknown 输入不借用主请求的成功。旧 terminal 无 attempt 时只回退同 request
 已关联文本，不按时间、文字含义或“最佳答案”猜关联，也不建答案引用表。
 
+新 App Server terminal 的 `final_answer` 仅保存绑定根 thread/turn 和有序原消息
+seq。Owner 只在完整根 `final_answer` item 已提交后纳入引用；commentary、child、
+工具文本和其他根均不属于答案，不追加总结轮。`SessionResult` 与 `LiveReply`
+共同校验原 request/attempt、根身份、阶段、消息类型、顺序和 terminal 之前的
+范围。引用为空表示合法空答；坏引用返回 `answer_reference_invalid`，不借用其他
+行。完整空文本 item 仍保留原记录和引用。既有无引用记录沿原关联读取，不能
+把旧空值升级为新格式的完整性证明。
+
 | 消费者 | 保留的正文及完成语义 |
 | --- | --- |
-| 委派完成返回 | terminal attempt 正文连续拼接后 strip；成功空正文用既有占位；失败走 agent-error，保留原交付缺失/完整性错误。 |
-| App 历史状态 | 正文双换行拼接，不整体 strip；失败仍可带保存的正文；无 terminal 按原运行事实区分 running/queued/unknown。 |
-| App 实时 ask/SSE | `LiveReply` 依原 request/attempt 接收，新 attempt/retry 清旧正文，忽略空片段后双换行拼接并 strip；成功另需原通知前缀送达。 |
+| 委派完成返回 | 新原生答案使用共同正文格式；旧 terminal attempt 正文仍连续拼接后 strip。成功空正文用既有占位；坏引用走 reply_unavailable，失败走 agent-error。 |
+| App 历史状态与刷新 | 新原生答案使用共同正文格式，历史消息只投影被选中的原生正文行；旧正文仍双换行拼接、不整体 strip。失败可带已保存正文；无 terminal 区分 running/queued/unknown。 |
+| App 实时 ask/SSE | `LiveReply` 依原 request/attempt 接收，新 attempt/retry 清旧正文；原生进展使用 progress，根 final item 使用 message。terminal 固定共同选择，成功另需原通知前缀送达。 |
 
 实时消费保留事件流，不强制改为事后 DB 查询；重建 receipt 不虚构 delivered。
-合法空答和正文行后来丢失，现有记录不能普遍区分；可识别的 terminal、会话或输入
-关联缺失则显式保留。Claude idle 迟到文本可以保存展示，不提升为完整尾部交付保证。
+新原生正文的共同格式为忽略空片段、按双换行连接后整体 strip；完整记录仍保留
+原始空白。旧格式的合法空答和正文行后来丢失不能普遍区分；可识别的 terminal、
+会话或输入关联缺失仍显式保留。Claude idle 迟到文本可以保存展示，不提升为
+完整尾部交付保证。
 
 ### 问题结算
 
@@ -162,6 +244,38 @@ expired、closed；显式关闭保留 `question_closed` 和 reason，系统到�
 回答、到期和关闭只处置一次，晚答不能消费新 attempt。claim 后保存失败走原 Owner/
 存储故障边界，不发布或返回未保存的成功答案，不用撤回 claim 处理普通校验错误。
 这些事实沿现有消息 JSON 保存，不新增活回调、持久问题队列或存储根。
+
+<a id="native-question-control"></a>
+### 原生问题与控制写入
+
+opt-in App Server 的原生用户问题沿同一 PendingQuestion/OwnerQuestions
+保存表单、结构化答案、可信来源和关闭事实，不再从展示文本反推原生答案。
+不可变 binding 同时保留原连接 generation、server request、thread/turn/item、
+request/attempt、产品 question 与原生 question IDs。客户端与服务端 RPC 编号
+分属两个方向；相同编号或新连接复用编号不能取得旧问题的回答资格。
+
+原生 reader 的有界问题交接独立于展示队列，Owner 在发布拥塞期间仍可登记、
+关闭问题并接管控制。根 terminal、Stop、resolved 或断连同步撤销回答资格；
+原 MCP 问题也随原生宿主准入关闭而失效。状态和通知仍由原 Owner 落盘、发布，
+后到登记的已接纳问题保留请求及关闭前缀，不因入口未显示而遗失。
+
+答案先沿原消息保存，再交给原 Harness 的串行完整帧写出口。取得原写锁后，
+最后一个 await 之后复核连接、原问题未 resolved、目标和准入；复核到写帧
+之间不让出。存储期间或等待写锁期间失效的答案不会写出，也不跨连接重放。
+本地已答记录不证明原生接收或模型消费；不增设 ACK 账本。通知是否已显示或
+成功送达不参与实际发送资格判断。产品 deadline 与原生 isBlocking 分别解释。
+
+可提前退休的关联 Stop 先按原 Owner 的首个在途命令信封核对 command ID
+及内容，再沿同一控制判定执行；最终被拒绝为 command_conflict 的命令不能
+先对宿主产生副作用。Stop 后首输入的迟到拒绝、EOF 等只补原事实，保留
+已选 interrupted outcome 与有限采集 reader。未进入 steer writer 的取消可
+证明没有 I/O；已进入 writer 则继续依原持久发送证据判断，不能猜测回队。
+
+执行准入关闭与采集归属分开：原 request/attempt 身份保留到有限 reader/proof
+清理和资源确认退出。必要完整输出无法容纳或保存时，原请求失败并退休，
+已接纳前缀仍先交付；饱和队列之外的失败标记不能被根成功候选覆盖。
+已选业务结论不因此重选；记录或退休失信仍沿既有 Owner/Manager 失败接管。
+卡片、输出身份和退休投影的消费者约束归[原生子任务合同](native-subagents.md)。
 
 审计原执行结果时使用非空 `terminal_request_id` 及其唯一性，不按消息时间或
 `request.content_id` 计数；复制的历史可以保留这些值而不代表新执行。原生父轮的
@@ -531,10 +645,12 @@ Connector OAuth 在本地安装绑定前可取消，回调单次领取；普通�
 才能删旧位置；删会话本身不证明文件无人使用。正常新写入应符合安装资源声明，
 不能靠补 marker、删除有效 marker 或关闭检查绕过归属问题。
 
-Codex 对话和重试沿现有传输：拼装后的 prompt 按 UTF-8 字节计，`<=102400`
+Codex exec 对话和重试沿现有传输：拼装后的 prompt 按 UTF-8 字节计，`<=102400`
 使用 argv，`>102400` 完整写文件并让模型读取；用户原文完整持久化。这是明确
 保留的选择，账户路径修正不重新打开 stdin 改造，不恢复票43的完整 argv/env
 预算项目，也不扩大到 one-shot。运行参数与诊断保留可读信息，只掩码实际秘密。
+opt-in App Server 的大输入通过业务 RPC 保持 inline，不走该文件溢出路径；原输入
+及附件仍由同一 submission 与文件 owner 保全。
 
 凭据的 `CODEX_HOME` 同时保存认证和原生会话。重新授权借用已有目录；取消、
 provider 失败和 spawn 失败不授予删除该目录的权限。用预存 rollout 验证这些

@@ -34,6 +34,7 @@ def _validate_runtime_configuration(backend: str, fields: dict[str, Any]) -> Non
     allow, deny = fields.get("tool_allow"), fields.get("tool_deny")
     harness.profile.tool_policy.validate(backend, allow, deny)
     harness.validate_configuration(RunConfig(
+        transport=settings.codex_transport if backend == "codex" else None,
         system_prompt=fields.get("system_prompt"), model=fields.get("model"),
         reasoning_effort=fields.get("reasoning_effort"), service_tier=fields.get("service_tier"),
         subagents=fields.get("subagents") or [], mcp_servers=[],

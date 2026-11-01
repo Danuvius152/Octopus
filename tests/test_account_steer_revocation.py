@@ -9,7 +9,7 @@ import pytest
 
 from server.agent_manager import AgentManager
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.session_manager import session_manager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.workspace import paths_for
@@ -57,7 +57,7 @@ async def test_disabling_owner_during_steer_git_anchor_prevents_frame_delivery(
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, build_turn_argv=argv, prepare_resume=None,
-        activity_observer=None, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        activity_observer=None, new_driver=ClaudeDriver, can_steer=True, reusable=True,
     ))
     owner = accounts["owner"]["id"]
     workspace = paths_for(owner).workspace

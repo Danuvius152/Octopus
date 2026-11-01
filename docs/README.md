@@ -65,19 +65,19 @@ leave the README unchanged.
 | [Applications with a backend — the run contract](implemented/application-backends.md) | implemented | An app declares a backend with an executable `start.sh`; Octopus allocates a port, supervises it, proxies to it and reaps it when idle. |
 | [Applications: hosting, builds and deletion](implemented/applications.md) | implemented | Account-owned applications with independent build, backend and deletion lifecycles. |
 | [Codex performance in Monitor](implemented/codex-performance-monitor.md) | implemented | Passive effective output TPS, response windows, model grouping and interpretation limits. |
-| [Codex: interactive execution and tool-free text calls](implemented/codex-backend.md) | implemented | Native exec turns, scoped instructions and a separate subscription text worker. |
+| [Codex: interactive execution and tool-free text calls](implemented/codex-backend.md) | implemented | Native exec turns, opt-in single-root App Server execution and a separate subscription text worker. |
 | [Connectors: installations, enablement and token ownership](implemented/connectors.md) | implemented | Account-owned OAuth installations, agent-scoped enablement and typed MCP tools. |
 | [Console redesign — the blue workspace UI](implemented/console-redesign.md) | implemented | The blue workspace UI — design tokens, the two-level sidebar, and every manage surface as a page rather than a dialog. |
 | [Current storage and publication handoff](implemented/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |
 | [Harness credential refresh and re-authorization](implemented/harness-credential-reauth.md) | implemented | Owned proactive refresh and reactive rejection; reauthorization preserves credential identity. |
 | [Harness transient-error retry](implemented/harness-transient-retry.md) | implemented | Evidence-limited preparation and continuation; missing output never authorizes prompt replay. |
 | [Harness: current runtime boundary](implemented/harness-layer.md) | implemented | One public Harness with runtime profiles, shared execution ownership and explicit capabilities. |
-| [Input steering, streaming and held processes](implemented/inline-steering.md) | implemented | Claude stream-JSON steering and process reuse; Codex exec queues later input. |
+| [Input steering, streaming and held processes](implemented/inline-steering.md) | implemented | Claude stream-JSON steering and process reuse; opt-in Codex App Server steers its bound active root; Codex exec queues later input. |
 | [Message time, composer history and model selection](implemented/composer-and-time.md) | implemented | Original timestamps, human-only prompt history and session model controls. |
 | [Model, reasoning and speed settings](implemented/model-reasoning.md) | implemented | Independent model, reasoning and Normal/Fast speed controls with runtime discovery and preserved conversation history. |
 | [Named-agent delegation: conversations and work rounds](implemented/agent-collaboration.md) | implemented | Asynchronous same-account collaboration with original-receipt completion and exact-work cancellation. |
 | [Native research: pipeline, report and return ownership](implemented/native-deep-research.md) | implemented | Bounded native leaves with distinct research completion, follow-up processing and retirement. |
-| [Native sub-agents, surfaced](implemented/native-subagents.md) | implemented | The CLIs' own sub-agents surfaced as one event and one card — including the ones that finish after the turn that started them. |
+| [Native sub-agents, surfaced](implemented/native-subagents.md) | implemented | Native helper observations, scoped App Server work cards and retained child output, including late events within the original resource lifetime. |
 | [Octopus on a phone](implemented/mobile.md) | implemented | Octopus on a phone — the drawer that puts itself away, 16px fields, touch targets, and safe-area insets. |
 | [Octopus 当前跨模块契约](implemented/architecture-contract.md) | implemented | 当前所有权、输入、完成、资源退休、账户与数据保证；不代表生产部署。 |
 | [Scheduled runs: what a fire is, and what stops it stacking](implemented/scheduled-runs.md) | implemented | What a scheduled fire is: the overlap guard, the `[scheduled:…]` marker, and the link from "last run" to the run. |
@@ -100,13 +100,17 @@ guarantee.
 
 | Plan | Status | What |
 |---|---|---|
-| [Octopus 工程收敛与运行时路线](plans/engineering-runtime-roadmap.md) | in-progress | 第一、二阶段代码与 G2 验证已完成；Codex app-server 与 DeepSeek 迁移仍待实施。 |
+| [Octopus 工程收敛与运行时路线](plans/engineering-runtime-roadmap.md) | in-progress | 第一、二阶段与 Codex G0-Base 已验证；R2 产品集成与默认切换待验，DeepSeek 待实施。 |
 | [Codex / DSH 兼容与 DeepSeek backend 可行性方案](plans/deepseek-harness-backend.md) | proposed | 推荐 SDK runtime 与同宿主薄插件，调用公开 Agent steer 并复用原生等待/退出；具体设计已更新，尚未实施。 |
 | [Multi-tenancy: remaining policy and hardening proposals](plans/multi-tenancy-gaps.md) | proposed | Re-scope the remaining account-policy choices against current code before implementing them. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
 | [运行时执行扩展：暂停范围与恢复条件](plans/runtime-execution-scope.md) | paused | 保留原七项执行扩展的身份、依赖与恢复条件，不自动恢复实施。 |
 
 <!-- END plans-index -->
+
+## Active review material
+
+- [Architecture follow-up at `26aa78f`](review/architecture/architecture-review-20261101.html): five candidates covering BG details, one-shot retirement, history paging, Wiki read snapshots and Research configuration capture; compares the two earlier HTML reports. Before shows the fixed current code; After shows unimplemented proposals, not verified architecture. This is temporary review material, not an implementation contract.
 
 ## Protocol and incident references
 

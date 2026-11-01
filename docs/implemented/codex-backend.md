@@ -1,13 +1,17 @@
 # Codex: interactive execution and tool-free text calls
 
-> **Status:** implemented — Native exec turns, scoped instructions and a separate subscription text worker.
+> **Status:** implemented — Native exec turns, opt-in single-root App Server execution and a separate subscription text worker.
 
 ## Interactive execution
 
-The current Codex profile runs native `codex exec --json` through the common
-Harness. Native thread identity is retained for resume. Stdin closes after the
-initial input; additional user input queues for a subsequent turn. The proposed
-app-server transport and complete native-tail semantics remain in
+The default Codex profile runs native `codex exec --json` through the common
+Harness using `ArgvDriver`. The driver delegates existing argv rendering and
+parsing to the profile; HarnessRun retains process and retirement ownership.
+Native thread identity is retained for resume. Stdin closes after the
+initial input; additional user input queues for a subsequent turn. Basic opt-in
+App Server start, precise resume, steering, native questions and scoped
+root/child output are implemented below; remaining completion/consumer
+integration and default cutover remain in
 [the runtime plan](../plans/engineering-runtime-roadmap.md).
 
 The profile renders selected MCP entries and a composed controller through
@@ -16,6 +20,11 @@ request-specific trusted instructions; no saved agent configuration is rewritten
 to accomplish this. Model, effort and speed follow [their own contract](model-reasoning.md).
 Nonempty arbitrary tool allow/deny policies unsupported by Codex are rejected;
 headless bypass is not proof that such a policy was enforced.
+
+Saved custom subagent definitions remain intact across edits and backend changes.
+Claude renders those definitions into its native configuration. Codex currently
+uses its built-in helpers; saving a definition does not map its custom role,
+model or tool restrictions into Codex. The agent form states this boundary.
 
 Native stdout events and bounded verified rollout observations are normalized
 into common events. Native helper cards describe observation, not proof that
@@ -27,6 +36,196 @@ credential selects its runtime home; an unbound invocation follows the existing
 host-default path. In-app device login is implemented. This differs from the
 original plan's unresolved login alternatives. Public transcript export/import
 is separate from [rewind](session-rewind.md) and [native-copy fork](session-fork.md).
+
+## Opt-in App Server start and precise resume
+
+`OCTOPUS_CODEX_TRANSPORT=app-server` selects the transport before preparation;
+`exec` remains the default. `OCTOPUS_CODEX_APP_SERVER_BINARY` selects its binary
+(default `codex`, resolved on PATH). The driver requires the G0-Base verified
+0.166.0 binary, SHA256
+`b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8`.
+A different binary fails preparation. Selection does not rewrite saved agents,
+convert backend identities or authorize a production/default transport switch.
+There is no second transport execution or automatic fallback after a failure.
+
+Each attempt has its own managed stdio host. Initialization, effective config,
+thread preparation and controller checks precede `turn/start`. Process and thread
+overrides disable message wake, goals and sleep execution while keeping the
+G0-verified active collaboration features enabled. Effective mode, requested model
+and permissions are checked before business input. Exact `thread/resume` must
+return the captured native identity; missing or incompatible history fails
+without creating a replacement. Controller checkpoint comparison and trusted
+developer-item injection retain independent uncertainty evidence. Prompt text and
+large inputs travel in the business RPC; attachment ownership and original
+recovery payloads stay with the existing submission.
+
+Only the start response or a matching native user-message client ID can bind the
+accepted root. Notifications preceding proof are buffered within finite bounds.
+Conflicting/missing identities, unsupported complete items and unexpected root
+turns fail visibly, preserve the valid accepted prefix and retire the original
+host. One bound root may contain multiple model samples and tools. Its terminal
+starts retirement immediately; the client never starts a second root to summarize
+or continue it. SessionOwner remains the product settlement authority. Thread
+association commits with input evidence, so losing a `session_started` observation
+cannot make the next writer open a new history. The next writer reads the
+committed identity after its predecessor retires.
+
+Preparation, possible-send and acceptance evidence live on the original
+submission with separate input/attempt/RPC/thread/turn identities. Their timing,
+late proof and manual recovery rules belong to
+[the input contract](architecture-contract.md#codex-native-input-evidence);
+[current storage](current-storage-format.md#publication-boundary) owns the format
+and finite publication handoff. Acceptance does not prove model consumption.
+
+This path supports human steering of its bound active root; process reuse and
+automatic continuation remain unsupported. Ineligible later input queues for
+an ordinary request. Native user questions use the existing product question
+owner; unsupported approval/dynamic requests receive explicit method-specific
+negative responses. Root and child output retain their original identities, and
+known helper state is reconciled through finite retirement. Bound-root completion
+and selected final replies use the contracts below. Full native detail reading,
+Stop/recovery integration, effect consumers and native Monitor accounting retain
+their remaining tickets. Implemented controls and
+output routing do not certify full R2 cutover.
+Research web leaves remain explicitly on exec; one-shots keep the text worker.
+
+### Root completion and selected answer
+
+Only the accepted root's real terminal supplies a provider candidate. A final
+text item, model sample, native wait or child terminal cannot finish the request.
+On validated root terminal the original Run freezes admission and starts bounded
+retirement before storage or presentation waits. The same stdout parser retains
+original observation identity for finite late items, questions and input proof;
+it never reopens execution or routes collection through Claude's live idle scope.
+EOF or the collection cutoff ends that responsibility. Raw drain only releases
+descriptors. Missing complete root items, malformed necessary records or overflow
+prevent success; a cancelled helper need not have produced an answer.
+
+The original Owner chooses one business outcome. Normal success requires its
+necessary prefix and actual resource retirement. Stop and start-wait failure may
+select their outcome first, then record it after finite collection. Final refs
+and terminal sequence are allocated at that recording point, so late root finals
+remain before the terminal without changing the selected outcome. Native provider
+status is retained separately. Retirement failure wakes the original Owner and
+enters its existing Manager takeover/fatal boundary, including behind slow
+notification delivery; it cannot leave a normal completion pending forever.
+
+Active time ends at first admission closure; cleanup uses the existing grace
+periods. A late terminal cannot erase earlier overall/idle expiry while storage
+waits. Real root/child progress can refresh idle, duplicate turn notifications
+cannot, and late collection cannot renew it. The original slot and identity span
+retirement. Remaining helpers become interrupted only after proven retirement,
+with the original cause; completed helpers retain completion. Root success does
+not claim that every descendant result was understood.
+
+`TurnOutcome.final_answer` references ordered original root final-message rows.
+Commentary, child text and tool text remain in the transcript and never become
+reply fragments. Complete empty items are retained; a legal empty selection is
+distinct from invalid/missing refs. SessionResult, LiveReply, App ask/SSE/status
+and named delegation share that selection. Legacy records retain their prior
+interpretation. See the [result contract](architecture-contract.md#原请求结果读取)
+for formatting, input uncertainty and failure semantics.
+
+### Active-root human input
+
+Owner captures the original attempt and the driver's connection/thread/turn
+target. A compatible human input uses `turn/steer` with `expectedTurnId` and its
+original product input ID. A native wait can accept it; wait returning does not
+close the root. Validated root terminal and Stop immediately close the target,
+even while its original host is retiring.
+
+The original submission retains possible-send, acceptance and rejection facts.
+A response or correlated complete user message can prove acceptance; neither
+proves the model consumed the instruction. Missing proof remains unknown after
+a successful root and is never automatically replayed. A known unaccepted input
+returns to the ordinary queue with its original identity and order. Configuration
+intent, attachments, Wiki eligibility, the eight-input pending budget, paused
+backlog exceptions and live status refresh are owned by
+[the steering contract](inline-steering.md#bound-codex-root-and-queue-qualification).
+
+### Native questions and output
+
+The pinned protocol permits `request_user_input` only on the root; child
+approvals can still arrive, including during shutdown. Native question forms
+and structured answers pass through OwnerQuestions and the existing product
+answer UI. The response uses the original native question IDs on the original
+connection. Root terminal, Stop, serverRequest/resolved and connection loss
+revoke reply eligibility immediately, independently of storage/publication
+latency. The final write rechecks that binding; a saved answer is not proof
+that its native response was sent. MCP ask keeps its existing entry and owner,
+and also closes with its originating native run. Full timing and provenance
+belong to [the question contract](architecture-contract.md#native-question-control).
+
+Headless permission policy remains unchanged. Unexpected command/file approvals
+are declined, permission requests receive no permissions, and legacy approval
+methods use their own negative response shape. An unregistered dynamic tool
+returns `success:false` with explanatory `contentItems`; an unknown request
+returns MethodNotFound and fails the original stream. It cannot hang forever or
+silently approve. `isBlocking` controls native waiting evidence, not the product
+question deadline.
+
+Typed request/attempt/native provenance survives complete messages, tools,
+deltas, WS, history and snapshot cards. Root resume identity remains unchanged
+by child work. Main chat projects root output; child cards show collected text
+and actual known work status. A mailbox interaction or completed start tool is
+not a completed child turn. Root success can coexist with residual helper
+interruption after proven retirement. The
+[native output contract](native-subagents.md) owns work identities, display
+windows, bounded caches and late-item semantics.
+
+### Effective configuration and request isolation
+
+Saved configuration validation and execution select the same transport, profile
+and driver. App Server text is validated as JSONL rather than placed under exec's
+argv limit; the shared argv/environment checks still apply to the actual launch.
+The logical request captures product defaults at dispatch preparation. Its retry
+retains that snapshot, while a later request captures newly saved defaults;
+[model settings](model-reasoning.md#saving-defaults-and-repairing-an-existing-session)
+owns the capture and inherited-session repair rules.
+
+Clearing a session's model or effort override first restores Agent inheritance.
+When neither the session nor its Agent supplies that field, it uses the current
+native invocation's default rather than the previous history's setting.
+The driver resolves native defaults through
+`config/read` and, when no model is configured, the native catalog default.
+It explicitly supplies the resolved model to prevent resume metadata from
+restoring the old model and effort. A null prepared effort can represent the
+model's native default; it is distinct from an explicitly requested effort.
+Before sending input, the driver checks the prepared model, effort, cwd,
+approval policy, sandbox and service tier against the request.
+
+Fast requires the native Fast feature and the selected model's advertised
+`priority` tier, including paginated catalogs. It fails preparation when that
+capability or the effective tier is missing. Normal explicitly resets the
+thread to `default`; the pinned native provider request omits that tier field.
+Process and thread overrides keep wake, goals and sleep disabled even when
+the shared native home enables them. Current controller checkpoints are checked
+after exact resume, including compacted history, and changed trusted instructions
+are acknowledged before business input. An uncertain injection blocks sending.
+
+Each outbound frame is encoded and checked before a possible-send or controller
+mutation is recorded. Its UTF-8 budget is 4 MiB minus 4096 bytes, reserving native
+echo metadata below the run's 4 MiB stdout line limit. Static saves check known
+text; actual preparation and writes check the composed payload and complete
+envelope. Oversized input fails explicitly and retains the original draft.
+Unbound native observations have a separate 8 MiB UTF-8 / 256-frame correlation
+budget; non-BMP text is not counted as expanded ASCII escapes. No path truncates
+the input to fit either budget.
+
+Sessions may share an owned credential home. Request-specific MCP configuration
+travels through the invocation's argv/environment and RPC, without rewriting
+that home's config. Namespace URLs may be shared; signed scope, original run
+lease, Wiki task and connector installation determine the actual callback's
+identity and authority. Current permissions are checked at the tool effect,
+so a captured configuration or resumed history does not extend a grant.
+
+Attachment and canonical memory ownership stay with their existing owners;
+native skills remain native files. App Server supplies request text inline and
+does not create a shared request-config file. An active late-created child can
+read the original materials and use its original live scoped tools. Retained
+materials do not keep authorization alive after Stop or root terminal. The
+[execution contract](architecture-contract.md#输入完成与资源退休) separates closing
+admission, late input proof, outcome recording and confirmed resource retirement.
 
 <a id="single-call-text-contract"></a>
 ## Single-call text contract
@@ -77,6 +276,7 @@ keystore cases cover bound/unbound behavior without claiming a live keyring test
 
 Code: [profile](../../server/harness/codex.py),
 [native control](../../server/harness/codex_control.py),
+[App Server driver](../../server/harness/codex_app_server.py),
 [text worker](../../server/harness/codex_text.py).
 Regression entry points: `tests/test_harness_codex.py`,
 `tests/test_codex_controller.py`, `tests/test_codex_text.py`,
@@ -84,6 +284,27 @@ Regression entry points: `tests/test_harness_codex.py`,
 The focused worker scenarios include admission denial, HTTP/stream failures,
 missing native binary, hostile startup configuration and confirmed descendant
 retirement. Current installation checks are selected through [testing.md](../testing.md).
+
+App Server public submission/Owner/SQLite regressions are in
+`tests/test_codex_app_server_submission.py`, with protocol correlation in
+`tests/test_codex_app_server.py` and durable uncertainty in
+`tests/test_native_input_evidence.py`. They cover preparation failure/early Stop,
+write-before-record refusal, lost ACK, late proof, malformed buffered output,
+history loss and original-receipt deduplication. Live Codex cases cover
+exec-to-App Server and App Server-to-App Server precise resume with real
+attachment/tool effects. `web/e2e/codex-app-server.spec.ts` verifies original
+receipts and subsequent native resume after reopening the same session across
+reloads. These checks do not establish production deployment.
+
+`tests/test_codex_app_server_configuration.py` covers transport-aware saves,
+current defaults, Fast rejection and UTF-8 refusal without sending input.
+`tests/test_codex_app_server_authorization.py` checks real HTTP tool denial while
+outcome storage is blocked or the original process is still retiring. Protocol
+correlation also covers a complete 3,000,000-byte non-BMP input before ACK.
+Pinned-host probes with a controlled provider verify effective configuration,
+720,039-byte Chinese input, actual scoped MCP/connector callbacks, late child
+material reads and active owner revocation. Those probes establish native
+assembly and effects at the controlled boundary, not remote model capability.
 
 ## Historical evidence
 

@@ -20,8 +20,9 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from .driver import RunDriver
 from .events import (
     HarnessCredential,
     HarnessEvent,
@@ -38,12 +39,14 @@ from .profile import (
     OneShotContext,
     ParseOutput,
     RuntimeProfile,
-    StdinMode,
     ToolPolicySupport,
     TurnContext,
     WebCapability,
 )
 from .registry import register
+
+if TYPE_CHECKING:
+    from .run import HarnessRun
 
 logger = logging.getLogger(__name__)
 
@@ -262,9 +265,26 @@ _TASK_SUBTYPES = frozenset(
 # hundreds of turns can't grow one.
 _MAX_TRACKED_TASKS = 64
 
-# `build_turn_argv` and the profile below so the renderer and the run engine
-# can never disagree (inline-steering.md §6).
-_STDIN_MODE = StdinMode.STREAM_JSON
+class ClaudeDriver(RunDriver):
+    """Claude's stream-json input, including held turns and steering."""
+
+    input_in_argv = False
+
+    async def start_input(self, io: HarnessRun, context: TurnContext) -> None:
+        await io.send_input(context.prompt)
+
+    async def send_input(self, io: HarnessRun, text: str, *, input_id: str | None = None) -> str:
+        # Claude deduplicates command UUIDs. Every frame, including a held
+        # process's next opening input, needs a fresh identity.
+        import uuid
+
+        input_id = input_id or str(uuid.uuid4())
+        line = json.dumps({
+            "type": "user", "uuid": input_id, "parent_tool_use_id": None,
+            "message": {"role": "user", "content": text},
+        }) + "\n"
+        await io.write_input(line.encode())
+        return input_id
 
 
 # ------------------------------------------------------------------ turn argv
@@ -351,14 +371,8 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
         argv += ["--model", ctx.model]
     if ctx.resume_id:
         argv += ["--resume", ctx.resume_id]
-    if _STDIN_MODE is StdinMode.STREAM_JSON:
-        # The prompt — and, later, any mid-turn follow-up — are written as
-        # JSON lines on stdin instead of being baked into argv
-        # (inline-steering.md §6). `HarnessRun.start` writes the first frame
-        # the moment the process is up, so the CLI never waits on an idle pipe.
-        argv += ["--input-format", "stream-json"]
-    else:
-        argv += ["--", ctx.prompt]
+    # The driver writes the first frame as soon as the process is ready.
+    argv += ["--input-format", "stream-json"]
 
     env = os.environ.copy()
     private_settings = _apply_env_credential(argv, env, ctx.credential)
@@ -944,7 +958,7 @@ CLAUDE_CODE = RuntimeProfile(
     # process is up, so the CLI never waits for input that isn't coming
     # (measured 2.39s vs a 2.04s bare spawn). Neither failure reproduced —
     # inline-steering.md §10, with the fork suites as the standing gate.
-    stdin_mode=_STDIN_MODE,
+    new_driver=ClaudeDriver,
     can_steer=True,
     reusable=True,
     can_continue=True,

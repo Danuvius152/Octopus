@@ -24,10 +24,10 @@ from server.harness import (
     ParseOutput,
     RunConfig,
     RuntimeProfile,
-    StdinMode,
     TurnContext,
     get_harness,
 )
+from server.harness.driver import ArgvDriver
 
 PRIVATE_PROMPT = "PRIVATE-PROMPT-46-原始输入\n第二行"
 PRIVATE_PERSONA = "PRIVATE-PERSONA-46-私有指令"
@@ -59,7 +59,7 @@ def _profile(script: str) -> RuntimeProfile:
         tools_prompt="",
         credential_style="env_secret",
         premature_exit_recovery=False,
-        stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        new_driver=ArgvDriver,
         build_turn_argv=build_turn_argv,
         new_event_parser=_TranscriptParser,
         build_oneshot_argv=lambda ctx: ([sys.executable, "-c", script, ctx.prompt], {}),
@@ -154,7 +154,7 @@ async def test_stream_diagnostics_keep_protocol_context_and_mask_credentials(
     profile = replace(
         get_harness(backend).profile,
         build_turn_argv=_profile(script).build_turn_argv,
-        stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        new_driver=ArgvDriver,
         activity_observer=None,
     )
     run = Harness(profile).create_run(RunConfig(mcp_servers=[]))

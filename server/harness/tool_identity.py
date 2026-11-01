@@ -74,14 +74,14 @@ class ToolIdentityTracker:
 
     def __init__(self) -> None:
         self._attempt_id: str | None = None
-        self._calls: dict[str, _CapturedCall] = {}
+        self._calls: dict[str | tuple[str, ...], _CapturedCall] = {}
         self._children: dict[str, _ChildRun] = {}
         # One claim per actual spawn ID; None retains evidence of ambiguity.
         # Ordinary calls need no process-history entries.
-        self._spawn_claims: dict[str, RuntimeMetadata | None] = {}
+        self._spawn_claims: dict[str | tuple[str, ...], RuntimeMetadata | None] = {}
 
     def _resolve_result(self, event: HarnessEvent) -> None:
-        raw_id = event.tool_use_id or ""
+        raw_id = self._key(event)
         captured = self._calls.get(raw_id)
         if captured and not captured.result_seen:
             captured.result_seen = True
@@ -237,7 +237,8 @@ class ToolIdentityTracker:
         if attempt_id != self._attempt_id:
             self._attempt_id = attempt_id
             self._calls.clear()
-        raw = event.tool_use_id
+        raw = self._key(event)
+        native = RuntimeMetadata.model_validate(event.runtime_metadata).native if event.runtime_metadata else None
         if raw and event.type in ("tool_use", "question_request"):
             if event.type == "tool_use" or raw not in self._calls:
                 observations = {}
@@ -247,7 +248,7 @@ class ToolIdentityTracker:
                             child = self._children.get(child_id)
                             observations[child_id] = child.identity if child else None
                 self._calls[raw] = _CapturedCall(
-                    RuntimeMetadata(request_id=request_id, attempt_id=attempt_id, tool_call_id=uuid.uuid4().hex),
+                    RuntimeMetadata(request_id=request_id, attempt_id=attempt_id, tool_call_id=uuid.uuid4().hex, native=native),
                     event.tool_name, observations,
                 )
                 if raw in self._spawn_claims:
@@ -256,5 +257,16 @@ class ToolIdentityTracker:
                     self._spawn_claims[raw] = self._calls[raw].identity
             event.runtime_metadata = self._calls[raw].identity.model_dump()
         elif raw and event.type == "tool_result":
+            if native is not None and raw not in self._calls:
+                self._calls[raw] = _CapturedCall(RuntimeMetadata(request_id=request_id, attempt_id=attempt_id,
+                    tool_call_id=uuid.uuid4().hex, native=native), event.tool_name)
             self._resolve_result(event)
         self._resolve_child(event)
+
+    @staticmethod
+    def _key(event: HarnessEvent) -> str | tuple[str, ...]:
+        metadata = event.runtime_metadata or {}
+        source = metadata.get("native")
+        if source and event.tool_use_id:
+            return (metadata["request_id"], metadata["attempt_id"], source["thread_id"], source["turn_id"], source["item_id"])
+        return event.tool_use_id or ""

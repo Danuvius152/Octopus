@@ -18,12 +18,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .events import HarnessCredential, HarnessEvent
 from .login import LoginDriver
 from .model_settings import ModelSettings
+
+if TYPE_CHECKING:
+    from .driver import RunDriver
 
 
 @dataclass
@@ -101,9 +103,9 @@ class TurnContext:
     # dir both harnesses point at. None when there's no owning agent.
     memory_dir: str | None = None
     # Native-deep-research web leaf (native-deep-research.md §4): when True, the
-    # profile renders a SCOPED, read-only-ish turn that enables the backend's
-    # web tools and forbids destructive/fan-out tools (no Bash/Write/subagents),
-    # so a throwaway research leaf can search the web but can't touch the box.
+    # profile renders a scoped turn with web tools and no Octopus MCP. Claude
+    # restricts tools; Codex exec uses its native read-only sandbox, which is
+    # not a strict web-only tool allowlist.
     web_research: bool = False
     # Sub-agent definitions to register for this turn (native-subagents.md §6).
     # A profile without a surface for them simply doesn't render them.
@@ -180,24 +182,6 @@ class TranscriptCodec(Protocol):
     ) -> None: ...
 
 
-class StdinMode(str, Enum):
-    """What a backend's stdin is for (inline-steering.md §6).
-
-    One enum rather than two booleans: "the prompt arrives on stdin" and
-    "stdin is closed right after spawn" are mutually exclusive, and separate
-    flags could express the combination that must never exist.
-    """
-
-    #: Prompt is in argv; stdin gets EOF immediately. Codex reads stdin even
-    #: with a positional prompt and blocks forever waiting on EOF, so closing
-    #: it is what lets the turn proceed.
-    CLOSE_AFTER_SPAWN = "close_after_spawn"
-
-    #: The initial prompt is a JSON line on stdin. This transport alone
-    #: promises neither steering nor another request on the same process.
-    STREAM_JSON = "stream_json"
-
-
 @dataclass(frozen=True)
 class ToolPolicySupport:
     """Restrictions this adapter can enforce, independent of auto-approval."""
@@ -227,14 +211,17 @@ class RuntimeProfile:
     # the session_manager run loop respawns with "continue" after a
     # premature mid-turn exit only when this is set.
     premature_exit_recovery: bool
-    # How the CLI is fed its prompt, and therefore what stdin is for
-    # (inline-steering.md §6).
-    stdin_mode: StdinMode
+    # Per-run protocol state and operations; no process or product ownership.
+    new_driver: Callable[[RuntimeProfile], RunDriver]
     # Renderers / parsers (module functions in the profile's file):
     build_turn_argv: Callable[[TurnContext], tuple[list[str], dict[str, Any]]]
     new_event_parser: Callable[[], EventParser]
     build_oneshot_argv: Callable[[OneShotContext], tuple[list[str], dict[str, Any]]]
     parse_oneshot_stdout: Callable[[str], str]
+    select_transport: Callable[[RuntimeProfile, str], RuntimeProfile] | None = None
+    # JSON-RPC accepts the original large input directly. Existing transports
+    # retain their file-spill convention and its attachment lifecycle.
+    inline_large_inputs: bool = False
     # Independent adapter guarantees. An open stdin pipe proves neither.
     can_steer: bool = False
     reusable: bool = False

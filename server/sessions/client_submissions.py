@@ -140,7 +140,9 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
     state = row["execution_state"]
     owner = row["execution_owner"] or row["request_id"]
     terminal = row["terminal"]
-    if terminal is not None and row["delivery_state"] != "unknown":
+    if terminal is not None and row["delivery_state"] != "unknown" and not (
+        row["native_inputs"] and row["delivery_state"] == "none"
+    ):
         state = "done"
     receipt = row["receipt"]
     result = {"session_id": session_id, "client_request_id": row["client_id"], "request_id": row["request_id"],
@@ -149,6 +151,7 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
                            "state_version": row["state_version"], "updated_at": row["updated_at"],
                            "execution_owner_request_id": owner,
                            "delivery_state": row["delivery_state"],
+                           "native_inputs": row["native_inputs"],
                            "recoverable_input": context is not None and state == "withdrawn"
                            and not row["dismissed"] and not row["recovered_by"]}
     if terminal is not None:
@@ -162,6 +165,7 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
                       message={
                           "service_restart_execution_unknown": "The service restarted after execution may have begun. Review the input and conversation; it will not run again automatically.",
                           "steer_delivery_unknown": "Delivery to the active model was not acknowledged. Its result does not confirm whether this input was received; review it before starting new work.",
+                          "input_acceptance_unknown": "The native runtime may have received this input, but acceptance is unconfirmed. Review the saved input and results; it will not be replayed automatically.",
                       }.get(row["reason_code"], "Execution is unconfirmed. Review the saved input and conversation; this request will not run again automatically."))
     elif receipt is None and terminal is None and state not in {"withdrawn", "rejected"}:
         result.update(accepted=False, state="unknown", code="admission_unknown",
@@ -170,6 +174,8 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
         result["message"] = ("This retained input has no verifiable request context. Review the original record; it cannot be recovered."
                              if context is None else
                              "This input was withdrawn before execution. You can restore it and send it again.")
+    if any(item.get("kind") == "steer" and item["state"] == "accepted" for item in row["native_inputs"]):
+        result["message"] = "The native runtime accepted this input. Model processing is unconfirmed; the root result does not prove this instruction was consumed."
     if include_input and row["payload"] is not None:
         payload = row["payload"]
         result["input"] = {"content": payload["content"], "attachment_ids": payload["attachment_ids"],

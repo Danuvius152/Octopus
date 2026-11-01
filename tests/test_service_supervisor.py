@@ -259,7 +259,8 @@ from dataclasses import replace
 from pathlib import Path
 from server.config import settings
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.driver import ArgvDriver
+from server.harness.claude_code import ClaudeDriver
 from server.main import app
 import uvicorn
 
@@ -273,7 +274,7 @@ model.write_text("import json,os,sys\\nfrom pathlib import Path\\n"
                  "sys.stdin.read()\\n")
 harness=get_harness('codex')
 harness.profile=replace(harness.profile,binary=sys.executable,prepare_resume=None,activity_observer=None,
-    stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+    new_driver=ClaudeDriver, can_steer=True, reusable=True,
     build_turn_argv=lambda context: ([sys.executable,'-u',str(model)],{'cwd':str(root)}))
 spawn=asyncio.create_subprocess_exec
 async def interrupted_spawn(*args,**kwargs):

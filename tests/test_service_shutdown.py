@@ -21,7 +21,7 @@ from server.config import settings
 from server.database import Database
 from server.delegations import DelegationManager
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.mcp_http import build_servers, mount_all
 from server.mcp_http import lifespan as mcp_lifespan
 from server.research.manager import ResearchManager
@@ -211,7 +211,7 @@ def synthetic_cli(monkeypatch, starts, code=None):
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), new_driver=ClaudeDriver, can_steer=True, reusable=True,
         activity_observer=None,
     ))
 

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.driver import ArgvDriver
 from server.wiki import job_events, job_notifications
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiWorker
@@ -45,7 +45,7 @@ async def returning(jobs, client, tmp_path, monkeypatch):
 
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
-        stdin_mode=StdinMode.CLOSE_AFTER_SPAWN, build_turn_argv=argv,
+        new_driver=ArgvDriver, build_turn_argv=argv,
     ))
     request = await manager.start_message(original.id, "Review these selected notes")
     state = SimpleNamespace(manager=manager, original=original, receipt=request, gate=gate, prompts=prompts)

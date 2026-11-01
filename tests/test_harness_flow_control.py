@@ -18,9 +18,9 @@ from server.harness import (
     HarnessEvent,
     ParseOutput,
     RuntimeProfile,
-    StdinMode,
 )
 from server.harness.codex_activity import CodexActivityObserver
+from server.harness.driver import ArgvDriver
 
 
 class _Parser(EventParser):
@@ -38,7 +38,7 @@ def _profile(script: Path, *arguments: Path | str) -> RuntimeProfile:
         tools_prompt="",
         credential_style="env_secret",
         premature_exit_recovery=False,
-        stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        new_driver=ArgvDriver,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(script), *map(str, arguments)],
             {"cwd": context.working_dir},

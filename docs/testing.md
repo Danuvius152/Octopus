@@ -24,6 +24,29 @@ does not establish Claude's actual authentication, model output or provider-side
 effort behavior; a separately authorized live investigation does not change this
 default test selection.
 
+### Existing tests when adding a transport
+
+The transport matrix currently retains Claude stream-JSON, Codex exec and the
+explicitly selected Codex App Server. Keep each existing test's business guarantee
+and choose its fixture from what it tests:
+
+| Test intent | Adaptation and evidence |
+|---|---|
+| Shared request, Owner, persistence, notification or retirement behavior | Retain the original public assertions. A synthetic profile can isolate capability/ownership combinations; it does not establish a real transport's wire behavior. App Server adds controlled-stdio cases through the original Run, Owner and SQLite. |
+| Claude or exec wire behavior | Keep the original wire fixtures. Replace retired Harness setup such as `StdinMode` with its actual driver, and old input helper names with the public operation; keep acceptance, UUID, no-send and cleanup assertions. See [Harness core](../tests/test_harness_core.py), [Claude](../tests/test_harness_claude.py) and [Codex](../tests/test_harness_codex.py). |
+| Native App Server RPC and races | Use [native submission](../tests/test_codex_app_server_submission.py), steering, questions, output and completion peers. They separately cover acceptance versus processing, original target/generation, late proof/items, blocked storage, budgets, complete-item integrity and actual process-group cleanup. Do not substitute an exec event parser. |
+| Stored/wire shape | Update expected additive fields or the declared format only with the corresponding validity and old-record coverage. Keep byte/association/integrity checks. The shared [recording replay](../web/src/lib/recordingReplay.json) is checked against backend snapshots and frontend replay. |
+| Reply consumers and UI | Preserve legacy rendering and formatting, then add root/child interleaving, commentary versus final, empty/bad references and reload checks. [Native result consumers](../tests/test_codex_app_server_results.py) exercise actual App and named-delegation entry points. |
+
+For a timing-contract change, move a deterministic barrier to the newly owning
+boundary and retain the original failure/recovery proposition. For example,
+losing internal `session_started` delivery must not prevent precise resume from
+committed input identity; the test must still allow the finite native output
+reader to finish. Do not globally change old tests to App Server, remove their
+assertions or turn incompatibilities into skips. A selected live test that skips
+does not certify App Server acceptance. Default cutover has its own integration
+scope; the explicit exec leaf and text-worker uses retain their tests.
+
 ### Fast checks during development
 
 Get feedback on each change promptly with the smallest relevant test set:
@@ -124,6 +147,50 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 | Frontend unit | `cd web && bun run test` | Stores, HTTP/WS events, components, input lifecycle, account/service generation boundaries and Wiki job cards. Vitest tests are colocated with source. |
 | Offline browser E2E | `cd web && bun run test:e2e:fast` | Real browser plus isolated backend: login/accounts, sessions, input recovery, sidebar/pins, attachments, Wiki cards and page readiness. Uses a test-only harness and verifies an offline execution audit; actual provider behavior needs the live tier. |
 | Codex browser E2E | `cd web && bun run test:e2e:llm codex.spec.ts` | Real Codex session creation, response streaming and Monitor reporting through the product backend. Needs the installed, signed-in Codex CLI. |
+
+The development-only App Server path has an additional explicit browser case:
+`cd web && bun run test:e2e:llm codex-app-server.spec.ts`, with
+`OCTOPUS_CODEX_TRANSPORT=app-server` and `OCTOPUS_CODEX_APP_SERVER_BINARY` selecting
+the [G0-pinned binary](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume).
+It checks original-receipt deduplication and precise native resume after reloading
+and reopening the same session. Without that selection the case skips; a skip is
+not transport acceptance. The default exec browser case remains independently
+required. App Server live pytest covers both exec-origin and native-origin history
+in `tests/test_codex_app_server_real.py`; these no-descendant cases do not establish
+the later interaction, descendant or Monitor contracts.
+
+Native question/control and output regressions use controlled stdio peers in
+`tests/test_codex_app_server_questions.py` and `tests/test_codex_app_server_output.py`.
+They exercise the original Owner, SQLite and publication path with explicit
+storage, writer, reader and process-group barriers: dual RPC IDs, late answers,
+Stop/conflicting controls, input-proof waits, retained late items, scoped work
+rounds and failure before/after child terminal. Shared Harness/Owner regressions
+retain both Claude and Codex offline coverage. The selected nested G0 frame
+fixture is protocol replay, not a new live execution.
+
+`tests/test_codex_app_server_completion.py` exercises original Owner admission,
+root status, active/retirement budgets, stalled storage with real TERM/KILL,
+Stop selection before recording, finite late items and start-wait failure.
+Missing necessary root items and legal empty replies have separate cases.
+Retirement-failure cases retain the actual process-group cleanup and inject lost
+exit proof; they observe the existing fatal OS-exit boundary without terminating
+pytest. Shared failure probes separately exercise the real service exit.
+`tests/test_codex_app_server_results.py` drives actual App ask/SSE/history and
+named-delegation consumers; session-result tests reject bad references without
+fallback. These controlled peers establish product timing and persistence,
+without claiming a new live-provider run or full R2 cutover. The shared replay
+fixture also checks additive native fields across backend snapshots, WS replay
+and frontend refresh. A lost internal session-start notification remains distinct
+from cancellation of the finite output reader.
+
+`cd web && bun e2e/run.ts offline native-output.spec.ts --workers=1` verifies
+native root/child partials with the same item ID, snapshot-card anchoring,
+per-item completion, reconnect and reload in the actual browser. Explicit local
+HTTP/WS fixtures isolate presentation from native protocol and persistence;
+backend process tests supply that separate evidence. Source-adjacent store and
+transcript tests cover stale snapshots and service-generation changes. Retain
+failed logs and combine unchanged full-run evidence with affected-module fixes
+under the reuse policy above; passing browser mocks do not certify R2 cutover.
 
 ### Markers, providers and isolation
 

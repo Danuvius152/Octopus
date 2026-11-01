@@ -97,6 +97,12 @@ class QuestionsMixin(SessionManagerBase):
             return False
         if pending.attempt_id is not None and pending.attempt_id != session._run.question_attempt_id:
             return False
+        if pending.backend is not None and pending.backend.captures_retirement_output and not pending.backend.question_admission_open:
+            return False
+        if pending.native_ref is not None:
+            assert pending.backend is not None
+            if not pending.backend.question_open(pending.native_ref):
+                return False
         return pending.expires_at is None or time.monotonic() < pending.expires_at
 
     async def answer_question(self, session_id: str, question_id: str, answers: list[dict[str, Any]], *,

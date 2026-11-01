@@ -6,6 +6,7 @@ database, repairs projections, interprets an earlier format or reads secrets.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -41,6 +42,7 @@ def verify_main(db: sqlite3.Connection) -> int:
 
     from .db.schema import _SCHEMA, CURRENT_VERSION
     from .delegations import _PersistedRound
+    from .submission_models import NativeInputEvidence
 
     version = db.execute("PRAGMA user_version").fetchone()[0]
     if version != CURRENT_VERSION:
@@ -66,6 +68,14 @@ def verify_main(db: sqlite3.Connection) -> int:
             _PersistedRound.model_validate_json(row[0])
     except ValidationError:
         raise RuntimeError("Primary database contains an invalid current delegation snapshot") from None
+    try:
+        for request_id, raw in db.execute("SELECT request_id,native_inputs FROM client_submissions"):
+            entries = [NativeInputEvidence.model_validate(item) for item in json.loads(raw)]
+            if (any(item.input_id != request_id for item in entries)
+                    or len({item.attempt_id for item in entries}) != len(entries)):
+                raise ValueError("Native evidence belongs to a different input or repeats an attempt")
+    except (ValueError, TypeError):
+        raise RuntimeError("Primary database contains invalid current native input evidence") from None
     return version
 
 

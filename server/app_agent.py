@@ -15,9 +15,9 @@ read exactly what your app has been saying (§3).
 
 This manager owns the turn: it registers a record on the broadcast bus
 *before* the turn starts (so no event can be missed), converts the session
-events into the small vocabulary an app cares about — ``delta``, ``message``,
-``tool``, ``question``, ``done``, ``error`` — and enforces the caps that keep
-a looping app from turning into a fork bomb of CLI processes (§6).
+events into the small vocabulary an app cares about — ``delta``, ``progress``,
+``message``, ``reset``, ``tool``, ``question``, ``done``, ``error`` — and enforces
+the caps that keep a looping app from turning into a fork bomb of CLI processes (§6).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from .aio import complete_cleanup
 from .applications import data_dir_for
-from .session_results import LiveReply
+from .session_results import LiveReply, committed_result
 
 if TYPE_CHECKING:
     from .applications import ApplicationManager
@@ -232,6 +232,17 @@ class AppAgentManager:
         session = self._require_conversation(app_id, conversation_id)
         db = self._require_db()
         rows = await db.load_messages(conversation_id)
+        native_requests = {(row.get("runtime_metadata") or {})["request_id"]
+                           for row in rows if (row.get("runtime_metadata") or {}).get("native")}
+        selected: set[int] = set()
+        for request_id in native_requests:
+            associated = [row for row in rows
+                if (row.get("runtime_metadata") or {}).get("request_id") == request_id
+                or (row.get("tool_input") or {}).get("attempt_context", {}).get("request_id") == request_id]
+            saved = committed_result(request_id, request_id, associated)
+            if saved.missing not in {None, "terminal_missing"}:
+                raise AppAgentError(f"The recorded reply is unavailable: {saved.missing}", status_code=409)
+            selected.update(saved.message_seqs)
         messages = [
             {
                 "role": r["role"],
@@ -240,6 +251,7 @@ class AppAgentManager:
             }
             for r in rows
             if r.get("type") == "text" and (r.get("content") or "").strip()
+            and (not (r.get("runtime_metadata") or {}).get("native") or r["seq"] in selected)
         ]
         return {**self._conversation_summary(session), "messages": messages}
 
@@ -306,9 +318,12 @@ class AppAgentManager:
         session = self._require_conversation(app_id, conversation_id)
         result: dict[str, Any] = {"conversation_id": conversation_id, "request_id": request_id}
         saved = await self._require_db().read_session_result(conversation_id, request_id)
+        if saved.missing is not None and saved.outcome is not None:
+            raise AppAgentError(f"The recorded reply is unavailable: {saved.missing}", status_code=409)
         if saved.outcome is not None:
             return {**result, "state": "completed" if saved.outcome.status == "success" else "failed",
-                    "outcome": saved.outcome.model_dump(exclude_unset=True), "reply": "\n\n".join(saved.fragments), "cost": saved.cost}
+                    "outcome": saved.outcome.model_dump(exclude_unset=True),
+                    "reply": saved.reply_text() if saved.outcome.final_answer is not None else "\n\n".join(saved.fragments), "cost": saved.cost}
         current = session._run.request
         if current is not None and current.request_id == request_id:
             return {**result, "state": "running"}
@@ -646,6 +661,19 @@ class AppAgentManager:
         kind = msg.get("type")
         if reset:
             turn.emit({"type": "reset"})
+        if turn.body.missing:
+            turn.error = f"The recorded reply is unavailable: {turn.body.missing}"
+            turn.emit({"type": "error", "code": turn.body.missing, "message": turn.error})
+            turn.done.set()
+            return
+        native = (msg.get("runtime_metadata") or {}).get("native")
+        if native and kind in {"assistant_delta", "assistant_text"}:
+            if native.get("thread_id") != native.get("root_thread_id") or native.get("turn_id") != native.get("root_turn_id"):
+                return
+            if kind == "assistant_delta" or native.get("phase") != "final_answer":
+                if msg.get("content"):
+                    turn.emit({"type": "progress", "text": msg["content"]})
+                return
         if kind == "recording_failed":
             reason = msg.get("message") or "The agent finished, but saving its result is unconfirmed."
             turn.error = f"{reason} Open the conversation to inspect the recorded messages."

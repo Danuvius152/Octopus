@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from ..submission_models import InputRecoveryUnavailable
+from ..submission_models import InputRecoveryUnavailable, NativeInputEvidence
 from .applications import require_application_writable
 from .base import DatabaseBase
 from .schedules import ScheduleChangedError
@@ -15,7 +15,7 @@ from .users import owner_is_available
 
 _COLUMNS = ("session_id", "client_id", "payload_sha256", "request_id", "receipt", "payload", "execution_state",
             "execution_owner", "execution_generation", "reason_code", "state_version", "created_at",
-            "updated_at", "recovery_of", "dismissed", "execution_boot", "process_group", "delivery_state")
+            "updated_at", "recovery_of", "dismissed", "execution_boot", "process_group", "delivery_state", "native_inputs")
 
 _SELECT = (
     f"SELECT {','.join('i.' + column for column in _COLUMNS)},successor.client_id,m.content "
@@ -25,15 +25,106 @@ _SELECT = (
     "LEFT JOIN client_submissions successor ON successor.session_id=i.session_id AND successor.recovery_of=i.client_id "
 )
 
+# Accepted steer has no model-consumption proof. Keep it reviewable through
+# the existing saved-input surface, including after its carrier succeeds.
+_NATIVE_STEER_NOTICE = (
+    "(json_extract(i.receipt,'$.disposition')='steered' AND EXISTS(SELECT 1 FROM json_each(i.native_inputs) "
+    "WHERE json_extract(value,'$.kind')='steer' AND json_extract(value,'$.state') IN ('not_sent','unknown','accepted'))"
+    ")"
+)
+
 
 def _submission(row) -> dict[str, Any]:
     result = dict(zip((*_COLUMNS, "recovered_by", "terminal"), row, strict=True))
-    for key in ("payload", "receipt", "terminal"):
+    for key in ("payload", "receipt", "terminal", "native_inputs"):
         result[key] = json.loads(result[key]) if result[key] is not None else None
     return result
 
 
 class ClientSubmissionsMixin(DatabaseBase):
+    async def record_native_input(self, session_id: str, request_id: str, evidence: NativeInputEvidence,
+                                  *, process_group: int | None = None) -> None:
+        """Commit protocol evidence on its original submission before business I/O.
+
+        A later provider terminal does not settle an unknown input. Old records
+        have no native facts; local write/drain confirmation is never upgraded.
+        """
+        async with self.transaction(write=True) as tx:
+            row = await tx.fetch_one(
+                "SELECT native_inputs,execution_state,EXISTS(SELECT 1 FROM messages m "
+                "WHERE m.session_id=i.session_id AND m.terminal_request_id=COALESCE(i.execution_owner,i.request_id)) "
+                "FROM client_submissions i WHERE session_id=? AND request_id=?",
+                (session_id, request_id),
+            )
+            if row is None:
+                raise ValueError("Native input has no original submission")
+            if evidence.input_id != request_id:
+                raise ValueError("Native input identity does not match its submission")
+            entries = [NativeInputEvidence.model_validate(item) for item in json.loads(row[0])]
+            previous = next((item for item in entries if item.attempt_id == evidence.attempt_id), None)
+            if row[1] == "pending" and (evidence.state != "not_sent" or entries and previous is None and any(
+                    item.state not in {"not_sent", "rejected"} or item.kind != "steer" for item in entries)):
+                raise ValueError("A pending submission only accepts its initial unsent native input")
+            if row[1] not in {"pending", "running"} and (
+                    previous is None or previous.state not in {"unknown", "accepted", "rejected"}
+                    or evidence.state not in {"accepted", "rejected"}):
+                raise ValueError("A closed submission only accepts proof of its existing native input")
+            if evidence.thread_id is not None:
+                # Persist history association with input evidence, before a
+                # business frame can outrun the Owner's session_started event.
+                updated = await tx.execute(
+                    "UPDATE sessions SET claude_session_id=? WHERE id=? AND backend='codex' "
+                    "AND (claude_session_id IS NULL OR claude_session_id=?)",
+                    (evidence.thread_id, session_id, evidence.thread_id),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("Native history no longer belongs to this session")
+            if process_group is not None:
+                await tx.execute("UPDATE client_submissions SET process_group=? WHERE session_id=? AND request_id=?",
+                                 (process_group, session_id, request_id))
+            if previous is not None:
+                transitions = {"not_sent": {"not_sent", "unknown", "rejected"}, "unknown": {"unknown", "accepted", "rejected"},
+                               "accepted": {"accepted"}, "rejected": {"rejected"}}
+                if evidence.state not in transitions[previous.state]:
+                    raise ValueError("Native input evidence cannot lose a known fact")
+                for key in ("input_id", "rpc_id", "thread_id", "turn_id", "acceptance_source", "kind",
+                            "connection_generation", "target_turn_id"):
+                    known = getattr(previous, key)
+                    if known is not None and known != getattr(evidence, key):
+                        raise ValueError(f"Native input {key} changed within its attempt")
+                entries = [evidence if item.attempt_id == evidence.attempt_id else item for item in entries]
+            else:
+                entries.append(evidence)
+            uncertain = any(item.state == "unknown" for item in entries)
+            delivery = "unknown" if uncertain else "confirmed" if any(item.state == "accepted" for item in entries) else "none"
+            # Observation can settle input uncertainty after Stop. It cannot
+            # reopen execution or replace the already committed outcome.
+            state = row[1]
+            if state != "running" and row[2] and not uncertain:
+                state = "done" if delivery == "confirmed" else "withdrawn"
+            await tx.execute(
+                "UPDATE client_submissions SET native_inputs=?,delivery_state=?,execution_state=?,reason_code=?,state_version=state_version+1,updated_at=? "
+                "WHERE session_id=? AND request_id=?",
+                (json.dumps([item.model_dump() for item in entries]), delivery, state,
+                 "input_acceptance_unknown" if uncertain else None, datetime.now(UTC).isoformat(), session_id, request_id),
+            )
+
+    async def requeue_unaccepted_input(self, session_id: str, request_id: str) -> bool:
+        """Return the same input only after its original writer proves rejection."""
+        async with self.transaction(write=True) as tx:
+            row = await tx.fetch_one("SELECT native_inputs,execution_state FROM client_submissions WHERE session_id=? AND request_id=?",
+                                     (session_id, request_id))
+            if row is None:
+                raise ValueError("The original native input no longer exists")
+            if row[1] != "running" or any(
+                    item["state"] not in {"not_sent", "rejected"} for item in json.loads(row[0])):
+                return False
+            await tx.execute(
+                "UPDATE client_submissions SET execution_state='pending',execution_owner=NULL,delivery_state='none',reason_code=NULL,"
+                "receipt=json_set(receipt,'$.disposition','accepted'),state_version=state_version+1,updated_at=? "
+                "WHERE session_id=? AND request_id=?", (datetime.now(UTC).isoformat(), session_id, request_id))
+            return True
+
     async def get_source_submission(self, source: str, delivery_id: str, *, session_id: str | None = None) -> dict[str, Any] | None:
         """Resolve the committed source identity, including its original target."""
         async with self.transaction(write=False) as tx:
@@ -130,7 +221,7 @@ class ClientSubmissionsMixin(DatabaseBase):
                 original = await self._get_client_submission(tx, session_id, recovery_of)
                 if (original is None or original["payload"] is None
                         or original["execution_state"] != "withdrawn" or original["dismissed"]
-                        or original["terminal"] is not None):
+                        or original["terminal"] is not None and not (original["native_inputs"] and original["delivery_state"] == "none")):
                     raise InputRecoveryUnavailable("This input is not available for recovery. Review its current status.")
                 if original["recovered_by"]:
                     raise InputRecoveryUnavailable("This input has already been resubmitted. Review the new request.")
@@ -221,6 +312,16 @@ class ClientSubmissionsMixin(DatabaseBase):
                 "SELECT DISTINCT execution_generation FROM client_submissions WHERE payload IS NOT NULL "
                 "AND execution_state IN ('running','unknown') AND execution_generation IS NOT NULL",
             )
+            # Only new, explicit native evidence can distinguish preparation
+            # from possible business delivery. Historical running rows retain
+            # their conservative classification; no fact is backfilled.
+            await tx.execute(
+                "UPDATE client_submissions SET execution_state='withdrawn',reason_code='service_restart_before_start',"
+                "state_version=state_version+1,updated_at=? WHERE execution_state='running' "
+                "AND json_array_length(native_inputs)>0 AND NOT EXISTS ("
+                "SELECT 1 FROM json_each(native_inputs) WHERE json_extract(value,'$.state') NOT IN ('not_sent','rejected'))",
+                (datetime.now(UTC).isoformat(),),
+            )
             await tx.execute(
                 "UPDATE client_submissions SET reason_code=CASE WHEN delivery_state='unknown' THEN reason_code "
                 "WHEN execution_state='pending' "
@@ -236,8 +337,9 @@ class ClientSubmissionsMixin(DatabaseBase):
         async with self.transaction(write=False) as tx:
             cursor = await tx.execute(
                 _SELECT.replace("SELECT ", "SELECT i.rowid,", 1) +
-                "WHERE i.session_id=? AND i.payload IS NOT NULL AND i.execution_state IN ('withdrawn','unknown') "
-                "AND (i.delivery_state='unknown' OR m.id IS NULL) "
+                "WHERE i.session_id=? AND i.payload IS NOT NULL AND ((i.execution_state IN ('withdrawn','unknown') "
+                "AND (i.delivery_state='unknown' OR m.id IS NULL OR i.delivery_state='none' AND json_array_length(i.native_inputs)>0)) "
+                f"OR {_NATIVE_STEER_NOTICE}) "
                 "AND i.dismissed=0 AND successor.client_id IS NULL AND (? IS NULL OR i.rowid<?) ORDER BY i.rowid DESC LIMIT ?",
                 (session_id, before, before, limit + 1),
             )
@@ -247,8 +349,8 @@ class ClientSubmissionsMixin(DatabaseBase):
     async def dismiss_client_submission(self, session_id: str, client_id: str) -> bool:
         async with self.transaction(write=True) as tx:
             cursor = await tx.execute(
-                "UPDATE client_submissions SET dismissed=1,state_version=state_version+1,updated_at=? "
-                "WHERE session_id=? AND client_id=? AND execution_state IN ('withdrawn','unknown')",
+                "UPDATE client_submissions AS i SET dismissed=1,state_version=state_version+1,updated_at=? "
+                f"WHERE session_id=? AND client_id=? AND (execution_state IN ('withdrawn','unknown') OR {_NATIVE_STEER_NOTICE})",
                 (datetime.now(UTC).isoformat(), session_id, client_id),
             )
             return cursor.rowcount == 1

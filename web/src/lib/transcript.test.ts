@@ -66,6 +66,7 @@ describe("applyTranscript", () => {
       hasMoreMessages: {},
       lastAppliedSeq: {},
       streamingText: {},
+      streamingItems: {},
     });
   });
 
@@ -113,6 +114,20 @@ describe("applyTranscript", () => {
     handleWsMessage({ type: "assistant_delta", session_id: "s1", content: "answer still streaming" });
     applyTranscript("s1", { messages: [msg(0)], next_message_seq: 1 });
     expect(useSessionStore.getState().streamingText.s1).toBe("answer still streaming");
+  });
+
+  it("retains root and child native-only deltas that arrive during an older snapshot read", () => {
+    const baseline = useSessionStore.getState().streamingItems.s1 || {};
+    const identity = (thread: string) => ({ request_id: "r", attempt_id: "a", native: {
+      thread_id: thread, turn_id: "t", item_id: "same", root_thread_id: "root", root_turn_id: "t" } });
+    handleWsMessage({ type: "assistant_delta", session_id: "s1", content: "Root live", runtime_metadata: identity("root") });
+    handleWsMessage({ type: "assistant_delta", session_id: "s1", content: "Child live", runtime_metadata: identity("child") });
+    applyTranscript("s1", { messages: [msg(10)], next_message_seq: 11 }, baseline);
+    expect(Object.values(useSessionStore.getState().streamingItems.s1).map((item) => item.content)).toEqual(["Root live", "Child live"]);
+    applyTranscript("s1", { messages: [msg(10), { role: "assistant", type: "text", seq: 11,
+      content: "Root complete", runtime_metadata: identity("root") }], next_message_seq: 12 }, baseline);
+    expect(Object.values(useSessionStore.getState().streamingItems.s1).map((item) => item.content)).toEqual(["Child live"]);
+    expect(useSessionStore.getState().lastAppliedSeq.s1).toBe(11);
   });
 });
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..harness import get_harness
+from ..config import settings
+from ..harness import RunConfig, get_harness
 from ..models import SessionInfo, SessionStatus
 from .base import Session, fork_info_fields
 
@@ -19,7 +20,8 @@ def session_info(
     get = source.get if isinstance(source, dict) else lambda name, default=None: getattr(source, name, default)
     backend = get("backend") or "claude-code"
     try:
-        can_steer = get_harness(backend).profile.can_steer
+        config = RunConfig(transport=settings.codex_transport if backend == "codex" else None)
+        can_steer = get_harness(backend).runtime_profile(config).can_steer
     except ValueError:
         can_steer = False
     return SessionInfo(

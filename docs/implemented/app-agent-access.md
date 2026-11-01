@@ -25,7 +25,11 @@ An `ask` timeout returns HTTP 504 with structured `detail` containing
 call without a conversation ID. Poll that original request instead of resubmitting
 the operation. After a restart, an unavailable outcome is explicitly `unknown`.
 SSE events carry request/attempt identities; a `reset` event clears text from an
-abandoned attempt. A final reply retains all text blocks of the completed attempt.
+abandoned attempt. Legacy replies retain their completed attempt's text blocks.
+For App Server, `progress` carries root commentary/deltas, `message` carries
+complete root final items, and `done.reply` uses the terminal's selected answer.
+Child bodies remain in the product transcript. Helper interruption is structured
+run state and is not appended as model prose.
 
 Ask/SSE consumes the original request's single
 completion. A successful `done` requires both an acknowledged business result
@@ -56,10 +60,15 @@ for the shared ownership and retirement rules. Deployment is verified separately
 
 Historical request status uses the shared
 [session result association](architecture-contract.md#原请求结果读取): ordered fragments
-are joined with two newlines without trimming the whole saved reply, including
-failed outcomes. Live ask/SSE retains its attempt-reset/empty-fragment/strip
-behavior and requires delivered notifications. Neither path selects a better
-answer by text or claims to detect every lost body row.
+from legacy records are joined with two newlines without trimming the whole
+saved reply, including failed outcomes. New App Server status and live replies
+share the selected root items and formatting: ignore empty fragments, join with
+two newlines and strip the whole reply. Conversation refresh projects those same
+selected native rows; commentary and child text remain available in the full
+product conversation. Invalid/missing refs return an explicit error, including
+HTTP 409 on historical lookup, without borrowing other text. A valid empty
+selection returns an empty reply. Live ask/SSE retains attempt resets and requires
+delivered notifications. Legacy records cannot prove every lost body row.
 
 ## 3. A conversation is a session
 

@@ -24,10 +24,11 @@ class EventsMixin(SessionManagerBase):
     @staticmethod
     def _event_to_message_content(event: HarnessEvent) -> MessageContent | None:
         if event.type == "text":
-            if not event.content or not event.content.strip():
+            if event.content is None or not event.content.strip() and not (event.runtime_metadata or {}).get("native"):
                 return None
             return MessageContent(
-                role=MessageRole.assistant, type="text", content=event.content
+                role=MessageRole.assistant, type="text", content=event.content,
+                runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata) if event.runtime_metadata else None,
             )
         if event.type == "thinking":
             # Persist thinking as a typed message; the UI can choose to hide
@@ -36,7 +37,16 @@ class EventsMixin(SessionManagerBase):
                 role=MessageRole.assistant,
                 type="thinking",
                 content=event.content,
+                runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata) if event.runtime_metadata else None,
             )
+        if event.type == "subagent" and event.subagent is not None and event.subagent.card_id:
+            from dataclasses import asdict
+            details = asdict(event.subagent)
+            details.pop("summary", None)
+            details.pop("prompt", None)
+            details.pop("runtime_metadata", None)  # The typed message field owns this source.
+            return MessageContent(role=MessageRole.system, type="native_subagent", tool_input=details,
+                runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata))
         if event.type == "tool_use":
             return MessageContent(
                 role=MessageRole.assistant,
@@ -85,7 +95,7 @@ class EventsMixin(SessionManagerBase):
         first: a long session can spawn many, and this is UI state, not
         history.
         """
-        key = update.tool_call_id
+        key = update.card_id or update.tool_call_id
         if not key:
             return
         session._subagents[key] = update.merged_with(session._subagents.get(key))
@@ -93,7 +103,7 @@ class EventsMixin(SessionManagerBase):
             session._subagents.pop(next(iter(session._subagents)))
 
     def _flush_text_deltas(
-        self, session_id: str, buf: list[str]
+        self, session_id: str, buf: list[str], metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Drain the coalescing buffer into one `assistant_delta` frame.
 
@@ -107,7 +117,7 @@ class EventsMixin(SessionManagerBase):
         text = "".join(buf)
         buf.clear()
         return self._event_to_ws_message(
-            session_id, HarnessEvent(type="text_delta", content=text)
+            session_id, HarnessEvent(type="text_delta", content=text, runtime_metadata=metadata)
         )
 
     @staticmethod
@@ -123,14 +133,16 @@ class EventsMixin(SessionManagerBase):
                 "type": "assistant_delta",
                 "session_id": session_id,
                 "content": event.content,
+                **({"runtime_metadata": event.runtime_metadata} if event.runtime_metadata else {}),
             }
         if event.type == "text":
-            if not event.content or not event.content.strip():
+            if event.content is None or not event.content.strip() and not (event.runtime_metadata or {}).get("native"):
                 return None
             return {
                 "type": "assistant_text",
                 "session_id": session_id,
                 "content": event.content,
+                **({"runtime_metadata": event.runtime_metadata} if event.runtime_metadata else {}),
             }
         if event.type == "thinking":
             # We persist thinking but don't broadcast it by default — the
@@ -160,6 +172,11 @@ class EventsMixin(SessionManagerBase):
                 "task_id": u.task_id,
                 "tool_use_id": u.tool_use_id,
                 "tool_call_id": u.tool_call_id,
+                "card_id": u.card_id,
+                "native_thread_id": u.native_thread_id,
+                "native_turn_id": u.native_turn_id,
+                "parent_thread_id": u.parent_thread_id,
+                "runtime_metadata": event.runtime_metadata,
                 "status": u.status,
                 "stop_reason": u.stop_reason,
                 "name": u.name,

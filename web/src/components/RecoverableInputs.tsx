@@ -128,11 +128,28 @@ export function RecoverableInputs({ sessionId, connected, disabled, onRestore }:
 
   if (!token || (!page.items.length && !error)) return null;
   return <section aria-label="Saved inputs" className="shrink-0 max-h-72 overflow-auto px-6 py-2 text-sm">
-    {page.items.map((item) => <article key={item.client_request_id} className="mb-2 rounded-md border border-border p-3">
-      <p className="font-medium">{item.execution.state === "withdrawn" ? "Not executed · input saved" : "Execution result unknown"}</p>
-      <p className="text-xs text-muted-foreground">{item.execution.state === "withdrawn"
+    {page.items.map((item) => {
+      const native = item.execution.native_inputs ?? [];
+      const accepted = native.some((input) => input.kind === "steer" && input.state === "accepted") &&
+        !native.some((input) => input.state === "unknown");
+      const waiting = native.some((input) => input.kind === "steer" && input.state === "not_sent") &&
+        item.execution.state === "running";
+      return <article key={item.client_request_id} className="mb-2 rounded-md border border-border p-3">
+      <p className="font-medium">{accepted ? "Accepted by runtime · processing unconfirmed" : waiting
+        ? "Added to active turn · acceptance pending" : item.execution.state === "withdrawn" ? "Not executed · input saved" : "Execution result unknown"}</p>
+      <p className="text-xs text-muted-foreground">{accepted
+        ? "The root response does not prove this instruction was consumed. Review the conversation before deciding on further work."
+        : waiting ? "The input is owned by the active request. Runtime acceptance has not been confirmed."
+        : item.execution.state === "withdrawn"
         ? "This input was withdrawn before it ran. Restore it to review and send it again."
         : "Review the conversation and saved input before starting new work. It will not run again automatically."}</p>
+      {item.execution.native_inputs?.some((input) => input.state === "unknown")
+        ? <p className="text-xs text-muted-foreground">Native input acceptance is unconfirmed. A completed response does not resolve this uncertainty.</p>
+        : item.execution.state === "unknown" && item.execution.native_inputs?.some((input) => input.state === "accepted")
+          ? <p className="text-xs text-muted-foreground">Native input was accepted; model processing and the result remain unconfirmed.</p>
+          : null}
+      {item.execution.native_inputs?.some((input) => input.controller === "unknown") &&
+        <p className="text-xs text-muted-foreground">A session preparation change is unconfirmed. Review the native history before continuing.</p>}
       <p className="my-2 whitespace-pre-wrap break-words">{item.preview || "Attachment-only input"}</p>
       {item.attachment_count > 0 && <p>{item.attachment_count} required attachment(s)</p>}
       {details[item.client_request_id] && <div className="my-2">
@@ -151,7 +168,7 @@ export function RecoverableInputs({ sessionId, connected, disabled, onRestore }:
           onClick={() => onRestore(details[item.client_request_id], [])}>Restore text and re-attach files</Button>}
         <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void action(item, "dismiss")}>Dismiss notice</Button>
       </div>
-    </article>)}
+    </article>; })}
     {page.next_cursor && <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void more()}>Load more saved inputs</Button>}
     {error && <p role="alert">{error} <button type="button" className="underline" onClick={() => setRefresh((n) => n + 1)}>Retry loading</button></p>}
   </section>;

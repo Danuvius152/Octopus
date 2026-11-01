@@ -639,7 +639,7 @@ export function AgentFormPage({
                 </div>
               </div>
 
-              <SubagentEditor value={subagents} onChange={setSubagents} />
+              <SubagentEditor value={subagents} onChange={setSubagents} backend={backend} />
             </div>
           )}
         </div>
@@ -658,15 +658,22 @@ export function AgentFormPage({
 function SubagentEditor({
   value,
   onChange,
+  backend,
 }: {
   value: SubagentDefinition[];
   onChange: (next: SubagentDefinition[]) => void;
+  backend: string;
 }) {
   const update = (i: number, patch: Partial<SubagentDefinition>) =>
     onChange(value.map((sa, n) => (n === i ? { ...sa, ...patch } : sa)));
 
   return (
     <div className="agent-subagents space-y-3">
+      <p className="text-xs text-gray-700">
+        {backend === "claude-code"
+          ? "These definitions are available to Claude Code for this agent."
+          : "Definitions are saved, but Codex does not yet use them as native roles or tool restrictions. Switching back to Claude Code keeps them available."}
+      </p>
       <div className="flex items-center justify-between">
         <Label>
           Sub-agents

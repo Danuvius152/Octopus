@@ -5,7 +5,6 @@ import { ChatView } from "./ChatView";
 import { mockChatViewport } from "./chatViewport.test-support";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { loadOlderMessages } from "../lib/transcript";
 import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
 
 const { child } = vi.hoisted(() => ({ child: {
@@ -70,11 +69,11 @@ async function launch(mode: string) {
 
 it.each(["rewind", "duplicate"])("%s loads a paged snapshot without overwriting newer WS rows/questions", async (mode) => {
   let finish!: (response: Response) => void;
-  mockSessionFetch((url: string) => {
+  let finishOlder!: (response: Response) => void;
+  const fetcher = mockSessionFetch((url: string) => {
     if (url.endsWith("/duplicate")) return Promise.resolve(new Response(JSON.stringify(child)));
-    if (url.includes("/messages?before_seq=200")) return Promise.resolve(new Response(JSON.stringify({
-      messages: [{ role: "user", type: "text", content: "older page", seq: 199 }], oldest_loaded_seq: 199, has_more_messages: true,
-    })));
+    if (url.includes("/messages?before_seq=200"))
+      return new Promise<Response>((resolve) => { finishOlder = resolve; });
     if (new URL(url, window.location.origin).pathname === `/api/sessions/${child.id}`)
       return new Promise<Response>((resolve) => { finish = resolve; });
     throw new Error(`Unexpected session request: ${url}`);
@@ -97,8 +96,24 @@ it.each(["rewind", "duplicate"])("%s loads a paged snapshot without overwriting 
   expect(state.pendingQuestions[child.id][0].question_id).toBe("late-question");
   expect(state.sessions.some((row) => row.id === parent.id)).toBe(mode === "duplicate");
   expect(state.archivedSessions.some((row) => row.id === parent.id)).toBe(mode === "rewind");
-  await act(async () => { expect(await loadOlderMessages(child.id)).toBe(1); });
-  expect(useSessionStore.getState().messages[child.id][0].seq).toBe(199);
+  // The short WS-only window can already have armed automatic paging. Keep
+  // its response behind the snapshot assertions, then exercise the same UI
+  // paging path whether it started automatically or needs the header button.
+  const olderButton = screen.queryByRole("button", { name: "Load earlier messages" });
+  if (olderButton) fireEvent.click(olderButton);
+  await waitFor(() => expect(finishOlder).toBeTypeOf("function"));
+  expect(fetcher.mock.calls.filter(([url]) => url.includes("/messages?before_seq=")))
+    .toEqual([[expect.stringContaining("/messages?before_seq=200")]]);
+  await act(async () => finishOlder(Response.json({
+    messages: [{ role: "user", type: "text", content: "older page", seq: 199 }], oldest_loaded_seq: 199, has_more_messages: false,
+  })));
+  // Let Virtuoso apply its prepend adjustment before unmounting the list.
+  await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
+  const paged = useSessionStore.getState();
+  expect(paged.oldestSeq[child.id]).toBe(199);
+  expect(paged.messages[child.id][0].seq).toBe(199);
+  expect(paged.messages[child.id].find((row) => row.seq === 400)?.content).toBe("new WS row");
+  expect(paged.pendingQuestions[child.id][0].question_id).toBe("late-question");
 });
 
 it.each(["rewind", "duplicate"])("%s rejects an old service response after a newer service arrives", async (mode) => {

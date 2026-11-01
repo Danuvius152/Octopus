@@ -38,6 +38,7 @@ from .submission import (
 )
 
 if TYPE_CHECKING:
+    from ..harness.events import NativeQuestionRef
     from ..knowledge import KnowledgeContext, OwnedTaskContext
     from .owner import SessionOwner
     from .owner_questions import QuestionNotification
@@ -275,6 +276,8 @@ class PendingQuestion:
     request_publication: QuestionNotification | None = field(default=None, repr=False)
     publication: QuestionNotification | None = field(default=None, repr=False)
     retirement_requested: bool = False
+    backend: HarnessRun | None = field(default=None, repr=False)
+    native_ref: NativeQuestionRef | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -530,7 +533,7 @@ class SessionManagerBase:
         raise NotImplementedError  # provided by a mixin
 
     def _flush_text_deltas(
-        self, session_id: str, buf: list[str]
+        self, session_id: str, buf: list[str], metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         raise NotImplementedError  # provided by a mixin
 

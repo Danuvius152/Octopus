@@ -15,7 +15,7 @@ from server.agent_manager import AgentManager
 from server.database import Database
 from server.delegations import DelegationManager
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.mcp_identity import verify
 from server.sessions import SessionManager
 from server.sessions.owner import SessionOwnerUnavailable
@@ -59,7 +59,7 @@ async def notification_runtime(tmp_path, monkeypatch):
 
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
-        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True, build_turn_argv=session_turn_argv(harness.profile, argv),
+        new_driver=ClaudeDriver, can_steer=True, reusable=True, build_turn_argv=session_turn_argv(harness.profile, argv),
     ))
     spawn, submit = asyncio.create_subprocess_exec, manager.start_message
 

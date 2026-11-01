@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -24,6 +25,7 @@ from ..config import settings
 from ..credential_bindings import CredentialBindingError
 from ..diagnostics import diagnostic_text, exception_diagnostic, safe_diagnostic
 from ..harness import HarnessCredential, HarnessEvent, HarnessRun, get_harness
+from ..harness.driver import ActiveTurnRef, SteerNotAccepted
 from ..harness.events import HarnessPreparationError
 from ..harness.model_settings import (
     ModelControlError,
@@ -33,11 +35,13 @@ from ..harness.model_settings import (
 from ..large_prompts import spill_if_large
 from ..models import (
     AttachmentMetadata,
+    FinalAnswerRef,
     MessageContent,
     MessageRole,
     SessionStatus,
     TurnOutcome,
 )
+from ..submission_models import NativeInputEvidence
 from .base import (
     _MAX_PENDING_STEERS,
     ActiveRun,
@@ -56,7 +60,7 @@ from .client_submissions import (
     require_retired_writers,
     saved_context,
 )
-from .commands import CorrelatedControl, _process_owned_command
+from .commands import CorrelatedControl, _process_owned_command, current_interrupt
 from .observation import AttemptResource
 from .owner_questions import (
     BeginQuestionAttempt,
@@ -332,6 +336,7 @@ class Execution:
     terminal: Publication | None = None
     retirement: asyncio.Task[None] | None = None
     publication_failed: bool = False
+    input_changed: asyncio.Event = field(default_factory=asyncio.Event)
     completion_reason: Literal["expired"] | None = None
 
     def format_exception(self, error: BaseException) -> str:
@@ -349,7 +354,11 @@ class _Steer:
     backend: HarnessRun
     previous: Any
     prepared: asyncio.Task[Any]
+    target: ActiveTurnRef | None = None
     write: asyncio.Task[bool] | None = None
+    # The I/O task owns this monotonic observation. A task cancelled before
+    # entry proves the native writer never ran, even without a send marker.
+    write_entered: bool = False
     message: MessageContent | None = None
     seq: int | None = None
     merged: Any = None
@@ -401,6 +410,31 @@ class OwnerRuntime:
         # A result is retained in this exact task until the owner consumes it.
         task.add_done_callback(lambda _done: self.owner.wake())
         return task
+
+    def native_control_matches(self, command: RuntimeCommand) -> bool:
+        execution = self.current
+        if execution is None or execution.attempt is None:
+            return False
+        return bool(getattr(execution.attempt.backend, "captures_retirement_output", False) and (
+            isinstance(command, Interrupt)
+            or isinstance(command, CancelRequest) and command.request_id == execution.request.request_id
+            or isinstance(command, CorrelatedControl)
+            and current_interrupt(self.owner.manager, self.owner.session, command.data, command.user_id)))
+
+    def freeze_native_control(self, command: RuntimeCommand) -> None:
+        """An accepted, validated Stop seals resource writes before storage I/O.
+
+        Product settlement remains the serialized command's responsibility.
+        This changes only the original host's send/retirement boundary.
+        """
+        if not self.native_control_matches(command):
+            return
+        execution = self.current
+        assert execution is not None and execution.attempt is not None
+        backend = execution.attempt.backend
+        if backend.native_end_reason == "process_ended":
+            backend.native_end_reason = "service_shutdown" if getattr(command, "cause", "user") == "shutdown" else "user_stop"
+        backend.retire()
 
     def changed(self) -> None:
         self.dispatch_notice = self.owner.manager._dispatch_event(self.owner.session)
@@ -615,7 +649,7 @@ class OwnerRuntime:
         new_session = command.schedule is not None and session.origin == "schedule" and session.id not in manager.sessions
         if not new_session and manager.sessions.get(session.id) is not session:
             raise ValueError(f"Session {session.id} not found")
-        await manager.require_active_agent(session.agent_id)
+        agent = await manager.require_active_agent(session.agent_id)
         if session._transcript_integrity != "ok":
             raise AdmissionIntegrityError("Transcript has duplicate sequences; export and review it before continuing")
         closed = (manager._admission_closed or session._admission_closed
@@ -651,9 +685,14 @@ class OwnerRuntime:
             manager._check_turn_quota(session)
         steering = (command.steerable and request.source == "human" and self.current is not None
                 and session._steer_open and not request.attachment_ids
+                and self.current.attempt is not None
+                and getattr(self.current.attempt.backend, "steering_open", True)
+                and await self._steer_configuration_matches(session, agent)
                 and request.wiki_mode in {None, "auto"} and session._run.wiki_mode in {None, "auto"}
                 and (not session._dispatch_paused or self.current.request.priority)
-                and len(session._steer_queue) < _MAX_PENDING_STEERS)
+                and not any(item.source == "human" and (not session._dispatch_paused or item.priority)
+                            for item in session._pending_queue)
+                and len(session._steer_queue) + int(self.steer is not None and self.steer.write is not None) < _MAX_PENDING_STEERS)
         # An accepted input owns its notification too. At most the current
         # handoff can wait outside the publisher's budget; a slow subscriber
         # must not create a full queue snapshot on every pending request.
@@ -715,6 +754,17 @@ class OwnerRuntime:
         return PendingInput(request.request_id, request.source, request.summary, request.work_id,
                             request.priority, request.order, request.queued_event)
 
+    async def _steer_configuration_matches(self, session: Session, agent: dict[str, Any] | None) -> bool:
+        execution = self.current
+        if execution is None or execution.prepared is None:
+            return False
+        prepared = execution.prepared
+        if session.backend != prepared.configured.backend:
+            return False
+        connectors = await self.owner.manager._load_connectors(agent)
+        config = self.owner.manager._run_config(session, agent, connectors)
+        return prepared.backend.matches_configuration(config, session.working_dir, prepared.credential)
+
     def _existing_input(self, row: dict[str, Any], digest: str) -> SubmissionReceipt:
         """A duplicate observes the original input; it never queues it again."""
         if row["payload_sha256"] != digest:
@@ -732,6 +782,7 @@ class OwnerRuntime:
         result: HarnessEvent | None = None, metadata: dict[str, Any] | None = None,
         provider_code: str | None = None,
         rejected_input: dict[str, Any] | None = None,
+        defer_recording: bool = False,
     ) -> dict[str, Any]:
         """The single writer selects once and retains its commit observation."""
         if asyncio.current_task() is not self.owner.task:
@@ -768,8 +819,6 @@ class OwnerRuntime:
                 **(settlement.stored.tool_input or {}),
                 "attempt_context": {"request_id": settlement.request_id, "attempt_id": settlement.attempt_id},
             }
-        settlement.seq = session._next_message_seq
-        session._next_message_seq += 1
         event = {
             "type": "result", "session_id": session.id,
             "request_id": settlement.request_id, "work_id": settlement.work_id,
@@ -788,7 +837,11 @@ class OwnerRuntime:
                     event[key] = metadata[key]
         if rejected_input is not None:
             event["tool_input"] = settlement.stored.tool_input
-        settlement.event = self.owner.manager._tag_persisted(event, settlement.seq, settlement.stored)
+        settlement.event = event
+        if defer_recording:
+            # Stop has selected the business outcome. The original bounded
+            # reader still owns the necessary prefix preceding its record.
+            return event
         return await self._record_terminal(execution)
 
     async def _record_terminal(self, execution: Execution) -> dict[str, Any]:
@@ -796,6 +849,26 @@ class OwnerRuntime:
         session, settlement = self.owner.session, execution.settlement
         assert settlement.stored is not None and settlement.event is not None
         stored = settlement.stored
+        if settlement.seq is None:
+            attempt = execution.attempt
+            if attempt is not None:
+                self._capture_recording(execution)
+                root = getattr(attempt.backend, "observed_root", None)
+                if attempt.final_answer is None and root is not None:
+                    attempt.final_answer = FinalAnswerRef(thread_id=root.thread_id, turn_id=root.turn_id)
+                assert settlement.outcome is not None
+                settlement.outcome.final_answer = attempt.final_answer.model_copy(deep=True) if attempt.final_answer is not None else None
+                native_status = getattr(attempt.backend, "native_terminal_status", None)
+                if native_status in {"completed", "failed", "interrupted"}:
+                    settlement.outcome.native_status = native_status
+                settlement.outcome.recording_integrity = "incomplete" if settlement.protocol_issues else "complete"
+                settlement.outcome.recording_issues = dict(settlement.protocol_issues)
+                settlement.outcome.recording_locations = list(settlement.protocol_locations)
+                stored.content = settlement.outcome.model_dump()
+                settlement.event["content"] = stored.content
+            settlement.seq = session._next_message_seq
+            session._next_message_seq += 1
+            self.owner.manager._tag_persisted(settlement.event, settlement.seq, stored)
         database = self.owner.manager.db
         assert database is not None
         try:
@@ -851,6 +924,14 @@ class OwnerRuntime:
         if execution.deadline is not None:
             execution.deadline.cancel()
         execution.settlement.request_interruption(cause)
+        if execution.attempt is not None:
+            # Stop closes tool admission before durable settlement can wait.
+            # The original HarnessRun still owns and confirms OS retirement.
+            execution.attempt.backend.close_admission()
+            if getattr(execution.attempt.backend, "captures_retirement_output", False):
+                if execution.attempt.backend.native_end_reason == "process_ended":
+                    execution.attempt.backend.native_end_reason = "service_shutdown" if cause == "shutdown" else "user_stop"
+                execution.attempt.backend.retire()
         if not execution.request.started and retain_unstarted:
             execution.request.priority = False
             session._pending_queue.append(self._pending_input(execution.request))
@@ -860,13 +941,16 @@ class OwnerRuntime:
             await self.settle(
                 execution, status="interrupted",
                 message=message or original_message, code=code or original_code,
+                defer_recording=bool(execution.attempt is not None
+                                     and getattr(execution.attempt.backend, "captures_retirement_output", False)),
             )
         else:
             await self.complete(execution.request, reason="shutdown" if cause == "shutdown" else "withdrawn", execution=execution)
         if (execution.phase in {"start", "stream", "retry"}
                 and execution.operation is not None and not execution.operation.done()):
             execution.operation.cancel()
-        if execution.reader is not None and execution.reader.task is not None and not execution.reader.task.done():
+        if (not (execution.attempt is not None and getattr(execution.attempt.backend, "captures_retirement_output", False))
+                and execution.reader is not None and execution.reader.task is not None and not execution.reader.task.done()):
             execution.reader.task.cancel()
         if execution.attempt is not None:
             execution.retirement = self.retire(execution.attempt.backend, "service_shutdown" if cause == "shutdown" else "user_stop")
@@ -888,6 +972,8 @@ class OwnerRuntime:
         existing = session._run.retirements.get(id(backend))
         if existing is not None and existing.backend is backend:
             return existing.task
+        if getattr(backend, "captures_retirement_output", False):
+            backend.retire(reason=reason)
         invalidate = getattr(backend, "invalidate_activity", None)
         if invalidate is not None:
             invalidate()
@@ -1086,6 +1172,10 @@ class OwnerRuntime:
     async def advance(self) -> None:
         """Consume a bounded amount of ready evidence before the next command."""
         session, manager = self.owner.session, self.owner.manager
+        execution = self.current
+        if execution is not None and execution.input_changed.is_set():
+            execution.input_changed.clear()
+            self.changed()
         idle_prefix_ready = self._offer_idle_publication()
         for key, resource in tuple(session._run.retirements.items()):
             # Real output already handed off by the original reader precedes
@@ -1155,16 +1245,18 @@ class OwnerRuntime:
             self.owner.wake()
             return
         await self._deadline(execution)
-        if execution.interrupted:
+        if execution.interrupted or execution.settlement.outcome is not None and execution.settlement.seq is None:
+            if (execution.attempt is not None and getattr(execution.attempt.backend, "captures_retirement_output", False)
+                    and not execution.stream_ended):
+                await self._consume_runtime(execution)
             if self.steer is not None:
                 await self._steering(execution)
-            await self._finish_interrupted(execution)
+            await self._finish_selected(execution)
             return
         if not publication_ready:
             if execution.phase in {"start", "stream"}:
                 await self._consume_runtime(execution, consume_events=False)
-                if self.steer is not None:
-                    await self._steering(execution)
+                await self._steering(execution)
             return
         if execution.phase == "claim":
             # Claim publication precedes actual execution; a subscriber can
@@ -1192,9 +1284,15 @@ class OwnerRuntime:
                 execution.phase = "terminal"
                 self.owner.wake()
                 return
-            execution.request.started = True
             configured = capture_configuration(session)
             request = replace(execution.request)
+            if configured.backend == "codex" and settings.codex_transport == "app-server":
+                native_input = NativeInputEvidence(input_id=request.request_id, attempt_id=uuid.uuid4().hex)
+                # Establish preparation evidence before Stop may settle this
+                # input. Later protocol observations refine the same attempt.
+                await manager.input_database().record_native_input(session.id, request.request_id, native_input)
+                execution.settlement.attempt_id = native_input.attempt_id
+            execution.request.started = True
             execution.operation = self.task(self._prepare_input(configured, request), f"request-input-{request.request_id}")
             execution.phase = "input"
             return
@@ -1350,21 +1448,23 @@ class OwnerRuntime:
             prompt = fork_helpers.wrap_for_fork_replay(prompt, copied)
         if configured.user_id is None:
             raise ValueError("The session has no file owner")
-        prompt = await asyncio.to_thread(spill_if_large, configured.id, prompt, user_id=configured.user_id)
+        backend = manager._make_run(configured, agent, connectors)
+        if not isinstance(backend, HarnessRun) or not backend.profile.inline_large_inputs:
+            prompt = await asyncio.to_thread(spill_if_large, configured.id, prompt, user_id=configured.user_id)
         if configured.agent_id:
             from ..agent_memory import ensure_agent_dirs
             await asyncio.to_thread(ensure_agent_dirs, configured.agent_id, configured.user_id)
-        backend = manager._make_run(configured, agent, connectors)
         return _PreparedRun(configured, agent, credential, connectors, backend, prompt)
 
     async def _prepare_retry(self, captured: Session, prepared: _PreparedRun, prompt: str) -> _PreparedRun:
         if captured.user_id is None:
             raise ValueError("The session has no file owner")
-        prompt = await asyncio.to_thread(spill_if_large, captured.id, prompt, user_id=captured.user_id)
+        backend = self.owner.manager._make_run(captured, prepared.agent, prepared.connectors)
+        if not isinstance(backend, HarnessRun) or not backend.profile.inline_large_inputs:
+            prompt = await asyncio.to_thread(spill_if_large, captured.id, prompt, user_id=captured.user_id)
         if captured.agent_id:
             from ..agent_memory import ensure_agent_dirs
             await asyncio.to_thread(ensure_agent_dirs, captured.agent_id, captured.user_id)
-        backend = self.owner.manager._make_run(captured, prepared.agent, prepared.connectors)
         return replace(prepared, configured=captured, backend=backend, prompt=prompt)
 
     async def _begin_attempt(self, execution: Execution, prepared: _PreparedRun) -> None:
@@ -1397,7 +1497,30 @@ class OwnerRuntime:
                 return
         if session._run.retirements:
             return
-        attempt = execution.attempt = _Attempt(backend, prepared.prompt, reused)
+        # Native preparation already owns its first attempt identity. A retry
+        # after an actual attempt still gets a fresh identity.
+        attempt_id = execution.settlement.attempt_id if execution.attempt is None else None
+        attempt = execution.attempt = _Attempt(backend, prepared.prompt, reused, attempt_id=attempt_id or uuid.uuid4().hex)
+        if isinstance(backend, HarnessRun):
+            from ..harness import Harness
+            assert execution.turn is not None
+            execution.turn.harness = Harness(backend.profile)
+            database = self.owner.manager.db
+            assert database is not None
+            # A prior attempt may commit its history before its reader is
+            # cancelled. The next writer resumes that fact, not a lost event.
+            session.claude_session_id = await database.get_session_resume_id(session.id)
+
+            async def record_input(evidence):
+                await database.record_native_input(session.id, evidence.input_id, evidence,
+                                                   process_group=backend.process_group_id)
+                # Report a committed read-model change to the original Owner.
+                # Coalescing notifications does not replace the saved evidence.
+                execution.input_changed.set()
+                self.owner.wake()
+
+            backend.bind_input_recorder(record_input)
+            backend.bind_questions(self.owner.wake)
         observation = session._request_observations.get(execution.request.request_id)
         if observation is not None:
             observation._attempts.append(AttemptResource(execution.request.request_id, attempt.attempt_id,
@@ -1451,6 +1574,13 @@ class OwnerRuntime:
         attempt, turn = execution.attempt, execution.turn
         if attempt is None or turn is None or execution.interrupted:
             return
+        if getattr(attempt.backend, "captures_retirement_output", False) and not attempt.backend.question_admission_open:
+            # The original run has frozen execution and started its bounded
+            # retirement. Late records cannot restart the active root's clock.
+            if execution.deadline is not None:
+                execution.deadline.cancel()
+                execution.deadline = None
+            return
         deadlines = []
         if settings.turn_max_seconds > 0:
             deadlines.append(turn.started_at + settings.turn_max_seconds)
@@ -1472,6 +1602,9 @@ class OwnerRuntime:
             activity.consumed = activity.latest
             execution.attempt.touch(activity.latest)
             self._arm_deadline(execution)
+        if getattr(execution.attempt.backend, "captures_retirement_output", False) and not execution.attempt.backend.question_admission_open:
+            self._arm_deadline(execution)
+            return
         if execution.deadline is None or not execution.deadline.expired:
             return
         attempt, turn = execution.attempt, execution.turn
@@ -1491,15 +1624,25 @@ class OwnerRuntime:
         execution.retirement = self.retire(attempt.backend, "parent_timeout")
         if execution.operation is not None and not execution.operation.done():
             execution.operation.cancel()
-        if execution.reader is not None and execution.reader.task is not None and not execution.reader.task.done():
-            execution.reader.task.cancel()
-        execution.start_ended = execution.stream_ended = True
-        execution.phase = "retire"
+        execution.start_ended = True
+        if getattr(attempt.backend, "captures_retirement_output", False):
+            # Budget cancellation freezes execution, but the original reader
+            # still records its finite shutdown prefix under the old identity.
+            execution.phase = "stream"
+        else:
+            if execution.reader is not None and execution.reader.task is not None and not execution.reader.task.done():
+                execution.reader.task.cancel()
+            execution.stream_ended = True
+            execution.phase = "retire"
         await self._end_questions(execution)
 
     async def _consume_runtime(self, execution: Execution, *, consume_events: bool = True) -> None:
         session, manager, attempt = self.owner.session, self.owner.manager, execution.attempt
         assert attempt is not None
+        if getattr(attempt.backend, "captures_retirement_output", False) and attempt.backend.retirement_state == "failed":
+            # The original failed resource must reach Manager takeover even
+            # when its product reader is held by a slow notification prefix.
+            await attempt.backend.wait_retirement()
         if not execution.start_ended and execution.operation is not None and execution.operation.done():
             execution.start_ended = True
             try:
@@ -1512,11 +1655,20 @@ class OwnerRuntime:
                     assert execution.reader.task is not None
                     execution.reader.task.cancel()
             except asyncio.CancelledError:
-                if attempt.timeout is None:
+                if attempt.timeout is None and not execution.interrupted:
                     raise
             except Exception as error:
-                await self._failed(execution, error, "backend_exception")
-                return
+                if execution.interrupted:
+                    # A start waiter can finish with a real refusal while Stop
+                    # records its already selected outcome. Retain that proof
+                    # and keep draining the original reader; ordinary failure
+                    # cleanup would cancel the finite prefix Stop still owns.
+                    manager._capture_error_text(attempt, HarnessEvent(type="error", content=str(error)))
+                    logger.info("Backend start ended after interruption session=%s request=%s error_type=%s\n%s",
+                                session.id, execution.request.request_id, type(error).__name__, attempt.backend.format_exception(error))
+                else:
+                    await self._failed(execution, error, "backend_exception")
+                    return
             else:
                 session._steer_open = bool(attempt.backend.can_steer and attempt.result is None)
                 execution.phase = "stream"
@@ -1576,14 +1728,11 @@ class OwnerRuntime:
         settlement = execution.settlement
         if attempt.conversation_id is not None:
             turn.continuation_id = attempt.conversation_id
-        for kind, count in getattr(attempt.backend, "protocol_issues", {}).items():
-            settlement.protocol_issues[kind] = settlement.protocol_issues.get(kind, 0) + count
-        settlement.protocol_locations.extend({**location, "attempt_id": attempt.attempt_id}
-            for location in getattr(attempt.backend, "protocol_locations", [])[:max(0, 8 - len(settlement.protocol_locations))])
         if attempt.result is not None and attempt.result.cost is not None:
             settlement.cost = (settlement.cost or 0) + attempt.result.cost
         decision = await manager._after_attempt(session, turn, attempt)
         if decision.retry:
+            self._capture_recording(execution)
             if attempt.failed and attempt.error_text:
                 execution.frames.append(await manager._recovery_frame(
                     session, code="attempt_failed", phase="diagnostic", message=attempt.error_text,
@@ -1598,18 +1747,32 @@ class OwnerRuntime:
             self.owner.wake()
             return
         detail = decision.events[-1] if decision.events else {}
-        failed = attempt.failed or attempt.timeout is not None
+        failed = (attempt.failed or attempt.timeout is not None or bool(settlement.protocol_issues.get("fatal_protocol_error"))
+                  or bool(getattr(attempt.backend, "protocol_issues", {}).get("fatal_protocol_error")))
         reason = detail.get("message")
         raw = attempt.result.content if attempt.result else attempt.error_text
         if failed and raw:
             reason = f"{reason}\n{raw}" if reason else raw
         if failed and not reason:
             reason = safe_diagnostic(getattr(attempt.backend, "stderr_text", "")) or "Backend ended without a terminal result"
-        await self.settle(execution, status="failed" if failed else "success",
+        status: Literal["success", "failed", "interrupted"] = "failed" if failed else "success"
+        if (attempt.result is not None and attempt.result.error_code == "native_turn_interrupted"
+                and attempt.timeout is None and not getattr(attempt.backend, "protocol_issues", {})):
+            status = "interrupted"
+        await self.settle(execution, status=status,
                                    message=reason, code=detail.get("code"), result=attempt.result,
                                    metadata=detail, provider_code=attempt.failure_code)
         execution.phase = "terminal"
         self.owner.wake()
+
+    @staticmethod
+    def _capture_recording(execution: Execution) -> None:
+        attempt, settlement = execution.attempt, execution.settlement
+        assert attempt is not None
+        for kind, count in getattr(attempt.backend, "protocol_issues", {}).items():
+            settlement.protocol_issues[kind] = settlement.protocol_issues.get(kind, 0) + count
+        settlement.protocol_locations.extend({**location, "attempt_id": attempt.attempt_id}
+            for location in getattr(attempt.backend, "protocol_locations", [])[:max(0, 8 - len(settlement.protocol_locations))])
 
     async def _overall_expired(self, execution: Execution) -> bool:
         turn, manager = execution.turn, self.owner.manager
@@ -1633,13 +1796,14 @@ class OwnerRuntime:
     async def _failed(self, execution: Execution, error: Exception, code: str) -> None:
         session = self.owner.session
         session._steer_open = False
-        if execution.reader is not None and execution.reader.task is not None:
+        backend = execution.attempt.backend if execution.attempt is not None else None
+        native = backend is not None and getattr(backend, "captures_retirement_output", False)
+        if not native and execution.reader is not None and execution.reader.task is not None:
             execution.reader.task.cancel()
         if execution.deadline is not None:
             execution.deadline.cancel()
         if self.steer is not None and self.steer.execution is execution and self.steer.write is not None:
             self.steer.write.cancel()
-        backend = execution.attempt.backend if execution.attempt is not None else None
         credential = execution.prepared.credential if execution.prepared is not None else None
         if credential is None and execution.preparation_diagnostic is not None:
             credential = execution.preparation_diagnostic.credential
@@ -1657,11 +1821,20 @@ class OwnerRuntime:
             code=error.code if isinstance(error, AttachmentUnavailable) else code,
             rejected_input={"content": execution.request.prompt, "attachment_ids": execution.request.attachment_ids}
                 if isinstance(error, AttachmentUnavailable) else None,
+            defer_recording=native,
         )
-        execution.phase = "terminal"
+        if native:
+            execution.start_ended = True
+            if execution.operation is not None and not execution.operation.done():
+                execution.operation.cancel()
+            if execution.reader is not None and execution.reader.task is not None and execution.reader.task.done():
+                execution.stream_ended = True
+            execution.phase = "stream"
+        else:
+            execution.phase = "terminal"
         self.owner.wake()
 
-    async def _finish_interrupted(self, execution: Execution) -> None:
+    async def _finish_selected(self, execution: Execution) -> None:
         if self.steer is not None and self.steer.execution is execution:
             return
         for task in (execution.operation, execution.reader.task if execution.reader is not None else None):
@@ -1687,6 +1860,8 @@ class OwnerRuntime:
         if not self._confirm_retired(execution):
             return
         if execution.request.started and execution.settlement.event is not None:
+            if execution.settlement.seq is None:
+                await self._record_terminal(execution)
             execution.phase = "terminal"
             if execution.publication_failed and not execution.frames and not execution.prefix:
                 await self._finish(execution)
@@ -1700,6 +1875,9 @@ class OwnerRuntime:
     def _confirm_retired(self, execution: Execution) -> bool:
         if execution.retired.done():
             return True
+        if execution.attempt is not None and getattr(execution.attempt.backend, "has_question_events", False):
+            self.owner.wake()
+            return False
         if self.steer is not None and self.steer.execution is execution:
             return False
         for operation in (execution.operation, execution.reader.task if execution.reader is not None else None,
@@ -1768,14 +1946,17 @@ class OwnerRuntime:
         assert attempt is not None
         steer = self.steer
         if steer is None:
-            if not session._steer_open or not session._steer_queue or not execution.start_ended:
+            if (not session._steer_open or not session._steer_queue or not execution.start_ended
+                    or not getattr(attempt.backend, "steering_open", True)):
                 return
+            target = getattr(attempt.backend, "active_turn", None)
             request = await load_pending_input(manager, session.id, session._steer_queue[0])
             prepared = self.task(self._prepare_steer(
                 capture_configuration(session), replace(request), session._run.knowledge_context,
                 execution.request.request_id,
             ), f"steer-input-{request.request_id}")
-            self.steer = _Steer(request, execution, attempt.backend, session._run.knowledge_context, prepared)
+            self.steer = _Steer(request, execution, attempt.backend, session._run.knowledge_context, prepared,
+                                target=target)
             return
         if steer.write is None:
             if not steer.prepared.done():
@@ -1795,8 +1976,12 @@ class OwnerRuntime:
                     message = MessageContent(role=MessageRole.user, type="text", content=request.prompt,
                         tool_input={"request_context": {"request_id": request.request_id, "source": request.source,
                             "work_id": request.work_id, "knowledge": json.loads(encode(merged))}})
-                    seq = await manager._persist_message(session, message, git_head=prepared.git_head, git_status_clean=prepared.git_clean)
-                    request.recorded_input = RecordedInput(seq, message, prepared.git_head, prepared.git_clean, True)
+                    if steer.target is not None:
+                        assert message.tool_input is not None
+                        message.tool_input["native_steer"] = True
+                    seq = None if steer.target is not None else await manager._persist_message(
+                        session, message, git_head=prepared.git_head, git_status_clean=prepared.git_clean)
+                    request.recorded_input = RecordedInput(seq, message, prepared.git_head, prepared.git_clean, steer.target is None)
                 steer.message, steer.seq = request.recorded_input.message, request.recorded_input.seq
                 # Constraints are installed before frame I/O can expose them to
                 # tools. The original owner restores them if no frame is sent.
@@ -1808,17 +1993,23 @@ class OwnerRuntime:
                     steer.previous_wiki_task = tasks.active[token]
                     steer.installed_wiki_task = replace(tasks.active[token], request=merged.trusted_request, knowledge=merged)
                     tasks.active[token] = steer.installed_wiki_task
-                # The original record owns a possibly submitted frame from
-                # this handoff onward. Stop cannot put it back in the queue.
+                # The original record owns the writer. Native send evidence
+                # and entry of the I/O task distinguish uncertainty from an
+                # operation cancelled before it could write anything.
                 request.started = True
                 session._steer_queue[:] = [item for item in session._steer_queue if item.request_id != request.request_id]
                 session._inline_requests.setdefault(execution.request.request_id, []).append(request)
-                session._request_observations[request.request_id].follow(
-                    session._request_observations[execution.request.request_id])
-                steer.write = self.task(self._write_steer(
-                    steer.backend, request.prompt, session.id, session.user_id, request.request_id,
-                    execution.request.request_id,
-                ), f"steer-write-{request.request_id}")
+                if steer.target is None:
+                    session._request_observations[request.request_id].follow(
+                        session._request_observations[execution.request.request_id])
+                write_args = (steer.backend, request.prompt, session.id, session.user_id,
+                              request.request_id, execution.request.request_id, steer.target)
+
+                async def write_original() -> bool:
+                    steer.write_entered = True
+                    return await self._write_steer(*write_args)
+
+                steer.write = self.task(write_original(), f"steer-write-{request.request_id}")
             except (asyncio.CancelledError, Exception) as error:
                 if isinstance(error, Exception):
                     logger.error("Steer preparation failed session=%s error=%s\n%s", session.id,
@@ -1829,12 +2020,46 @@ class OwnerRuntime:
         if not steer.write.done():
             return
         request = steer.request
+        uncertain = False
         try:
             delivered = steer.write.result()
         except (asyncio.CancelledError, Exception) as error:
+            # The committed send marker is authoritative even if cancellation
+            # happened before the driver coroutine ever began. No marker (or
+            # explicit rejection) proves this native input can safely requeue.
+            if (steer.target is not None and (not execution.interrupted or not steer.write_entered
+                                             or isinstance(error, SteerNotAccepted) and not error.submitted)
+                    and await manager.input_database().requeue_unaccepted_input(session.id, request.request_id)):
+                request.started = False
+                if execution.interrupted:
+                    request.priority = False
+                request.recorded_input = None
+                session._inline_requests[execution.request.request_id].remove(request)
+                session._pending_queue.extend([self._pending_input(request), *session._steer_queue])
+                session._pending_queue.sort(key=lambda item: item.order)
+                session._steer_queue.clear()
+                session._steer_open = False
+                self._restore_steer_context(steer)
+                self.steer = None
+                self.changed()
+                return
             delivered = False
+            uncertain = True
             logger.error("Steer delivery unconfirmed session=%s request=%s error=%s\n%s",
                          session.id, request.request_id, type(error).__name__, steer.backend.format_exception(error))
+        if steer.target is not None and (delivered or uncertain):
+            recorded = request.recorded_input
+            assert recorded is not None
+            steer.seq = await manager._persist_message(session, recorded.message,
+                git_head=recorded.git_head, git_status_clean=recorded.git_status_clean)
+            recorded.seq, recorded.confirmed = steer.seq, True
+            session._request_observations[request.request_id].follow(
+                session._request_observations[execution.request.request_id])
+        if uncertain:
+            if steer.target is not None:
+                assert steer.message is not None
+                execution.frames.append(manager._tag_persisted({"type": "user_message", "session_id": session.id,
+                    "content": request.prompt, "tool_input": steer.message.tool_input}, steer.seq, steer.message))
             await self.complete(request, reason="steer_delivery_unknown", actual_request_id=execution.request.request_id,
                                 execution=execution)
         if delivered:
@@ -1844,12 +2069,8 @@ class OwnerRuntime:
             execution.frames.append(manager._tag_persisted({"type": "steered", "session_id": session.id,
                 "content": request.prompt, "tool_input": steer.message.tool_input}, steer.seq, steer.message))
         else:
-            if session._run.knowledge_context is steer.merged:
-                session._run.knowledge_context = steer.previous
-            from ..wiki.tasks import tasks
-            if (steer.wiki_task_id is not None and steer.previous_wiki_task is not None
-                    and tasks.active.get(steer.wiki_task_id) is steer.installed_wiki_task):
-                tasks.active[steer.wiki_task_id] = steer.previous_wiki_task
+            if steer.target is None or not steer.write.cancelled() and steer.write.exception() is None:
+                self._restore_steer_context(steer)
             if not steer.write.cancelled() and steer.write.exception() is None:
                 request.started = False
                 await self.complete(request, reason="account_unavailable")
@@ -1857,6 +2078,16 @@ class OwnerRuntime:
             session._steer_open = False
         self.steer = None
         self.owner.wake()
+
+    def _restore_steer_context(self, steer: _Steer) -> None:
+        from ..wiki.tasks import tasks
+
+        session = self.owner.session
+        if session._run.knowledge_context is steer.merged:
+            session._run.knowledge_context = steer.previous
+        if (steer.wiki_task_id is not None and steer.previous_wiki_task is not None
+                and tasks.active.get(steer.wiki_task_id) is steer.installed_wiki_task):
+            tasks.active[steer.wiki_task_id] = steer.previous_wiki_task
 
     async def _prepare_steer(self, configured: Session, request: QueuedPrompt, previous: Any, owner: str) -> tuple[Any, _PreparedInput]:
         from ..knowledge import AdmittedRequest, RequestRef, revise
@@ -1872,21 +2103,32 @@ class OwnerRuntime:
     async def _write_steer(
         self, backend: HarnessRun, prompt: str, session_id: str, user_id: str | None,
         request_id: str, owner_request_id: str,
+        target: ActiveTurnRef | None = None,
     ) -> bool:
         from ..mcp_identity import McpScope, scope_is_live
         database = self.owner.manager.db
         assert database is not None
         group = getattr(backend, "process_group_id", None)
         if isinstance(group, int):
-            await database.note_submission_process(session_id, owner_request_id, group)
-        available = await database.set_steer_delivery(session_id, request_id, confirmed=False)
+            try:
+                await database.note_submission_process(session_id, owner_request_id, group)
+            except asyncio.CancelledError as error:
+                if target is not None:
+                    raise SteerNotAccepted("Native input was cancelled before entering its writer") from error
+                raise
+        if target is not None and backend.active_turn != target:
+            raise SteerNotAccepted("The original native target ended before writing")
+        available = True if target is not None else await database.set_steer_delivery(session_id, request_id, confirmed=False)
         # This check is at actual frame submission, after the final DB await.
         # It captures the original run lease; no current Session is consulted.
         if not available or not scope_is_live(McpScope(session_id, user_id=user_id,
                     run_lease_id=backend.run_lease_id, work_id=backend.work_id)):
             return False
-        await backend.steer(prompt)
-        await database.set_steer_delivery(session_id, request_id, confirmed=True)
+        if target is not None:
+            await backend.steer(prompt, input_id=request_id, target=target)
+        else:
+            await backend.steer(prompt)
+            await database.set_steer_delivery(session_id, request_id, confirmed=True)
         return True
 
     async def _idle_event(self, command: IdleEvent) -> bool | IdlePublication:

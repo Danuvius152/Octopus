@@ -11,7 +11,7 @@ from server import deps
 from server.config import settings
 from server.database import Database
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.main import app
 from server.session_manager import SessionManager
 from tests.accounts import create_account
@@ -45,7 +45,7 @@ async def test_busy_fork_refuses_without_blocking_owned_stop(
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None,
-        prepare_resume=None, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        prepare_resume=None, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(retired)], {"cwd": context.working_dir},
         ),

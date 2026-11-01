@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Octopus · 架构补充审查：当前代码与改造建议 · 26aa78f</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({startOnLoad:true,theme:"neutral",securityLevel:"strict",fontFamily:"system-ui, sans-serif",flowchart:{curve:"linear",htmlLabels:false}});
+  </script>
+  <style>
+    :root{--ink:#182b32;--muted:#59666b;--line:#d7dedb;--paper:#f6f5ef;--green:#14634c;--red:#b23c38;--amber:#936017}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.7 system-ui,-apple-system,"Segoe UI",sans-serif}
+    main{max-width:1160px;margin:auto;padding:58px 28px 70px}main h1,main h2,main h3,main p{margin:0}main h1{font-size:clamp(32px,4vw,52px);font-weight:650;letter-spacing:-.04em;line-height:1.2}main h2{font-size:28px;line-height:1.4;letter-spacing:-.02em}main h3{font-size:18px}a{color:var(--green);text-underline-offset:4px}code,.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}
+    header{border-top:5px solid var(--green);padding-top:24px}.eyebrow{font-size:11px;letter-spacing:.18em;font-weight:700;text-transform:uppercase;color:var(--green)}.meta{margin:17px 0 23px;display:flex;gap:9px;flex-wrap:wrap}.badge{display:inline-block;border-radius:4px;padding:3px 9px;font-size:12px;font-weight:650;background:#e9edeb;color:#3f5154}.strong{background:#dceee5;color:#135d43}.worth{background:#f7eacb;color:#86580e}.panel > .label,.scope .label{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:650}
+    .scope{display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:20px 0}.scope strong{display:block;font-size:19px}.scope p,.small{font-size:13px;color:var(--muted)}nav{display:flex;gap:10px 24px;flex-wrap:wrap;padding:24px 0;font-size:14px}.legend{font-size:12px;color:var(--muted);display:flex;gap:18px;flex-wrap:wrap}.legend span::before{content:"";display:inline-block;width:14px;height:10px;border:1px solid #536569;margin-right:6px}.legend .dashed::before{border-style:dashed}.legend .red::before{background:var(--red);border:0;height:3px;vertical-align:middle}.legend .dark::before{background:var(--ink);border-width:3px}
+    article{margin-top:44px;padding-top:27px;border-top:1px solid #bcc8c2;scroll-margin-top:25px}.title{display:flex;align-items:flex-start;gap:18px}.number{font-size:38px;line-height:1.15;color:#abb8ae;font-weight:300}.tags{margin:11px 0 16px;display:flex;flex-wrap:wrap;gap:7px}.files{margin-bottom:18px;line-height:1.9}.files a{font-family:ui-monospace,monospace;font-size:12px;text-decoration:none;border-bottom:1px dotted #a2b3a6;margin-right:15px}
+    .compare{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:18px 0 21px}.panel{background:#fff;border:1px solid var(--line);border-radius:8px;min-height:310px;padding:18px;overflow:hidden}.panel.after{background:#edf3ef}.panel>.label{margin-bottom:12px}.mermaid{margin:0;white-space:pre-wrap;font-size:12px;min-height:230px;display:flex;align-items:center;justify-content:center}.mermaid svg{max-height:300px;width:100%}.fallback{font-size:12px;color:var(--muted);margin-top:9px}
+    .box{border:1px solid #9caaa7;background:white;border-radius:5px;padding:10px 14px;text-align:center;font-size:14px}.box small{display:block;font-size:11px;color:var(--muted)}.deep{border:3px solid var(--ink);background:var(--ink);color:white;padding:16px;border-radius:6px}.deep strong{display:block;font-size:18px}.deep small{display:block;color:#bccfc6;font-size:12px;margin-top:5px}.seam{border-top:2px dashed #b4cbbf;margin:12px 0;padding-top:12px}.arrow{text-align:center;color:#728780;font-size:20px;line-height:1.4}.bad{color:var(--red)}.row{display:flex;gap:9px;align-items:center}.row>*{flex:1}.inside{font-size:12px;color:#d4e4dc;border-left:2px solid #739589;padding-left:12px;margin:10px 0 2px}.outcome{background:#f9e9e6;border-left:3px solid var(--red);padding:8px 12px;color:#8b302c;font-size:13px;margin-top:12px}.good{background:#e0eee5;border-left-color:var(--green);color:#174f3f}
+    .facts{display:grid;grid-template-columns:78px 1fr;gap:8px 12px;font-size:14px;margin-top:16px}.facts dt{font-size:12px;color:var(--muted);font-weight:650}.facts dd{margin:0}.wins{display:flex;gap:8px 20px;flex-wrap:wrap;list-style:none;padding:0;margin:14px 0;font-size:13px;color:var(--green)}.wins li::before{content:"↗ ";font-weight:600}.evidence{background:#eeefea;border-radius:5px;padding:14px 17px;font-size:13px;margin-top:16px}.evidence b{font-weight:650}.contract{font-size:12px;color:var(--muted);border-left:2px solid #a5b9ad;padding-left:12px;margin-top:13px}.timeline{display:grid;gap:9px;padding:5px 0}.step{display:flex;gap:12px;align-items:center;font-size:13px}.step b{font:11px ui-monospace,monospace;background:#e5eae7;padding:5px 7px;color:#566863}.step span{border-bottom:1px solid #e1e5e1;flex:1;padding:5px 0}.strip{border-left:3px solid #9dac9e;background:#f0f2ee;padding:9px 12px;margin-top:8px;font-size:13px}
+    section{margin-top:48px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:18px;font-size:13px}th{text-align:left;font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:.07em}td,th{padding:12px 14px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}td:first-child{width:24%;font-weight:600}.top{background:var(--ink);color:white;border-radius:9px;padding:30px}.top a{color:#c6e7d4}.top p{margin-top:12px}.top .eyebrow{color:#a9d8bc}.top h2{margin-top:12px}footer{margin-top:30px;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+    @media(max-width:760px){main{padding:30px 18px}.compare,.scope{grid-template-columns:1fr}.panel{min-height:280px}main h2{font-size:23px}.number{font-size:30px}.facts{grid-template-columns:65px 1fr}.top{padding:22px}td:first-child{min-width:130px}.scope{gap:15px}}
+    @media print{main{max-width:none;padding:0}article{break-inside:avoid}.panel{min-height:250px}a{color:inherit}body{background:white}.top{color:var(--ink);background:#e8eee8}.top a{color:var(--ink)}}
+  </style>
+</head>
+<body>
+<main class="max-w-6xl mx-auto">
+  <header>
+    <div class="eyebrow">Architecture review / 01 November 2026</div>
+    <h1>Octopus：收口之后，<br>还有哪些责任留在调用方？</h1>
+    <div class="meta"><span class="badge">main · 26aa78f0</span><span class="badge">本地源码 · 2026-11-01 00:02 +08</span><span class="badge">5 个候选</span><span class="badge strong">1 个最小实验已复现</span><span class="badge worth">改造建议均未实施</span></div>
+    <div class="scope">
+      <div><div class="label">Review scope</div><strong>最近 60 个提交牵引</strong><p>重点：会话 / Harness、Wiki、前端读取；不是全库缺陷穷举。</p></div>
+      <div><div class="label">Current architecture</div><strong>深化现有 owner</strong><p>保留模块化单体、SessionOwner、事务与效果分工；按 locality 判断收益。</p></div>
+      <div><div class="label">Evidence boundary</div><strong>源码 + 现有测试阅读</strong><p>另执行真实 Store 最小实验；未运行产品套件、模型或部署检查。</p></div>
+    </div>
+    <div class="evidence"><b>如何读 Before / After：</b>本报告每个候选的左图（Before）都是 <code>26aa78f</code> 当前代码的责任关系；右图（After）都是建议改造后的目标分工，<b>尚未实现、未完成接口设计与行为验收，也不是已验证的通用“最佳实践”</b>。右图中的框表示责任，不要求按图新增类或文件；实施后是否成立，须通过各卡片列出的反例验证。推荐强度不等于缺陷复现或方案验收强度。</div>
+    <nav><a href="#bg">01 · BG 详情</a><a href="#oneshot">02 · one-shot 退休</a><a href="#paging">03 · 历史分页</a><a href="#wiki">04 · Wiki 读取快照</a><a href="#configuration">05 · Research 配置</a><a href="#previous-reports">旧报告对照</a><a href="#kept">保留的结构</a><a href="#top">首选</a></nav>
+    <div class="legend"><span>module</span><span class="dashed">seam</span><span class="red">责任泄漏 / 错误覆盖</span><span class="dark">deep module</span></div>
+  </header>
+
+  <article id="bg">
+    <div class="title"><div class="number">01</div><h2>把 BG 详情补齐纳入后台任务的读取责任</h2></div>
+    <div class="tags"><span class="badge strong">Strong</span><span class="badge">ports &amp; adapters + in-process</span><span class="badge">已复现：真实 Store，模拟到达顺序</span></div>
+    <div class="files">
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/web/src/components/BgTaskChip.tsx#L97">BgTaskChip.tsx:97 / 113</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/web/src/stores/sessionStore.ts#L943">sessionStore.ts:943 / 977</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/web/src/hooks/useWebSocket.ts#L398">useWebSocket.ts:398</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/web/src/lib/cardSnapshots.ts#L37">cardSnapshots.ts:37</a>
+    </div>
+    <div class="compare">
+      <div class="panel"><div class="label">Before · 当前代码 26aa78f · 单条详情旁路</div>
+        <pre class="mermaid">flowchart TD
+          M["首次渲染 / 展开"] --> G["GET + 调用方 baseline"]
+          G --> D["迟到详情：running"]
+          W["WS：completed"] --> S["BG Store"]
+          D -->|"直接覆盖状态 / 输出"| S
+          classDef state fill:#e5eee8,stroke:#6d8878;
+          class S state;
+          linkStyle 3 stroke:#b23c38,stroke-width:3px;</pre>
+        <div class="fallback">列表已守住终态；单条详情仅保护 delivery 字段。</div>
+      </div>
+      <div class="panel after"><div class="label">After · 改造建议，未实施 · 完整业务责任</div>
+        <div class="row"><div class="box">首次渲染</div><div class="box">展开输出</div></div><div class="arrow">↓</div>
+        <div class="deep"><strong>后台任务详情 module</strong><small>小 interface：视图只表达读取意图</small><div class="seam"><div class="inside">原观察寿命 · 终态单调<br>输出补齐 · 交付诊断保全</div></div></div>
+        <div class="arrow">↓</div><div class="box">沿现有 BG Store 提交</div>
+      </div>
+    </div>
+    <dl class="facts">
+      <dt>问题</dt><dd>mount / expand 各自拼读取与 baseline，详情写入绕过列表已具备的终态保护，interface 仍把合并知识留给视图。</dd>
+      <dt>方案方向</dt><dd>深化既有 BG 读取与写入责任，让两处视图共用原观察和字段合并规则，保留按需加载完整输出。</dd>
+      <dt>删除检验</dt><dd>应能删掉两处调用方的 baseline 与提交编排；只抽 fetch、仍由调用方决定如何合并，不增加 depth。</dd>
+    </dl>
+    <ul class="wins"><li>locality：终态与输出一起裁定</li><li>leverage：两处读取共享规则</li><li>测试跨越同一 seam</li></ul>
+    <div class="evidence"><b>本轮实测：</b>真实 <code>upsertBgTask</code>：先 <code>running</code>，再事件式写入 <code>completed / exit=0 / complete output</code>，最后提交原 running detail；结果回退到 <code>running / exit=null / partial</code>。<br><b>下一步最先验证：</b>从真实 Chip 发起延迟 GET，经 <code>handleWsMessage(bg_completed)</code> 更新后释放旧响应；检查状态不退、合法输出可补齐、交付诊断不丢。现有 <code>BgTaskChip.test.tsx:44–93</code> 已提供 fetch / WS adapter，但本轮未运行浏览器。</div>
+    <div class="contract">沿 S7 补齐单条详情消费者，不重做已完成的列表读取。accountFetch 已保护账户代次；连接/服务代次与目标删除的失效仍需接回既有观察，不能误报为完全没有身份保护。</div>
+  </article>
+
+  <article id="oneshot">
+    <div class="title"><div class="number">02</div><h2>让 one-shot 的执行退役在 HTTP 结束后仍可观察</h2></div>
+    <div class="tags"><span class="badge strong">Strong</span><span class="badge">local-substitutable</span><span class="badge">跨安装交接缺口：静态证据，待反例验证</span></div>
+    <div class="files">
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/harness/harness.py#L270">harness.py:270–337</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/routers/files.py#L103">routers/files.py:103</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/routers/agents.py#L355">routers/agents.py:355</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/installation_admission.py#L35">installation_admission.py:35</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/main.py#L508">main.py:508</a>
+    </div>
+    <div class="compare">
+      <div class="panel"><div class="label">Before · 当前代码 26aa78f · 响应与资源寿命</div><div class="timeline">
+        <div class="step"><b>T0</b><span>ShowMe / 计划解析 → one-shot</span></div>
+        <div class="step"><b>T1</b><span>OS 已 spawn，句柄尚未交回</span></div>
+        <div class="step"><b>T2</b><span>取消；2 秒内无法确认执行退役</span></div>
+        <div class="step"><b>T3</b><span class="bad">HTTP 结束，requests 计数释放</span></div>
+        <div class="step"><b>T4</b><span>局部 retirement task 仍等待原句柄</span></div>
+      </div><div class="outcome">安装事实清单看不到这份原退休观察。</div></div>
+      <div class="panel after"><div class="label">After · 改造建议，未实施 · 一份原资源责任</div>
+        <div class="box">ShowMe / 计划解析 / Research</div><div class="arrow">↓</div>
+        <div class="deep"><strong>原 Harness 的 one-shot 生命周期</strong><div class="inside">原 spawn · 进程组 · 私有配置<br>实际执行退役 · 可持续观察</div></div>
+        <div class="row" style="margin-top:17px"><div class="box">文本或失败<br><small>可以先结束等待</small></div><div class="box">安装排空<br><small>确认退出后才放行</small></div></div>
+      </div>
+    </div>
+    <dl class="facts">
+      <dt>问题</dt><dd>“文本或异常”的 interface 没有交出仍在退休的原资源证据；Research 保留失败 pipeline，HTTP 路径只在响应期间计数。</dd>
+      <dt>方案方向</dt><dd>原 Harness 继续拥有真实资源与清理，所属生命周期持续观察；结果成败、HTTP 等待结束与执行退役保持独立。</dd>
+      <dt>删除检验</dt><dd>深化应消除各调用者对“异常之后是否仍有资源”的推断；只再包一层 try/finally，不能填平该 seam。</dd>
+    </dl>
+    <ul class="wins"><li>locality：退休证明归原 owner</li><li>leverage：多个消费者共享观察</li><li>安装只消费公开事实</li></ul>
+    <div class="evidence"><b>现存证据：</b><code>test_harness_core.py:643–696</code> 明确构造公共调用失败、进程仍存活、原句柄迟到后被清理；本轮只阅读，未执行。普通 <code>HarnessRun</code> 已有原退休观察，one-shot 的局部 task 未接入安装事实。<br><b>最先反例：</b>本地 synthetic CLI 已 spawn → 扣住句柄 → 取消并让 HTTP 结束 → 调用 quiesce；应仍被原资源阻塞，释放句柄并确认进程组退出后才能放行。测试同时经过真实 HTTP 与安装入口，无需真实模型。</div>
+    <div class="contract">这是既存 one-shot 消费者的 S2 / S8 接入缺口，不是 Codex app-server 或完整原生尾部迁移。保持 tool-free 调用独立，不新建 SessionOwner 请求、持久任务账本或全局任务扫描。</div>
+  </article>
+
+  <article id="paging">
+    <div class="title"><div class="number">03</div><h2>把历史分页的完成绑定到原视图观察</h2></div>
+    <div class="tags"><span class="badge worth">Worth exploring</span><span class="badge">ports &amp; adapters + in-process</span><span class="badge">静态反例 · 单生产调用方</span></div>
+    <div class="files">
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/web/src/components/ChatView.tsx#L230">ChatView.tsx:230–247</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/web/src/lib/transcript.ts#L70">transcript.ts:70–103</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/web/src/App.tsx#L143">App.tsx:143</a>
+    </div>
+    <div class="compare">
+      <div class="panel"><div class="label">Before · 当前代码 26aa78f · 完成回调归属</div>
+        <pre class="mermaid">flowchart TD
+          A["A：请求上一页"] --> P["分页等待"]
+          A --> B["切到 B：重置滚动状态"]
+          P --> R["A 返回 added 数量"]
+          R -->|"无原视图核对"| I["修改 B 的索引 / stalled"]
+          B --> I
+          linkStyle 3 stroke:#b23c38,stroke-width:3px;</pre>
+      </div>
+      <div class="panel after"><div class="label">After · 改造建议，未实施 · 保留原观察归属</div>
+        <div class="box">A 的历史分页开始</div><div class="arrow">↓</div>
+        <div class="deep"><strong>原分页读取与观察寿命</strong><div class="inside">原 session · 原窗口 · 原视图<br>完成与失效一起解释</div></div>
+        <div class="row" style="margin-top:17px"><div class="box">A 缓存<br><small>按数据有效性接纳</small></div><div class="box">当前滚动锚点<br><small>仅原观察仍有效时结算</small></div></div>
+      </div>
+    </div>
+    <dl class="facts">
+      <dt>问题</dt><dd>分页 interface 只返回添加数量；ChatView 常驻，切换后旧回调仍会改 loading、索引与停顿标记。</dd>
+      <dt>方案方向</dt><dd>在现有分页责任里明确原观察的有效期；视图继续拥有滚动锚点，合法缓存更新与可见视图结算分别判断。</dd>
+      <dt>删除检验</dt><dd>transcript 已藏住游标与在途去重，不能删除；只补齐必要寿命责任，若局部修正足够就停止，不新增通用观察框架。</dd>
+    </dl>
+    <ul class="wins"><li>locality：切换与完成成对解释</li><li>保留视图滚动责任</li><li>测试模拟真实跨会话交错</li></ul>
+    <div class="evidence"><b>最先反例：</b>A 发起分页后切 B，再分别释放 A 的成功与失败，B 的索引、加载状态和再次分页能力均不受影响。<code>transcript.test.ts:119</code> 及 <code>new-features.spec.ts:275</code> 提供现有分页/锚点测试入口；本轮未运行此交错，未声称已发生可见滚动故障。</div>
+    <div class="contract">S7 的会话完整读取已集中；本候选只涉及历史分页残余路径。leverage 有限于一个生产调用方，因此不以文件大或回调多升级为大重构。</div>
+  </article>
+
+  <article id="wiki">
+    <div class="title"><div class="number">04</div><h2>让 Wiki 的同次读取拥有完整正文表示</h2></div>
+    <div class="tags"><span class="badge worth">Worth exploring</span><span class="badge">local-substitutable</span><span class="badge">结构收益 · 没有已证实一致性故障</span></div>
+    <div class="files">
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/wiki/store.py#L1082">wiki/store.py:1082</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/wiki/batch_read.py#L53">batch_read.py:53</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/wiki/tasks.py#L383">tasks.py:383</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/wiki/raw_blocks.py#L95">raw_blocks.py:95</a>
+    </div>
+    <div class="compare">
+      <div class="panel"><div class="label">Before · 当前代码 26aa78f · 三处正文表示知识</div>
+        <div class="box">Store 已读 raw / 索引 / metadata</div><div class="arrow">↓ 公共片段 + raw</div>
+        <div class="strip">批读 → SELECT text → 区间与正文配对</div>
+        <div class="strip">来源读足检查 → SELECT text → 完整定位</div>
+        <div class="strip">raw blocks → SELECT text → 坐标等价证明</div>
+        <div class="outcome">调用方知道 documents.text 与 revision 的配对协议。</div>
+      </div>
+      <div class="panel after"><div class="label">After · 改造建议，未实施 · 深化 snapshot seam</div>
+        <div class="deep"><strong>Store：同次读取的正文事实</strong><small>保留原 History 保护与当前读取语义</small><div class="seam"><div class="inside">身份 / revision · raw · 提取正文<br>完整定位 · 表示等价依据</div></div></div>
+        <div class="arrow">↓</div><div class="row"><div class="box">批读预算</div><div class="box">Tasks 覆盖</div><div class="box">raw 展示</div></div>
+        <div class="outcome good">各业务继续拥有自己的规则；退出重复正文查询。</div>
+      </div>
+    </div>
+    <dl class="facts">
+      <dt>问题</dt><dd>三处真实消费者绕过已存在的读取操作，重新读取并解释完整提取正文；存储表示变化仍需跨 module 修改。</dd>
+      <dt>方案方向</dt><dd>把同次读取的 raw、提取正文、版本与定位事实留在既有 Store snapshot 责任内；保留批读、响应裁剪与阅读证明各自 owner。</dd>
+      <dt>删除检验</dt><dd>应能删掉三处 SELECT text 与重新配对知识；若只是改为 getter，而调用方仍拼快照和坐标，则仍是 shallow。</dd>
+    </dl>
+    <ul class="wins"><li>locality：正文表示一处解释</li><li>leverage：三处消费者受益</li><li>权限仍按实际返回范围</li></ul>
+    <div class="evidence"><b>反证已核实：</b>批读与已查到的生产来源检查路径都有外层 History 锁；不能仅凭两次连接推导并发版本混用，也未测得性能收益。<br><b>最先反例：</b>带 BOM、超过 24,000 字符的来源章节：raw 阅读不能冒充提取正文阅读，首段不能冒充完整来源，响应裁剪后只登记实际区间。复用 <code>test_wiki_workflow_reading.py:96 / 144</code>、<code>test_wiki_read_response.py:58</code> 与 <code>test_wiki_source_read_consistency.py:13</code>；本轮仅阅读。</div>
+    <div class="contract">符合 W1–W4 既有责任，不是完整 Wiki/App transport 替换。它的必要性低于前两项；先证明能消除配对知识，再考虑 implementation。</div>
+  </article>
+
+  <article id="configuration">
+    <div class="title"><div class="number">05</div><h2>补齐 Research 接纳时的有效配置捕获</h2></div>
+    <div class="tags"><span class="badge worth">Worth exploring</span><span class="badge">in-process + local-substitutable</span><span class="badge">优先核实：合同与源码的捕获时点不同</span></div>
+    <div class="files">
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/research/manager.py#L209">research/manager.py:209 / 268</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/sessions/configuration.py#L27">sessions/configuration.py:27</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/routers/files.py#L95">routers/files.py:95</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/server/routers/agents.py#L352">routers/agents.py:352</a>
+      <a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/docs/implemented/native-deep-research.md#L80">native-deep-research.md:80</a>
+    </div>
+    <div class="compare">
+      <div class="panel"><div class="label">Before · 当前代码 26aa78f · 分两次取配置</div>
+        <div class="timeline">
+          <div class="step"><b>T0</b><span>接纳 Research：复制 Session 配置</span></div>
+          <div class="step"><b>T1</b><span>等待研究并发槽；Agent 默认值可改变</span></div>
+          <div class="step"><b>T2</b><span>取得槽位后，才从 DB 读取 Agent</span></div>
+          <div class="step"><b>T3</b><span>取 Agent model；合并默认 credential</span></div>
+          <div class="step"><b>T4</b><span>解析凭据；启动前复核当前授权</span></div>
+        </div>
+        <div class="outcome">文档承诺接纳时捕获，实际组合不同时间点的值。</div>
+      </div>
+      <div class="panel after"><div class="label">After · 改造建议，未实施 · 捕获与授权分开</div>
+        <div class="box">Research 的既定配置选择规则</div><div class="arrow">↓ 接纳时</div>
+        <div class="deep"><strong>既有配置 owner：一致捕获</strong><div class="inside">选定的 Session / Agent 配置作为一份事实<br>等待并发槽时保留原选择</div></div>
+        <div class="arrow">↓ 实际启动时</div>
+        <div class="box">凭据解析 + 当前授权复核<small>快照不延长权限；保留 Research 受限 leaf 政策</small></div>
+      </div>
+    </div>
+    <dl class="facts">
+      <dt>问题</dt><dd>普通请求已有统一捕获；Research、ShowMe 和计划解析仍分别组合配置与授权，Research 还把接纳时 Session 与取得槽位后的 Agent 混在一次准备中。</dd>
+      <dt>方案方向</dt><dd>先兑现 Research 已承诺的捕获时点，把必要的一致捕获交回既有配置责任；各业务仍决定选择哪些设置，实际启动继续检查实时授权。</dd>
+      <dt>删除检验</dt><dd>应让调用方退出跨时点拼接及重复继承编排；仅替换一个凭据 getter、仍要求调用者掌握全部顺序，不增加 depth。</dd>
+    </dl>
+    <ul class="wins"><li>locality：捕获时点归原 owner</li><li>leverage：复用已有配置机制</li><li>测试观察实际启动参数</li></ul>
+    <div class="evidence"><b>源码与合同：</b>文档明确 Research 配置在接纳时捕获，包括等待并发槽期间；<code>start:209</code> 只复制 Session，<code>_run_job:268–273</code> 却在取得槽位后读取 Agent，再选择默认 model 和 credential。ShowMe 在自己的路由合并 Session 覆盖，计划解析采用 Agent 配置。<br><b>最先反例：</b>占满 Research 并发槽 → 接纳任务 → 修改 Agent 默认配置 → 释放槽位，观察 synthetic CLI 实际收到的完整配置；再于启动前撤销原凭据授权，确认不会产生未经授权的 spawn。此联合反例尚未执行。</div>
+    <div class="contract">本项比原报告的“辅助配置暂不优先”多了明确合同差异，因此单独列项。Research 是否应继承会话的 model、effort、tier 是另一项尚需明确的选择，不能仅凭调用差异判为缺陷；本图不预先决定这些字段，也不把交互会话的工具、memory 或 prompt 装配带入 leaf。</div>
+  </article>
+
+  <section id="previous-reports">
+    <div class="eyebrow">Comparison with the two earlier reports</div><h2>两份旧报告：哪些已完成，哪些仍有补充</h2>
+    <p class="small" style="margin-top:14px"><a href="architecture-before-after-20261028-131512.html">《前后架构对照》</a>比较 <code>88d2284 → 0df8b78</code>，其主体图是两个已存在版本的对比；只有候选部分右图表示当时的建议。<a href="architecture-review-codebase-20261028.html">《全库架构审查》</a>的七项候选则以 <code>0df8b78</code> 为 Before，After 是当时建议。两份旧报告都不能把“当前”直接读作今日 <code>26aa78f</code>，本次不改写其历史证据。</p>
+    <div class="table-wrap"><table><thead><tr><th>旧报告的主题</th><th>26aa78f 当前状态</th><th>本次补充 / 保留条件</th></tr></thead><tbody>
+      <tr><td>公共返回接管</td><td>BG、Research、委派终态及问题已接入共享接管。</td><td>保留来源业务结论、重试与独立返回政策，不重复立项。</td></tr>
+      <tr><td>配置变更与请求捕获</td><td>普通请求的保存、捕获与准备边界已集中。</td><td><a href="#configuration">05</a> 核查 Research 辅助调用的捕获完整性；不重做普通请求 S3。</td></tr>
+      <tr><td>应用删除 / Connector 绑定</td><td>应用删除先确认退休；绑定使用身份串行化和原子 upsert。</td><td>旧缺陷不再作为当前发现。新 writer / provider 沿原生命周期与事务接入。</td></tr>
+      <tr><td>应用与计划列表</td><td>已有各自的业务读取与更新入口。</td><td><a href="#bg">01</a> 单条 BG 详情与 <a href="#paging">03</a> 历史分页仍需补齐；不统一所有列表协议。</td></tr>
+      <tr><td>Wiki 注册 / 受保护操作</td><td>W1–W4 已收回同代借用、锁序和最终授权。</td><td><a href="#wiki">04</a> 是内部正文表示知识的深化，已存在的锁保护继续保留。</td></tr>
+      <tr><td>App / 普通 Wiki 校验</td><td>共享正文参数合同，原 verify 空正文差异已有修正路径。</td><td>完整网关替换仍需新客户端或跨 owner 用例证明，不作为本轮必做项。</td></tr>
+      <tr><td>原请求结算 / 执行退役</td><td>原 Owner 结算与资源观察已供普通请求消费者使用。</td><td><a href="#oneshot">02</a> 单独核查 one-shot 的生命周期交接，不宣称普通会话尚未收敛。</td></tr>
+      <tr><td>安装交接</td><td>由各域给出排空事实，安装层显式组合并封口。</td><td><a href="#oneshot">02</a> 验证 HTTP 结束后仍在清理的原 one-shot 是否继续阻塞交接。</td></tr>
+    </tbody></table></div>
+    <div class="evidence"><b>补充审查的落点：</b>公共责任集中以后，还要证明单条详情、分页、辅助模型调用等真实消费者都接入了对应保证。逐项先做跨入口交错反例，再判断需要局部修正还是深化；领域内部测试通过不能代替这一步。当前实施状态与边界由 <a href="../../plans/engineering-runtime-roadmap.md#phase-2">工程路线第二阶段</a>及其指向的 implemented 合同维护。</div>
+  </section>
+
+  <section id="kept">
+    <div class="eyebrow">Decisions respected</div><h2>本轮保留的结构与不重复立项的方向</h2>
+    <div class="table-wrap"><table><thead><tr><th>范围</th><th>当前判断</th><th>为什么保留</th></tr></thead><tbody>
+      <tr><td>返回接管 / 原请求结算</td><td>已深化，沿原 owner 演进。</td><td>BG、Research、委派共享接纳；来源业务结论与重试政策确实不同，不能合成通用 Job。</td></tr>
+      <tr><td>完整会话 / 委派读取</td><td>hydrateSession、delegationReads 已收回时序。</td><td>SnapshotReads 只排序观察，不复制实体；cardSnapshots 的不同身份规则仍有必要。</td></tr>
+      <tr><td>Wiki 受保护操作</td><td>小 module 也已取得真实 depth。</td><td>content_mutations 等隐藏同代借用、History 与授权顺序；删除会让规则回到多个路由。</td></tr>
+      <tr><td>辅助模型配置</td><td>Research 捕获差异已单列为 <a href="#configuration">候选 05</a>。</td><td>保留各业务的配置选择和工具政策；捕获时点与继承字段分别判断，不强制所有调用采用完整会话配置。</td></tr>
+      <tr><td>输入恢复 / App 网关</td><td>保持路线 §3.3 的触发条件。</td><td>没有新的发送产品选择或新客户端证据；不为统一函数形状扩大本次范围。</td></tr>
+      <tr><td>完整原生尾部 / 新运行时</td><td>已有第三、四阶段计划，非新候选。</td><td>不把已确定的 Codex / DeepSeek 路线重新包装成架构发现；本轮未核验外部协议或安装版本。</td></tr>
+    </tbody></table></div>
+    <p class="small" style="margin-top:14px">本轮未发现需要推翻已有 ADR / implemented 决策的候选。依据：<a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/GLOSSARY.md">领域词汇</a>、<a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/docs/implemented/architecture-contract.md">当前架构合同</a>、<a href="https://github.com/Danuvius152/Octopus/blob/26aa78f0aea69387cd5373bfb871802f624966f0/docs/plans/engineering-runtime-roadmap.md">工程运行时路线</a>。模块大小和文件数量不作为好坏判据。</p>
+  </section>
+
+  <section id="verification">
+    <div class="eyebrow">Audit trail</div><h2>证据与交付边界</h2>
+    <div class="table-wrap"><table><tbody>
+      <tr><td>固定源码</td><td><code>26aa78f0aea69387cd5373bfb871802f624966f0</code>；本地 main 与现存 origin/main 引用一致，未 fetch 远端，不声明生产部署版本。</td></tr>
+      <tr><td>近期变化</td><td>最近 60 提交中：useWebSocket 16 次、Wiki jobs 15 次、sessionStore 13 次、sessions/turns 12 次；用来选探索范围，不据频次推导缺陷。</td></tr>
+      <tr><td>独立阅读</td><td>三个有界探索分别核查运行时、前端与 Wiki；主审回读关键调用和反证。以上结论保留各自验证强度。</td></tr>
+      <tr><td>已执行实验</td><td>使用 Bun 执行真实 Zustand Store 的最小脚本；隔离进程内存，无网络、模型或持久写入。记录 running baseline，写入 completed 事件事实，再提交旧 running detail，结果为 <code>completed / 0 / complete output → running / null / partial</code>。归档复用同一源码版本的证据，未重复运行；可复核的核心调用顺序见下方。</td></tr>
+      <tr><td>尚未执行</td><td>真实 Chip 延迟响应、one-shot 与 quiesce 联合反例、跨会话分页交错、Research 排队期间配置变化，以及任何新实现回归；现有测试源码不是本轮通过回执。</td></tr>
+      <tr><td>改动与范围</td><td>本次仅补充与收存报告、更新文档入口；未修改业务代码或配置。已有旧 review 文档删除保留。所有 After 均为未实施建议，没有函数签名或接口设计，选择后再进入约束讨论。</td></tr>
+      <tr><td>报告位置</td><td>本页位于 <code>docs/review/architecture/architecture-review-20261101-002033.html</code>，从 <a href="../../README.md">文档索引</a>进入。正文和 CSS 在单文件内；Tailwind / Mermaid 依技能要求使用 CDN。结论限于固定版本，后续已接受的合同仍归原 implemented / plans 文档。</td></tr>
+    </tbody></table></div>
+    <div class="evidence"><b>BG 最小实验的核心顺序：</b>以下调用真实 Store，<code>running</code> 为固定任务身份的完整合法测试行；省略浏览器环境替身及夹具字段，不把该实验冒充 HTTP / WS 联合测试。
+      <pre class="mono" style="white-space:pre-wrap;margin-top:10px">const state = () =&gt; useSessionStore.getState();
+state().upsertBgTask(sessionId, running);
+const baseline = state().bgTasks[sessionId][0];
+state().upsertBgTask(sessionId, {
+  ...running, status: "completed", exit_code: 0,
+  stdout: "complete output", completed_at: "2026-11-01T00:00:01Z",
+});
+state().upsertBgTask(sessionId, running, baseline);
+// 实际观察：status = running, exit_code = null, stdout = partial</pre>
+    </div>
+  </section>
+
+  <section id="top" class="top">
+    <div class="eyebrow">Top recommendation</div>
+    <h2>先选 01：补齐 BG 单任务详情读取</h2>
+    <p>它有本轮最小实验直接证明的错误覆盖、两个现存入口和可复用的测试 seam，能用较小范围补齐 S7 的真实行为。</p>
+    <p>随后优先取得 <a href="#oneshot">02 的安装交接反例</a>与 <a href="#configuration">05 的排队配置反例</a>；03 先判断局部生命周期修正是否足够，04 的收益主要是知识归属。这个顺序是验证与评估建议，不表示这些改造已完成。</p>
+    <p><a href="#bg">回到候选 01 →</a></p>
+  </section>
+  <footer>评价词汇：module = 责任模块；interface = 调用方必须知道的全部约束；depth = 小 interface 承载的能力；seam = 可替换行为的接缝；adapter = 接缝上的具体实现；locality = 变更与验证集中；leverage = 一个实现让多个真实调用方受益。源码证据与建议均限于本报告固定版本。</footer>
+</main>
+</body>
+</html>

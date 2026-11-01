@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from server.database import Database
 from server.deps import get_session_manager
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.harness.run import HarnessRun
 from server.routers.sessions import router
 from server.sessions import SessionManager
@@ -50,7 +50,7 @@ async def held_rewind(tmp_path, monkeypatch, request):
     )
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, binary=sys.executable, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        harness.profile, binary=sys.executable, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         activity_observer=None, prepare_resume=None,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(identity_path), str(input_path),

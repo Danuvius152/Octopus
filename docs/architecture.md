@@ -192,13 +192,13 @@ One install serves several people, each fully isolated (design:
 | `models.py` | Pydantic request/response models + enums (`SessionStatus`, `MessageRole`, agent/schedule/connector/credential DTOs). |
 | `session_manager.py` | Session entry points, registration and cross-session quota; delegates mutable per-session behavior to SessionOwner. |
 | `sessions/` | SessionOwner serializes mutable execution, input, question and lifecycle state; managed Harness I/O reports original results. Completion consumers follow [the execution contract](implemented/architecture-contract.md#输入完成与资源退休): business outcome, notification delivery and retirement have separate authorities. |
-| `harness/` | The single boundary for all model/runtime interaction (see below). Also normalizes **native sub-agents** ([`implemented/native-subagents.md`](implemented/native-subagents.md)): Claude Code's `system/task_*` events and Codex's `collab_tool_call` items collapse onto one `SubagentUpdate`, keyed on the spawning tool call's id, and `agents.subagents` renders to `--agents` so an Octopus agent can bring its own helpers. |
+| `harness/` | The single boundary for model/runtime interaction. Native helpers normalize to `SubagentUpdate`: legacy cards retain tool identity, while App Server work keeps typed request/attempt/thread/turn source independently of the display cache. Claude renders saved `agents.subagents` through `--agents`; [native helper contract](implemented/native-subagents.md). |
 | `agent_manager.py` | Agent CRUD (the durable assistant definitions). |
 | `agent_memory.py` | Per-agent native memory provisioning under the owning account's `agents/<id>/memory/`. |
 | `delegations.py` | Named-agent delegation and continuation by `delegation_id` ([design](implemented/agent-collaboration.md)). The original request's completion determines each round's reply or error; question events relay pending questions separately. Owns cycle/depth guards, delivery identity, continuation and descendant cancellation. Completion does not by itself archive an ordinary delegation session or prove its execution has retired. |
 | `scheduler.py` | `ScheduleRunner` — APScheduler runner for recurring prompts, **interval and cron**, fired per agent into fresh auto-archiving sessions. |
 | `schedule_ai.py` | Natural-language `/schedule` parsing — turns "every weekday at 9am" into a cron/interval spec via the agent's own harness (backend-agnostic). |
-| `database.py` / `db/` | SQLite (`aiosqlite`, WAL, FK cascade, `busy_timeout`, `synchronous=FULL`). `db/schema.py` defines current format 6; `PRAGMA user_version` is its sole format marker. Startup matches it before keys or writers; genuinely empty storage creates the complete current DDL directly. Ordinary reopening does not interpret or convert historical data. Publication verifies the full retained structure and current facts after old writers retire, before the candidate starts. Credentials and recovery relationships have one authority in `credential_secrets` and the successor's `recovery_of`. Short transactions confirm the original driver's COMMIT; uncertain storage enters fail-stop. Current input and unfinished-fork recovery remain owned by `SessionManager`. See [current storage and publication](implemented/current-storage-format.md). |
+| `database.py` / `db/` | SQLite (`aiosqlite`, WAL, FK cascade, `busy_timeout`, `synchronous=FULL`). `db/schema.py` defines current format 7; `PRAGMA user_version` is its sole format marker. Startup matches it before keys or writers; genuinely empty storage creates the complete current DDL directly. Ordinary reopening does not interpret or convert historical data. Publication verifies the full retained structure and current facts after old writers retire, before the candidate starts. Credentials and recovery relationships have one authority in `credential_secrets` and the successor's `recovery_of`. Short transactions confirm the original driver's COMMIT; uncertain storage enters fail-stop. Current input and unfinished-fork recovery remain owned by `SessionManager`. See [current storage and publication](implemented/current-storage-format.md). |
 | `jsonl_parser.py` / `jsonl_writer.py` | Read/write Claude Code JSONL session files for `octopus handoff` (import) and `octopus pull` (export → local `claude --resume`). |
 | `applications.py` | Agent-built applications ([design](implemented/applications.md)): account-owned directories, build sessions (`origin='application'`) and status projection. Progress can mark a build running; the original request's committed completion and entrypoint determine its final status. Direct build-session requests use the same completion observer. Archive keeps rows and files; the name index is live-only. |
 | `app_backends.py` | **Application backends** ([`implemented/application-backends.md`](implemented/application-backends.md)) — an executable `start.sh` at the app root IS the declaration; no manifest. Allocates a port, runs install/start with a **minimal** environment (never the server's, so Octopus credentials cannot leak into app code), waits for the port to accept, proxies `/apps/{id}/api/*`, reaps when idle. Three directories, three owners: `<slug>/` code (a rebuild rewrites it), `<slug>.data/` the app's own state (never touched), `<slug>.runtime/` installed deps (delete to force a clean reinstall). |
@@ -206,7 +206,7 @@ One install serves several people, each fully isolated (design:
 | `mcp_http.py` | **The MCP namespaces, served in-process** ([`plans/polish-2026-09.md`](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/polish-2026-09.md) §4 B1) — each tool namespace is mounted at `/mcp/<name>` over streamable-HTTP instead of spawned as a stdio subprocess per session. Both CLIs build the tool name from the config key, so keys are unchanged and `mcp__bg__run` stays `mcp__bg__run`; connectors mount once per *kind* while their key stays per-installation. Replaces 7 subprocesses per session (~39 MB PSS each). |
 | `mcp_identity.py` | Per-session scope for those namespaces. One HTTP endpoint serves every session, so identity travels with the request: master-key signatures identify the session/account/run and each call checks its current authority. Claude passes the bearer as a header, Codex as an env var it names; that asymmetry stops at the profile boundary. |
 | `bg_tasks.py` | Cross-turn background shell tasks: spawn, stream capture (bounded), idle watchdog, cancel, persistence in `bg_tasks`. |
-| `large_prompts.py` | Spills any synthesized prompt over ~100 KB to a file and hands the model a small `Read` pointer (avoids `E2BIG` on argv). |
+| `large_prompts.py` | Legacy transport prompt spill over ~100 KB, with a small `Read` pointer to avoid argv `E2BIG`. App Server keeps its input inline in RPC; original input remains persisted. |
 | `attachments.py` / `file_viewer.py` | Account-owned session attachments; working-dir-scoped file reads for the viewer. |
 | `connector_manager.py` + `connectors/` | Connector framework (see below). |
 | `credentials` (`oauth_login.py`, `oauth_providers.py`, `oauth_errors.py`, `codex_login.py`) | Stored backend credentials: API keys, OAuth logins, and Codex device-auth in-app login. |
@@ -228,10 +228,13 @@ The harness is the **only** place that talks to a model runtime. There is one
 | `harness.py` | The `Harness` front door (one per backend kind). |
 | `profile.py` | `RuntimeProfile` — the per-backend data record + small collaborators (argv builder, event parser, capability flags). Capabilities (e.g. native memory, premature-exit recovery) are derived from the profile. |
 | `run.py` | `HarnessRun` — universal subprocess + JSONL stream engine (4 MiB line limit, graceful shutdown, PATH discovery incl. nvm). |
+| `driver.py` | Per-run protocol operations: argv rendering, preparation, input encoding and parsing. `ArgvDriver` handles initial EOF; `ClaudeDriver` lives in `claude_code.py`. The profile owns capabilities; HarnessRun retains processes, leases, readers and retirement. |
 | `assembly.py` | Shared per-turn assembly: MCP server selection, system-prompt composition (in-app tools blurb, connectors blurb, memory blurb), working-dir absolutization. |
 | `events.py` | Backend-neutral `HarnessEvent` DTOs (`text`, `thinking`, `tool_use`, `tool_result`, `question_request`, `result`, `error`, `session_started`). |
 | `claude_code.py` | Claude profile — `claude --print --output-format=stream-json` argv, event normalization, JSONL transcript codec, `run_oneshot`. |
 | `codex.py` | Codex profile — `codex exec --json` argv (per-turn `-c` TOML overrides for MCP), event normalization, `run_oneshot`. Each attempt uses its own exec process; recovery follows the [evidence contract](implemented/harness-transient-retry.md#4-recovery-evidence-in-the-original-owner). |
+| `codex_app_server.py` | Opt-in G0-pinned stdio RPC driver: preparation, exact native resume, input/root correlation, bidirectional questions and native output. Original submissions, OwnerQuestions and Owner retain input, answer and settlement authority; [scope and limits](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume). |
+| `native_output.py` | Bounded projection of original native child/work facts. Carries typed source and reconciles final observations after resource retirement, independently of the UI card cache; no scheduler or parent-consumption oracle. |
 | `codex_text.py` | Codex one-shot model-only worker: native authentication/configuration, subscription text HTTP with no tool dispatcher, completed-text result. The common Harness owns admission and process-group retirement; [capability contract](implemented/codex-backend.md#source-and-verification). |
 | `registry.py` | `get_harness(backend)` / `available_backends()` (a kind appears only when its CLI resolves on PATH; `claude-code` is always listed). |
 | `login.py` | `LoginDriver` protocol for in-app credential login flows. |
@@ -301,7 +304,7 @@ ws.py receives → submit_client_message()
   → persist and return the admission receipt
   → dispatcher commits and verifies the execution claim before executor I/O
     → persist and broadcast user_message (no optimistic transcript row)
-    → large_prompts.spill_if_large(...)        (only if huge)
+    → large_prompts.spill_if_large(...)        (legacy transports; App Server stays inline)
     → broadcast status: running
     → HarnessRun spawns the agent's backend CLI with injected MCP servers
       → streams HarnessEvents: assistant_text / tool_use / tool_result /
@@ -321,6 +324,13 @@ by input recovery, without changing their unknown outcomes or replaying them.
 Admission and dispatch share that frozen retirement evidence. Current writers
 remain with their original SessionOwner until the captured resources retire;
 standalone startup retains conservative process-group/host-boot checks.
+
+The opt-in App Server path records initial `not_sent` before Owner preparation,
+then records possible sending before its business RPC. Explicit unsent evidence
+permits recovery after preparation failure or restart; unknown native acceptance
+survives a successful terminal. Late correlated proof can refine the input after
+Stop while preserving the committed interrupted outcome. See
+[native input evidence](implemented/architecture-contract.md#codex-native-input-evidence).
 
 ### `/showme` — the in-app file viewer (browser only)
 
@@ -347,6 +357,15 @@ WS actions receive the generic refusal; controls with command identities retain
 the usual authorization, replay and conflict rules. Historical tool approval
 requests remain readable from saved messages as static records, without actions
 or a live approval lifecycle.
+
+Opt-in App Server native user questions join the same OwnerQuestions path and
+product form. Original connection/request binding and final write eligibility
+remain with the originating Harness/driver, independently of display pressure.
+Root terminal, Stop, resolved and disconnect invalidate the answer target; a
+persisted late answer cannot migrate to another connection. Native approvals
+and unregistered dynamic tools receive explicit negative responses under the
+existing headless policy. See the
+[native question contract](implemented/architecture-contract.md#native-question-control).
 
 The original Question Owner validates complete answers against its saved form
 before claim, then saves text plus versioned `tool_input.question_resolution`
@@ -457,7 +476,7 @@ current format only; publication verifies retained data and owns any finite
 conversion. Do not duplicate the schema in docs.
 
 - **`client_submissions`** — browser input, attachment proofs, immutable admission
-  receipt, execution owner/state and manual recovery provenance. Scoped through
+  receipt, execution owner/state, native input evidence and manual recovery provenance. Scoped through
   its owning session and deleted by the session's foreign-key cascade. The
   process-local dispatch queue is not restored or automatically replayed.
 
@@ -557,8 +576,9 @@ reservation refuses deletion with 409 until that original operation finishes.
 - **One harness, profiles not subclasses.** All model interaction goes through a
   single `Harness` + `HarnessRun` engine parameterized by a `RuntimeProfile`
   value per backend. Adding a backend is a new profile, not a new class tree.
-- **Native CLI turns.** Octopus spawns `claude --print` / `codex exec --json`
-  and parses their stream-JSON itself (`harness/run.py`). Codex tool-free
+- **Native CLI turns.** Octopus spawns `claude --print` / `codex exec --json`,
+  or explicitly selected `codex app-server`. Per-run drivers interpret the wire;
+  `harness/run.py` owns checked I/O and retirement. Codex tool-free
   one-shots use the dedicated text worker; native Codex still owns their
   authentication and default configuration. There is no `claude-code-sdk`
   dependency.

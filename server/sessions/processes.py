@@ -185,7 +185,7 @@ class ProcessesMixin(SessionManagerBase):
         session._run.held_since = None
         frames = []
         for key, run in list(session._subagents.items()):
-            if run.status in {"running", "unknown"}:
+            if run.status in {"running", "unknown"} and not run.card_id:
                 update = replace(run, status="interrupted", stop_reason=reason)
                 session._subagents[key] = update
                 frame = self._event_to_ws_message(session.id, HarnessEvent(type="subagent", subagent=update))

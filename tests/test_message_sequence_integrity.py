@@ -11,7 +11,7 @@ from server import deps
 from server.database import Database
 from server.deps import get_session_manager
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.main import app
 from server.models import MessageContent
 from server.routers.sessions import get_session
@@ -105,7 +105,7 @@ async def test_reserved_terminal_does_not_advance_snapshot_watermark(history, mo
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
-        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", "-c", code], {"cwd": context.working_dir}),
     ))
     entered, release = asyncio.Event(), asyncio.Event()

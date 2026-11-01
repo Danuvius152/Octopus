@@ -1,20 +1,20 @@
 # Native sub-agents, surfaced
 
-> **Status:** implemented — The CLIs' own sub-agents surfaced as one event and one card — including the ones that finish after the turn that started them.
+> **Status:** implemented — Native helper observations, scoped App Server work cards and retained child output, including late events within the original resource lifetime.
 
-The implemented scope is observation and presentation,
-including Claude held-process late events. It does not prove that a parent
-receipt waits for its native descendants or that a delegation receives a later
-parent report. Current Codex exec may retire an unfinished helper after parent
-success; Claude's idle handler preserves late messages without reopening the
-receipt. The selected [runtime roadmap](../plans/engineering-runtime-roadmap.md#codex-native-tail)
-requires complete managed native tails for the Codex migration and permits a
-shared lifecycle refactor. That migration has not been implemented.
+The implemented scope is observation and presentation, including Claude
+held-process late events and opt-in Codex App Server capture through bounded
+retirement. A card does not prove that the parent consumed a child result or
+that a delegation receives a later parent report. Codex root success may coexist
+with an unfinished helper retired as interrupted. Default Codex execution still
+uses exec; the remaining completion, result-consumer and cutover scope belongs to
+the [runtime roadmap](../plans/engineering-runtime-roadmap.md#codex-native-tail).
 
 ## 1. Observation sources
 
-The Claude parser normalizes `system/task_*` events; the Codex parser normalizes
-`collab_tool_call` items. Progress, completion and naming have different native
+The Claude parser normalizes `system/task_*` events; Codex exec normalizes
+`collab_tool_call` items. The App Server driver observes original native
+thread/turn/item events and collaboration tools. Progress, completion and naming have different native
 shapes, so the common event carries observations without imposing one provider's
 lifetime on another. The initial protocol probes used Claude 2.1.274 and Codex
 0.132.0; their timings and advertised feature names are historical evidence,
@@ -30,8 +30,10 @@ the provider runtime and has its own native identity. Its lifetime need not end
 with the parent's first turn; §7 describes Claude's asynchronous case. This
 observation model does not itself determine the parent request's completion.
 
-So it gets its own vocabulary rather than being forced into sessions: an
-**observation** attached to the parent tool call, with no row of its own.
+It remains an **observation**, without a separate runnable Octopus session.
+Legacy cards attach to the originating tool call. App Server cards retain their
+original request/attempt, child thread, actual work turn, creation parent and
+triggering tool provenance where available.
 
 ## 3. One shape for both harnesses
 
@@ -42,27 +44,53 @@ and accumulated progress steps. Partial updates merge with the prior observation
 rather than clearing omitted fields. Status distinguishes running, completed,
 failed, cancelled, interrupted and unknown.
 
+For App Server, `card_id` distinguishes work rounds and multiple receivers of
+one tool call. Resource creation can supply a pending observation before the
+actual child turn is known; a subsequent actual turn binds that card. Later turns
+of the same child have separate cards. A `started` tool item's completion proves
+the start action was recorded, not that the child finished. `interacted` can
+represent either a mailbox-only message or a triggering follow-up; it never
+creates a work round without an actual child turn. A wait retains the original
+work it observed, so its late response cannot complete a newer turn or rewrite
+the child's creation parent. None of these facts proves parent consumption.
+
 The Claude parser keeps a `task_id → (tool_use_id, name)` map for the life of
 the run, because `task_updated` arrives with only a `task_id` — the one event
 that can't identify itself.
 
 ## 4. Progress is broadcast, state is remembered
 
-Progress events are **not persisted**, for the same reason token deltas
+Legacy progress events are **not persisted**, for the same reason token deltas
 aren't: they're a live view of something whose durable record already exists
 (the `Task` tool call and its result). Persisting them would double every
 sub-agent in the transcript.
 
-But a browser reload mid-run must not blank the card, so the session keeps the
-last observation per canonical `tool_call_id` in memory (bounded, oldest dropped) and the
-session snapshot (`GET /api/sessions/{id}`) carries them. A server restart
-loses this in-memory projection. A missing card or server restart does not
+The session keeps the last observation per card identity in memory, bounded to
+64 cards with oldest-first eviction, and the session snapshot
+(`GET /api/sessions/{id}`) carries them. Legacy cards use canonical
+`tool_call_id`; App Server cards use `card_id` and typed native provenance.
+A server restart loses this live cache. A missing card or server restart does not
 prove native success; request completion and resource retirement have their own
 [contract](architecture-contract.md#输入完成与资源退休).
 
+App Server status observations are durable `native_subagent` messages. Complete
+child text and tools retain their original transcript rows, with the body stored
+once. Status rows do not copy prompt/summary bodies. Typed `runtime_metadata`
+carries request/attempt plus native thread/turn/item, root association, known
+parent and phase; turn observations have no invented item ID. A tool's optional
+`tool_call_id` remains independent provenance: plain native text does not acquire
+one. Tool consumers still require valid tool provenance.
+
+Backend coalescing, tool indexing, WS and browser partials use the same scoped
+item identity. A complete item clears only its own partial. Snapshot reconciliation
+preserves native partials updated after the read began; an old snapshot cannot
+erase them merely because no complete row has advanced seq yet. Service-generation
+changes clear the previous connection's partials. Legacy records without native
+metadata retain their old interpretation; no ancestry is inferred from text.
+
 ## 5. The card
 
-**Keyed on the spawning tool call's id, never on the tool's name.** The name
+Legacy cards are **keyed on the spawning tool call's id, never on its name**. The name
 is not stable: this CLI version advertises `Task` in its init event and then
 emits the call as `Agent`, and Codex's is `subagent:<tool>`. A card that
 matched names would have quietly stopped rendering on a CLI upgrade — the
@@ -70,7 +98,16 @@ worst failure mode available, because everything else would keep working.
 Every tool call mounts a card; the ones with no sub-agent behind them render
 nothing.
 
-Rendered where the spawning tool call sits in the transcript: the sub-agent's name, what it's doing right now, its token and
+App Server renders one card for each observed child work round. Only the display
+projection hides child text from main chat; raw transcript rows, original seq,
+global high water and tool audit remain intact. Cards rebuild their summary from
+the collected child text with matching request/attempt/thread/turn. Historical
+pagination and realtime output use the same association. If a window has child
+text but lacks the older status row, its card remains unconfirmed. A typed live
+snapshot can supply a missing display anchor without inventing a stored seq;
+loading the original row deduplicates that anchor.
+
+Legacy cards render where the spawning tool call sits in the transcript: the sub-agent's name, what it's doing right now, its token and
 tool counts as they climb, elapsed time, and — when it lands — the summary,
 collapsed to a few lines with the full text one click away. Failure says so
 with its reason rather than a chip that simply stops moving.
@@ -127,6 +164,37 @@ keeps spinning after its process is gone is a lie.
 This is the same hole native cron ticks fall through, and the same fix covers
 them.
 
+### Opt-in App Server capture
+
+App Server has no held-process idle execution path. Root terminal or Stop revokes
+execution and question admission immediately, while the original attempt keeps
+its collection identity through finite reader/proof cleanup. Late complete items,
+tool results and denied approvals remain associated with that attempt. This
+does not renew tool grants or permit another root input.
+
+After the original process group and readers have retired, unfinished observed
+helpers receive interrupted with the recorded reason, including parent_done or
+user_stop. Confirmed completed children retain their actual outcome. EOF or an
+interrupt ACK alone cannot produce this synthetic ending. The observation map is
+bounded independently of the 64-card display cache; evicting card 65 cannot erase
+items or resource responsibility.
+
+On output failure, the stream retains its accepted prefix and then reconciles
+known final observations from that same bounded map before its reliable error.
+This includes real child terminals withheld by a full queue; only unfinished
+work becomes interrupted after proven retirement. Missing exit proof instead
+retains the original failure/resource responsibility and does not manufacture
+helper interruption. A card cannot remain running merely because its final
+event encountered output pressure. Root success remains a separate fact and is
+not presented as proof that all child work was understood or summarized.
+
+Repeated child started/completed notifications do not refresh the active root's
+idle budget. Once execution admission closes, late child items and states retain
+their original association without extending cleanup. The first cancellation
+cause, including parent_timeout, survives a later native interrupted terminal.
+Child bodies and helper status remain separate from the root's selected reply;
+the [result contract](architecture-contract.md#原请求结果读取) owns that selection.
+
 ## 8. Cost
 
 The card displays the usage reported by the native subagent events. It does not
@@ -144,6 +212,15 @@ profiles and `SubagentCard`. Current regression entry points are
 Live provider selection follows [testing.md](../testing.md); the presence of a
 Claude test is not evidence of current local Claude validation.
 
+App Server regressions in `tests/test_codex_app_server_output.py` and
+`tests/test_codex_app_server_questions.py` cover multi-receiver/multi-turn
+identities, stale waits, mailbox-only interaction, late items, real process-group
+retirement, cache eviction and output overflow before/after child terminal.
+The nested fixture replays selected original G0-Base frames; it is not a fresh
+live-provider run. Frontend source-adjacent tests and
+`web/e2e/native-output.spec.ts` cover partial interleaving, sparse windows,
+reconnect and refresh; the browser fixture does not establish native I/O semantics.
+
 
 Parser snapshots for both harnesses (every event, including the anonymous
 `task_updated`), the session-manager path (broadcast-only, snapshot-carried,
@@ -159,7 +236,9 @@ both its completion and the agent's follow-up report survive.
 
 * **Custom sub-agent definitions for Codex** are not rendered by the current
   profile. A transport change must verify its own supported native surface.
-* **Opening a sub-agent's own transcript.** Claude writes one under the
+* **Opening a sub-agent's full native transcript.** Collected App Server child
+  text is readable in its card. Additional transcript reading remains separate.
+  Claude writes one under the
   session's `tasks/` dir and Codex's child threads are real threads on disk;
   reading them is a file-tailing feature, not an event-stream one.
 * **Steering a running sub-agent** (Codex's `send_input`, Claude's

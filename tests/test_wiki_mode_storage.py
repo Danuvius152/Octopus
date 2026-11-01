@@ -62,13 +62,13 @@ async def _current_database(tmp_path: Path) -> tuple[Path, str]:
     return path, context
 
 
-async def test_empty_storage_and_current_reopen_share_format_six_without_repreparing(tmp_path, monkeypatch):
+async def test_empty_storage_and_current_reopen_share_current_format_without_repreparing(tmp_path, monkeypatch):
     path = tmp_path / "empty.db"
     database = Database(str(path))
     await database.initialize()
     await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (6,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (7,)
     before = _facts(path)
     statements = []
     connect = aiosqlite.Connection._connect

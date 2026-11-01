@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from server.agent_manager import AgentManager
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.driver import ArgvDriver
 from server.session_manager import session_manager
 from server.workspace import paths_for
 from tests import test_live_account_authorization as live_authorization
@@ -45,7 +45,7 @@ async def test_disabling_owner_during_resume_preparation_prevents_model_spawn(
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, build_turn_argv=argv, prepare_resume=prepare_resume,
-        activity_observer=None, stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        activity_observer=None, new_driver=ArgvDriver,
     ))
     owner = accounts["owner"]["id"]
     agent = await AgentManager(accounts["db"]).create_agent(

@@ -1018,7 +1018,7 @@ async def test_job_cancel_targets_captured_wiki_request_and_preserves_human_corr
 @pytest.fixture
 async def shutdown_worker(jobs, monkeypatch):
     from server.harness import get_harness
-    from server.harness.profile import StdinMode
+    from server.harness.claude_code import ClaudeDriver
     from server.wiki.registry import registry
 
     manager = wiki_api.session_manager
@@ -1036,7 +1036,7 @@ async def shutdown_worker(jobs, monkeypatch):
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=argv, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
+        harness.profile, build_turn_argv=argv, new_driver=ClaudeDriver, can_steer=True, reusable=True,
     ))
 
     async def observe(event):

@@ -72,7 +72,7 @@ async def steering(tmp_path, monkeypatch):
                 self.prompt = prompt
                 self.ready.set()
 
-            async def send_user_frame(self, prompt):
+            async def send_input(self, prompt):
                 if control.frame_marker is not None:
                     control.frame_marker.touch()
                 # The independent connection cannot see the writer's pending

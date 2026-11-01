@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   IconChevronDown,
   IconChevronRight,
@@ -9,7 +9,25 @@ import {
   IconUsersGroup,
 } from "@tabler/icons-react";
 
-import { useSessionStore } from "../stores/sessionStore";
+import { useSessionStore, type SubagentRun } from "../stores/sessionStore";
+import { nativeCard } from "../lib/nativeOutput";
+
+export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; cardId: string }) {
+  const messages = useSessionStore((s) => s.messages[sessionId]);
+  const streaming = useSessionStore((s) => s.streamingItems[sessionId]);
+  const snapshots = useSessionStore((s) => s.subagents[sessionId]);
+  const run = useMemo(() => {
+    const saved = nativeCard(messages || [], cardId, Object.values(snapshots || {}));
+    if (!saved) return undefined;
+    const partials = Object.values(streaming || {}).filter((item) =>
+      saved.runtime_metadata && item.runtime_metadata.request_id === saved.runtime_metadata.request_id &&
+      item.runtime_metadata.attempt_id === saved.runtime_metadata.attempt_id &&
+      item.runtime_metadata.native?.thread_id === saved.native_thread_id &&
+      item.runtime_metadata.native?.turn_id === saved.native_turn_id);
+    return { ...saved, summary: [saved.summary, ...partials.map((item) => item.content)].filter(Boolean).join("\n\n") };
+  }, [messages, streaming, cardId, snapshots]);
+  return <SubagentCard sessionId={sessionId} observedRun={run} />;
+}
 
 const stopReasons: Record<string, string> = {
   parent_done: "Parent turn ended before completion",
@@ -33,20 +51,22 @@ const stopReasons: Record<string, string> = {
  * only trace is a tool call that sits there for minutes looking stuck, and a
  * result that appears from nowhere when it's over.
  *
- * Renders nothing when there's no live state for the call: after a server
- * restart the sub-agent is gone anyway, and the tool call plus its result are
- * still in the transcript, so an empty card would add nothing.
+ * Legacy calls require live cached state. Native observedRun also rebuilds
+ * collected work and body from the original transcript after a refresh.
  */
 export function SubagentCard({
   sessionId,
   toolCallId,
+  observedRun,
 }: {
   sessionId: string;
   toolCallId?: string | null;
+  observedRun?: SubagentRun;
 }) {
-  const run = useSessionStore((s) =>
+  const cached = useSessionStore((s) =>
     toolCallId ? s.subagents[sessionId]?.[toolCallId] : undefined
   );
+  const run = observedRun || cached;
   const [open, setOpen] = useState(false);
   if (!run) return null;
 
@@ -92,7 +112,7 @@ export function SubagentCard({
         )}
         <IconUsersGroup size={13} className="shrink-0 text-gray-700" />
         <span className="subagent-name shrink-0 font-semibold text-gray-900">
-          {run.name || "sub-agent"}
+          {run.name || (run.native_thread_id ? `agent ${run.native_thread_id.slice(0, 8)}` : "sub-agent")}
         </span>
         {/* What it is doing right now — the reason this card exists. */}
         <span className="subagent-description truncate text-gray-700">
@@ -101,7 +121,7 @@ export function SubagentCard({
             : failed
               ? "failed"
               : completed
-                ? "done"
+                ? run.native_thread_id ? "helper finished" : "done"
                 : unknown
                   ? "unconfirmed"
                   : run.status}
@@ -115,6 +135,8 @@ export function SubagentCard({
           {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
         </span>
       </button>
+
+      {run.native_turn_id && <p className="mt-1 font-mono text-[10px] text-gray-600">Turn {run.native_turn_id.slice(0, 8)}</p>}
 
       {stopReason && (
         <p className="subagent-stop-reason mt-1 text-[11.5px] text-gray-700">{stopReason}</p>

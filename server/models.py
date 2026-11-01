@@ -190,6 +190,14 @@ class TurnRecovery(BaseModel):
     delay: float | None = None
 
 
+class FinalAnswerRef(BaseModel):
+    """Ordered original message rows selected from one bound native root."""
+
+    thread_id: str
+    turn_id: str
+    message_seqs: list[int] = Field(default_factory=list)
+
+
 class TurnOutcome(BaseModel):
     kind: Literal["outcome"] = "outcome"
     request_id: str
@@ -201,6 +209,8 @@ class TurnOutcome(BaseModel):
     recording_integrity: Literal["complete", "incomplete"] = "complete"
     recording_issues: dict[str, int] = Field(default_factory=dict)
     recording_locations: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    final_answer: FinalAnswerRef | None = None
+    native_status: Literal["completed", "failed", "interrupted"] | None = None
 
 
 class ToolReceipt(BaseModel):
@@ -210,11 +220,22 @@ class ToolReceipt(BaseModel):
     work_id: str | None = None
 
 
+class NativeSource(BaseModel):
+    thread_id: str
+    turn_id: str
+    item_id: str | None = None
+    root_thread_id: str
+    root_turn_id: str
+    parent_thread_id: str | None = None
+    phase: str | None = None
+
+
 class RuntimeMetadata(BaseModel):
     request_id: str
     attempt_id: str
-    tool_call_id: str
+    tool_call_id: str | None = None
     receipt: ToolReceipt | None = None
+    native: NativeSource | None = None
 
 
 class MessageContent(BaseModel):
@@ -277,6 +298,11 @@ class SubagentRun(BaseModel):
     task_id: str
     tool_use_id: str | None = None
     tool_call_id: str | None = None
+    card_id: str | None = None
+    native_thread_id: str | None = None
+    native_turn_id: str | None = None
+    parent_thread_id: str | None = None
+    runtime_metadata: RuntimeMetadata | None = None
     status: Literal["running", "completed", "failed", "cancelled", "interrupted", "unknown"] = "running"
     stop_reason: str | None = None
     name: str = ""

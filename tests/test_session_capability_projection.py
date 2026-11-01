@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 
 from server.harness import get_harness
-from server.harness.profile import StdinMode
+from server.harness.claude_code import ClaudeDriver
 from server.mcp_identity import reset_current_scope, set_current_scope, verify
 from server.mcp_servers.wiki import mcp as wiki_mcp
 from server.session_manager import session_manager
@@ -47,7 +47,7 @@ async def test_owner_uses_steer_and_reuse_capabilities_independently(bindings, t
 
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON, can_steer=can_steer, reusable=reusable,
+        new_driver=ClaudeDriver, can_steer=can_steer, reusable=reusable,
         build_turn_argv=argv,
     ))
     agent = await client.post("/api/agents", headers=headers, json={"name": "Independent capabilities", "backend": "codex"})
@@ -93,8 +93,10 @@ async def test_owner_uses_steer_and_reuse_capabilities_independently(bindings, t
         await manager.stop_all_held_processes()
 
 
-@pytest.mark.parametrize("backend,can_steer", [("claude-code", True), ("codex", False)])
-async def test_session_capabilities_are_consistent_across_live_and_archived_views(bindings, backend, can_steer):
+@pytest.mark.parametrize("backend,transport,can_steer", [("claude-code", "exec", True), ("codex", "exec", False), ("codex", "app-server", True)])
+async def test_session_capabilities_are_consistent_across_live_and_archived_views(bindings, monkeypatch, backend, transport, can_steer):
+    from server.config import settings
+    monkeypatch.setattr(settings, "codex_transport", transport)
     client, headers, _, _ = bindings
     agent = await client.post("/api/agents", headers=headers, json={"name": "Projection", "backend": backend})
     agent_id = agent.json()["id"]

@@ -64,3 +64,43 @@ async def test_missing_terminal_is_distinct_from_a_legitimate_empty_answer(datab
     assert empty.missing is None and empty.fragments == () and empty.outcome.status == "success"
     deleted = await database.read_session_result("deleted", "empty")
     assert deleted.missing == "session_missing"
+
+
+@pytest.mark.parametrize("invalid", ["missing", "child", "request", "attempt", "turn", "commentary", "tool", "after", "order", "duplicate"])
+async def test_native_answer_references_fail_without_borrowing_other_text(database, invalid):
+    metadata = {"request_id": "original", "attempt_id": "attempt", "native": {
+        "thread_id": "root", "turn_id": "turn", "root_thread_id": "root", "root_turn_id": "turn",
+        "item_id": "answer", "phase": "final_answer"}}
+    if invalid == "child":
+        metadata["native"]["thread_id"] = "child"
+    elif invalid in {"request", "attempt"}:
+        metadata[invalid + "_id"] = "other"
+    elif invalid == "turn":
+        metadata["native"]["turn_id"] = "other"
+    elif invalid == "commentary":
+        metadata["native"]["phase"] = "commentary"
+    seqs = {"missing": [1], "after": [3], "order": [2, 0], "duplicate": [0, 0]}.get(invalid, [0])
+    await database.append_message(session_id="session", seq=0, role="assistant",
+        type="tool_result" if invalid == "tool" else "text", content="Must not be borrowed",
+        runtime_metadata=metadata,
+        tool_input={"attempt_context": {"request_id": "original", "attempt_id": "attempt"}})
+    await database.append_message(session_id="session", seq=2, role="assistant", type="text", content="Other text",
+        tool_input={"attempt_context": {"request_id": "original", "attempt_id": "attempt"}})
+    await database.record_terminal(session_id="session", request_id="original", seq=3, role="system", type="result",
+        content={"kind": "outcome", "request_id": "original", "status": "success", "final_answer": {
+            "thread_id": "root", "turn_id": "turn", "message_seqs": seqs}}, created_at="time",
+        tool_input={"attempt_context": {"request_id": "original", "attempt_id": "attempt"}})
+    result = await database.read_session_result("session", "original")
+    assert result.missing == "answer_reference_invalid"
+    assert result.fragments == () and result.outcome.status == "success"
+
+
+async def test_explicit_empty_native_answer_does_not_fall_back_to_commentary(database):
+    await database.append_message(session_id="session", seq=0, role="assistant", type="text", content="Progress only",
+        tool_input={"attempt_context": {"request_id": "empty", "attempt_id": "attempt"}})
+    await database.record_terminal(session_id="session", request_id="empty", seq=1, role="system", type="result",
+        content={"kind": "outcome", "request_id": "empty", "status": "success", "final_answer": {
+            "thread_id": "root", "turn_id": "turn", "message_seqs": []}}, created_at="time",
+        tool_input={"attempt_context": {"request_id": "empty", "attempt_id": "attempt"}})
+    result = await database.read_session_result("session", "empty")
+    assert result.missing is None and result.fragments == ()
