@@ -148,12 +148,14 @@ login flow but targets the **existing** credential id, so bindings stay
 valid and the flag clears.
 
 - **Claude** (`POST /credentials/oauth/complete`): optional
-  `credential_id`. The target must belong to the login's account and use the
-  Claude backend before the code is exchanged. After exchange, storage checks
+  `credential_id`. On first completion, the target must belong to the login's
+  account and use the Claude backend before the code is exchanged. Storage checks
   the target owner again under the same write lock as the in-place update,
   clearing reconnect/status fields without changing the credential ID. A
-  deleted, adopted or foreign target returns 404 without replacing its secret;
-  install-owner None is an explicit owner here, not an unfiltered DB query.
+  target deleted or adopted before commit returns 404 without replacing its
+  secret. A current account is required. Repeated matching completion reads the
+  original operation result before revalidating mutable target existence:
+  deletion after success does not erase that historical result or recreate a row.
 - **Codex** (`POST /credentials/codex/start`): optional
   `reauth_credential_id`. The permanent `codex_home_for(reauth_credential_id)`
   path and credential ID stay unchanged. The login CLI writes into a fresh
@@ -170,12 +172,48 @@ valid and the flag clears.
 
 A brand-new login already creates `status=active`, so no change there.
 
+### Claude OAuth operation ownership
+
+The login driver accepts one immutable completion request containing account,
+login ID, authorization code, label and optional reauth target. OAuthLoginManager
+registers and strongly retains its only task before target validation can await.
+That task owns exchange, API-key mint (or the scope-missing OAuth bundle), and
+the narrow `OAuthCredentials` writer. One database transaction saves secret,
+expiry and credential state. Success follows that commit; the router performs
+no subsequent persistence. Matching repeated calls wait for the same task/result;
+conflicting parameters return 409 and another account sees no such login.
+
+| Observation or action | Result and retirement responsibility |
+| --- | --- |
+| HTTP completion waiter disconnects | Only that wait ends; the original task continues and blocks drain. |
+| Explicit cancel before committing | Revoke subsequent stages first, cancel provider work once, then wait for actual retirement; a late exchange cannot mint or commit. |
+| Explicit cancel after committing begins | Keep the only committer alive and wait for its actual result. A cancelled cancel-waiter does not withdraw it. |
+| `POST /credentials/oauth/cancel` succeeds | HTTP 200 with `status=cancelled` or `already_completed`; errors and unconfirmed retirement are explicit failures. |
+| Retirement exceeds five seconds | Return 503 and retain the original task/blocker; repeated observation can confirm its later result. |
+
+Cancellation does not undo provider effects already sent. The check and transition
+into committing have no await between them. Task exceptions are observed; TTL
+cleanup removes only retired records. Shutdown seals admission and joins the
+original tasks before releasing storage. Login operations are process-local and
+are not resumed across restart; completed credentials remain in the normal list.
+Storage uncertainty follows the existing database health boundary, without replay.
+`tests/test_oauth_operation.py` covers stage barriers, lost waiters, deduplication,
+GC/shutdown and real route-to-SQLite commits; reauth ownership tests cover changed
+targets and historical result reads. These are offline provider tests.
+
 ## 6. Frontend
 
-- `CredentialList.tsx`: per-credential `needs_reconnect` → amber/destructive
+- `HarnessPage.tsx`: per-credential `needs_reconnect` → amber/destructive
   "needs reauth" badge + a "Re-authorize" button that opens the existing
   dialog in re-auth mode, threading `credential_id` (Claude) /
   `reauth_credential_id` (Codex). On success, refetch → flag clears.
+- Claude submission and recoverable errors retain the original completion request
+  for explicit **Wait again**. **Close** ends observation; **Cancel sign-in**
+  consumes the typed cancellation receipt. Late success, error and cancellation
+  cannot update a retired account/view. Historical completion refetches the
+  current credential list instead of upserting its old result, so deleting a
+  credential is not undone by a late response. Codex retains its device polling
+  and cancellation flow. `HarnessPage.test.tsx` covers these actual consumers.
 - `useWebSocket.ts`: an `error` event with `code === "auth_expired"` renders
   the chat error text (as today) AND refetches `/api/credentials` so the
   sidebar badge appears immediately without a reload.

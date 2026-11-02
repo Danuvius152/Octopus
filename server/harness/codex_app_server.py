@@ -168,7 +168,8 @@ class AppServerDriver(RunDriver):
         self._proof_tail: asyncio.Task[None] | None = None
         self._proofs: set[asyncio.Task[None]] = set()
         self._output: NativeOutput | None = None
-        self._items: dict[tuple[str, str, str], str] = {}
+        self._items: dict[tuple[str, str, str], tuple[str | None, str]] = {}
+        self._items_changed = asyncio.Event()
         self._started_turns: set[tuple[str, str]] = set()
         self._metrics: dict[str, CodexActivityObserver] = {}
         self._metrics_env: dict[str, str] = {}
@@ -868,7 +869,7 @@ class AppServerDriver(RunDriver):
         if method == "item/agentMessage/delta":
             # A root delta promises a complete item, even if its started
             # notification was omitted. Child cancellation promises no answer.
-            self._items.setdefault((params["threadId"], turn_id, params["itemId"]), "started")
+            self._items.setdefault((params["threadId"], turn_id, params["itemId"]), ("agentMessage", "started"))
         item = params.get("item") or {}
         if method in {"item/started", "item/completed"}:
             if not isinstance(item.get("id"), str) or not item["id"]:
@@ -876,11 +877,12 @@ class AppServerDriver(RunDriver):
             key = params["threadId"], turn_id, item["id"]
             previous = self._items.get(key)
             digest = hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest() if method == "item/completed" else "started"
-            if previous == digest or previous is not None and method == "item/started":
+            if previous == (item.get("type"), digest) or previous is not None and method == "item/started":
                 return ParseOutput(activity=False)
-            if previous is not None and previous != "started":
+            if previous is not None and previous[1] != "started":
                 raise NativeProtocolError("Conflicting complete native item")
-            self._items[key] = digest
+            self._items[key] = item.get("type"), digest
+            self._items_changed.set()
         if len(self._items) > 16384:
             raise NativeProtocolError("Native item identity capacity exceeded")
         output = self._raw_event(obj)
@@ -975,12 +977,28 @@ class AppServerDriver(RunDriver):
         if self._input is not None and self._input.turn_id and not self._terminal:
             await io.write_control((json.dumps({"id": "octopus:interrupt", "method": "turn/interrupt",
                 "params": {"threadId": self._input.thread_id, "turnId": self._input.turn_id}}) + "\n").encode())
+        if self._pending_root_commands():
+            # EOF removes the native notification subscriber before killing its
+            # background terminals. Clean while the original reader is attached;
+            # an ACK alone cannot prove the command's complete output arrived.
+            assert self._input is not None
+            with self._rpc.request("thread/backgroundTerminals/clean", {"threadId": self._input.thread_id}) as request:
+                await io.write_control(request.data)
+                await request.response
+                while self._pending_root_commands():
+                    self._items_changed.clear()
+                    await self._items_changed.wait()
+
+    def _pending_root_commands(self) -> bool:
+        return self._input is not None and any(
+            key[:2] == (self._input.thread_id, self._input.turn_id) and value == ("commandExecution", "started")
+            for key, value in self._items.items())
 
     def connection_closed(self) -> None:
         self._questions.clear()
         if self._input is not None and self._input.state == "accepted" and self._io is not None:
             missing = [key[2] for key, value in self._items.items()
-                       if key[:2] == (self._input.thread_id, self._input.turn_id) and value == "started"]
+                       if key[:2] == (self._input.thread_id, self._input.turn_id) and value[1] == "started"]
             if missing:
                 self._io.fail_stream("native_collection_incomplete", f"Native root items did not complete: {missing}")
         protected = {identifier for identifier, evidence in self._steers.items() if evidence.state in {"accepted", "rejected"}}

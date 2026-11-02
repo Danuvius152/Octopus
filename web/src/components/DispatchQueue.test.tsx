@@ -79,7 +79,7 @@ it.each(["HTTP", "WS"])("recovers on an equal revision from %s without letting a
   let rejectEarlier!: (reason: Error) => void;
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => new Promise<Response>((_, reject) => { rejectEarlier = reject; }))
     .mockResolvedValueOnce(new Response("unavailable", { status: 503 }))
-    .mockResolvedValueOnce(Response.json({ messages: [], dispatch_state: snapshot })));
+    .mockResolvedValueOnce(Response.json({ messages: [], dispatch_state: snapshot, active_attempt: null })));
   render(<DispatchQueue sessionId="session" />);
   const earlier = loadSessionSnapshot("session").catch(() => {});
   await act(async () => { await loadSessionSnapshot("session").catch(() => {}); });

@@ -482,7 +482,10 @@ CAS / child notice 诊断写入及原 completion 观察，只消费公共接管�
   CLI handoff/import 仍使用其现行账户归属逻辑，不因没有网页入口而删除。
 - 外部 WS 发送、控制使用当前请求/命令及目标身份；缺身份明确拒绝，不补身份执行。
   UI 只消费完整 `dispatch_state`，保留 generation/revision 防乱序；活动状态
-  缺失或畸形不伪装为空队列，归档详情不创建 live Owner。
+  缺失或畸形不伪装为空队列，归档详情不创建 live Owner。详情中的 dispatch 与
+  attempt 原子接纳；有效显式 null 包括活动 request 暂无 attempt。拒绝旧执行
+  目标不丢同范围的安全历史补齐，观察与确认责任归
+  [前端读取合同](frontend-list-reconciliation.md#执行快照与-stop)。
 - 旧工具批准链已退出。当前问答、完整回答和取消正常工作；历史批准正文可只读
   展示，旧动作按不支持拒绝，不重新启用另一套审批或改写工具设置。
 - Wiki 新请求使用 `auto`、`read`、`maintain`。HTTP 使用 `/read-many`、

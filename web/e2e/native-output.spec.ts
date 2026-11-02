@@ -55,6 +55,7 @@ test("native root and helper items stay separate through completion, reconnect a
       const reconnected = reconnectGeneration > 0 && connections >= reconnectGeneration;
       if (reconnected) reconnectDetails += 1;
       data = { ...session, status: done ? "idle" : "running",
+        active_attempt: done ? null : { request_id: "request", attempt_id: "attempt" },
         messages, next_message_seq: messages.at(-1)!.seq! + 1, oldest_loaded_seq: 1, has_more_messages: false,
         pending_questions: [], subagents: [{ ...helper, name: reconnected ? "/root/reviewer restored" : helper.name }],
         dispatch_state: { generation: "native-service", revision, paused: false, active_request_id: done ? null : "request", items: [] } };

@@ -1675,6 +1675,12 @@ class OwnerRuntime:
                     assert execution.reader.task is not None
                     execution.reader.task.cancel()
             except asyncio.CancelledError:
+                from ..mcp_identity import work_is_open
+                if not work_is_open(execution.request.work_id):
+                    # Revocation can abort spawn before CloseWork reaches this
+                    # Owner. Settle and retire the original execution here.
+                    await self._interrupt("user")
+                    return
                 if attempt.timeout is None and not execution.interrupted:
                     raise
             except Exception as error:

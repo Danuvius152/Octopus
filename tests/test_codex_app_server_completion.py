@@ -25,6 +25,7 @@ from tests.native_app_server import (
     start_output,
     terminal,
     until,
+    wire_frames,
 )
 from tests.session_runtime import wait_dispatch_idle
 
@@ -124,6 +125,61 @@ async def test_root_success_cannot_hide_a_missing_complete_root_item(native_runt
     assert result.fragments == ("Saved final",)
 
 
+@pytest.mark.parametrize("order", ["before_ack", "after_ack"])
+@pytest.mark.parametrize("stop", [False, True])
+async def test_background_command_is_collected_before_native_connection_closes(native_runtime, tmp_path, order, stop):
+    manager, database, session, mode, starts, events = native_runtime
+    mode[0] = f"control_background_{order}"
+    receipt = await manager.start_message(session.id, "Finish with a running command", source="human")
+    await until(lambda: any(event.get("tool_use_id") == "background-command" for event in events))
+    run = session._run.backend
+    inject(tmp_path, item(ROOT, "turn-1", "answer", "Saved final"))
+    if stop:
+        await manager.interrupt(session.id)
+    else:
+        inject(tmp_path, terminal())
+    try:
+        await until(lambda: (tmp_path / "native-clean-requested").exists())
+        assert json.loads((tmp_path / "native-clean-requested").read_text()) == {"threadId": ROOT}
+        assert not run.question_admission_open
+        if order == "after_ack":
+            assert not any(event.get("terminal") for event in events)
+            other = {"method": "item/completed", "params": {"threadId": "child", "turnId": "child-turn",
+                "item": {"id": "background-command", "type": "commandExecution", "status": "completed",
+                    "command": "other command", "aggregatedOutput": "Other command finished", "exitCode": 0}}}
+            inject(tmp_path, child_start(), other)
+            await until(lambda: any(event.get("output") == "Other command finished" for event in events))
+            assert not any(event.get("terminal") for event in events)
+    finally:
+        (tmp_path / "native-clean-release").touch()
+    await wait_dispatch_idle(manager, session.id)
+    result = await database.read_session_result(session.id, receipt.request_id)
+    assert result.outcome.status == ("interrupted" if stop else "success")
+    assert result.outcome.recording_integrity != "incomplete"
+    rows = await database.load_messages(session.id)
+    tool_results = [row for row in rows if row["type"] == "tool_result" and row.get("tool_use_id") == "background-command"
+                    and row["runtime_metadata"]["native"]["thread_id"] == ROOT]
+    assert len(tool_results) == 1
+    assert tool_results[0]["is_error"] and tool_results[0]["content"] == "1 passed, 1 teardown error"
+    assert tool_results[0]["seq"] < next(row["seq"] for row in rows if row["type"] == "result")
+    assert len(starts) == 1 and run.retirement_state == "proven"
+
+
+@pytest.mark.parametrize("failure", ["missing", "error"])
+async def test_background_cleanup_ack_or_failure_cannot_replace_complete_item(native_runtime, tmp_path, failure):
+    manager, database, session, mode, _, events = native_runtime
+    mode[0] = f"control_background_{failure}"
+    receipt = await manager.start_message(session.id, "Do not hide missing output", source="human")
+    await until(lambda: any(event.get("tool_use_id") == "background-command" for event in events))
+    inject(tmp_path, item(ROOT, "turn-1", "answer", "Saved final"), terminal())
+    await wait_dispatch_idle(manager, session.id)
+    assert (tmp_path / "native-clean-requested").exists()
+    result = await database.read_session_result(session.id, receipt.request_id)
+    assert result.outcome.status == "failed"
+    assert result.outcome.recording_integrity == "incomplete"
+    assert result.fragments == ("Saved final",)
+
+
 @pytest.mark.parametrize("native_status", ["failed", "interrupted"])
 async def test_native_root_status_is_preserved_without_another_root(native_runtime, tmp_path, native_status):
     manager, database, session, _, starts, events = native_runtime
@@ -135,6 +191,7 @@ async def test_native_root_status_is_preserved_without_another_root(native_runti
     assert result.fragments == ("Saved final",)
     assert len(starts) == 1
     assert len([event for event in events if event.get("terminal")]) == 1
+    assert not any(frame.get("method") == "thread/backgroundTerminals/clean" for frame in wire_frames(tmp_path))
 
 
 @pytest.mark.parametrize("gate", ["prefix", "terminal"])

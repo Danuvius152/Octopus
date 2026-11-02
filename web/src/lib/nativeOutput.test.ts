@@ -8,6 +8,25 @@ const identity = (thread: string) => ({ request_id: "r", attempt_id: "a", native
   thread_id: thread, turn_id: "t", item_id: "same", root_thread_id: "root", root_turn_id: "t",
 } });
 
+test("hidden root reasoning has no chat rows while transcript sequences and child observations survive", () => {
+  const messages = [
+    { role: "assistant" as const, type: "text", seq: 1, content: "Before" },
+    ...["", "", "", "", "", "", "", "Retained reasoning"].map((content, index) => ({
+      role: "assistant" as const, type: "thinking", seq: index + 2, content,
+    })),
+    { role: "assistant" as const, type: "thinking", seq: 10, content: "", runtime_metadata: identity("child") },
+    { role: "assistant" as const, type: "text", seq: 11, content: "After" },
+  ];
+  useSessionStore.getState().setMessages("s", messages);
+  useSessionStore.getState().setLastAppliedSeq("s", 11);
+  const stored = useSessionStore.getState().messages.s;
+  expect(nativeChatMessages(stored).map((row) => [row.type, row.seq])).toEqual([
+    ["text", 1], ["native_subagent", 10], ["text", 11],
+  ]);
+  expect(stored).toEqual(messages);
+  expect(useSessionStore.getState().lastAppliedSeq.s).toBe(11);
+});
+
 test("a tool-only historical window exposes a saved child reference without inventing completion", () => {
   const messages = [{ role: "tool" as const, type: "tool_result", seq: 40, content: "Saved tool output", runtime_metadata: identity("child") }];
   const cards = nativeChatMessages(messages);

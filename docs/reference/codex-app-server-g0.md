@@ -1,6 +1,7 @@
 # Codex App Server G0：0.166.0 锁版观察
 
-本页保存 2026-11-01 的两组协议实验及适用条件。本次文档重组未重新运行实验。
+本页保存 2026-11-01 的两组协议实验及适用条件，以及同一锁版的后续收尾观察。
+前两组历史实验未因后续修复而重跑。
 普通 Codex 的现行职责由 [Codex 合同](../implemented/codex-backend.md)维护；
 强目标的恢复条件见[暂停执行范围](../plans/runtime-execution-scope.md)。
 
@@ -103,6 +104,26 @@ late mailbox 在宿主退出后没有进入 source/fork 恢复后的显式请求
 CONNECT 代理，未观察到认证/刷新请求。真实根、子、孙逐层等待并返回
 `G0_LIVE_ROOT=899`，根 commentary 和 final_answer 分开，宿主正常退出。
 这只证明一次模型选择了活动等待；逐层请求体消费由确定性场景证明，未推断 TLS 内内容。
+
+<a id="residual-root-command-retirement"></a>
+## 残留根命令的连接收尾
+
+后续针对同一 0.166.0 binary digest 的 loopback Responses SSE 实验，使用独立
+home/cwd、合成 provider 和一条已输出后继续等待的命令，不读取登录、不请求
+远端模型。根先正常结束时，直接关闭 stdin 的宿主退出 0，但客户端没有收到
+命令的完整结果；保持连接并发送 `thread/backgroundTerminals/clean`，等待完整
+item 后再关闭，则收到 `status=failed`、`exitCode=-1` 与原输出，宿主同样退出。
+锁版 [连接关闭顺序](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server/src/lib.rs#L1196)
+先移除 outbound，之后才清理线程；因此 rollout 中有完成记录不证明 wire 已送达。
+
+再让同一二进制、同一合成 provider 经过实际 `HarnessRun`、原驱动和 stdout
+reader，沿产品未修改的 500ms protocol-interrupt 窗口收尾：该次清理阶段为
+2.225ms，完整错误工具结果及原 request/attempt/native 身份均被采集，未产生
+`native_collection_incomplete`，原进程组确认退出。这个数值只是一条协议可行性
+观察，不是任意负载或任意工具的时延保证；超过产品期限仍保留完整性失败。
+正常/Stop、ACK 与完整事件的两种顺序、同名 child、无残留、清理错误及缺事件
+由当前 `test_codex_app_server_completion.py` 的受控宿主回归覆盖。
+产品的退休与结果规则见 [根完成合同](../implemented/codex-backend.md#root-completion-and-selected-answer)。
 
 ## 证据定位与边界
 

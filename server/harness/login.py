@@ -12,11 +12,11 @@ importing the managers directly and branching on backend kind:
                            begin a login; returns the manager's session.
                            `reauth_credential_id` re-authorizes an existing
                            credential in place (device_code only — Claude
-                           carries its re-auth target on `submit_code`'s
+                           carries its re-auth target on `complete_oauth`'s
                            complete route instead). harness-credential-reauth.md §5
-  - `submit_code(id,code)` oauth_redirect only — exchange the pasted code
-  - `get(id)`              device_code only — poll the in-flight login
-  - `cancel(id)`           abort (idempotent)
+  - `complete_oauth(request, credentials)` redirect only — own exchange and commit
+  - `get(id)`              current login record; device polling or OAuth owner check
+  - `cancel(id)`           backend-specific cancellation; OAuth returns its result
   - `cleanup_credential(id)` revoke local state on delete (Codex: rmtree
                            its CODEX_HOME; Claude: nothing on disk)
 
@@ -28,8 +28,28 @@ harness and owns the per-kind delete cleanup.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
+
+from ..models import CredentialInfo, OAuthCancelResponse
+from ..oauth_providers import OAuthTokenSet
+
+
+@dataclass(frozen=True)
+class OAuthCompletion:
+    user_id: str | None
+    login_id: str
+    code: str = field(repr=False)
+    label: str
+    credential_id: str | None = None
+
+
+class OAuthCredentialWriter(Protocol):
+    """First-use target validation and one complete local credential commit."""
+
+    async def validate(self, request: OAuthCompletion) -> None: ...
+    async def commit(self, request: OAuthCompletion, material: str | OAuthTokenSet) -> CredentialInfo: ...
 
 
 class LoginMethod(str, Enum):
@@ -51,7 +71,7 @@ class LoginDriver(Protocol):
         reauth_credential_id: str | None = None,
         user_id: str | None = None,
     ) -> Any: ...
-    async def submit_code(self, login_id: str, code: str) -> Any: ...
+    async def complete_oauth(self, request: OAuthCompletion, credentials: OAuthCredentialWriter) -> CredentialInfo: ...
     def get(self, login_id: str) -> Any: ...  # the record, or None
-    async def cancel(self, login_id: str) -> None: ...
+    async def cancel(self, login_id: str) -> OAuthCancelResponse | None: ...
     def cleanup_credential(self, credential_id: str) -> None: ...

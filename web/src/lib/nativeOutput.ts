@@ -71,7 +71,9 @@ export function nativeChatMessages(messages: Message[], snapshots: SubagentRun[]
       // reachable without inventing completion or changing persisted rows.
       cards.add(card.card_id);
       visible.push(cardAnchor(card, message));
-    } else {
+    } else if (message.type !== "thinking") {
+      // MessageBubble hides root reasoning. Exclude its list row as well,
+      // otherwise Virtuoso leaves padding for a body that renders nothing.
       visible.push(message);
     }
   }

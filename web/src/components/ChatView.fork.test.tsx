@@ -26,11 +26,13 @@ const dispatch = (generation: string) => ({ generation, revision: 0, paused: fal
 const detail = () => ({ ...child,
   messages: Array.from({ length: 200 }, (_, index) => ({ role: "assistant", type: "text", seq: 200 + index, content: `old ${index}` })),
   oldest_loaded_seq: 200, has_more_messages: true, next_message_seq: 400,
-  pending_questions: [], subagents: [], dispatch_state: dispatch("old-service"),
+  pending_questions: [], subagents: [], dispatch_state: dispatch("old-service"), active_attempt: null,
 });
 
 beforeEach(() => {
   mockChatViewport();
+  // Retire the preceding test's SessionList reads and connection scope too.
+  useSessionStore.getState().setToken("");
   useSessionStore.getState().setToken("synthetic-token");
   useSessionStore.setState({
   token: "synthetic-token", activeSessionId: parent.id, activeAgentId: "agent",

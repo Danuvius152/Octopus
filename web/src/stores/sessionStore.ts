@@ -5,7 +5,7 @@ import { withPinOrder } from "../lib/sidebarPins";
 import { unreadList, type ListReadState } from "../lib/listState";
 import type { ControlCommandStatus } from "../lib/submission";
 import { normalizeMessage, type MessageInput } from "../lib/turnOutcome";
-import { readDispatchState, type DispatchState } from "../lib/sessionDispatch";
+import { readActiveAttempt, readDispatchState, type ActiveAttempt, type DispatchState } from "../lib/sessionDispatch";
 import { nativeItemKey } from "../lib/nativeOutput";
 import type {
   AgentRead as ApiAgentRead,
@@ -179,11 +179,15 @@ export interface Identity {
   is_admin: boolean;
 }
 
-type DispatchReadStart = Pick<SessionStore, "accountGeneration" | "dispatchGeneration" | "dispatchStates">;
+type DispatchReadStart = Pick<SessionStore, "accountGeneration" | "dispatchGeneration" | "dispatchStates" | "executionObservations">;
 
 interface SessionStore {
-  activeAttempts: Record<string, { request_id: string; attempt_id: string }>;
-  setActiveAttempt: (sessionId: string, attempt: { request_id: string; attempt_id: string } | null) => void;
+  activeAttempts: Record<string, ActiveAttempt>;
+  setActiveAttempt: (sessionId: string, attempt: ActiveAttempt | null) => void;
+  // Live execution observations, including absent -> present -> absent.
+  // HTTP snapshots use this baseline without claiming a new live observation.
+  executionObservations: Record<string, number>;
+  applyExecutionSnapshot: (sessionId: string, detail: Record<string, unknown>, start: DispatchReadStart) => boolean;
   controlCommands: Record<string, ControlCommandStatus>;
   setControlCommand: (command: ControlCommandStatus) => void;
   dismissControlCommand: (id: string) => void;
@@ -473,10 +477,59 @@ export type Delegation = Omit<ApiDelegationResponse,
   "work_id" | "terminal_disposition" | "terminal_delivery_error"
 >>;
 
+function dispatchUpdate(s: SessionStore, sessionId: string, snapshot: DispatchState, start?: DispatchReadStart): Partial<SessionStore> | null {
+  if (start && start.accountGeneration !== s.accountGeneration) return null;
+  if (s.retiredDispatchGenerations.includes(snapshot.generation)) return null;
+  if (start && start.dispatchGeneration !== s.dispatchGeneration && snapshot.generation !== s.dispatchGeneration) return null;
+  const changed = s.dispatchGeneration !== null && s.dispatchGeneration !== snapshot.generation;
+  const previous = changed ? undefined : s.dispatchStates[sessionId];
+  if (previous && snapshot.revision < previous.revision) return null;
+  const errors = { ...(changed ? {} : s.dispatchUnavailable) };
+  delete errors[sessionId];
+  return {
+    dispatchGeneration: snapshot.generation,
+    ...(changed ? { activeAttempts: {}, executionObservations: {}, closedQuestionIds: {}, pendingQuestions: {},
+      sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingItems: {} } : {}),
+    retiredDispatchGenerations: changed ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
+    // Equal revision confirms content and invalidates earlier read failures.
+    dispatchStates: { ...(changed ? {} : s.dispatchStates),
+      [sessionId]: previous?.revision === snapshot.revision ? { ...previous } : snapshot },
+    dispatchUnavailable: errors,
+  };
+}
+
 export const useSessionStore = create<SessionStore>((set, get) => ({
   activeAttempts: {},
-  setActiveAttempt: (sessionId, attempt) => set((s) => ({ activeAttempts: attempt
-    ? { ...s.activeAttempts, [sessionId]: attempt } : dropKey(s.activeAttempts, sessionId) })),
+  executionObservations: {},
+  setActiveAttempt: (sessionId, attempt) => set((s) => ({
+    activeAttempts: attempt ? { ...s.activeAttempts, [sessionId]: attempt } : dropKey(s.activeAttempts, sessionId),
+    executionObservations: { ...s.executionObservations, [sessionId]: (s.executionObservations[sessionId] ?? 0) + 1 },
+  })),
+  applyExecutionSnapshot: (sessionId, detail, start) => {
+    const snapshot = readDispatchState(detail.dispatch_state);
+    const active = snapshot ? readActiveAttempt(detail.active_attempt, snapshot) : undefined;
+    if (!snapshot || active === undefined) {
+      const generation = detail.dispatch_state && typeof detail.dispatch_state === "object" && "generation" in detail.dispatch_state
+        ? detail.dispatch_state.generation : null;
+      if (typeof generation === "string" && get().retiredDispatchGenerations.includes(generation)) return false;
+      get().setDispatchUnavailable(sessionId, true, start);
+      return false;
+    }
+    let applied = false;
+    set((s) => {
+      if (snapshot.generation === s.dispatchGeneration) {
+        const observed = start.dispatchGeneration === s.dispatchGeneration ? start.executionObservations[sessionId] ?? 0 : 0;
+        if (observed !== (s.executionObservations[sessionId] ?? 0)) return s;
+      }
+      const patch = dispatchUpdate(s, sessionId, snapshot, start);
+      if (!patch) return s;
+      if (patch.dispatchStates?.[sessionId].active_request_id !== snapshot.active_request_id) return s;
+      const attempts = patch.activeAttempts ?? s.activeAttempts;
+      applied = true;
+      return { ...patch, activeAttempts: active ? { ...attempts, [sessionId]: active } : dropKey(attempts, sessionId) };
+    });
+    return applied;
+  },
   controlCommands: {},
   setControlCommand: (command) => set((s) => ({ controlCommands: { ...s.controlCommands, [command.id]: command } })),
   dismissControlCommand: (id) => set((s) => ({ controlCommands: dropKey(s.controlCommands, id) })),
@@ -862,7 +915,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setDispatchUnavailable: (sessionId, unavailable, start) => set((s) => {
     if (start && (start.accountGeneration !== s.accountGeneration ||
         start.dispatchGeneration !== s.dispatchGeneration ||
-        start.dispatchStates[sessionId] !== s.dispatchStates[sessionId])) return s;
+        start.dispatchStates[sessionId] !== s.dispatchStates[sessionId] ||
+        start.executionObservations[sessionId] !== s.executionObservations[sessionId])) return s;
     const errors = { ...s.dispatchUnavailable };
     if (unavailable) errors[sessionId] = true;
     else delete errors[sessionId];
@@ -881,27 +935,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }
     let applied = false;
     set((s) => {
-      if (start && start.accountGeneration !== s.accountGeneration) return s;
-      if (s.retiredDispatchGenerations.includes(snapshot.generation)) return s;
-      if (start && start.dispatchGeneration !== s.dispatchGeneration &&
-          snapshot.generation !== s.dispatchGeneration) return s;
-      const changed = s.dispatchGeneration !== null && s.dispatchGeneration !== snapshot.generation;
-      const previous = changed ? undefined : s.dispatchStates[sessionId];
-      if (previous && snapshot.revision < previous.revision) return s;
-      const errors = { ...(changed ? {} : s.dispatchUnavailable) };
-      delete errors[sessionId];
+      const patch = dispatchUpdate(s, sessionId, snapshot, start);
+      if (!patch) return s;
       applied = true;
-      return {
-        dispatchGeneration: snapshot.generation,
-        ...(changed ? { closedQuestionIds: {}, pendingQuestions: {}, sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingItems: {} } : {}),
-        retiredDispatchGenerations: changed
-          ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
-        // An equal revision confirms the existing content and invalidates
-        // older reads, including failures waiting to mark it unavailable.
-        dispatchStates: { ...(changed ? {} : s.dispatchStates),
-          [sessionId]: previous?.revision === snapshot.revision ? { ...previous } : snapshot },
-        dispatchUnavailable: errors,
-      };
+      const observations = patch.executionObservations ?? s.executionObservations;
+      return { ...patch, executionObservations: { ...observations, [sessionId]: (observations[sessionId] ?? 0) + 1 } };
     });
     return applied;
   },

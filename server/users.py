@@ -313,6 +313,19 @@ class UserManager:
         paths_for(user["id"]).ensure()
         return user
 
+    async def login(self, username: str, password: str) -> tuple[dict[str, Any], str]:
+        """Verify outside the write transaction, then commit that exact proof."""
+        user = await self.authenticate(username, password)
+        token = new_token()
+        issued = await self.db.store_login_token(
+            user_id=user["id"], password_hash=user["password_hash"],
+            token_hash=token_digest(token), created_at=_now(),
+            expires_at=(datetime.now(UTC) + SESSION_TTL).isoformat(),
+        )
+        if not issued:
+            raise UserError("Wrong username or password", status_code=401)
+        return user, token
+
     async def set_password(
         self, user_id: str, password: str, *, keep_token_hash: str | None = None
     ) -> int:

@@ -14,6 +14,7 @@ from server.agent_manager import AgentManager
 from server.delegations import DelegationError
 from server.mcp_identity import scope_is_live, work_is_open
 from tests.test_delegation_restart_security import wait_live_scope
+from tests.test_delegation_work import wait_state
 from tests.test_delegation_work import work_runtime as work_runtime
 
 
@@ -38,6 +39,173 @@ async def _background(manager, rec, context, path):
         while not path.exists():
             await asyncio.sleep(.01)
     return response.json()["id"], int(path.read_text())
+
+
+async def test_branch_loses_authority_before_first_cancellation_save(
+    work_runtime, monkeypatch, tmp_path
+):
+    manager, delegations, parent, starts = work_runtime
+    for name in ("Middle", "LateLeaf"):
+        await AgentManager(manager.db).create_agent(name=name, backend="codex", user_id=parent.user_id)
+    outer = await delegations.start_delegation(
+        parent_session_id=parent.id, agent_name="Worker", request="held outer",
+    )
+    outer_context = await asyncio.wait_for(starts.get(), 3)
+    outer_scope = await wait_live_scope(outer_context)
+    middle = await delegations.start_delegation(
+        parent_session_id=outer.delegation_id, agent_name="Middle", request="held middle",
+        scope=outer_scope,
+    )
+    middle_context = await asyncio.wait_for(starts.get(), 3)
+    middle_scope = await wait_live_scope(middle_context)
+    task_id, pid = await _background(manager, middle, middle_context, tmp_path / "middle.pid")
+    saving, release = asyncio.Event(), asyncio.Event()
+    save = manager.db.compare_and_set_delegation_state
+
+    async def paused(*args, **kwargs):
+        if args[0] == outer.delegation_id and json.loads(args[2])["state"] == "cancelled":
+            saving.set()
+            await release.wait()
+        return await save(*args, **kwargs)
+
+    monkeypatch.setattr(manager.db, "compare_and_set_delegation_state", paused)
+    cancelling = asyncio.create_task(delegations.cancel_delegation(outer.delegation_id))
+    try:
+        await asyncio.wait_for(saving.wait(), 3)
+        with pytest.raises(DelegationError):
+            await delegations.start_delegation(
+                parent_session_id=middle.delegation_id, agent_name="LateLeaf",
+                request="held forbidden leaf", scope=middle_scope,
+            )
+        assert starts.empty()
+        assert all(not work_is_open(rec.work_id) for rec in (outer, middle))
+        assert not scope_is_live(middle_scope)
+        release.set()
+        await asyncio.wait_for(cancelling, 5)
+        assert not _alive(pid)
+        assert (await manager.work_test_bg.get_task(task_id)).status == "cancelled"
+        assert not manager.work_has_resources(outer.work_id)
+        assert not manager.work_has_resources(middle.work_id)
+    finally:
+        release.set()
+        await asyncio.gather(cancelling, return_exceptions=True)
+
+
+async def test_revocation_during_spawn_is_an_interruption_owned_by_the_original_session(
+    work_runtime, monkeypatch
+):
+    manager, delegations, parent, _ = work_runtime
+    spawned, release_spawn, saving, release_save = (asyncio.Event() for _ in range(4))
+    processes = []
+    spawn = asyncio.create_subprocess_exec
+    save = manager.db.compare_and_set_delegation_state
+
+    async def paused_spawn(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        processes.append(process)
+        spawned.set()
+        await release_spawn.wait()
+        return process
+
+    async def paused_save(*args, **kwargs):
+        if json.loads(args[2])["state"] == "cancelled":
+            saving.set()
+            await release_save.wait()
+        return await save(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", paused_spawn)
+    rec = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held spawn")
+    cancelling = None
+    try:
+        await asyncio.wait_for(spawned.wait(), 3)
+        monkeypatch.setattr(manager.db, "compare_and_set_delegation_state", paused_save)
+        cancelling = asyncio.create_task(delegations.cancel_delegation(rec.delegation_id))
+        await asyncio.wait_for(saving.wait(), 3)
+        release_spawn.set()
+        await asyncio.wait_for(processes[0].wait(), 3)
+        await manager.await_session_execution(rec.delegation_id, timeout=3)
+        # An aborted original start must not kill its SessionOwner.
+        await manager.interrupt(rec.delegation_id)
+        assert manager.dispatch_snapshot(rec.delegation_id)["active_request_id"] is None
+        release_save.set()
+        await asyncio.wait_for(cancelling, 3)
+    finally:
+        release_spawn.set()
+        release_save.set()
+        await asyncio.gather(*([cancelling] if cancelling else []), return_exceptions=True)
+
+
+@pytest.mark.parametrize("setup", ["create", "followup"])
+async def test_setup_started_before_branch_closure_retires_without_new_model(
+    work_runtime, monkeypatch, setup
+):
+    manager, delegations, parent, starts = work_runtime
+    await AgentManager(manager.db).create_agent(name="Late helper", backend="codex", user_id=parent.user_id)
+    outer = await delegations.start_delegation(
+        parent_session_id=parent.id, agent_name="Worker", request="held outer",
+    )
+    scope = await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    child_id = None
+    if setup == "followup":
+        previous = await delegations.start_delegation(
+            parent_session_id=outer.delegation_id, agent_name="Late helper", request="first answer", scope=scope,
+        )
+        await asyncio.wait_for(starts.get(), 3)
+        await wait_state(delegations, previous.delegation_id, "completed")
+        await delegations.confirm_recording()
+        child_id = previous.delegation_id
+    entered, release = asyncio.Event(), asyncio.Event()
+    if setup == "create":
+        create = manager.create_session
+
+        async def paused_create(*args, **kwargs):
+            nonlocal child_id
+            child = await create(*args, **kwargs)
+            child_id = child.id
+            entered.set()
+            await release.wait()
+            return child
+
+        monkeypatch.setattr(manager, "create_session", paused_create)
+        operation = delegations.start_delegation(
+            parent_session_id=outer.delegation_id, agent_name="Late helper", request="held new child", scope=scope,
+        )
+    else:
+        save = manager.db.compare_and_set_delegation_state
+
+        async def paused_save(*args, **kwargs):
+            if args[0] == child_id and json.loads(args[2])["state"] == "running":
+                entered.set()
+                await release.wait()
+            return await save(*args, **kwargs)
+
+        monkeypatch.setattr(manager.db, "compare_and_set_delegation_state", paused_save)
+        operation = delegations.follow_up_delegation(
+            parent_session_id=outer.delegation_id, delegation_id=child_id, request="held new round", scope=scope,
+        )
+    pending = asyncio.create_task(operation)
+    cancelling = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        cancelling = asyncio.create_task(delegations.cancel_delegation(outer.delegation_id))
+        async with asyncio.timeout(3):
+            while work_is_open(outer.work_id):
+                await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(DelegationError):
+            await asyncio.wait_for(pending, 3)
+        await asyncio.wait_for(cancelling, 5)
+        assert starts.empty()
+        assert not manager.session_has_resources(child_id)
+        if setup == "create":
+            assert next(row for row in await manager.db.load_sessions(include_archived=True)
+                        if row["id"] == child_id)["archived"]
+        else:
+            assert delegations.get_delegation(child_id) is previous
+            assert previous.state == "completed"
+    finally:
+        release.set()
+        await asyncio.gather(pending, *([cancelling] if cancelling else []), return_exceptions=True)
 
 
 @pytest.mark.parametrize("conflict_stage", ["state", "terminal"])

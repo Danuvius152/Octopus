@@ -55,6 +55,9 @@ test("Stop keeps returns paused through correction and reconnect until explicit 
       messages: phase === "corrected" || phase === "resumed" ? messages : [],
       next_message_seq: phase === "corrected" || phase === "resumed" ? 4 : 0,
       oldest_loaded_seq: 0, has_more_messages: false, pending_questions: [], subagents: [],
+      active_attempt: snapshots[phase].active_request_id === null ? null : {
+        request_id: snapshots[phase].active_request_id, attempt_id: `attempt-${snapshots[phase].active_request_id}`,
+      },
       dispatch_state: snapshots[phase],
     };
     else if (path.endsWith("/dispatch/resume")) {

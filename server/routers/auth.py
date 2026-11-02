@@ -123,13 +123,12 @@ async def login(req: LoginRequest, request: Request, users: UserMgr) -> LoginRes
             "Too many attempts — wait a few minutes and try again",
         )
     try:
-        user = await users.authenticate(req.username, req.password)
+        user, token = await users.login(req.username, req.password)
     except UserError as e:
         _record_failure(key)
         raise HTTPException(e.status_code, e.message) from e
 
     _FAILURES.pop(key, None)
-    token = await users.issue_token(user["id"])
     logger.info("login: %s", user["username"])
     return LoginResponse(
         token=token,

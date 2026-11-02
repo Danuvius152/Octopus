@@ -1,6 +1,6 @@
 # 账户边界：具体剩余行为与产品政策
 
-> **Status:** proposed — 优先收敛 Agent DELETE 作用域与 Connector refresh 分类，按证据级别保留其余账户政策。
+> **Status:** proposed — 优先收敛 Connector refresh 分类，按证据级别保留其余账户政策。
 
 本页按 `fd7ab9c` 源码重核旧租户审计，只描述剩余变化。静态路径确认、待验证
 性质和产品政策分开；没有运行利用复现或生产检查。现行保证归
@@ -9,20 +9,6 @@
 现场结果和旧漏洞实现不代表当前部署。
 
 ## 源码可确认的剩余行为
-
-### Agent DELETE 的副作用前作用域检查
-
-[DELETE 路由](../../server/routers/agents.py)先调用 scoped `get_agent`，但无结果
-仍调用不带 `user_id` 的 [AgentManager.delete_agent](../../server/agent_manager.py)。
-后者按全局 id 读取、删除行并删除 memory 目录，route 的 `assert agent is not None`
-发生在副作用之后。archive 路径则已在 scoped 查询为空时拒绝，两者不能合并为
-“都已修复”。
-
-静态影响条件是已知目标 Agent id、目标非 system 且没有 session；不能扩写成
-任意 Agent 均可被删除，也不能将事后 500/assert 当作删除未发生的证据。
-修复范围是在副作用前拒绝跨账户目标，并让业务删除入口持有/校验调用者范围。
-完成条件：两账户经公开 DELETE 及业务入口测试拒绝，目标行与 memory 目录
-保持不变；合法删除和 protected/有 session 拒绝行为仍正确。
 
 ### Connector refresh 的临时与永久错误分类
 
@@ -62,6 +48,10 @@
 Agent/credential 绑定与 reauth 交换前 owner 检查、同凭据并发 refresh owner、
 Codex staging 登录已有实现。新开户/邀请注册事务创建 protected default Agent，
 普通启动不替已有账户自动补建。
+
+Agent DELETE 已在实际业务入口要求账户范围，拒绝发生在数据库、memory 和事件
+副作用之前；登录 token 提交已复核本次密码证明。现行行为及双账户/竞争回归归
+[账户合同](../implemented/multi-tenancy.md)，不再作为本计划剩余项。
 
 全局 Connector catalog 的修改、custom kind 与 OAuth client 写操作已要求
 `AdminUser`；已认证账户读取 catalog 与不含 secret 的 client 信息是明确共享

@@ -7,6 +7,18 @@ export interface DispatchState {
   items: { request_id: string; source: string; summary: string; priority: boolean }[];
 }
 
+export interface ActiveAttempt { request_id: string; attempt_id: string }
+
+/** Undefined means incomplete/invalid; only explicit null confirms absence. */
+export function readActiveAttempt(value: unknown, dispatch: DispatchState): ActiveAttempt | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || !("request_id" in value) || !("attempt_id" in value) ||
+      typeof value.request_id !== "string" || !value.request_id ||
+      typeof value.attempt_id !== "string" || !value.attempt_id ||
+      value.request_id !== dispatch.active_request_id) return undefined;
+  return { request_id: value.request_id, attempt_id: value.attempt_id };
+}
+
 export function readDispatchState(value: unknown): DispatchState | null {
   if (!value || typeof value !== "object") return null;
   const data = value as DispatchState;

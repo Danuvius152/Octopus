@@ -36,7 +36,7 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
     if (url.endsWith(`/api/sessions/${sid}`)) {
       body = {
         id: sid, status: "idle", messages: [{ role: "system", type: "result", seq: 2, content: outcome }],
-        next_message_seq: 3, dispatch_state: dispatch, pending_questions: [question], subagents: [],
+        next_message_seq: 3, dispatch_state: dispatch, active_attempt: null, pending_questions: [question], subagents: [],
       };
     } else if (url.endsWith("/bg-tasks")) body = [task];
     else if (url.endsWith("/delegations")) body = [delegation];

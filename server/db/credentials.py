@@ -44,13 +44,14 @@ class CredentialsMixin(DatabaseBase):
         secret_encrypted: str,
         created_at: str,
         user_id: str | None = None,
+        token_expires_at: str | None = None,
     ) -> None:
         async with self.transaction(write=True) as tx:
             await tx.execute(
                 "INSERT INTO backend_credentials "
                 "(id, backend, label, auth_type, created_at, "
-                " status, needs_reconnect, user_id) "
-                "VALUES (?, ?, ?, ?, ?, 'active', 0, ?)",
+                " status, needs_reconnect, user_id, token_expires_at) "
+                "VALUES (?, ?, ?, ?, ?, 'active', 0, ?, ?)",
                 (
                     credential_id,
                     backend,
@@ -58,6 +59,7 @@ class CredentialsMixin(DatabaseBase):
                     auth_type,
                     created_at,
                     user_id,
+                    token_expires_at,
                 ),
             )
             await tx.execute(

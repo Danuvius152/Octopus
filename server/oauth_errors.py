@@ -39,6 +39,17 @@ class RefreshErrorCode(str, Enum):
 REFRESH_ERROR_CODES: tuple[str, ...] = tuple(c.value for c in RefreshErrorCode)
 
 
+class OAuthLoginError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class OAuthCancelled(OAuthLoginError):
+    def __init__(self) -> None:
+        super().__init__("Login cancelled", status_code=409)
+
+
 class OAuthRefreshError(RuntimeError):
     """Provider classification; only explicit token rejection is permanent."""
 

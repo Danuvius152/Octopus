@@ -22,7 +22,7 @@ function mockServer(post: () => Promise<Response>, archived = false) {
     if (path.endsWith("/api/agents")) return Response.json([agent]);
     if (path.endsWith("/api/sessions")) return Response.json([session]);
     if (path.endsWith("/api/sessions/s1")) return Response.json({ ...session, archived, messages: [],
-      dispatch_state: archived ? null : dispatch, pending_questions: [], subagents: [] });
+      dispatch_state: archived ? null : dispatch, active_attempt: null, pending_questions: [], subagents: [] });
     if (path.endsWith("/api/backends")) return Response.json({ available: ["codex"] });
     return Response.json([]);
   });

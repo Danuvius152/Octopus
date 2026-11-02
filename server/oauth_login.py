@@ -6,8 +6,8 @@ Drives the PKCE+manual-paste flow:
      provider for an authorize URL, returns both to the caller.
   2. User opens URL, signs in, copies the `<code>#<state>` blob shown
      on the provider's callback page.
-  3. `submit_code(login_id, raw_code)` splits + validates state, calls
-     the provider's token exchange, then its api-key mint.
+  3. `complete(request, credentials)` owns state validation, token exchange,
+     api-key mint and the complete local credential commit in one task.
 
 Per-provider knowledge (endpoints, client id, scopes, payload shapes)
 lives in `server/oauth_providers.py`. This module owns lifecycle:
@@ -25,7 +25,9 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .oauth_errors import ScopeMissingError
+from .harness.login import OAuthCompletion, OAuthCredentialWriter
+from .models import CredentialInfo, OAuthCancelResponse
+from .oauth_errors import OAuthCancelled, OAuthLoginError, ScopeMissingError
 from .oauth_providers import OAuthProvider, OAuthTokenSet, get_provider
 
 logger = logging.getLogger(__name__)
@@ -36,11 +38,14 @@ DEFAULT_PROVIDER = "claude-code"
 
 # Login attempts that never complete shouldn't accumulate forever.
 _LOGIN_TTL_SECONDS = 15 * 60
+# Match the device-login retirement grace; a slow provider remains owned.
+_CANCEL_TIMEOUT_SECONDS = 5.0
 
 
 class LoginState(str, Enum):
     awaiting_code = "awaiting_code"
     finalizing = "finalizing"
+    committing = "committing"
     success = "success"
     error = "error"
     cancelled = "cancelled"
@@ -52,14 +57,6 @@ class LoginSession:
     url: str
     provider_name: str = DEFAULT_PROVIDER
     state: LoginState = LoginState.awaiting_code
-    # Populated when the user's account can mint a long-lived API key
-    # (Console org with `org:create_api_key` scope). Mutually exclusive
-    # with `oauth_tokens`.
-    token: str | None = None
-    # Populated when the user's account can't mint an API key (Pro/Max
-    # subscriber without an org). The OAuthTokenSet is what gets persisted
-    # as the credential's secret in that case.
-    oauth_tokens: OAuthTokenSet | None = None
     message: str | None = None
     # Who started this login (multi-tenancy.md §5). The id is unguessable, which
     # is why nothing has gone wrong, not a reason it is authorised: without this
@@ -69,6 +66,8 @@ class LoginSession:
     _verifier: str = field(default="", repr=False)
     _state: str = field(default="", repr=False)
     _created_at: float = field(default=0.0, repr=False)
+    _request: OAuthCompletion | None = field(default=None, repr=False)
+    _task: asyncio.Task[CredentialInfo] | None = field(default=None, repr=False)
 
 
 class OAuthLoginManager:
@@ -76,6 +75,7 @@ class OAuthLoginManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, LoginSession] = {}
+        self._closing = False
 
     # ---------------------------------------------------------------- public
 
@@ -90,6 +90,8 @@ class OAuthLoginManager:
         Returns the LoginSession with `state == awaiting_code` and `url`
         populated. Raises KeyError if the provider isn't registered.
         """
+        if self._closing:
+            raise OAuthLoginError("OAuth login admission is closed", status_code=503)
         provider = get_provider(provider_name)
         verifier = _gen_verifier()
         state = _gen_state()
@@ -116,91 +118,125 @@ class OAuthLoginManager:
         )
         return session
 
-    async def submit_code(self, login_id: str, raw_code: str) -> LoginSession:
-        """Exchange the user-pasted code for a long-lived API key."""
-        session = self._sessions.get(login_id)
-        if session is None:
-            raise KeyError(f"unknown login id: {login_id}")
-        if session.state != LoginState.awaiting_code:
-            raise RuntimeError(
-                f"login {login_id} is in state {session.state}, cannot accept code"
-            )
+    async def complete(self, request: OAuthCompletion, credentials: OAuthCredentialWriter) -> CredentialInfo:
+        session = self._sessions.get(request.login_id)
+        if session is None or session.user_id != request.user_id:
+            raise KeyError("unknown login_id")
+        if session._request is not None and session._request != request:
+            raise OAuthLoginError("Login completion parameters conflict with the original request", status_code=409)
+        if session._task is None:
+            if self._closing:
+                raise OAuthLoginError("OAuth login admission is closed", status_code=503)
+            if session.state == LoginState.cancelled:
+                raise OAuthCancelled()
+            # Fix identity and retain the only task before validation can await.
+            session._request = request
+            session.state = LoginState.finalizing
+            session._task = asyncio.create_task(self._complete(session, request, credentials), name=f"oauth-complete-{session.id}")
+            session._task.add_done_callback(self._observe)
+        return await self._wait(session)
 
-        provider = get_provider(session.provider_name)
-        code, code_state = _split_code(raw_code)
-        if code_state and code_state != session._state:
-            session.state = LoginState.error
-            session.message = "state mismatch — possible CSRF; restart the login"
-            logger.warning("OAuth login %s: %s", login_id, session.message)
-            raise RuntimeError(session.message)
+    @staticmethod
+    def _observe(task: asyncio.Task[CredentialInfo]) -> None:
+        if not task.cancelled():
+            task.exception()
 
-        session.state = LoginState.finalizing
-        logger.info("OAuth login %s: exchanging code for access token", login_id)
+    @staticmethod
+    async def _wait(session: LoginSession) -> CredentialInfo:
+        assert session._task is not None
         try:
-            token_set = await provider.exchange_code(
-                code=code, code_verifier=session._verifier, state=session._state
-            )
-        except Exception as e:
-            session.state = LoginState.error
-            session.message = f"token exchange failed: {e}"
-            logger.warning("OAuth login %s: %s", login_id, session.message)
-            raise RuntimeError(session.message) from e
+            return await asyncio.shield(session._task)
+        except asyncio.CancelledError:
+            if session._task.cancelled() and session.state == LoginState.cancelled:
+                raise OAuthCancelled() from None
+            raise
 
-        logger.info(
-            "OAuth login %s: minting long-lived API key", login_id
-        )
+    @staticmethod
+    def _require_active(session: LoginSession) -> None:
+        if session.state == LoginState.cancelled:
+            raise OAuthCancelled()
+
+    async def _complete(self, session: LoginSession, request: OAuthCompletion, credentials: OAuthCredentialWriter) -> CredentialInfo:
         try:
-            api_key = await provider.mint_api_key(token_set.access_token)
-        except ScopeMissingError as e:
-            # Personal-account / Pro / Max user — no org, so the OAuth
-            # token wasn't granted org:create_api_key. Keep the token set
-            # itself; the credential will use CLAUDE_CODE_OAUTH_TOKEN with
-            # periodic refresh instead of a long-lived sk-ant- key.
-            if token_set.refresh_token is None:
-                session.state = LoginState.error
-                session.message = (
-                    "API key creation failed and the OAuth response didn't "
-                    "include a refresh token — can't fall back to OAuth auth"
-                )
-                logger.warning("OAuth login %s: %s", login_id, session.message)
-                raise RuntimeError(session.message) from e
-            session.oauth_tokens = token_set
+            await credentials.validate(request)
+            self._require_active(session)
+            code, code_state = _split_code(request.code)
+            if code_state and code_state != session._state:
+                raise OAuthLoginError("state mismatch — possible CSRF; restart the login")
+            provider = get_provider(session.provider_name)
+            try:
+                tokens = await provider.exchange_code(code=code, code_verifier=session._verifier, state=session._state)
+            except Exception as error:
+                raise OAuthLoginError(f"token exchange failed: {error}") from error
+            self._require_active(session)
+            material: str | OAuthTokenSet
+            try:
+                material = await provider.mint_api_key(tokens.access_token)
+                if not material:
+                    raise OAuthLoginError("API key creation returned no usable token")
+            except ScopeMissingError as error:
+                if tokens.refresh_token is None:
+                    raise OAuthLoginError("API key creation failed and the OAuth response didn't include a refresh token") from error
+                material = tokens
+            except Exception as error:
+                raise OAuthLoginError(f"API key creation failed: {error}") from error
+            self._require_active(session)
+            # Explicit cancellation and this transition run without an await.
+            session.state = LoginState.committing
+            result = await credentials.commit(request, material)
             session.state = LoginState.success
-            logger.info(
-                "OAuth login %s: missing %s scope — storing OAuth token set instead",
-                login_id,
-                e.missing_scope,
-            )
-            return session
-        except Exception as e:
+            logger.info("OAuth login %s: credential committed", session.id)
+            return result
+        except asyncio.CancelledError:
+            if session.state == LoginState.cancelled:
+                raise OAuthCancelled() from None
+            raise
+        except OAuthCancelled:
+            raise
+        except Exception as error:
+            if session.state == LoginState.cancelled:
+                raise OAuthCancelled() from error
             session.state = LoginState.error
-            session.message = f"API key creation failed: {e}"
-            logger.warning("OAuth login %s: %s", login_id, session.message)
-            raise RuntimeError(session.message) from e
+            session.message = str(error)
+            raise
+        finally:
+            session._verifier = ""
 
-        session.token = api_key
-        session.state = LoginState.success
-        logger.info("OAuth login %s: success", login_id)
-        return session
-
-    async def cancel(self, login_id: str) -> None:
+    async def cancel(self, login_id: str) -> OAuthCancelResponse:
         session = self._sessions.get(login_id)
         if session is None:
-            return
-        if session.state in (LoginState.success, LoginState.error, LoginState.cancelled):
-            return
-        session.state = LoginState.cancelled
-        session.message = "cancelled by user"
-        logger.info("OAuth login %s: cancelled", login_id)
+            raise KeyError("unknown login_id")
+        if session.state not in (LoginState.committing, LoginState.success, LoginState.error, LoginState.cancelled):
+            session.state = LoginState.cancelled
+            session.message = "cancelled by user"
+            if session._task is not None:
+                session._task.cancel()
+        if session._task is not None:
+            try:
+                async with asyncio.timeout(_CANCEL_TIMEOUT_SECONDS):
+                    await self._wait(session)
+            except OAuthCancelled:
+                pass
+            except TimeoutError as error:
+                raise OAuthLoginError("Login retirement is not confirmed; wait and try again", status_code=503) from error
+        return OAuthCancelResponse(status="already_completed" if session.state == LoginState.success else "cancelled")
 
     def get(self, login_id: str) -> LoginSession | None:
         return self._sessions.get(login_id)
 
     def drain_blockers(self) -> tuple[str, ...]:
-        return ("token exchange",) if any(session.state == LoginState.finalizing for session in self._sessions.values()) else ()
+        return ("OAuth completion",) if any(session._task is not None and not session._task.done() for session in self._sessions.values()) else ()
+
+    def begin_shutdown(self) -> None:
+        self._closing = True
 
     async def shutdown(self) -> None:
-        """Nothing to tear down (no subprocesses) — just drop state."""
+        self.begin_shutdown()
+        results = await asyncio.gather(*(self.cancel(session.id) for session in tuple(self._sessions.values())
+                                        if session._task is None or not session._task.done()), return_exceptions=True)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise RuntimeError("OAuth login retirement is unconfirmed") from failures[0]
         self._sessions.clear()
 
     # ---------------------------------------------------------------- internals
@@ -213,6 +249,7 @@ class OAuthLoginManager:
             sid
             for sid, s in self._sessions.items()
             if now - s._created_at > _LOGIN_TTL_SECONDS
+            and (s._task is None or s._task.done())
         ]
         for sid in stale:
             self._sessions.pop(sid, None)

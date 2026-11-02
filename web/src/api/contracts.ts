@@ -2192,16 +2192,7 @@ export interface paths {
         put?: never;
         /**
          * Oauth Complete
-         * @description Submit the code copied from the OAuth callback, exchange it for a
-         *     long-lived API key via Anthropic's OAuth + api-key endpoints, and
-         *     persist the credential.
-         *
-         *     Two completion shapes from the orchestrator:
-         *       - `session.token` set → Console org user with a fresh sk-ant- key.
-         *         Stored as auth_type=oauth, no expiry tracking needed.
-         *       - `session.oauth_tokens` set → Pro/Max subscriber whose token can't
-         *         mint an API key. We store the full OAuthTokenSet as JSON, with
-         *         token_expires_at populated so the resolver knows when to refresh.
+         * @description Await the original login's complete credential commit.
          */
         post: operations["oauth_complete_api_credentials_oauth_complete_post"];
         delete?: never;
@@ -2219,11 +2210,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Oauth Cancel
-         * @description Abort an in-flight login (kills the subprocess). Idempotent, and only
-         *     for a login this account started.
-         */
+        /** Oauth Cancel */
         post: operations["oauth_cancel_api_credentials_oauth_cancel_post"];
         delete?: never;
         options?: never;
@@ -4790,6 +4777,14 @@ export interface components {
         OAuthCancelRequest: {
             /** Login Id */
             login_id: string;
+        };
+        /** OAuthCancelResponse */
+        OAuthCancelResponse: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "cancelled" | "already_completed";
         };
         /** OAuthCompleteRequest */
         OAuthCompleteRequest: {
@@ -10723,11 +10718,13 @@ export interface operations {
         };
         responses: {
             /** @description Successful Response */
-            204: {
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["OAuthCancelResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

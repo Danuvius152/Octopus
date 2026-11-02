@@ -151,7 +151,7 @@ it("loads the replacement session's actual queue after an archive broadcast", as
   useSessionStore.setState({ token: "archive-test", activeSessionId: "archived-old", dispatchStates: {}, dispatchUnavailable: {},
     sessions: [{ id: "archived-old", name: "Archived" } as SessionInfo] });
   const dispatch = { generation: "archive-service", revision: 0, paused: false, active_request_id: null, items: [] };
-  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "archive-replacement", messages: [], dispatch_state: dispatch })));
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "archive-replacement", messages: [], dispatch_state: dispatch, active_attempt: null })));
   handleWsMessage({ type: "session_archived", old_session_id: "archived-old", new_session_id: "archive-replacement" });
   await vi.waitFor(() => expect(useSessionStore.getState().dispatchStates["archive-replacement"]).toEqual(dispatch));
   vi.unstubAllGlobals();

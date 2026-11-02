@@ -9,6 +9,8 @@ admin disabling themselves — is refused.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -132,6 +134,47 @@ async def test_a_successful_login_clears_the_count(client):
                 "/api/auth/login", json={"username": "archer", "password": "wrong"}
             )
         ).status_code == 401
+
+
+@pytest.mark.parametrize("change", ["password", "disable", "delete"])
+async def test_login_rechecks_password_proof_when_committing_token(client, monkeypatch, change):
+    c, users, db = client
+    user = await users.create_user(username="archer", password="password1")
+    await c.post("/api/auth/login", json={"username": "archer", "password": "wrong"})
+    verified, release = asyncio.Event(), asyncio.Event()
+    authenticate = users.authenticate
+
+    async def paused(username, password):
+        observed = await authenticate(username, password)
+        verified.set()
+        await release.wait()
+        return observed
+
+    monkeypatch.setattr(users, "authenticate", paused)
+    pending = asyncio.create_task(c.post(
+        "/api/auth/login", json={"username": "archer", "password": "password1"}
+    ))
+    try:
+        await asyncio.wait_for(verified.wait(), 2)
+        if change == "password":
+            await users.set_password(user["id"], "changed-password")
+        elif change == "disable":
+            await users.set_disabled(user["id"], True)
+        else:
+            async with db.transaction(write=True) as tx:
+                await tx.execute("DELETE FROM users WHERE id = ?", (user["id"],))
+        release.set()
+        response = await asyncio.wait_for(pending, 2)
+        assert response.status_code == 401
+        assert "token" not in response.json()
+        assert await db.list_tokens(user["id"]) == []
+        assert [len(attempts) for attempts in auth_router._FAILURES.values()] == [2]
+        if change == "disable":
+            await users.set_disabled(user["id"], False)
+            assert await db.list_tokens(user["id"]) == []
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
 
 
 @pytest.mark.asyncio

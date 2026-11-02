@@ -4,15 +4,17 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { CommandNotices } from "../components/CommandNotices";
 import { useSessionStore } from "../stores/sessionStore";
 import { useWebSocket } from "./useWebSocket";
+import { observeSession } from "../lib/hydrateSession";
 
 
 beforeEach(() => {
   vi.useFakeTimers();
   Socket.reset(1);
   vi.stubGlobal("WebSocket", Socket);
+  useSessionStore.setState(useSessionStore.getInitialState(), true);
   useSessionStore.getState().setToken("receipt-test");
   useSessionStore.setState({ controlCommands: {}, activeAttempts: { s: { request_id: "r", attempt_id: "a" } },
-    dispatchStates: { s: { generation: "g", revision: 1, active_request_id: "r", paused: false, items: [] } } });
+    dispatchGeneration: "g", dispatchStates: { s: { generation: "g", revision: 1, active_request_id: "r", paused: false, items: [] } } });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -31,6 +33,33 @@ it("reports disconnected controls and correlates Stop with its attempt", async (
     client_command_id: payload.client_command_id, accepted: true }) }));
   expect((await pending).accepted).toBe(true);
   expect(useSessionStore.getState().controlCommands[payload.client_command_id]).toBeUndefined();
+});
+
+it.each([
+  ["g", "next-request", "a2"], ["g", "r", "a2"], ["g", "r", null], ["g", null, null], ["new-service", "r2", "a2"],
+])("hydrates a coherent Stop target %s / %s / %s before sending the control", async (generation, requestId, attemptId) => {
+  const dispatch = { generation, revision: 2, active_request_id: requestId, paused: false, items: [] };
+  const active = attemptId === null ? null : { request_id: requestId, attempt_id: attemptId };
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "s", messages: [], dispatch_state: dispatch, active_attempt: active })));
+  const { result } = renderHook(useWebSocket);
+  const targets: unknown[] = [];
+  const unsubscribe = useSessionStore.subscribe((state) => {
+    if (state.dispatchStates.s?.revision === 2) targets.push(state.activeAttempts.s ?? null);
+  });
+  try {
+    await act(async () => { await observeSession("s", "detail").done; });
+    expect(useSessionStore.getState().activeAttempts.s ?? null).toEqual(active);
+    expect(targets.every((target) => JSON.stringify(target) === JSON.stringify(active))).toBe(true);
+    const pending = result.current.interrupt("s");
+    const socket = Socket.instances[0];
+    const payload = JSON.parse(socket.send.mock.calls[0][0]);
+    expect(payload).toMatchObject({ type: "interrupt", request_id: requestId, attempt_id: attemptId, generation, revision: 2 });
+    act(() => socket.onmessage?.({ data: JSON.stringify({ type: "command_receipt", operation: "interrupt", session_id: "s",
+      client_command_id: payload.client_command_id, accepted: true }) }));
+    expect((await pending).accepted).toBe(true);
+  } finally {
+    unsubscribe();
+  }
 });
 
 it("marks an unconfirmed Stop unknown and never replays it on reconnect", async () => {
@@ -105,7 +134,7 @@ it("keeps live card completions across delayed reconnect responses and accepts n
   });
   const finish = async (status: string, newJobs = false) => {
     await act(async () => {
-      waiting.get("/api/sessions/s")!(Response.json({ messages: [],
+      waiting.get("/api/sessions/s")!(Response.json({ messages: [], active_attempt: null,
         dispatch_state: { generation: "g", revision: 1, active_request_id: "r", paused: false, items: [] }, subagents: [
         { task_id: "child", tool_call_id: "call", status, summary: "snapshot" },
       ] }));

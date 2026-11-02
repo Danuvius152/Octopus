@@ -40,10 +40,12 @@ async def fail_destination_owner(manager, session, monkeypatch):
 
 async def test_research_retains_report_and_reports_failed_delivery_when_its_destination_owner_has_ended(runtime, monkeypatch):
     manager, db, session, _, _, events = runtime
-    owner = await fail_destination_owner(manager, session, monkeypatch)
     reports = []
+    started, release = asyncio.Event(), asyncio.Event()
 
     async def report(*args, **kwargs):
+        started.set()
+        await release.wait()
         reports.append("one report")
         return _fake_report()
 
@@ -52,6 +54,9 @@ async def test_research_retains_report_and_reports_failed_delivery_when_its_dest
     research.bind(manager, db)
     try:
         job = await research.start(session.id, "Retain this completed report")
+        await asyncio.wait_for(started.wait(), 2)
+        owner = await fail_destination_owner(manager, session, monkeypatch)
+        release.set()
         await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 2)
         row = await db.get_research_job(job["id"])
         assert row["status"] == "completed" and row["injection_status"] == "failed"
@@ -62,6 +67,7 @@ async def test_research_retains_report_and_reports_failed_delivery_when_its_dest
         assert any(event.get("type") == "research_delivery" and event.get("injection_status") == "failed" for event in events)
         assert manager._session_owners[id(session)] is owner and owner.failed
     finally:
+        release.set()
         await asyncio.gather(research.shutdown(), return_exceptions=True)
 
 

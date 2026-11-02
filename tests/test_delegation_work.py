@@ -57,11 +57,15 @@ async def work_runtime(monkeypatch, tmp_path, short_process_shutdown):
 
     def argv(context):
         starts.put_nowait(context)
+        # Select the original round, since prompts also carry ancestor context.
+        scope = next((verify(entry.credential) for entry in context.mcp_servers if entry.credential), None)
+        round_ = delegations.get_delegation(scope.session_id) if scope else None
+        request = round_.request if round_ is not None and round_.work_id == scope.work_id else context.prompt
         code = "import json,time\n"
         code += "print(json.dumps({'type':'thread.started','thread_id':'scripted'}),flush=True)\n"
-        if "controlled" in context.prompt:
+        if "controlled" in request:
             code += f"from pathlib import Path\nwhile not Path({str(tmp_path / 'release')!r}).exists(): time.sleep(.01)\n"
-        elif "held" in context.prompt:
+        elif "held" in request:
             code += "time.sleep(30)\n"
         code += "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'reply'}}),flush=True)\n"
         code += "print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)\n"

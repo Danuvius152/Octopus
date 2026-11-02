@@ -317,8 +317,12 @@ class AgentManager:
         return await self.db.load_agents(user_id=user_id)
 
     @_memory_mutation
-    async def delete_agent(self, agent_id: str) -> None:
-        agent = await self.db.get_agent(agent_id)
+    async def delete_agent(
+        self, agent_id: str, *, user_id: str | None
+    ) -> dict[str, Any]:
+        if user_id is None:
+            raise AgentError("Agent not found")
+        agent = await self.db.get_agent(agent_id, user_id=user_id)
         if agent is None:
             raise AgentError("Agent not found")
         if agent["is_system"]:
@@ -332,3 +336,4 @@ class AgentManager:
         # Hard delete also removes the agent's memory dir. Archiving keeps it,
         # mirroring archived-session history.
         agent_memory.remove_agent_dir(agent_id, owner_id)
+        return agent

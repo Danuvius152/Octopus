@@ -790,6 +790,10 @@ class DelegationManager:
                 if child.parent_work_id == item.work_id and child.work_id not in owned:
                     branch.append(child)
                     owned.add(child.work_id)
+        # Saving one round may suspend while a descendant is still running.
+        # Revoke the whole captured branch before any persistence or cleanup.
+        for item in branch:
+            close_work(item.work_id)
         affected = []
         refusal: DelegationError | None = None
         for item in branch:

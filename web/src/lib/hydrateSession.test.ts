@@ -10,7 +10,10 @@ function deferred() {
   const promise = new Promise<Response>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-const json = (value: unknown) => new Response(JSON.stringify(value));
+// Real session details always distinguish a missing attempt from explicit null.
+const json = (value: unknown) => new Response(JSON.stringify(
+  value && typeof value === "object" && "dispatch_state" in value ? { active_attempt: null, ...value } : value
+));
 const dispatch = (generation: string) => ({ generation, revision: 0, paused: false, active_request_id: null, items: [] });
 
 beforeEach(() => {
@@ -63,6 +66,101 @@ it("captures the background baseline before fetch", async () => {
   response.resolve(json([bg]));
   await loaded;
   expect(useSessionStore.getState().bgTasks.s[0].stdout).toBe("live output");
+});
+
+it.each(["new-attempt", "attempt-cleared", "new-dispatch"])("rejects an old execution snapshot after %s was observed", async (observation) => {
+  const initial = { ...dispatch("service"), active_request_id: "r", revision: 1 };
+  useSessionStore.getState().applyDispatchState("s", initial);
+  if (observation !== "attempt-cleared") useSessionStore.getState().setActiveAttempt("s", { request_id: "r", attempt_id: "a1" });
+  const response = deferred();
+  const confirmation = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(response.promise).mockReturnValueOnce(confirmation.promise));
+  const read = observeSession("s", "detail");
+  handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "r", attempt_id: "a2" });
+  if (observation === "attempt-cleared") handleWsMessage({ type: "result", session_id: "s", request_id: "r", content: "finished" });
+  if (observation === "new-dispatch") handleWsMessage({ type: "dispatch_state", session_id: "s", dispatch_state: { ...initial, revision: 2 } });
+  const current = useSessionStore.getState();
+  response.resolve(json({ id: "s", messages: [], dispatch_state: initial,
+    active_attempt: observation === "new-attempt" ? null : { request_id: "r", attempt_id: "a1" } }));
+  expect(await read.done).not.toBeNull();
+  expect(useSessionStore.getState().dispatchStates.s).toBe(current.dispatchStates.s);
+  expect(useSessionStore.getState().activeAttempts.s).toBe(current.activeAttempts.s);
+  read.cancel();
+  confirmation.resolve(json({ id: "s", messages: [], dispatch_state: initial, active_attempt: null }));
+});
+
+it.each([undefined, {}, { request_id: "other", attempt_id: "a2" }])("refuses incomplete or inconsistent attempt data %j without changing dispatch", async (active) => {
+  const initial = { ...dispatch("service"), active_request_id: "r", revision: 1 };
+  useSessionStore.getState().applyDispatchState("s", initial);
+  useSessionStore.getState().setActiveAttempt("s", { request_id: "r", attempt_id: "a1" });
+  const before = useSessionStore.getState();
+  // Deliberately bypass the valid-detail factory to test the raw trust boundary.
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "s", messages: [], dispatch_state: { ...initial, revision: 2 }, active_attempt: active })));
+  expect(await observeSession("s", "detail").done).not.toBeNull();
+  expect(useSessionStore.getState().dispatchStates.s).toBe(before.dispatchStates.s);
+  expect(useSessionStore.getState().activeAttempts.s).toBe(before.activeAttempts.s);
+  expect(useSessionStore.getState().dispatchUnavailable.s).toBe(true);
+});
+
+it("clears every old attempt when another session observes a new service generation", () => {
+  useSessionStore.getState().applyDispatchState("s", dispatch("old"));
+  for (const id of ["s", "other"]) useSessionStore.getState().setActiveAttempt(id, { request_id: "r", attempt_id: "a" });
+  handleWsMessage({ type: "dispatch_state", session_id: "third", dispatch_state: dispatch("new") });
+  expect(useSessionStore.getState().activeAttempts).toEqual({});
+  expect(useSessionStore.getState().executionObservations).toEqual({ third: 1 });
+});
+
+it.each([false, true])("fills reconnect history and task results with one confirmation; another live change=%s", async (changedAgain) => {
+  const initial = { ...dispatch("service"), revision: 1, active_request_id: "r" };
+  useSessionStore.getState().applyDispatchState("s", initial);
+  useSessionStore.getState().setActiveAttempt("s", { request_id: "r", attempt_id: "cached-a1" });
+  const first = deferred(), confirmation = deferred();
+  let detailReads = 0;
+  vi.stubGlobal("fetch", vi.fn((url: string) => {
+    if (url.endsWith("/s")) return ++detailReads === 1 ? first.promise : confirmation.promise;
+    if (url.endsWith("bg-tasks")) return Promise.resolve(json([{ id: "bg", status: "completed", stdout: "Saved output" }]));
+    return Promise.resolve(json([]));
+  }));
+  const read = observeSession("s");
+  handleWsMessage({ type: "dispatch_state", session_id: "s", dispatch_state: { ...initial, revision: 2 } });
+  handleWsMessage({ type: "assistant_text", session_id: "s", seq: 1, content: "Live tail" });
+  first.resolve(json({ id: "s", messages: [{ role: "user", type: "text", seq: 0, content: "Missing history" }],
+    next_message_seq: 1, dispatch_state: initial, active_attempt: { request_id: "r", attempt_id: "cached-a1" },
+    subagents: [{ tool_call_id: "native", status: "completed", summary: "Saved child answer" }] }));
+  try {
+    await read.done;
+    expect(useSessionStore.getState().messages.s.map((row) => row.content)).toEqual(["Missing history", "Live tail"]);
+    expect(useSessionStore.getState().subagents.s.native.summary).toBe("Saved child answer");
+    await vi.waitFor(() => expect(useSessionStore.getState().bgTasks.s?.[0].stdout).toBe("Saved output"));
+    expect(useSessionStore.getState().dispatchStates.s.revision).toBe(2);
+    expect(detailReads).toBe(2);
+    if (changedAgain) handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "r", attempt_id: "latest-a3" });
+    confirmation.resolve(json({ id: "s", messages: [{ role: "user", type: "text", seq: 2, content: "Confirmation history" }],
+      next_message_seq: 3, dispatch_state: { ...initial, revision: 2 }, active_attempt: { request_id: "r", attempt_id: "actual-a2" } }));
+    await vi.waitFor(() => expect(useSessionStore.getState().messages.s.some((row) => row.seq === 2)).toBe(true));
+    await vi.waitFor(() => expect(useSessionStore.getState().activeAttempts.s.attempt_id).toBe(changedAgain ? "latest-a3" : "actual-a2"));
+    expect(detailReads).toBe(2);
+  } finally {
+    confirmation.resolve(json({ id: "s", messages: [], dispatch_state: { ...initial, revision: 2 }, active_attempt: null }));
+    read.cancel();
+  }
+});
+
+it("ending the original observation also retires its pending execution confirmation", async () => {
+  const initial = { ...dispatch("service"), active_request_id: "r" };
+  useSessionStore.getState().applyDispatchState("s", initial);
+  const first = deferred(), confirmation = deferred();
+  const fetcher = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(confirmation.promise);
+  vi.stubGlobal("fetch", fetcher);
+  const read = observeSession("s", "detail");
+  handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "r", attempt_id: "live" });
+  first.resolve(json({ id: "s", messages: [], dispatch_state: initial, active_attempt: null }));
+  await read.done;
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  read.cancel();
+  confirmation.resolve(json({ id: "s", messages: [], dispatch_state: initial, active_attempt: null }));
+  await Promise.resolve(); await Promise.resolve();
+  expect(useSessionStore.getState().activeAttempts.s.attempt_id).toBe("live");
 });
 
 it("retains the service identity captured by its own read", async () => {

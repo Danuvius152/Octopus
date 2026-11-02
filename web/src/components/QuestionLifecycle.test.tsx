@@ -98,7 +98,7 @@ it("keeps an already closed question closed when an old pending snapshot arrives
   expect(await screen.findByText(closed.message)).toBeTruthy();
   act(() => {
     applySessionSnapshot(sid, {
-      dispatch_state: dispatch, next_message_seq: 2,
+      active_attempt: null, dispatch_state: dispatch, next_message_seq: 2,
       messages: [{ role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: { questions: [question] } }],
       pending_questions: [{ question_id: "q1", questions: [question] }],
     });
@@ -115,7 +115,7 @@ it("closes a form when history records its resolution before the pending snapsho
   expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
   act(() => {
     applySessionSnapshot(sid, {
-      dispatch_state: emptyDispatch,
+      active_attempt: null, dispatch_state: emptyDispatch,
       next_message_seq: 3,
       messages: [
         { role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: { questions: [question] } },
@@ -154,7 +154,7 @@ it("keeps a newer WebSocket question answerable when the earlier HTTP refetch co
   expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
   await act(async () => {
     resolveDetail(new Response(JSON.stringify({
-      dispatch_state: dispatch, messages: [], next_message_seq: 1, pending_questions: [],
+      active_attempt: null, dispatch_state: dispatch, messages: [], next_message_seq: 1, pending_questions: [],
     })));
     await detail;
   });
@@ -176,7 +176,7 @@ it("retains the newer live form while keeping a resolved question out of an olde
   });
   expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
   act(() => applySessionSnapshot(sid, {
-    dispatch_state: emptyDispatch,
+    active_attempt: null, dispatch_state: emptyDispatch,
     next_message_seq: 2,
     messages: [{ role: "assistant", type: "question_request", seq: 1,
       tool_use_id: "q1", tool_input: { questions: [question] } }],
@@ -195,7 +195,7 @@ it("clears live questions on a service generation change and rejects the retired
   renderChat();
   expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
   act(() => applySessionSnapshot(sid, {
-    dispatch_state: { ...dispatch, generation: "service-b" },
+    active_attempt: null, dispatch_state: { ...dispatch, generation: "service-b" },
     next_message_seq: 1, messages: [], pending_questions: [],
   }));
   expect(screen.queryByRole("button", { name: "Submit" })).toBeNull();
@@ -204,8 +204,8 @@ it("clears live questions on a service generation change and rejects the retired
   expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
   act(() => {
     expect(applySessionSnapshot(sid, {
-      dispatch_state: dispatch, next_message_seq: 5, messages: [], pending_questions: [],
-    })).toBe(false);
+      active_attempt: null, dispatch_state: dispatch, next_message_seq: 5, messages: [], pending_questions: [],
+    })).toBeNull();
   });
   expect(screen.getByRole("button", { name: "Submit" })).toBeTruthy();
   expect(useSessionStore.getState().pendingQuestions[sid][0].question_id).toBe("q2");

@@ -30,7 +30,7 @@ from .codex_control import controller_message, turn_message
 from .driver import ArgvDriver
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
 from .harness import Harness
-from .login import LoginMethod
+from .login import LoginMethod, OAuthCompletion, OAuthCredentialWriter
 from .model_settings import ModelOption, ModelSettings
 from .profile import (
     EventParser,
@@ -891,7 +891,7 @@ class _DeviceLoginDriver:
             user_id=user_id,
         )
 
-    async def submit_code(self, login_id: str, code: str):
+    async def complete_oauth(self, request: OAuthCompletion, credentials: OAuthCredentialWriter):
         raise NotImplementedError("device_code login polls; it has no code to submit")
 
     def get(self, login_id: str):

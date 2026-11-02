@@ -14,10 +14,15 @@ from server.main import app
 from server.routers import credentials as creds_router
 from server.session_manager import session_manager
 from tests.accounts import create_account
+from tests.oauth_provider import patch_provider
 
 
 @pytest.fixture
-async def client():
+async def client(monkeypatch):
+    from server import oauth_login
+
+    oauth = oauth_login.OAuthLoginManager()
+    monkeypatch.setattr(oauth_login, "oauth_login_manager", oauth)
     db = Database(":memory:")
     await db.initialize()
     _, bearer = await create_account(db)
@@ -26,6 +31,7 @@ async def client():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {bearer}"}) as c:
         yield c, db
+    await oauth.shutdown()
     await db.close()
     creds_router.set_db(None)
 
@@ -158,54 +164,10 @@ async def test_create_rejects_empty_secret(client):
 # ---------------------------------------------------------------------------
 
 
-class _StubLoginSession:
-    """Stand-in for server.oauth_login.LoginSession that the orchestrator
-    would have produced. Lets the REST tests run without spawning a real
-    `claude` subprocess."""
-
-    def __init__(
-        self,
-        state,
-        url=None,
-        token=None,
-        oauth_tokens=None,
-        message=None,
-    ):
-
-        self.id = "login-xyz"
-        self.state = state
-        self.url = url
-        self.token = token
-        self.oauth_tokens = oauth_tokens
-        self.message = message
-        # The real LoginSession has more fields the router doesn't read;
-        # we deliberately omit them to keep the stub small.
-
-    def __getattr__(self, name):  # pragma: no cover — defensive
-        return None
-
-
-async def _login_exists(monkeypatch, database, login_id: str = "login-xyz") -> None:
-    """Let the route find the login record for `login_id`.
-
-    `oauth/complete` and `oauth/cancel` check that the login belongs to the
-    caller before acting on it — only the account that started a sign-in may
-    finish it (multi-tenancy.md §5). A test that patches `submit_code` in
-    isolation leaves the manager with no record at all, so that check would
-    answer 404 for reasons the test is not about.
-    """
-    from server import oauth_login
-
-    owner = await database.get_system_agent()
-    monkeypatch.setattr(
-        oauth_login.OAuthLoginManager,
-        "get",
-        lambda self, lid: (
-            _make_login_for(owner["user_id"])
-            if lid == login_id
-            else None
-        ),
-    )
+async def _start_login(connection):
+    response = await connection.post("/api/credentials/oauth/start", json={})
+    assert response.status_code == 201, response.text
+    return response.json()["login_id"]
 
 
 @pytest.mark.asyncio
@@ -214,7 +176,7 @@ async def test_oauth_start_returns_login_id_and_url(client, monkeypatch):
     from server.oauth_login import LoginState
 
     async def fake_start(self, *, user_id=None):
-        return _StubLoginSession(LoginState.awaiting_code, url="https://claude.ai/oauth/authorize?fake")
+        return oauth_login.LoginSession(id="login-xyz", state=LoginState.awaiting_code, url="https://claude.ai/oauth/authorize?fake")
 
     monkeypatch.setattr(oauth_login.OAuthLoginManager, "start", fake_start)
 
@@ -270,24 +232,13 @@ async def test_oauth_start_rejects_codex(client):
 
 @pytest.mark.asyncio
 async def test_oauth_complete_persists_credential(client, monkeypatch):
-    from server import oauth_login
-    from server.crypto import decrypt
-    from server.oauth_login import LoginState
-
-    async def fake_submit(self, login_id, code):
-        assert login_id == "login-xyz"
-        assert code == "the-code"
-        return _StubLoginSession(
-            LoginState.success, token="sk-ant-fake-oauth-token-abcdef1234567890"
-        )
-
-    monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    await _login_exists(monkeypatch, client[1])
+    patch_provider(monkeypatch, api_key="sk-ant-fake-oauth-token-abcdef1234567890")
+    login_id = await _start_login(client[0])
 
     c, db = client
     res = await c.post(
         "/api/credentials/oauth/complete",
-        json={"login_id": "login-xyz", "code": "the-code", "label": "Personal"},
+        json={"login_id": login_id, "code": "the-code", "label": "Personal"},
         headers=c.headers,
     )
     assert res.status_code == 201, res.text
@@ -305,13 +256,10 @@ async def test_oauth_complete_persists_credential(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_oauth_complete_persists_oauth_token_bundle(client, monkeypatch):
     """Pro/Max path: orchestrator returns oauth_tokens (no API key).
-    Router should store the full bundle as JSON + populate token_expires_at."""
+    The original completion task stores the full bundle as JSON + populate token_expires_at."""
     import json
     import time
 
-    from server import oauth_login
-    from server.crypto import decrypt
-    from server.oauth_login import LoginState
     from server.oauth_providers import OAuthTokenSet
 
     expires_at_epoch = time.time() + 3600
@@ -322,16 +270,13 @@ async def test_oauth_complete_persists_oauth_token_bundle(client, monkeypatch):
         scopes=["user:inference", "user:profile"],
     )
 
-    async def fake_submit(self, login_id, code):
-        return _StubLoginSession(LoginState.success, oauth_tokens=ts)
-
-    monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    await _login_exists(monkeypatch, client[1])
+    patch_provider(monkeypatch, api_key=None, tokens=ts)
+    login_id = await _start_login(client[0])
 
     c, db = client
     res = await c.post(
         "/api/credentials/oauth/complete",
-        json={"login_id": "login-xyz", "code": "the-code", "label": "Pro/Max"},
+        json={"login_id": login_id, "code": "the-code", "label": "Pro/Max"},
         headers=c.headers,
     )
     assert res.status_code == 201, res.text
@@ -354,35 +299,19 @@ async def test_oauth_complete_persists_oauth_token_bundle(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_oauth_complete_returns_500_on_no_token(client, monkeypatch):
-    from server import oauth_login
-    from server.oauth_login import LoginState
-
-    async def fake_submit(self, login_id, code):
-        return _StubLoginSession(LoginState.error, message="token exchange failed")
-
-    monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    await _login_exists(monkeypatch, client[1])
-
-    c, _ = client
-    res = await c.post(
-        "/api/credentials/oauth/complete",
-        json={"login_id": "login-xyz", "code": "bad-code", "label": "L"},
-        headers=c.headers,
-    )
-    assert res.status_code == 500
+async def test_oauth_complete_rejects_missing_token_without_persisting(client, monkeypatch):
+    patch_provider(monkeypatch, api_key="")
+    c, db = client
+    login_id = await _start_login(c)
+    response = await c.post("/api/credentials/oauth/complete", json={
+        "login_id": login_id, "code": "the-code", "label": "Personal",
+    })
+    assert response.status_code == 400
+    assert await db.load_credentials() == []
 
 
 @pytest.mark.asyncio
 async def test_oauth_complete_404_unknown_id(client, monkeypatch):
-    from server import oauth_login
-
-    async def fake_submit(self, login_id, code):
-        raise KeyError(login_id)
-
-    monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    await _login_exists(monkeypatch, client[1])
-
     c, _ = client
     res = await c.post(
         "/api/credentials/oauth/complete",
@@ -393,31 +322,13 @@ async def test_oauth_complete_404_unknown_id(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_oauth_cancel_is_idempotent(client, monkeypatch):
-    from server import oauth_login
-
-    called: list[str] = []
-
-    async def fake_cancel(self, login_id):
-        called.append(login_id)
-
-    monkeypatch.setattr(oauth_login.OAuthLoginManager, "cancel", fake_cancel)
-    await _login_exists(monkeypatch, client[1])
-
+async def test_oauth_cancel_is_idempotent(client):
     c, _ = client
-    res = await c.post(
-        "/api/credentials/oauth/cancel",
-        json={"login_id": "login-xyz"},
-        headers=c.headers,
-    )
-    assert res.status_code == 204
-    res = await c.post(
-        "/api/credentials/oauth/cancel",
-        json={"login_id": "login-xyz"},
-        headers=c.headers,
-    )
-    assert res.status_code == 204
-    assert called == ["login-xyz", "login-xyz"]
+    login_id = await _start_login(c)
+    for _ in range(2):
+        response = await c.post("/api/credentials/oauth/cancel", json={"login_id": login_id})
+        assert response.status_code == 200
+        assert response.json() == {"status": "cancelled"}
 
 
 @pytest.mark.asyncio
@@ -466,27 +377,19 @@ async def _flagged_credential(db, *, cid, backend, auth_type, secret):
 
 @pytest.mark.asyncio
 async def test_oauth_complete_reauth_updates_in_place(client, monkeypatch):
-    from server import oauth_login
-    from server.oauth_login import LoginState
-
     c, db = client
     await _flagged_credential(
         db, cid="claudecred01", backend="claude-code", auth_type="oauth",
         secret="sk-ant-old-token",
     )
 
-    async def fake_submit(self, login_id, code):
-        return _StubLoginSession(
-            LoginState.success, token="sk-ant-fresh-token-1234567890"
-        )
-
-    monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    await _login_exists(monkeypatch, client[1], "x")
+    patch_provider(monkeypatch)
+    login_id = await _start_login(c)
 
     res = await c.post(
         "/api/credentials/oauth/complete",
         json={
-            "login_id": "x", "code": "y", "label": "Personal",
+            "login_id": login_id, "code": "y", "label": "Personal",
             "credential_id": "claudecred01",
         },
         headers=c.headers,
@@ -504,20 +407,14 @@ async def test_oauth_complete_reauth_updates_in_place(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_oauth_complete_reauth_404_unknown_credential(client, monkeypatch):
-    from server import oauth_login
-    from server.oauth_login import LoginState
-
-    async def fake_submit(self, login_id, code):
-        return _StubLoginSession(LoginState.success, token="sk-ant-fresh-1234567890")
-
-    monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    await _login_exists(monkeypatch, client[1])
+    patch_provider(monkeypatch)
+    login_id = await _start_login(client[0])
 
     c, _ = client
     res = await c.post(
         "/api/credentials/oauth/complete",
         json={
-            "login_id": "x", "code": "y", "label": "P", "credential_id": "nope",
+            "login_id": login_id, "code": "y", "label": "P", "credential_id": "nope",
         },
         headers=c.headers,
     )
@@ -800,7 +697,7 @@ async def test_a_claude_signin_credential_belongs_to_the_account(client, monkeyp
     This drives the real route as a real account and checks the row is owned,
     is listed for that account, and decrypts with that account's data key.
     """
-    from server import deps, oauth_login
+    from server import deps
     from server.config import settings
     from server.users import UserManager
 
@@ -819,24 +716,13 @@ async def test_a_claude_signin_credential_belongs_to_the_account(client, monkeyp
         token = await users.issue_token(nancy["id"])
         acct = {"Authorization": f"Bearer {token}"}
 
-        async def fake_submit(self, login_id, code):
-            return _StubLoginSession(
-                oauth_login.LoginState.success,
-                token="sk-ant-nancy-oauth-key-1234567890",
-            )
-
-        monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-        # The login record must resolve to *this* account, since only the
-        # account that started a sign-in may finish it.
-        monkeypatch.setattr(
-            oauth_login.OAuthLoginManager,
-            "get",
-            lambda self, lid: _make_login_for(nancy["id"]),
-        )
+        patch_provider(monkeypatch, api_key="sk-ant-nancy-oauth-key-1234567890")
+        started = await c.post("/api/credentials/oauth/start", headers=acct, json={})
+        login_id = started.json()["login_id"]
 
         res = await c.post(
             "/api/credentials/oauth/complete",
-            json={"login_id": "login-xyz", "code": "the-code", "label": "Claude"},
+            json={"login_id": login_id, "code": "the-code", "label": "Claude"},
             headers=acct,
         )
         assert res.status_code == 201, res.text
@@ -856,9 +742,3 @@ async def test_a_claude_signin_credential_belongs_to_the_account(client, monkeyp
         assert decrypt(row["secret_encrypted"], key).startswith("sk-ant-nancy")
     finally:
         deps.set_user_manager(None)
-
-
-def _make_login_for(user_id: str):
-    s = _StubLoginSession(None)
-    s.user_id = user_id
-    return s

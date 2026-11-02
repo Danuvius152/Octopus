@@ -39,6 +39,12 @@ one-shot 在首次可能挂起前由原 Harness 登记，公共调用超时或�
 task.done() 不能代替退休成功，失败证据继续阻塞。quiesce 同步关闭各 Harness
 准入，shutdown 等待原退休 future；详细责任归[Harness 合同](harness-layer.md)。
 
+OAuth 登录从首次完成请求接管到完整凭据提交持有同一 task。等待者离开或登录
+显示 cancelled 都不能释放仍在执行的 provider/提交责任；GC 不移除活 task。
+quiesce 同步关闭 OAuth 登录准入，正常 shutdown 在关闭数据库之前加入原 task。
+未确认退休仍保留 blocker，关闭失败按 writer 失败保留数据库，而不是清空登录表。
+具体取消回执与有界等待归[凭据合同](harness-credential-reauth.md#claude-oauth-operation-ownership)。
+
 Registry 在排出同步线程前登记原操作，覆盖尚未借用 Store 的空隙；取消等待不
 释放仍在运行的线程责任。最终交接以非阻塞短 guard 保护 Registry 与 Store 借用
 准入，无法取得或仍有活操作就拒绝，不在事件循环等线程退出。普通调度/借用封口

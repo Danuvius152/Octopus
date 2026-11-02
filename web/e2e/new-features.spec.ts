@@ -781,7 +781,8 @@ test.describe("Credentials Panel", () => {
       });
     });
     await page.route("**/api/credentials/oauth/cancel", (route) => {
-      route.fulfill({ status: 204, body: "" });
+      expect(route.request().postDataJSON()).toEqual({ login_id: "intercepted-login" });
+      route.fulfill({ status: 200, json: { status: "cancelled" } });
     });
 
     await login(page);
@@ -807,8 +808,10 @@ test.describe("Credentials Panel", () => {
     await expect(dialog.locator("#cred-label")).toBeVisible();
     await expect(dialog.locator("#cred-code")).toBeVisible();
 
-    // Cancel closes the dialog
-    await dialog.locator("button", { hasText: "Cancel" }).click();
+    // Cancellation reports its result before observation is closed.
+    await dialog.getByRole("button", { name: "Cancel sign-in", exact: true }).click();
+    await expect(dialog.getByRole("status")).toHaveText("Sign-in cancelled.");
+    await dialog.getByText("Close", { exact: true }).click();
     await expect(dialog).toHaveCount(0);
   });
 

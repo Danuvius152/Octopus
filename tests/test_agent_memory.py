@@ -66,7 +66,7 @@ async def test_agent_manager_provisions_and_cleans_dirs(agents_root, tmp_path):
         aid = agent["id"]
         assert agent_memory.agent_memory_dir(aid, owner["id"]).is_dir()
 
-        await mgr.delete_agent(aid)
+        await mgr.delete_agent(aid, user_id=owner["id"])
         assert not agent_memory.agent_state_dir(aid, owner["id"]).exists()
     finally:
         await db.close()
@@ -104,14 +104,14 @@ async def test_unarchive_and_delete_keep_one_owner_of_agent_memory(agents_root, 
     try:
         await asyncio.wait_for(entered.wait(), 2)
         with pytest.raises(AgentError, match="busy"):
-            await agents.delete_agent(agent["id"])
+            await agents.delete_agent(agent["id"], user_id=owner["id"])
         assert (await database.get_agent(agent["id"]))["archived"]
         assert original.read_bytes() == b"Original account memory\n"
         release.set()
         restored = await asyncio.wait_for(restoring, 2)
         assert not restored["archived"]
         assert original.read_bytes() == b"Original account memory\n"
-        await agents.delete_agent(agent["id"])
+        await agents.delete_agent(agent["id"], user_id=owner["id"])
         assert await database.get_agent(agent["id"]) is None
         assert not memory.parent.exists()
     finally:

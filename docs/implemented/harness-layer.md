@@ -216,6 +216,9 @@ Login is exposed through profile login drivers rather than routed independently
 by every feature. Claude OAuth and Codex native device login keep their actual
 differences. Credential refresh and reauthorization have their own
 [ownership contract](harness-credential-reauth.md).
+The OAuth-specific `complete_oauth` driver entry carries the fixed request and
+narrow credential writer into the original login task, through its database
+commit. Codex's device flow keeps its separate start/status/cancel semantics.
 
 Transcript import/export and fork are separate capabilities. Claude's transcript
 codec supports handoff/pull; lack of a Codex codec produces an explicit unsupported

@@ -21,6 +21,7 @@ delayed = None
 late_steer = None
 gated_steer = None
 created_fork = None
+pending_clean = False
 defaults_path = root / "native-defaults.json"
 defaults = json.loads(defaults_path.read_text()) if defaults_path.exists() else {"model": "fixture", "effort": "low"}
 selected_path = root / "native-selected.json"
@@ -57,12 +58,22 @@ def send(frame):
     print(json.dumps(frame), flush=True)
 
 
+def background_completed():
+    send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id,
+        "item": {"id": "background-command", "type": "commandExecution", "status": "failed",
+            "command": "pytest fixture", "processId": "45196", "aggregatedOutput": "1 passed, 1 teardown error",
+            "exitCode": -1}}})
+
+
 def frames():
-    global gated_steer
+    global gated_steer, pending_clean
     buffered = b""
     offset = root / "native-injection-offset"
     injected = int(offset.read_text()) if offset.exists() and (root / "native-injections.jsonl").exists() else 0
     while True:
+        if pending_clean and (root / "native-clean-release").exists():
+            pending_clean = False
+            background_completed()
         injections = root / "native-injections.jsonl"
         if injections.exists():
             values = injections.read_text().splitlines()
@@ -251,6 +262,10 @@ for line in frames():
                 send({"method": "serverRequest/resolved", "params": {"threadId": thread_id, "requestId": frame["id"]}})
                 send({"id": frame["id"], "result": {"turn": {"id": turn_id}}})
         if mode.startswith("control_"):
+            if mode.startswith("control_background_"):
+                send({"method": "item/started", "params": {"threadId": thread_id, "turnId": turn_id,
+                    "item": {"id": "background-command", "type": "commandExecution", "status": "inProgress",
+                        "command": "pytest fixture", "processId": "45196"}}})
             if mode == "control_group":
                 child = subprocess.Popen([sys.executable, "-c",
                     "import signal,sys,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
@@ -307,6 +322,17 @@ for line in frames():
             send({"id": frame["id"], "result": {"turnId": turn_id}})
         send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id,
             "item": {"id": "native-wait", "type": "collabAgentToolCall", "tool": "wait", "status": "completed"}}})
+        continue
+    if method == "thread/backgroundTerminals/clean":
+        (root / "native-clean-requested").write_text(json.dumps(params))
+        if mode == "control_background_error":
+            send({"id": frame["id"], "error": {"code": -32603, "message": "Cleanup unavailable"}})
+            continue
+        if mode == "control_background_before_ack":
+            background_completed()
+        send({"id": frame["id"], "result": {}})
+        if mode == "control_background_after_ack":
+            pending_clean = True
         continue
     if method == "turn/interrupt":
         send({"id": frame["id"], "result": {}})

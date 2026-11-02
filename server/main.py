@@ -293,6 +293,7 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
     bg_task_manager.begin_shutdown()
     backend_supervisor.begin_shutdown()
     codex_login_manager.begin_shutdown()
+    oauth_login_manager.begin_shutdown()
     if started <= {"sessions", "delegations"}:
         # Close hooks join restored recorders before the session drain budget.
         await asyncio.gather(*(harness.shutdown() for harness in all_harnesses()))
@@ -314,6 +315,7 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
         if flag in started and stop is not None:
             owners.append((name, stop()))
     owners.append(("Codex login", codex_login_manager.shutdown()))
+    owners.append(("OAuth login", oauth_login_manager.shutdown()))
     owners.extend((f"{harness.backend} one-shot resources", harness.shutdown()) for harness in all_harnesses())
     results = await asyncio.gather(*(stop for _, stop in owners), return_exceptions=True)
     failures = [(name, result) for (name, _), result in zip(owners, results, strict=True)
@@ -331,7 +333,6 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
     # Independent resources can retire even when a writer remains unconfirmed.
     if tunnel is not None:
         await attempt("tunnel", tunnel.stop())
-    await attempt("OAuth login", oauth_login_manager.shutdown())
     await attempt("WebSockets", shutdown_connections())
     if sampler_task is not None:
         sampler_task.cancel()
@@ -555,6 +556,7 @@ async def quiesce_installation(request: Request, user: deps.CurrentUser):
     if health.state != "ready":
         return JSONResponse({"detail": "Installation is unavailable; handoff was not confirmed"}, status_code=503)
     from .codex_login import codex_login_manager
+    from .oauth_login import oauth_login_manager
     from .wiki import app_bridge
     from .wiki.jobs import worker
     from .wiki.registry import registry
@@ -582,6 +584,7 @@ async def quiesce_installation(request: Request, user: deps.CurrentUser):
             bg_task_manager.begin_shutdown()
             backend_supervisor.begin_shutdown()
             codex_login_manager.begin_shutdown()
+            oauth_login_manager.begin_shutdown()
             # This is a successful handoff receipt, never a sealing intent.
             owner.offline_request = request_id
     except WikiError as error:

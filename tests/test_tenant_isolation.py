@@ -20,8 +20,8 @@ import json
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from server import crypto, deps
-from server.agent_manager import AgentManager
+from server import agent_memory, crypto, deps
+from server.agent_manager import AgentError, AgentManager
 from server.config import settings
 from server.database import Database
 from server.main import app
@@ -144,6 +144,49 @@ async def test_listing_shows_only_your_own(two_accounts):
     agents = (await c.get("/api/agents", headers=_as(ctx["vera"]["token"]))).json()
     agent_names = {a["name"] for a in agents}
     assert "Archer's agent" not in agent_names, f"Vera was shown {agent_names}"
+
+
+@pytest.mark.parametrize("entry", ["http", "manager"])
+async def test_agent_delete_authorizes_before_database_memory_and_events(
+    two_accounts, monkeypatch, entry
+):
+    ctx = two_accounts
+    owner = ctx["archer"]["user"]["id"]
+    manager = AgentManager(ctx["db"])
+    target = await manager.create_agent(name="Empty owned agent", user_id=owner)
+    memory = agent_memory.agent_memory_dir(target["id"], owner) / "MEMORY.md"
+    memory.write_text("Keep the owner's memory\n")
+    events = []
+
+    async def capture(event, **scope):
+        events.append((event, scope))
+
+    monkeypatch.setattr(session_manager, "_broadcast", capture)
+    for target_id in (target["id"], "missing-agent"):
+        if entry == "http":
+            response = await ctx["client"].delete(
+                f"/api/agents/{target_id}", headers=_as(ctx["vera"]["token"])
+            )
+            assert response.status_code == 404
+        else:
+            for caller in (ctx["vera"]["user"]["id"], None):
+                with pytest.raises(AgentError, match="not found"):
+                    await manager.delete_agent(target_id, user_id=caller)
+        assert await ctx["db"].get_agent(target["id"]) == target
+        assert memory.read_text() == "Keep the owner's memory\n"
+        assert events == []
+
+    response = await ctx["client"].delete(
+        f"/api/agents/{target['id']}", headers=_as(ctx["archer"]["token"])
+    )
+    assert response.status_code == 204
+    assert await ctx["db"].get_agent(target["id"]) is None
+    assert not memory.parent.parent.exists()
+    assert len(events) == 1
+    event, scope = events[0]
+    assert event["type"] == "agent_deleted"
+    assert event["agent_id"] == target["id"]
+    assert scope == {"user_id": owner}
 
 
 @pytest.mark.parametrize("operation", ["fork", "duplicate"])

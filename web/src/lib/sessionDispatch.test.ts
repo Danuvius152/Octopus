@@ -18,7 +18,7 @@ afterEach(() => vi.unstubAllGlobals());
 it("loads dispatch pause on selection and keeps a newer live snapshot", async () => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(
     !url.endsWith("/api/sessions/selected") ? [] : {
-      id: "selected", messages: [], dispatch_state: snapshot(),
+      id: "selected", messages: [], dispatch_state: snapshot(), active_attempt: null,
     }
   ))));
   await selectSession("selected");
@@ -43,7 +43,7 @@ it("ignores an older-instance HTTP response that finishes after a fresh websocke
     ? new Promise<Response>((resolve) => { finish = resolve; }) : Promise.resolve(new Response("[]"))));
   const loading = selectSession("selected");
   handleWsMessage({ type: "dispatch_state", session_id: "selected", dispatch_state: { ...snapshot("service-b", 0, false), items: [] } });
-  finish(new Response(JSON.stringify({ id: "selected", messages: [], dispatch_state: snapshot("service-a", 100),
+  finish(new Response(JSON.stringify({ id: "selected", messages: [], dispatch_state: snapshot("service-a", 100), active_attempt: null,
     pending_questions: [{ question_id: "retired-question", questions: [{ question: "Old question" }] }],
   })));
   await loading;

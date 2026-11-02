@@ -18,6 +18,10 @@ class BackendKind(str, Enum):
     codex = "codex"
 
 
+class OAuthCancelResponse(BaseModel):
+    status: Literal["cancelled", "already_completed"]
+
+
 class CreateAgentSessionRequest(BaseModel):
     name: str | None = None
     working_dir: str | None = None

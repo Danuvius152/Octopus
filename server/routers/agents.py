@@ -209,12 +209,10 @@ async def unpin_agent(
 async def delete_agent(
     session_manager: SessionMgr, agent_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
-    agent = await _get_manager().get_agent(agent_id, user_id)
     try:
-        await _get_manager().delete_agent(agent_id)
+        agent = await _get_manager().delete_agent(agent_id, user_id=user_id)
     except AgentError as e:
         raise _agent_http_error(e)
-    assert agent is not None  # delete_agent raised "not found" otherwise
     await _publish(session_manager, "agent_deleted", agent)
 
 

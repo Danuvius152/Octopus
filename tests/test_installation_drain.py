@@ -100,6 +100,47 @@ async def test_handoff_waits_for_an_admitted_lifecycle_operation_outside_its_sho
     assert response.status_code == 200
 
 
+async def test_handoff_observes_original_oauth_task_then_seals_login_admission(installation, monkeypatch):
+    from server.harness.login import OAuthCompletion
+    from server.oauth_credentials import OAuthCredentials
+    from tests.oauth_provider import patch_provider
+
+    running = installation
+    manager = oauth_login.oauth_login_manager
+    provider = patch_provider(monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+    exchange = provider.exchange_code
+
+    async def paused(**kwargs):
+        entered.set()
+        await release.wait()
+        return await exchange(**kwargs)
+
+    monkeypatch.setattr(provider, "exchange_code", paused)
+    login = await manager.start(user_id=running.session.user_id)
+    request = OAuthCompletion(running.session.user_id, login.id, "code", "Personal")
+    waiter = asyncio.create_task(manager.complete(request, OAuthCredentials(running.db)))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        response = await running.client.post("/api/installation/quiesce", json={"request_id": str(uuid4())})
+        assert response.status_code == 409
+        assert any("oauth login" in blocker for blocker in response.json()["blockers"])
+        release.set()
+        result = await manager.complete(request, OAuthCredentials(running.db))
+        assert await running.db.get_credential(result.id, running.session.user_id)
+        response = await running.client.post("/api/installation/quiesce", json={"request_id": str(uuid4())})
+        assert response.status_code == 200
+        with pytest.raises(RuntimeError, match="admission is closed"):
+            await manager.start(user_id=running.session.user_id)
+    finally:
+        release.set()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await manager.shutdown()
+
+
 @pytest.mark.parametrize("interruption", ["cancelled", "timeout"])
 async def test_oneshot_unknown_keeps_original_process_in_handoff_drain(
     installation, tmp_path, monkeypatch, interruption, short_process_shutdown,

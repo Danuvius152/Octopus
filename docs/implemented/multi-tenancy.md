@@ -22,6 +22,16 @@ Login throttling bounds guessing. Opaque tokens were chosen because
 revocation can be checked against the already-open SQLite authority without
 adding a JWT refresh/revocation subsystem.
 
+`UserManager.login` verifies the password outside the write transaction, then
+the database inserts the session token only if the account still exists, is
+enabled and has the exact password hash observed by that verification. A password
+change, disable or deletion that wins this race produces an authentication
+failure without a bearer; throttling clears only after successful issuance.
+Setup, registration and PAT issuance retain their separate business entries.
+This checks current validity, without adding a historical disable/re-enable epoch.
+The route-to-SQLite barriers in `tests/test_auth_routes.py` cover these races;
+`tests/test_users.py` retains revocation and current-device exceptions.
+
 HTTP ownership, MCP invocation authority and a running subprocess have distinct
 lifetimes. Revoking login is not proof that an already-running child has retired.
 The [current execution contract](architecture-contract.md) owns admission and
@@ -54,12 +64,17 @@ Unscoped internal access is not permission for account-facing routes to read all
 rows. Shared registries and provider definitions are installation-level by design;
 users' instances and secrets are not.
 
-Known limits must remain explicit. Agent archive rejects a foreign scoped
-lookup before mutation; Agent DELETE currently proceeds after that lookup
-returns None to an unscoped manager deletion, with its assertion only afterward.
-Knowing a non-system foreign Agent ID with no sessions is the static impact
-condition; a later 500 does not prove the row or private memory remained intact.
-The [remaining-account plan](../plans/multi-tenancy-gaps.md) owns the fix.
+Agent DELETE requires an explicit account scope in `AgentManager.delete_agent`.
+Absent scope, a foreign target and a missing target all fail before row deletion,
+memory cleanup or notification. The manager returns the authorized original row
+for the route's account-scoped event; no post-deletion assertion establishes
+authority. Protected system agents and agents with sessions remain undeletable.
+The existing memory-mutation owner keeps database and directory work ordered;
+this is not a database/filesystem atomic transaction. `tests/test_tenant_isolation.py`
+checks both the real HTTP and business entries, retained memory and event audience;
+Agent API and memory regressions cover legitimate deletion and existing guards.
+
+Known limits remain explicit.
 `schedules_changed` is a global empty invalidation notification; account-scoped
 refetch remains the data boundary, and the event contains no schedule rows.
 

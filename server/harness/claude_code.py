@@ -30,7 +30,7 @@ from .events import (
     SubagentUpdate,
 )
 from .harness import Harness
-from .login import LoginMethod
+from .login import LoginMethod, OAuthCompletion, OAuthCredentialWriter
 from .model_settings import ModelOption, ModelSettings
 from .private_settings import PrivateSettings
 from .profile import (
@@ -842,16 +842,16 @@ class _OAuthLoginDriver:
 
         return await oauth_login_manager.start(user_id=user_id)
 
-    async def submit_code(self, login_id: str, code: str):
+    async def complete_oauth(self, request: OAuthCompletion, credentials: OAuthCredentialWriter):
         from ..oauth_login import oauth_login_manager
 
-        return await oauth_login_manager.submit_code(login_id, code)
+        return await oauth_login_manager.complete(request, credentials)
 
     def get(self, login_id: str):
         """The login record, or None.
 
         It used to raise, on the grounds that a redirect login is completed by
-        `submit_code` rather than polled. But the record is also how a route
+        `complete_oauth` rather than polled. But the record is also how a route
         asks *whose* login this is — only the account that started a sign-in may
         finish or cancel it (multi-tenancy.md §5) — so looking one up is a
         reasonable thing to want. Polling it for a result still gets you
@@ -861,10 +861,10 @@ class _OAuthLoginDriver:
 
         return oauth_login_manager.get(login_id)
 
-    async def cancel(self, login_id: str) -> None:
+    async def cancel(self, login_id: str):
         from ..oauth_login import oauth_login_manager
 
-        await oauth_login_manager.cancel(login_id)
+        return await oauth_login_manager.cancel(login_id)
 
     def cleanup_credential(self, credential_id: str) -> None:
         # Claude credentials are a secret blob in the DB — nothing on disk to

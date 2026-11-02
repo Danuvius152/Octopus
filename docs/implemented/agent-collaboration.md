@@ -238,14 +238,25 @@ continues the successful admission order.
 `mcp__ask_agent__cancel(delegation_id, reason?)` →
 `POST /api/sessions/{parent_sid}/delegations/{child_sid}/cancel`.
 The owned cancel command captures the selected round and its original work
-branch before awaiting. It CAS-updates running rounds to cancelled, closes
-their exact work admission and retires their captured session, BG and Research
+branch and synchronously closes every captured work and run lease before the
+first await. Saving an ancestor therefore cannot leave a middle descendant
+authorized to create more work. It then CAS-updates running rounds to cancelled
+and retires their captured session, BG and Research
 resources before reporting cancellation. A completed answer stays completed
 while its residual work retires; a later follow-up's independent work is not
 cancelled. Cancelling the HTTP waiter does not withdraw this owned command.
 An ordinary relationship/CAS refusal is reported after all captured resources
 are cleaned; physical storage uncertainty retains the fail-stop boundary.
 Stable work identity and terminal disposition protect one parent injection.
+
+Setup already in flight rechecks its original caller after session creation and
+round registration, retiring or rolling back unadmitted work when revoked.
+Closed authority never short-circuits original resource lookup. If revocation
+aborts an original Harness spawn before CloseWork reaches its SessionOwner,
+that Owner uses its existing interruption and retirement path; an expected
+cancelled child start does not cancel the Owner itself. Deterministic save/spawn
+barriers in `tests/test_delegation_cancel_conflict.py` and the work/command
+regressions retain real subprocess exit, CAS refusal and cancelled-waiter evidence.
 
 The parent gets an injected
 `[agent-error:vera delegation=… reason=cancelled]`. Descendant

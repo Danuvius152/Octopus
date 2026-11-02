@@ -118,7 +118,7 @@
 | [数据保留、依赖与清理预览](plans/data-retention.md) | proposed | 先明确数据分类、引用和保留责任，提供干运行预览，再单独选择清理政策。 |
 | [稳定接口、薄 CLI 与访问凭据](plans/octo-cli.md) | proposed | 围绕真实消费者建立稳定数据接口、薄 CLI、PAT/设备管理与受限 App scope。 |
 | [第二执行环境与 Runtime provider](plans/runtime-providers.md) | proposed | 有真实第二环境需求后，验证文件、网络、历史、取消与资源退休的完整 provider 边界。 |
-| [账户边界：具体剩余行为与产品政策](plans/multi-tenancy-gaps.md) | proposed | 优先收敛 Agent DELETE 作用域与 Connector refresh 分类，按证据级别保留其余账户政策。 |
+| [账户边界：具体剩余行为与产品政策](plans/multi-tenancy-gaps.md) | proposed | 优先收敛 Connector refresh 分类，按证据级别保留其余账户政策。 |
 | [阶段、故障诊断与可行动告警](plans/observability-and-diagnostics.md) | proposed | 将原执行事实连成可读阶段和故障入口，增加少量可采取行动的告警。 |
 | [运行时执行扩展：暂停范围与恢复条件](plans/runtime-execution-scope.md) | paused | 按已交付 Codex R2 重基准七项执行扩展，保留更强承诺及独立 R06 核验的恢复条件。 |
 

@@ -58,19 +58,23 @@ async function applyDetailResponse(sessionId: string, res: Response, start: Snap
   const data: Record<string, unknown> = await res.json();
   const dispatch = readDispatchState(data.dispatch_state);
   if (!current() || !sessions.current(observation, dispatch?.generation)) return null;
-  if (!applySessionSnapshot(sessionId, data, start, !read.claim())) return null;
+  const applied = applySessionSnapshot(sessionId, data, start, !read.claim());
+  if (!applied) return null;
   sessions.detail(sessionInfoFromDetail(data), observation, dispatch);
-  return data;
+  return { data, ...applied };
 }
+
+interface SessionRead { done: Promise<Record<string, unknown> | null>; cancel: () => void }
 
 /** One read owns its original identity, baseline, publication and lifetime.
  * Ending observation does not stop any server-side execution. */
-export function observeSession(sessionId: string, purpose: "complete" | "detail" | "metadata" = "complete") {
+export function observeSession(sessionId: string, purpose: "complete" | "detail" | "metadata" = "complete", confirmExecution = true): SessionRead {
   const start = useSessionStore.getState();
   const lifetime = sessions.observe(sessionId);
   const { observation } = lifetime;
   const read = detailReads.begin(sessionId);
   let active = true;
+  let confirmation: SessionRead | undefined;
   const current = () => active;
   const done = (async () => {
     try {
@@ -83,9 +87,16 @@ export function observeSession(sessionId: string, purpose: "complete" | "detail"
         if (!current() || !sessions.current(observation)) return null;
         return sessions.detail(info, observation, null) ? info as unknown as Record<string, unknown> : null;
       }
-      const detail = await applyDetailResponse(sessionId, res, start, observation, current, read);
+      const result = await applyDetailResponse(sessionId, res, start, observation, current, read);
+      const detail = result?.data ?? null;
       if (detail && start.activeSessionId === sessionId && useSessionStore.getState().activeSessionId === sessionId && typeof detail.agent_id === "string") {
         useSessionStore.getState().setActiveAgentId(detail.agent_id);
+      }
+      if (result?.needsExecutionConfirmation && confirmExecution && current()) {
+        // Keep safe history now. One fresh read confirms a target whose live
+        // baseline moved; continuous traffic cannot create a polling loop.
+        confirmation = observeSession(sessionId, "detail", false);
+        void confirmation.done.catch(() => {});
       }
       return detail;
     } catch (error) {
@@ -103,7 +114,7 @@ export function observeSession(sessionId: string, purpose: "complete" | "detail"
     delegations = observeDelegations(sessionId, done);
     void delegations.done.catch(() => {});
   }
-  return { done, cancel: () => { active = false; lifetime.finish(); delegations?.cancel(); } };
+  return { done, cancel: () => { active = false; lifetime.finish(); delegations?.cancel(); confirmation?.cancel(); } };
 }
 
 export async function loadSessionSnapshot(sessionId: string) {
@@ -197,43 +208,41 @@ export async function loadSessionSnapshots(sessionId: string) {
 
 /** One queue-state path for selection, archived viewing and reconnect. */
 function applyDispatchSnapshot(
-  sessionId: string, detail: Record<string, unknown>, start: SnapshotStart,
-): boolean {
+  sessionId: string, detail: Record<string, unknown>, start: SnapshotStart, advanceOnly: boolean,
+): { needsExecutionConfirmation: boolean } | null {
   const store = useSessionStore.getState();
-  if (start.accountGeneration !== store.accountGeneration) return false;
+  if (start.accountGeneration !== store.accountGeneration) return null;
   if (detail && detail.dispatch_state) {
     const snapshot = readDispatchState(detail.dispatch_state);
     const raw = detail.dispatch_state as { generation?: unknown };
-    if (typeof raw.generation === "string" && store.retiredDispatchGenerations.includes(raw.generation)) return false;
+    if (typeof raw.generation === "string" && store.retiredDispatchGenerations.includes(raw.generation)) return null;
     if (!snapshot) {
       store.setDispatchUnavailable(sessionId, true, start);
-      return false;
+      return null;
     }
-    if (start.dispatchGeneration !== store.dispatchGeneration && snapshot.generation !== store.dispatchGeneration) return false;
-    store.applyDispatchState(sessionId, snapshot, start);
+    if (start.dispatchGeneration !== store.dispatchGeneration && snapshot.generation !== store.dispatchGeneration) return null;
+    // Older successes can fill history/task output without replacing controls.
+    if (!advanceOnly) return { needsExecutionConfirmation: !store.applyExecutionSnapshot(sessionId, detail, start) };
   } else {
-    if (start.dispatchGeneration !== store.dispatchGeneration) return false;
+    if (start.dispatchGeneration !== store.dispatchGeneration) return null;
     if (!detail || detail.archived !== true) {
       store.setDispatchUnavailable(sessionId, true, start);
-      return false;
+      return null;
     }
     store.setDispatchUnavailable(sessionId, false, start);
   }
-  return true;
+  return { needsExecutionConfirmation: false };
 }
 /** Reject a retired service before any part of its detail can be rehydrated. */
 export function applySessionSnapshot(
   sessionId: string, detail: Record<string, unknown>, start = useSessionStore.getState(),
   advanceOnly = false,
-): boolean {
-  if (!applyDispatchSnapshot(sessionId, detail, start)) return false;
+): { needsExecutionConfirmation: boolean } | null {
+  const applied = applyDispatchSnapshot(sessionId, detail, start, advanceOnly);
+  if (!applied) return null;
+  advanceOnly ||= applied.needsExecutionConfirmation;
   applyTranscript(sessionId, detail, start.streamingItems[sessionId] || {});
   const store = useSessionStore.getState();
-  const active = detail.active_attempt as { request_id?: unknown; attempt_id?: unknown } | undefined;
-  if (!advanceOnly && !store.activeAttempts[sessionId] && typeof active?.request_id === "string" && typeof active.attempt_id === "string" &&
-      store.dispatchStates[sessionId]?.active_request_id === active.request_id) {
-    store.setActiveAttempt(sessionId, { request_id: active.request_id, attempt_id: active.attempt_id });
-  }
   const snapshotMessages = (detail.messages as { seq?: number }[]) || [];
   const snapshotHigh = typeof detail.next_message_seq === "number"
     ? detail.next_message_seq - 1 : Math.max(-1, ...snapshotMessages.map((message) => message.seq ?? -1));
@@ -249,5 +258,5 @@ export function applySessionSnapshot(
     .map((question) => [question.question_id, question]));
   if (!advanceOnly) store.setPendingQuestions(sessionId, [...pending.values()]);
   store.setSubagents(sessionId, (detail.subagents as SubagentRun[]) || [], start.subagents[sessionId] || {}, advanceOnly);
-  return true;
+  return applied;
 }

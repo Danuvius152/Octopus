@@ -17,7 +17,6 @@ same way as a manually-pasted API key.
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -31,16 +30,18 @@ from ..crypto import encrypt
 from ..database import Database
 from ..deps import ScopeUser, SessionMgr
 from ..harness import LoginDriver, LoginMethod, get_harness, has_backend
+from ..harness.login import OAuthCompletion
 from ..models import (
     AuthType,
     BackendKind,
     CreateCredentialRequest,
     CredentialInfo,
     CredentialStatus,
+    OAuthCancelResponse,
     UpdateCredentialRequest,
 )
-from ..oauth_login import LoginState
-from ..oauth_providers import OAuthTokenSet
+from ..oauth_credentials import OAuthCredentials
+from ..oauth_errors import OAuthLoginError
 from ..users import UserManager
 
 if TYPE_CHECKING:
@@ -246,171 +247,46 @@ async def oauth_start(
         )
     try:
         session = await login.start(user_id=user_id)
+    except OAuthLoginError as e:
+        raise HTTPException(e.status_code, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     return OAuthStartResponse(login_id=session.id, device_url=session.url)
 
 
-def _serialize_oauth_tokens(ts: OAuthTokenSet) -> str:
-    """Encode an OAuthTokenSet as the on-disk secret blob.
-
-    Stored as JSON so the resolver can refresh the access_token in place
-    without re-running the entire login flow. The shape is intentionally
-    flat — no nested objects — to keep refresh writes cheap.
-    """
-    return json.dumps(
-        {
-            "access_token": ts.access_token,
-            "refresh_token": ts.refresh_token,
-            "expires_at_epoch": ts.expires_at_epoch,
-            "scopes": list(ts.scopes),
-            "token_type": ts.token_type,
-        },
-        separators=(",", ":"),
-    )
-
-
-@router.post(
-    "/oauth/complete",
-    response_model=CredentialInfo,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post("/oauth/complete", response_model=CredentialInfo, status_code=status.HTTP_201_CREATED)
 async def oauth_complete(
-    req: OAuthCompleteRequest,
-    user_id: ScopeUser = None,
-    _: str = Depends(verify_token),
-):
-    """Submit the code copied from the OAuth callback, exchange it for a
-    long-lived API key via Anthropic's OAuth + api-key endpoints, and
-    persist the credential.
-
-    Two completion shapes from the orchestrator:
-      - `session.token` set → Console org user with a fresh sk-ant- key.
-        Stored as auth_type=oauth, no expiry tracking needed.
-      - `session.oauth_tokens` set → Pro/Max subscriber whose token can't
-        mint an API key. We store the full OAuthTokenSet as JSON, with
-        token_expires_at populated so the resolver knows when to refresh.
-    """
-    db = _require_db()
-    secret_key = await UserManager(db).data_key_for(user_id)
-    return await _complete_oauth(db, req, user_id, secret_key)
-
-
-async def _complete_oauth(
-    db: Database, req: OAuthCompleteRequest, user_id: str | None, secret_key: str,
+    req: OAuthCompleteRequest, user_id: ScopeUser = None, _: str = Depends(verify_token),
 ) -> CredentialInfo:
-    started = _login_driver(BackendKind.claude_code.value).get(req.login_id)
-    if started is None or getattr(started, "user_id", None) != user_id:
-        # Only the account that started the sign-in may finish it. An
-        # unguessable login id is why this has never gone wrong, not a reason it
-        # is authorised (multi-tenancy.md §5).
-        raise HTTPException(status_code=404, detail="unknown login_id")
-    if req.credential_id is not None:
-        existing = await db.get_credential(req.credential_id, user_id)
-        if existing is None or existing["user_id"] != user_id:
-            raise HTTPException(status_code=404, detail="credential not found")
-        if existing["backend"] != BackendKind.claude_code.value:
-            raise HTTPException(
-                status_code=400,
-                detail="credential backend mismatch for re-authorization",
-            )
+    """Await the original login's complete credential commit."""
+    request = OAuthCompletion(user_id=user_id, **req.model_dump())
     try:
-        session = await _login_driver(BackendKind.claude_code.value).submit_code(
-            req.login_id, req.code
+        return await _login_driver(BackendKind.claude_code.value).complete_oauth(
+            request, OAuthCredentials(_require_db()),
         )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="unknown login_id")
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    if session.state != LoginState.success:
-        raise HTTPException(
-            status_code=500,
-            detail=session.message or "login completed without a usable result",
-        )
-
-    created_at = datetime.now(UTC).isoformat()
-
-    if session.token:
-        # API-key path: long-lived sk-ant- key from create_api_key endpoint.
-        secret_encrypted = encrypt(session.token, secret_key)
-        token_expires_at: str | None = None
-    elif session.oauth_tokens:
-        # OAuth-token path: store the full token set; resolver refreshes.
-        ts = session.oauth_tokens
-        secret_encrypted = encrypt(_serialize_oauth_tokens(ts), secret_key)
-        token_expires_at = datetime.fromtimestamp(
-            ts.expires_at_epoch, tz=UTC
-        ).isoformat()
-    else:
-        # State machine guarantees one of the two is set on success, but
-        # be defensive — a third shape sneaking in would otherwise corrupt
-        # the credential row silently.
-        raise HTTPException(
-            status_code=500,
-            detail="login completed with no token or oauth_tokens",
-        )
-
-    # Re-authorization in place: update the existing row's secret + clear the
-    # needs_reconnect flag so every agent/session already bound to this
-    # credential id keeps working (harness-credential-reauth.md §5).
-    if req.credential_id is not None:
-        updated = await db.reauthorize_credential(
-            req.credential_id,
-            user_id=user_id,
-            backend=BackendKind.claude_code.value,
-            label=req.label,
-            secret_encrypted=secret_encrypted,
-            token_expires_at=token_expires_at,
-            status=CredentialStatus.active.value,
-            needs_reconnect=False,
-            last_refresh_error_code=None,
-        )
-        if updated is None:
-            raise HTTPException(status_code=404, detail="credential not found")
-        return _row_to_info(updated)
-
-    cid = uuid.uuid4().hex[:12]
-    await db.save_credential(
-        credential_id=cid,
-        backend=BackendKind.claude_code.value,
-        label=req.label,
-        auth_type=AuthType.oauth.value,
-        secret_encrypted=secret_encrypted,
-        created_at=created_at,
-        # The owner — missing here was the bug that made a Claude sign-in
-        # "disappear": the secret was encrypted with the account's DEK
-        # (`secret_key` above) but the row was left unowned, so it fell out of
-        # the account's scoped credential list AND later decrypted with the
-        # wrong key (`data_key_for(None)` = the install token), and every turn
-        # ran without the credential.
-        user_id=user_id,
-    )
-    if token_expires_at is not None:
-        await db.update_credential(cid, token_expires_at=token_expires_at)
-    return CredentialInfo(
-        id=cid,
-        backend=BackendKind.claude_code,
-        label=req.label,
-        auth_type=AuthType.oauth,
-        created_at=created_at,
-        token_expires_at=token_expires_at,
-    )
+    except KeyError as error:
+        raise HTTPException(404, "unknown login_id") from error
+    except OAuthLoginError as error:
+        raise HTTPException(error.status_code, str(error)) from error
 
 
-@router.post("/oauth/cancel", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/oauth/cancel", response_model=OAuthCancelResponse)
 async def oauth_cancel(
-    req: OAuthCancelRequest,
-    user_id: ScopeUser = None,
-    _: str = Depends(verify_token),
-):
-    """Abort an in-flight login (kills the subprocess). Idempotent, and only
-    for a login this account started."""
+    req: OAuthCancelRequest, user_id: ScopeUser = None, _: str = Depends(verify_token),
+) -> OAuthCancelResponse:
     driver = _login_driver(BackendKind.claude_code.value)
     started = driver.get(req.login_id)
-    if started is not None and getattr(started, "user_id", None) == user_id:
-        await driver.cancel(req.login_id)
+    if started is None or started.user_id != user_id:
+        raise HTTPException(404, "unknown login_id")
+    try:
+        result = await driver.cancel(req.login_id)
+    except KeyError as error:
+        raise HTTPException(404, "unknown login_id") from error
+    except OAuthLoginError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+    assert result is not None  # OAuth redirect drivers return the original result.
+    return result
 
 
 # ---------------------------------------------------------------------------

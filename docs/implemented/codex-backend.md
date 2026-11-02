@@ -116,6 +116,21 @@ EOF or the collection cutoff ends that responsibility. Raw drain only releases
 descriptors. Missing complete root items, malformed necessary records or overflow
 prevent success; a cancelled helper need not have produced an answer.
 
+If the accepted root has an unfinished `commandExecution`, retirement sends
+`thread/backgroundTerminals/clean` on its original connection before stdin EOF.
+The same reader waits for the original thread/turn/item's complete event within
+the existing 0.5-second protocol-interrupt grace. The cleanup ACK only confirms
+submission; it cannot replace command output, exit code or complete-item evidence.
+This order matters for pinned 0.166.0: EOF detaches the notification subscriber
+before native shutdown terminates residual commands, so their completion can
+reach the rollout without reaching the client. No residual root command means no
+cleanup RPC. Stop uses the same retirement path; timeout or cleanup failure keeps
+the existing incomplete-recording failure and process-group retirement.
+A collected failed command remains an error tool result before the final result;
+it does not override the root's independently selected business outcome.
+The [locked-binary observation](../reference/codex-app-server-g0.md#residual-root-command-retirement)
+and `test_codex_app_server_completion.py` cover this boundary.
+
 The original Owner chooses one business outcome. Normal success requires its
 necessary prefix and actual resource retirement. Stop and start-wait failure may
 select their outcome first, then record it after finite collection. Final refs

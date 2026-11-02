@@ -6,7 +6,7 @@ Tests are split:
 
   - PKCE/state helpers (pure)
   - start() against the registry
-  - submit_code() with provider methods monkeypatched (api-key + oauth paths)
+  - complete() with provider methods monkeypatched (api-key + oauth paths)
   - ClaudeCodeProvider HTTP helpers with httpx stubbed
   - Provider registry + module-level back-compat shims
 """
@@ -19,6 +19,8 @@ import pytest
 
 from server import oauth_login as ol
 from server import oauth_providers as op
+from server.harness.login import OAuthCompletion
+from server.models import CredentialInfo
 from server.oauth_errors import ScopeMissingError
 from server.oauth_login import (
     AUTHORIZE_URL,
@@ -33,6 +35,24 @@ from server.oauth_login import (
     _split_code,
 )
 from server.oauth_providers import OAuthTokenSet
+
+
+class CredentialWriter:
+    def __init__(self):
+        self.materials = []
+        self.result = CredentialInfo(id="saved", backend="claude-code", label="Personal", auth_type="oauth", created_at="now")
+
+    async def validate(self, request):
+        pass
+
+    async def commit(self, request, material):
+        self.materials.append(material)
+        return self.result
+
+
+@pytest.fixture
+def writer():
+    return CredentialWriter()
 
 
 def _fresh_token_set(
@@ -125,7 +145,7 @@ async def test_start_unknown_provider_raises():
 
 
 # ---------------------------------------------------------------------------
-# submit_code: happy path
+# complete: happy path
 # ---------------------------------------------------------------------------
 
 
@@ -143,7 +163,7 @@ def _patch_claude_provider(monkeypatch, *, exchange=None, mint=None, refresh=Non
 
 
 @pytest.mark.asyncio
-async def test_submit_code_happy_path(monkeypatch):
+async def test_complete_happy_path(monkeypatch, writer):
     """code → token endpoint → access_token → api-key endpoint → sk-ant- key."""
     mgr = OAuthLoginManager()
     session = await mgr.start()
@@ -165,16 +185,16 @@ async def test_submit_code_happy_path(monkeypatch):
     _patch_claude_provider(monkeypatch, exchange=fake_exchange, mint=fake_mint)
 
     pasted = f"the-code#{session._state}"
-    finished = await mgr.submit_code(session.id, pasted)
+    finished = await mgr.complete(OAuthCompletion(None, session.id, pasted, "Personal"), writer)
 
-    assert finished.state == LoginState.success
-    assert finished.token == "sk-ant-real-1234567890"
-    assert finished.oauth_tokens is None
+    assert finished == writer.result
+    assert mgr.get(session.id).state == LoginState.success
+    assert writer.materials == ["sk-ant-real-1234567890"]
     assert [c[0] for c in calls] == ["exchange", "mint"]
 
 
 @pytest.mark.asyncio
-async def test_submit_code_accepts_bare_code_without_state(monkeypatch):
+async def test_complete_accepts_bare_code_without_state(monkeypatch, writer):
     """If the user only pasted the code half (no #state), it still works
     but we skip the state check."""
     mgr = OAuthLoginManager()
@@ -188,12 +208,13 @@ async def test_submit_code_accepts_bare_code_without_state(monkeypatch):
 
     _patch_claude_provider(monkeypatch, exchange=fake_exchange, mint=fake_mint)
 
-    s = await mgr.submit_code(session.id, "just-the-code")
-    assert s.state == LoginState.success
+    s = await mgr.complete(OAuthCompletion(None, session.id, "just-the-code", "Personal"), writer)
+    assert s == writer.result
+    assert mgr.get(session.id).state == LoginState.success
 
 
 @pytest.mark.asyncio
-async def test_submit_code_falls_back_to_oauth_when_scope_missing(monkeypatch):
+async def test_complete_falls_back_to_oauth_when_scope_missing(monkeypatch, writer):
     """Pro/Max account: mint_api_key raises ScopeMissingError → store
     the OAuthTokenSet instead of an API key."""
     mgr = OAuthLoginManager()
@@ -216,15 +237,15 @@ async def test_submit_code_falls_back_to_oauth_when_scope_missing(monkeypatch):
 
     _patch_claude_provider(monkeypatch, exchange=fake_exchange, mint=fake_mint)
 
-    finished = await mgr.submit_code(session.id, f"c#{session._state}")
-    assert finished.state == LoginState.success
-    assert finished.token is None
-    assert finished.oauth_tokens is ts
-    assert finished.oauth_tokens.refresh_token == "sk-ant-ort01-personal"
+    finished = await mgr.complete(OAuthCompletion(None, session.id, f"c#{session._state}", "Personal"), writer)
+    assert finished == writer.result
+    assert mgr.get(session.id).state == LoginState.success
+    assert writer.materials == [ts]
+    assert writer.materials[0].refresh_token == "sk-ant-ort01-personal"
 
 
 @pytest.mark.asyncio
-async def test_submit_code_scope_missing_without_refresh_token_errors(monkeypatch):
+async def test_complete_scope_missing_without_refresh_token_errors(monkeypatch, writer):
     """If we somehow get a scope error AND no refresh_token, we can't
     sustain auth — surface this as a login error (not silent success)."""
     mgr = OAuthLoginManager()
@@ -239,17 +260,17 @@ async def test_submit_code_scope_missing_without_refresh_token_errors(monkeypatc
     _patch_claude_provider(monkeypatch, exchange=fake_exchange, mint=fake_mint)
 
     with pytest.raises(RuntimeError, match="didn't include a refresh token"):
-        await mgr.submit_code(session.id, f"c#{session._state}")
+        await mgr.complete(OAuthCompletion(None, session.id, f"c#{session._state}", "Personal"), writer)
     assert mgr.get(session.id).state == LoginState.error
 
 
 # ---------------------------------------------------------------------------
-# submit_code: error paths
+# complete: error paths
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_submit_code_wrong_state_rejected(monkeypatch):
+async def test_complete_wrong_state_rejected(monkeypatch, writer):
     """Mismatched state must abort before any network call."""
     mgr = OAuthLoginManager()
     session = await mgr.start()
@@ -264,13 +285,13 @@ async def test_submit_code_wrong_state_rejected(monkeypatch):
     _patch_claude_provider(monkeypatch, exchange=fake_exchange)
 
     with pytest.raises(RuntimeError, match="state mismatch"):
-        await mgr.submit_code(session.id, "the-code#WRONG-STATE")
+        await mgr.complete(OAuthCompletion(None, session.id, "the-code#WRONG-STATE", "Personal"), writer)
     assert called is False
     assert mgr.get(session.id).state == LoginState.error
 
 
 @pytest.mark.asyncio
-async def test_submit_code_token_endpoint_failure(monkeypatch):
+async def test_complete_token_endpoint_failure(monkeypatch, writer):
     mgr = OAuthLoginManager()
     session = await mgr.start()
 
@@ -280,12 +301,12 @@ async def test_submit_code_token_endpoint_failure(monkeypatch):
     _patch_claude_provider(monkeypatch, exchange=fake_exchange)
 
     with pytest.raises(RuntimeError, match="token exchange failed"):
-        await mgr.submit_code(session.id, f"x#{session._state}")
+        await mgr.complete(OAuthCompletion(None, session.id, f"x#{session._state}", "Personal"), writer)
     assert mgr.get(session.id).state == LoginState.error
 
 
 @pytest.mark.asyncio
-async def test_submit_code_api_key_endpoint_failure(monkeypatch):
+async def test_complete_api_key_endpoint_failure(monkeypatch, writer):
     """Non-scope api-key failures still surface as login errors —
     only ScopeMissingError triggers the fallback."""
     mgr = OAuthLoginManager()
@@ -300,19 +321,19 @@ async def test_submit_code_api_key_endpoint_failure(monkeypatch):
     _patch_claude_provider(monkeypatch, exchange=fake_exchange, mint=fake_mint)
 
     with pytest.raises(RuntimeError, match="API key creation failed"):
-        await mgr.submit_code(session.id, f"x#{session._state}")
+        await mgr.complete(OAuthCompletion(None, session.id, f"x#{session._state}", "Personal"), writer)
     assert mgr.get(session.id).state == LoginState.error
 
 
 @pytest.mark.asyncio
-async def test_submit_code_unknown_id_raises():
+async def test_complete_unknown_id_raises(writer):
     mgr = OAuthLoginManager()
     with pytest.raises(KeyError):
-        await mgr.submit_code("nope", "x")
+        await mgr.complete(OAuthCompletion(None, "nope", "x", "Personal"), writer)
 
 
 @pytest.mark.asyncio
-async def test_submit_code_wrong_state_raises_on_completed_session(monkeypatch):
+async def test_complete_wrong_state_raises_on_completed_session(monkeypatch, writer):
     mgr = OAuthLoginManager()
     session = await mgr.start()
 
@@ -324,9 +345,9 @@ async def test_submit_code_wrong_state_raises_on_completed_session(monkeypatch):
 
     _patch_claude_provider(monkeypatch, exchange=fake_exchange, mint=fake_mint)
 
-    await mgr.submit_code(session.id, f"c#{session._state}")
-    with pytest.raises(RuntimeError, match="cannot accept code"):
-        await mgr.submit_code(session.id, f"c2#{session._state}")
+    await mgr.complete(OAuthCompletion(None, session.id, f"c#{session._state}", "Personal"), writer)
+    with pytest.raises(RuntimeError, match="conflict"):
+        await mgr.complete(OAuthCompletion(None, session.id, f"c2#{session._state}", "Personal"), writer)
 
 
 # ---------------------------------------------------------------------------

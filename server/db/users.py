@@ -228,6 +228,20 @@ class UsersMixin(DatabaseBase):
 
     # -- tokens -------------------------------------------------------------
 
+    async def store_login_token(
+        self, *, user_id: str, password_hash: str, token_hash: str,
+        created_at: str, expires_at: str,
+    ) -> bool:
+        """Issue only while the password proof is still valid at commit."""
+        async with self.transaction(write=True) as tx:
+            cursor = await tx.execute(
+                "INSERT INTO auth_tokens (token_hash, user_id, kind, created_at, expires_at) "
+                "SELECT ?, id, 'session', ?, ? FROM users "
+                "WHERE id = ? AND password_hash = ? AND disabled_at IS NULL",
+                (token_hash, created_at, expires_at, user_id, password_hash),
+            )
+            return cursor.rowcount > 0
+
     async def store_token(
         self,
         *,

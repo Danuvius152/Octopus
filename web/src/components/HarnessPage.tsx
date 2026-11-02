@@ -1,5 +1,6 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { components } from "../api/contracts";
 import {
   IconCheck,
   IconCopy,
@@ -64,12 +65,14 @@ async function friendlyErrorMessage(
 
 // The credential dialog is a small state machine spanning two backends:
 //   choose → (Claude: awaiting_code → submitting) | (Codex: device → polling)
+type OAuthRequest = components["schemas"]["OAuthCompleteRequest"];
 type FlowState =
   | { kind: "idle" }
   | { kind: "choose" }
   | { kind: "claude_starting" }
   | { kind: "claude_awaiting_code"; loginId: string; deviceUrl: string }
-  | { kind: "claude_submitting" }
+  | { kind: "claude_operation"; loginId: string; request: OAuthRequest | null; phase: "submitting" | "cancelling" | "error"; message?: string }
+  | { kind: "claude_result"; message: string }
   | { kind: "codex_label" }
   | { kind: "codex_starting" }
   | { kind: "codex_device"; loginId: string; url: string; code: string }
@@ -97,6 +100,14 @@ export function HarnessPage({
   // that row in place + clears its needs_reconnect flag, instead of minting a
   // new credential and stranding every binding on the dead one.
   const [reauthId, setReauthId] = useState<string | null>(null);
+  const viewGeneration = useRef(0);
+  useEffect(() => () => { viewGeneration.current++; }, []);
+
+  const beginViewRequest = () => {
+    const view = ++viewGeneration.current;
+    const account = useSessionStore.getState().accountGeneration;
+    return () => viewGeneration.current === view && useSessionStore.getState().accountGeneration === account;
+  };
 
   // Memoized for a stable reference — see the same note in SettingsDialog:
   // rebuilt per render it could not be a declared dependency without the
@@ -109,16 +120,19 @@ export function HarnessPage({
     [token]
   );
 
-  const fetchCredentials = useCallback(async () => {
+  const fetchCredentials = useCallback(async (current: () => boolean = () => true) => {
     try {
       const res = await fetch(API, { headers });
       if (res.ok) {
         const items: CredentialInfo[] = await res.json();
+        if (!current()) return null;
         setCredentials(items);
+        return items;
       }
     } catch {
       // ignore
     }
+    return null;
   }, [headers, setCredentials]);
 
   useEffect(() => {
@@ -138,6 +152,7 @@ export function HarnessPage({
   // ----------------------------------------------------------- open / close
 
   const openChooser = () => {
+    viewGeneration.current++;
     setLabel("");
     setCode("");
     setFlow({ kind: "choose" });
@@ -145,6 +160,7 @@ export function HarnessPage({
   };
 
   const closeAndReset = () => {
+    viewGeneration.current++;
     setOpen(false);
     setLabel("");
     setCode("");
@@ -171,6 +187,7 @@ export function HarnessPage({
   // --------------------------------------------------------------- Claude OAuth
 
   const startClaudeLogin = async () => {
+    const current = beginViewRequest();
     setFlow({ kind: "claude_starting" });
     try {
       const res = await fetch(`${API}/oauth/start`, {
@@ -179,56 +196,78 @@ export function HarnessPage({
         body: JSON.stringify({ backend: "claude-code" }),
       });
       if (!res.ok) {
+        const message = await friendlyErrorMessage(res, "start login");
+        if (!current()) return;
         setFlow({
           kind: "error",
-          message: await friendlyErrorMessage(res, "start login"),
+          message,
         });
         return;
       }
       const body: { login_id: string; device_url: string } = await res.json();
+      if (!current()) return;
       setFlow({
         kind: "claude_awaiting_code",
         loginId: body.login_id,
         deviceUrl: body.device_url,
       });
     } catch (e) {
-      setFlow({ kind: "error", message: String(e) });
+      if (current()) setFlow({ kind: "error", message: String(e) });
     }
   };
 
-  const submitCode = async () => {
-    if (flow.kind !== "claude_awaiting_code") return;
-    if (!label.trim() || !code.trim()) {
-      setFlow({ kind: "error", message: "Label and code are both required" });
-      return;
-    }
-    const loginId = flow.loginId;
-    setFlow({ kind: "claude_submitting" });
+  const completeClaudeLogin = async (request: OAuthRequest) => {
+    const current = beginViewRequest();
+    const operation = { kind: "claude_operation" as const, loginId: request.login_id, request };
+    setFlow({ ...operation, phase: "submitting" });
     try {
       const res = await fetch(`${API}/oauth/complete`, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          login_id: loginId,
-          code: code.trim(),
-          label: label.trim(),
-          // Re-auth in place when set; the backend updates this row + clears
-          // its needs_reconnect flag instead of minting a new credential.
-          credential_id: reauthId,
-        }),
+        body: JSON.stringify(request),
       });
       if (!res.ok) {
-        setFlow({
-          kind: "error",
-          message: await friendlyErrorMessage(res, "complete login"),
-        });
+        const message = await friendlyErrorMessage(res, "complete login");
+        if (current()) setFlow({ ...operation, phase: "error", message });
         return;
       }
       const created: CredentialInfo = await res.json();
-      upsertCredential(created);
-      closeAndReset();
+      if (!current()) return;
+      const items = await fetchCredentials(current);
+      if (!current()) return;
+      if (items?.some((item) => item.id === created.id)) closeAndReset();
+      else setFlow({ kind: "claude_result", message: items
+        ? "Sign-in completed, but this result is no longer in your credential list."
+        : "Sign-in completed. Reopen Engines to check the credential list; it could not be refreshed." });
     } catch (e) {
-      setFlow({ kind: "error", message: String(e) });
+      if (current()) setFlow({ ...operation, phase: "error", message: String(e) });
+    }
+  };
+
+  const submitCode = () => {
+    if (flow.kind !== "claude_awaiting_code" || !label.trim() || !code.trim()) return;
+    void completeClaudeLogin({ login_id: flow.loginId, code: code.trim(), label: label.trim(), credential_id: reauthId });
+  };
+
+  const cancelClaudeLogin = async () => {
+    if (flow.kind !== "claude_awaiting_code" && flow.kind !== "claude_operation") return;
+    const current = beginViewRequest();
+    const operation = { kind: "claude_operation" as const, loginId: flow.loginId,
+      request: flow.kind === "claude_operation" ? flow.request : null };
+    setFlow({ ...operation, phase: "cancelling" });
+    try {
+      const response = await fetch(`${API}/oauth/cancel`, {
+        method: "POST", headers, body: JSON.stringify({ login_id: operation.loginId }),
+      });
+      if (!response.ok) throw new Error(await friendlyErrorMessage(response, "cancel login"));
+      const result: components["schemas"]["OAuthCancelResponse"] = await response.json();
+      if (!current()) return;
+      if (result.status !== "cancelled" && result.status !== "already_completed") throw new Error("Login cancellation was not confirmed.");
+      if (result.status === "already_completed") await fetchCredentials(current);
+      if (current()) setFlow({ kind: "claude_result", message: result.status === "cancelled"
+        ? "Sign-in cancelled." : "Sign-in already completed. Check the credential list for current availability." });
+    } catch (error) {
+      if (current()) setFlow({ ...operation, phase: "error", message: String(error) });
     }
   };
 
@@ -243,6 +282,7 @@ export function HarnessPage({
       setFlow({ kind: "error", message: "A label is required" });
       return;
     }
+    const current = beginViewRequest();
     setFlow({ kind: "codex_starting" });
     try {
       const res = await fetch(`${API}/codex/start`, {
@@ -254,17 +294,20 @@ export function HarnessPage({
         }),
       });
       if (!res.ok) {
+        const message = await friendlyErrorMessage(res, "start Codex sign-in");
+        if (!current()) return;
         setFlow({
           kind: "error",
-          message: await friendlyErrorMessage(res, "start Codex sign-in"),
+          message,
         });
         return;
       }
       // `start` returns immediately; the URL + code arrive via status polling.
       const body: { login_id: string } = await res.json();
+      if (!current()) return;
       setFlow({ kind: "codex_device", loginId: body.login_id, url: "", code: "" });
     } catch (e) {
-      setFlow({ kind: "error", message: String(e) });
+      if (current()) setFlow({ kind: "error", message: String(e) });
     }
   };
 
@@ -687,17 +730,18 @@ export function HarnessPage({
             </div>
           )}
 
-          {flow.kind === "claude_submitting" && (
+          {flow.kind === "claude_operation" && flow.phase !== "error" && (
             <div className="text-sm text-muted-foreground">
-              Exchanging code for token…
+              {flow.phase === "cancelling" ? "Waiting for the sign-in cancellation result…" : "Completing sign-in…"}
             </div>
           )}
 
-          {flow.kind === "error" && (
+          {(flow.kind === "error" || flow.kind === "claude_operation" && flow.phase === "error") && (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
               {flow.message}
             </div>
           )}
+          {flow.kind === "claude_result" && <p role="status" className="text-sm">{flow.message}</p>}
 
           <DialogFooter>
             {flow.kind === "error" ? (
@@ -706,8 +750,17 @@ export function HarnessPage({
               </Button>
             ) : (
               <Button variant="ghost" onClick={() => handleOpenChange(false)}>
-                Cancel
+                Close
               </Button>
+            )}
+            {(flow.kind === "claude_awaiting_code" || flow.kind === "claude_operation") && (
+              <Button variant="outline" onClick={() => void cancelClaudeLogin()}
+                disabled={flow.kind === "claude_operation" && flow.phase === "cancelling"}>
+                Cancel sign-in
+              </Button>
+            )}
+            {flow.kind === "claude_operation" && flow.phase === "error" && flow.request && (
+              <Button onClick={() => { if (flow.request) void completeClaudeLogin(flow.request); }}>Wait again</Button>
             )}
             {flow.kind === "codex_label" && (
               <Button
