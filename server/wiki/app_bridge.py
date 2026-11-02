@@ -8,6 +8,7 @@ import re
 import uuid
 from pathlib import Path
 
+import httpx
 from starlette.datastructures import QueryParams
 
 from ..aio import complete_cleanup
@@ -94,6 +95,62 @@ class AppMutation:
         self.user_id = user_id
         self._finish_lock = asyncio.Lock()
         _active.add(self)
+
+    async def forward(self, app_id, request):
+        """Own dispatch, receipt interpretation and the original client transfer."""
+        client = None
+        dispatched = transferred = False
+        response = None
+        try:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
+            dispatched = True
+            response = await client.send(request, stream=True)
+            await response.aread()
+            await response.aclose()
+            # aread decodes; validators for the compressed representation no
+            # longer describe these bytes. Ordinary proxy streams remain raw.
+            if response.headers.pop("content-encoding", None):
+                for header in ("etag", "content-md5", "digest", "content-digest", "repr-digest"):
+                    response.headers.pop(header, None)
+            endpoint = request.url.path.removeprefix("/api/")
+            receipt = None
+            if response.status_code == 202 or endpoint == "delete" and response.is_success:
+                try:
+                    receipt = response.json()
+                except ValueError as error:
+                    raise WikiError("Application returned an invalid mutation receipt", 502) from error
+                if not isinstance(receipt, dict):
+                    raise WikiError("Application returned an invalid mutation receipt", 502)
+            if endpoint == "save" and response.status_code == 409:
+                await self.conflict(self.body)
+            if endpoint == "delete" and response.is_success:
+                await self.receipt(receipt)
+            if response.status_code == 202:
+                job_id = receipt.get("id")
+                if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
+                    raise WikiError("Application returned no valid async job receipt", 502)
+                self.follow_job(client, str(request.url.copy_with(path="/", query=None)).rstrip("/"), job_id, app_id)
+                transferred = True
+            else:
+                await self.finish()
+            return response
+        except BaseException:
+            if not transferred:
+                if dispatched:
+                    await complete_cleanup(self.abort(app_id))
+                else:
+                    await complete_cleanup(self.finish())
+            raise
+        finally:
+            if not transferred:
+                async def close():
+                    try:
+                        if response is not None:
+                            await response.aclose()
+                    finally:
+                        if client is not None:
+                            await client.aclose()
+                await complete_cleanup(close())
 
     async def finish(self):
         async with self._finish_lock:
@@ -191,7 +248,10 @@ class AppMutation:
                     try:
                         response = await client.get(f"{base}/api/jobs/{job_id}")
                         response.raise_for_status()
-                        state = response.json().get("status")
+                        payload = response.json()
+                        if payload.get("id", job_id) != job_id:
+                            raise ValueError("Sapphire returned another job's state")
+                        state = payload.get("status")
                         if state in {"done", "error"}:
                             terminal = True
                             break
@@ -250,6 +310,22 @@ async def begin(app_row, method, endpoint, query, body=b""):
         _preparations.pop(task, None)
 
 
+async def forward(app_row, target, request):
+    """Return a loaded managed receipt, or leave ordinary forwarding to proxy."""
+    from ..app_backends import backend_supervisor
+
+    mutation = await begin(app_row, request.method, request.url.path.removeprefix("/api/"),
+                           QueryParams(request.url.query), request.content)
+    if mutation is None:
+        return None
+    try:
+        backend_supervisor.require_running(app_row["id"], target)
+    except BaseException:
+        await complete_cleanup(mutation.finish())
+        raise
+    return await mutation.forward(app_row["id"], request)
+
+
 async def _join_preparation(task):
     return await task
 
@@ -295,6 +371,8 @@ async def _begin(app_row, method, endpoint, query, body=b""):
             except BlockingIOError:
                 await asyncio.sleep(0.05)
         journal = state / "external-change.json"
+        if _stopping or user_id in _blocked_owners:
+            raise WikiError("Wiki application writes are stopped during service transition", 503)
 
         def prepare():
             with history.under_existing_lock(handle, lease):

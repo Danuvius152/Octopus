@@ -96,6 +96,14 @@ export interface StreamingItem {
   runtime_metadata: RuntimeMetadata;
 }
 
+export interface MessagePageBasis {
+  window: symbol | undefined;
+  beforeSeq: number;
+}
+
+export type MessagePageResult = { state: "merged"; added: number } | { state: "obsolete" } |
+  { state: "failed"; error: string };
+
 export interface QuestionOption {
   label: string;
   description?: string;
@@ -280,20 +288,20 @@ interface SessionStore {
   // whose whole transcript fits has `hasMoreMessages: false` and never asks.
   oldestSeq: Record<string, number | null>;
   hasMoreMessages: Record<string, boolean>;
+  messageWindows: Record<string, symbol | undefined>;
   setMessageWindow: (
     sessionId: string,
     oldestSeq: number | null,
     hasMore: boolean
   ) => void;
-  // Older messages, oldest-first, in front of what is already held. Returns
-  // how many were actually added, which is what the chat list needs to keep
-  // its scroll position across the prepend.
+  // Accept a page only into the window it extends, in one store update.
   prependMessages: (
     sessionId: string,
     msgs: MessageInput[],
     oldestSeq: number | null,
-    hasMore: boolean
-  ) => number;
+    hasMore: boolean,
+    basis: MessagePageBasis,
+  ) => MessagePageResult;
 
   // Per-session WS-event dedup baseline. Set when a snapshot is loaded
   // (`/api/sessions/{id}` returns `next_message_seq`); the WS handler
@@ -379,7 +387,7 @@ interface SessionStore {
   // The BgTaskChip in chat looks each task up by id; it lives next
   // to the `mcp__bg__run` tool_use block that started it.
   bgTasks: Record<string, BgTask[]>;
-  upsertBgTask: (sessionId: string, task: BgTask, baseline?: BgTask | null) => void;
+  upsertBgTask: (sessionId: string, task: BgTask, baseline?: BgTask | null, advanceOnly?: boolean) => void;
   updateBgTaskDelivery: (sessionId: string, taskId: string, delivery: Pick<BgTask, "delivery_disposition" | "delivery_error">) => void;
   setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[], advanceOnly?: boolean) => void;
   sessionAuxiliaryErrors: Record<string, Partial<Record<SessionAuxiliaryKind, string>>>;
@@ -656,7 +664,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       };
     }),
   setMessages: (sessionId, msgs, preserveStreaming = false, nativeBaseline) =>
-    set((s) => ({
+    set((s) => {
+      const previous = s.messages[sessionId] || [];
+      const first = msgs.find((message) => typeof message.seq === "number")?.seq;
+      const seqs = new Set(msgs.map((message) => message.seq));
+      const continuous = first !== undefined && first === previous.find((message) => typeof message.seq === "number")?.seq &&
+        previous.every((message) => message.seq !== undefined && seqs.has(message.seq));
+      return {
+      messageWindows: { ...s.messageWindows, [sessionId]: continuous ? s.messageWindows[sessionId] : Symbol() },
       messages: { ...s.messages, [sessionId]: msgs.map(normalizeMessage) },
       closedQuestionIds: {
         ...s.closedQuestionIds,
@@ -675,47 +690,44 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           (preserveStreaming || item !== nativeBaseline?.[key]) &&
           !msgs.some((message) => message.type === "text" && nativeItemKey(message.runtime_metadata) === key)))
       } : dropKey(s.streamingItems, sessionId),
-    })),
+    }; }),
 
   oldestSeq: {},
   hasMoreMessages: {},
+  messageWindows: {},
   setMessageWindow: (sessionId, oldestSeq, hasMore) =>
     set((s) => ({
       oldestSeq: { ...s.oldestSeq, [sessionId]: oldestSeq },
       hasMoreMessages: { ...s.hasMoreMessages, [sessionId]: hasMore },
     })),
-  prependMessages: (sessionId, msgs, oldestSeq, hasMore) => {
-    // A page that overlaps what we hold is dropped rather than merged: two
-    // copies of one message is the failure this whole path is most likely to
-    // produce, and seq is the identity that rules it out.
-    const floor = get().oldestSeq[sessionId];
-    const fresh = msgs.filter((m) => {
-      // No seq on either side means nothing to compare, so trust the page; the
-      // server pages by seq, so that only happens on synthetic messages.
-      if (typeof m.seq !== "number" || typeof floor !== "number") return true;
-      return m.seq < floor;
-    });
-    if (fresh.length === 0) {
-      set((cur) => ({
-        hasMoreMessages: { ...cur.hasMoreMessages, [sessionId]: false },
-      }));
-      return 0;
-    }
-    // The tail is read inside the updater, not captured before it: a message
-    // can land from the WebSocket while the page is in flight, and prepending
-    // to a stale copy would lose it.
-    set((cur) => ({
+  prependMessages: (sessionId, msgs, oldestSeq, hasMore, basis) => {
+    let result: MessagePageResult = { state: "obsolete" };
+    set((cur) => {
+      if (cur.messageWindows[sessionId] !== basis.window || cur.oldestSeq[sessionId] !== basis.beforeSeq) return cur;
+      if (msgs.some((message) => !Number.isInteger(message.seq) || message.seq! < 0) ||
+          new Set(msgs.map((message) => message.seq)).size !== msgs.length) {
+        result = { state: "failed", error: "Invalid history page sequence." }; return cur;
+      }
+      const fresh = msgs.filter((message) => message.seq! < basis.beforeSeq).sort((a, b) => a.seq! - b.seq!);
+      if (fresh.length && oldestSeq !== null && oldestSeq !== fresh[0].seq) {
+        result = { state: "failed", error: "History page cursor does not match its rows." }; return cur;
+      }
+      if (fresh.length === 0 && hasMore) {
+        result = { state: "failed", error: "History page did not extend the window." }; return cur;
+      }
+      result = { state: "merged", added: fresh.length };
+      return {
       messages: {
         ...cur.messages,
         [sessionId]: [...fresh.map(normalizeMessage), ...(cur.messages[sessionId] || [])],
       },
       oldestSeq: {
         ...cur.oldestSeq,
-        [sessionId]: oldestSeq ?? fresh[0].seq ?? null,
+        [sessionId]: fresh[0]?.seq ?? cur.oldestSeq[sessionId],
       },
       hasMoreMessages: { ...cur.hasMoreMessages, [sessionId]: hasMore },
-    }));
-    return fresh.length;
+    }; });
+    return result;
   },
 
   // Text the model is producing right now, accumulated from `assistant_delta`
@@ -965,19 +977,36 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     else delete errors[sessionId];
     return { sessionAuxiliaryErrors: errors };
   }),
-  upsertBgTask: (sessionId, task, baseline) =>
+  upsertBgTask: (sessionId, task, baseline, advanceOnly = false) =>
     set((s) => {
       const current = s.bgTasks[sessionId] || [];
       const idx = current.findIndex((t) => t.id === task.id);
       const previous = current[idx];
       const deliveryUpdate = previous && bgDeliveryUpdates.get(previous);
-      // Detail responses supply output, but must preserve delivery events
-      // observed after their request began, including an explicit clearing.
-      const incoming = baseline !== undefined && deliveryUpdate !== undefined
-        && deliveryUpdate !== (baseline ? bgDeliveryUpdates.get(baseline) : undefined)
+      // Old details still supply output; only the current read can replace
+      // HTTP delivery facts, and later WS delivery always retains authority.
+      const incoming = previous && baseline !== undefined && (advanceOnly || deliveryUpdate !== undefined
+        && deliveryUpdate !== (baseline ? bgDeliveryUpdates.get(baseline) : undefined))
         ? { ...task, delivery_disposition: previous.delivery_disposition, delivery_error: previous.delivery_error }
         : task;
       const updated = { ...previous, ...incoming };
+      if (previous && baseline !== undefined) {
+        const terminal = previous.status !== "running" && previous.status !== "pending";
+        const changed = bgUpdates.get(previous) !== (baseline ? bgUpdates.get(baseline) : undefined);
+        if (terminal && (changed || previous.status !== task.status) ||
+            previous.status === "running" && task.status === "pending") {
+          updated.status = previous.status;
+          updated.exit_code = previous.exit_code;
+          updated.completed_at = previous.completed_at;
+          updated.stop_reason = previous.stop_reason;
+          updated.truncated = previous.truncated;
+        }
+        // Execution has one identity per id. A stale running detail cannot
+        // remove final bytes; a fuller detail can fill WS's missing output.
+        for (const field of ["stdout", "stderr"] as const) {
+          if ((previous[field]?.length ?? 0) > (updated[field]?.length ?? 0)) updated[field] = previous[field];
+        }
+      }
       if (deliveryUpdate) bgDeliveryUpdates.set(updated, deliveryUpdate);
       const marker = previous && bgUpdates.get(previous);
       if (baseline === undefined) bgUpdates.set(updated, Symbol());
@@ -1002,13 +1031,26 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setBgTasks: (sessionId, tasks, baseline, advanceOnly) =>
     set((s) => {
       const current = s.bgTasks[sessionId] || [];
-      const updates = new Map(current.map((task) => [task.id, bgDeliveryUpdates.get(task)]));
+      const previous = new Map(current.map((task) => [task.id, task]));
       const merged = mergeAuxiliarySnapshot(tasks, current, baseline, bgUpdates, advanceOnly);
-      for (const task of merged) {
-        const update = updates.get(task.id);
+      const rows = merged.map((task) => {
+        const before = previous.get(task.id);
+        // An older list may advance execution, but delivery is independent
+        // and a list must not discard the fuller output supplied by detail.
+        if (before && task !== before && baseline !== undefined) {
+          if (advanceOnly) {
+            task.delivery_disposition = before.delivery_disposition;
+            task.delivery_error = before.delivery_error;
+          }
+          for (const field of ["stdout", "stderr"] as const) {
+            if ((before[field]?.length ?? 0) > (task[field]?.length ?? 0)) task[field] = before[field];
+          }
+        }
+        const update = before && bgDeliveryUpdates.get(before);
         if (update) bgDeliveryUpdates.set(task, update);
-      }
-      return { bgTasks: { ...s.bgTasks, [sessionId]: merged } };
+        return task;
+      });
+      return { bgTasks: { ...s.bgTasks, [sessionId]: rows } };
     }),
 
   research: {},

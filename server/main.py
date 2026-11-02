@@ -34,6 +34,7 @@ from .connector_manager import ConnectorManager
 from .crypto import master_key
 from .database import Database
 from .delegations import delegation_manager
+from .harness.registry import all_harnesses
 from .installation_admission import InstallationAdmission
 from .mcp_http import MOUNT_PREFIX
 from .mcp_http import lifespan as mcp_lifespan
@@ -110,6 +111,8 @@ async def lifespan(app: FastAPI):
         except BaseException as error:
             service_health.fail(error)
         await db.initialize()
+        for harness in all_harnesses():
+            harness.open_admission()
         from .wiki.app_bridge import reopen as reopen_wiki_app_writers
         reopen_wiki_app_writers()
         started.add("sessions")
@@ -281,6 +284,8 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
     from .ws_delivery import shutdown_connections
 
     session_manager.close_admission()
+    for harness in all_harnesses():
+        harness.begin_shutdown()
     wiki_worker.begin_shutdown()
     if schedule_runner is not None:
         schedule_runner.begin_shutdown()
@@ -290,6 +295,7 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
     codex_login_manager.begin_shutdown()
     if started <= {"sessions", "delegations"}:
         # Close hooks join restored recorders before the session drain budget.
+        await asyncio.gather(*(harness.shutdown() for harness in all_harnesses()))
         await db.close()
         if "delegations" in started:
             delegation_manager.shutdown()
@@ -308,6 +314,7 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
         if flag in started and stop is not None:
             owners.append((name, stop()))
     owners.append(("Codex login", codex_login_manager.shutdown()))
+    owners.extend((f"{harness.backend} one-shot resources", harness.shutdown()) for harness in all_harnesses())
     results = await asyncio.gather(*(stop for _, stop in owners), return_exceptions=True)
     failures = [(name, result) for (name, _), result in zip(owners, results, strict=True)
                 if isinstance(result, BaseException)]
@@ -521,6 +528,7 @@ def _installation_blockers(request: Request) -> tuple[str, ...]:
         ("oauth login", oauth_login_manager.drain_blockers()),
         ("scheduler", runner.drain_blockers() if runner is not None else ()),
         ("database", db.drain_blockers() if db is not None else ("unavailable",)),
+        *((f"harness {harness.backend}", harness.drain_blockers()) for harness in all_harnesses()),
     )
     return tuple(f"{domain}: {reason}" for domain, reasons in facts for reason in reasons)
 
@@ -559,6 +567,8 @@ async def quiesce_installation(request: Request, user: deps.CurrentUser):
             if blockers := _installation_blockers(request):
                 return JSONResponse({"detail": "Installation still has work; wait for natural completion", "blockers": blockers}, status_code=409)
             health.begin_shutdown()
+            for harness in all_harnesses():
+                harness.begin_shutdown()
             session_manager.close_admission()
             worker.begin_shutdown()
             registry.begin_shutdown()

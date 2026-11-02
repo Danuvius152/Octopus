@@ -1,5 +1,7 @@
 """Sapphire query selection and Wiki protection at the application HTTP boundary."""
 
+import asyncio
+import fcntl
 import json
 import shlex
 import sys
@@ -7,6 +9,7 @@ import uuid
 from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -283,3 +286,186 @@ async def test_authentication_and_account_scope_precede_backend_start_and_dispat
     assert denied.status_code == 404, denied.text
     assert (ctx["data"] / "dispatched").read_bytes() == dispatched
     assert (ctx["root"] / "note.md").read_bytes() == ctx["original"]
+
+
+async def test_waiting_mutation_refuses_a_backend_stopped_before_its_lock(sapphire_proxy):
+    ctx = sapphire_proxy
+    state = await backend_supervisor.ensure_running(ctx["id"], str(ctx["data"]).removesuffix(".data"))
+    started = (ctx["data"] / "started").stat().st_mtime_ns
+    with (ctx["state"] / "vault.lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        pending = asyncio.create_task(ctx["client"].post(
+            ctx["base"] + "/api/save?vault=obv", headers=ctx["headers"],
+            json={"path": "note.md", "content": "must not send", "revision": ""},
+        ))
+        try:
+            async with asyncio.timeout(2):
+                while not app_bridge._preparations:
+                    await asyncio.sleep(0)
+            await backend_supervisor.stop(ctx["id"])
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        refused = await asyncio.wait_for(pending, 3)
+    assert refused.status_code == 503, refused.text
+    assert state.state == "stopped"
+    assert (ctx["data"] / "started").stat().st_mtime_ns == started
+    assert not (ctx["data"] / "dispatched").exists()
+    assert (ctx["root"] / "note.md").read_bytes() == ctx["original"]
+    assert not (ctx["state"] / "external-change.json").exists()
+
+
+async def test_body_wait_cannot_rebind_original_mutation_to_a_restarted_backend(sapphire_proxy):
+    ctx = sapphire_proxy
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            entered.set()
+            await release.wait()
+            yield json.dumps({"path": "note.md", "content": "must not send", "revision": ""}).encode()
+
+    waiting = asyncio.create_task(ctx["client"].post(ctx["base"] + "/api/save?vault=obv",
+        headers=ctx["headers"], content=Body()))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        original = backend_supervisor.get(ctx["id"])
+        old_process = original.process
+        await backend_supervisor.stop(ctx["id"])
+        replacement = await backend_supervisor.ensure_running(ctx["id"], original.app_dir)
+        assert replacement is original and replacement.process is not old_process
+        release.set()
+        refused = await asyncio.wait_for(waiting, 3)
+        assert refused.status_code == 503, refused.text
+        assert replacement.state == "running", "refusal must not abort the replacement writer"
+        assert not (ctx["data"] / "dispatched").exists()
+        assert (ctx["root"] / "note.md").read_bytes() == ctx["original"]
+    finally:
+        release.set()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_waiting_mutation_refuses_an_exited_backend_even_if_its_port_is_reused(sapphire_proxy):
+    ctx = sapphire_proxy
+    state = await backend_supervisor.ensure_running(ctx["id"], str(ctx["data"]).removesuffix(".data"))
+    process = state.process
+    assert process is not None
+    bodies = []
+
+    async def other_service(reader, writer):
+        try:
+            header = await reader.readuntil(b"\r\n\r\n")
+            length = next(int(line.split(b":", 1)[1]) for line in header.split(b"\r\n")
+                          if line.lower().startswith(b"content-length:"))
+            bodies.append(await reader.readexactly(length))
+            writer.write(b"HTTP/1.1 409 Conflict\r\nContent-Length: 2\r\n\r\n{}")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    trap = None
+    with (ctx["state"] / "vault.lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        pending = asyncio.create_task(ctx["client"].post(ctx["base"] + "/api/save?vault=obv",
+            headers=ctx["headers"], json={"path": "note.md", "content": "private body", "revision": ""}))
+        try:
+            async with asyncio.timeout(3):
+                while not app_bridge._preparations:
+                    await asyncio.sleep(0)
+            process.terminate()
+            await asyncio.wait_for(process.wait(), 3)
+            assert state.state == "running" and state.process is process
+            trap = await asyncio.start_server(other_service, "127.0.0.1", state.port)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        try:
+            refused = await asyncio.wait_for(pending, 3)
+            assert refused.status_code == 503, refused.text
+            assert bodies == [], "the retired backend's port now belongs to another service"
+            assert not (ctx["data"] / "dispatched").exists()
+            assert (ctx["root"] / "note.md").read_bytes() == ctx["original"]
+            assert not (ctx["state"] / "external-change.json").exists()
+        finally:
+            if trap is not None:
+                trap.close()
+                await trap.wait_closed()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.parametrize("terminal", ["done", "unrecognized"])
+async def test_async_mutation_keeps_its_original_job_after_http_waiter_cancellation(sapphire_proxy, monkeypatch, terminal):
+    ctx = sapphire_proxy
+    polled, release = asyncio.Event(), asyncio.Event()
+    forwarded = app_bridge.forward
+    clients, closed = [], []
+    real_client = httpx.AsyncClient
+
+    async def backend(request):
+        if request.url.path == "/api/git":
+            return httpx.Response(202, json={"id": "original-job"})
+        assert request.url.path == "/api/jobs/original-job"
+        polled.set()
+        await release.wait()
+        (ctx["root"] / "note.md").write_text("# Original async effect\n")
+        return httpx.Response(200, json={"id": "original-job", "status": terminal})
+
+    class Client(real_client):
+        async def aclose(self):
+            closed.append(self)
+            await super().aclose()
+
+    def client(**kwargs):
+        owned = Client(transport=httpx.MockTransport(backend), **kwargs)
+        clients.append(owned)
+        return owned
+
+    async def disconnect_before_receipt_delivery(*args):
+        receipt = await forwarded(*args)
+        assert receipt.status_code == 202
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(app_bridge, "forward", disconnect_before_receipt_delivery)
+    waiting = asyncio.create_task(ctx["client"].post(ctx["base"] + "/api/git?vault=obv",
+        headers=ctx["headers"], json={"action": "sync"}))
+    try:
+        await asyncio.wait_for(polled.wait(), 3)
+        waiting.cancel("client disconnected after job transfer")
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert app_bridge._pending and not clients[0].is_closed
+        with (ctx["state"] / "vault.lock").open("a+b") as probe:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*(asyncio.shield(task) for task in tuple(app_bridge._pending))), 5)
+        assert closed == clients and len(clients) == 1
+        assert not app_bridge._pending
+        assert not (ctx["state"] / "external-change.json").exists()
+        assert (ctx["root"] / "note.md").read_text() == "# Original async effect\n"
+        assert backend_supervisor.get(ctx["id"]).state == ("running" if terminal == "done" else "stopped")
+    finally:
+        release.set()
+        if not waiting.done():
+            waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        if app_bridge._pending:
+            await app_bridge.shutdown()
+
+
+@pytest.mark.parametrize("receipt", [{}, {"id": "../another-job"}, []])
+async def test_invalid_async_receipt_stops_original_writer_and_keeps_its_effects(sapphire_proxy, monkeypatch, receipt):
+    ctx = sapphire_proxy
+    real_client = httpx.AsyncClient
+
+    async def backend(request):
+        (ctx["root"] / "note.md").write_text("# Effect before invalid receipt\n")
+        return httpx.Response(202, json=receipt)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(backend), **kwargs))
+    result = await ctx["client"].post(ctx["base"] + "/api/git?vault=obv", headers=ctx["headers"], json={"action": "sync"})
+    assert result.status_code == 502, result.text
+    assert backend_supervisor.get(ctx["id"]).state == "stopped"
+    assert (ctx["root"] / "note.md").read_text() == "# Effect before invalid receipt\n"
+    assert not (ctx["state"] / "external-change.json").exists()
+    assert not app_bridge._pending

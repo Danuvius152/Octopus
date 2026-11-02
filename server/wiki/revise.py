@@ -31,7 +31,8 @@ def revise(curation, body, actor, task):
 
     store = curation.store
     with curation.history.locked():
-        document, text = raw_blocks.snapshot(store, body.doc, body.expected_revision)
+        snapshot = raw_blocks.snapshot(store, body.doc, body.expected_revision)
+        document, text = snapshot.document, snapshot.original_text
         path = document["path"]
         require_markdown_maintenance(path)
         tasks.require_path(task, store, path)
@@ -87,7 +88,7 @@ def revise(curation, body, actor, task):
                     "operation": body.operation, **store.index_state()})
         else:
             current = raw_blocks.coordinates(store, document, text)
-            document["raw_body_start"] = current.body_start
+            document = document | {"raw_body_start": current.body_start}
             parts = [raw_blocks.project(document, text, part) for part in current.blocks]
             by_locator = {part["locator"]: part for part in parts}
             intervals = []

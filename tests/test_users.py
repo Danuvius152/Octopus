@@ -222,6 +222,70 @@ class TestTokens:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("interruption", ["password", "commit", "revoke_failure"])
+async def test_password_change_has_one_durable_outcome(tmp_path, monkeypatch, interruption):
+    path = tmp_path / "password.db"
+    db = Database(str(path))
+    await db.initialize()
+    mgr = UserManager(db)
+    user = await mgr.create_user(username="archer", password="password1")
+    here = await mgr.issue_token(user["id"])
+    elsewhere = await mgr.issue_token(user["id"])
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute, commit = db.conn.execute, db.conn.commit
+    password_written = False
+
+    async def interrupted_execute(sql, parameters=()):
+        nonlocal password_written
+        if sql.startswith("UPDATE auth_tokens SET revoked_at") and interruption == "revoke_failure":
+            raise RuntimeError("revocation rejected")
+        cursor = await execute(sql, parameters)
+        if sql.startswith("UPDATE users SET password_hash"):
+            password_written = True
+            if interruption == "password":
+                entered.set()
+                await release.wait()
+        return cursor
+
+    async def interrupted_commit():
+        if password_written and interruption == "commit":
+            entered.set()
+            await release.wait()
+        await commit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db.conn, "execute", interrupted_execute)
+        patch.setattr(db.conn, "commit", interrupted_commit)
+        changing = asyncio.create_task(mgr.set_password(
+            user["id"], "a-better-password", keep_token_hash=token_digest(here)
+        ))
+        if interruption == "revoke_failure":
+            with pytest.raises(RuntimeError, match="revocation rejected"):
+                await changing
+        else:
+            await asyncio.wait_for(entered.wait(), 1)
+            changing.cancel()
+            await asyncio.sleep(0)
+            changing.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await changing
+    await db.close()
+
+    reopened = Database(str(path))
+    await reopened.initialize()
+    try:
+        restored = UserManager(reopened)
+        changed = interruption != "revoke_failure"
+        await restored.authenticate("archer", "a-better-password" if changed else "password1")
+        with pytest.raises(UserError):
+            await restored.authenticate("archer", "password1" if changed else "a-better-password")
+        assert await restored.resolve_token(here) is not None
+        assert (await restored.resolve_token(elsewhere) is None) == changed
+    finally:
+        await reopened.close()
+
+
 class TestInvites:
     @pytest.mark.asyncio
     async def test_registration_consumes_the_code(self, users):

@@ -160,7 +160,8 @@ for line in frames():
         if params["threadId"] == thread_id:
             path = history
         if not path.exists():
-            send({"id": frame["id"], "error": {"code": -32600, "message": f"thread not found: {params['threadId']}"}})
+            message = "history lookup denied" if mode == "fork_missing_denied" else f"thread not found: {params['threadId']}"
+            send({"id": frame["id"], "error": {"code": -32600, "message": message}})
             continue
         result = {"thread": {"id": params["threadId"], "path": str(path),
                              "cwd": path.with_suffix(".cwd").read_text() if path.with_suffix(".cwd").exists() else str(root)}}

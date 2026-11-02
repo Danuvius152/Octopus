@@ -1,5 +1,6 @@
 """The proxy's bytes and encoding headers describe the same representation."""
 
+import asyncio
 import gzip
 from types import SimpleNamespace
 
@@ -9,6 +10,56 @@ from starlette.requests import Request
 
 from server.routers import applications as route
 from server.wiki import app_bridge
+
+
+async def test_ordinary_proxy_retains_transport_cleanup_through_repeated_cancellation(tmp_path, monkeypatch):
+    sending, closing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    retired = []
+    real_client = httpx.AsyncClient
+
+    class Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            sending.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            closing.set()
+            await release.wait()
+            retired.append(True)
+
+    async def authorized(*args):
+        return {"id": "app", "app_dir": str(tmp_path)}
+
+    async def running(*args):
+        return SimpleNamespace(state=route.RUNNING, port=12345, process=None)
+
+    async def unmanaged(*args):
+        return None
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request({"type": "http", "method": "GET", "path": "/apps/app/api/data",
+                       "headers": [], "query_string": b""}, receive)
+    monkeypatch.setattr(route, "_application_for_request", authorized)
+    monkeypatch.setattr(route.backend_supervisor, "ensure_running", running)
+    monkeypatch.setattr(app_bridge, "begin", unmanaged)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=Transport(), **kwargs))
+    calling = asyncio.create_task(route.proxy_application_api(request, "app", "data"))
+    try:
+        await asyncio.wait_for(sending.wait(), 2)
+        calling.cancel("disconnected")
+        await asyncio.wait_for(closing.wait(), 2)
+        calling.cancel("second cancellation")
+        await asyncio.sleep(0)
+        assert not calling.done(), "the original transport cleanup must still have an owner"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await calling
+        assert retired == [True]
+    finally:
+        release.set()
+        await asyncio.gather(calling, return_exceptions=True)
 
 
 @pytest.mark.parametrize("encoded,mutation", [(True, False), (False, False), (True, True)])
@@ -40,9 +91,12 @@ async def test_proxy_encoding_matches_raw_stream_or_decoded_mutation(tmp_path, m
         return {"app_dir": str(tmp_path), "id": "app"}
 
     async def running(*args):
-        return SimpleNamespace(state=route.RUNNING, port=12345)
+        return SimpleNamespace(state=route.RUNNING, port=12345, process=None)
 
-    class Mutation:
+    class Mutation(app_bridge.AppMutation):
+        def __init__(self):
+            self.body = {}
+
         async def finish(self):
             upstream_closed.append("finished")
 
@@ -58,6 +112,7 @@ async def test_proxy_encoding_matches_raw_stream_or_decoded_mutation(tmp_path, m
     }, receive)
     monkeypatch.setattr(route, "_application_for_request", authorized)
     monkeypatch.setattr(route.backend_supervisor, "ensure_running", running)
+    monkeypatch.setattr(route.backend_supervisor, "require_running", lambda *args, **kwargs: None)
     monkeypatch.setattr(app_bridge, "begin", begin)
     monkeypatch.setattr(httpx, "AsyncClient", client)
     response = await route.proxy_application_api(request, "app", "data")

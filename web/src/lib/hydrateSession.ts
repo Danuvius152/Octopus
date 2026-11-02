@@ -116,16 +116,16 @@ export async function loadBgTaskSnapshot(sessionId: string): Promise<void> {
 }
 
 /** Cancelling a view's observation never cancels the server's job. */
-export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliaryKind) {
+export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliaryKind, bgTaskId?: string) {
   let active = true;
   return {
-    done: loadAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), undefined, () => active),
+    done: loadAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), undefined, () => active, bgTaskId),
     cancel: () => { active = false; },
   };
 }
 
-// Outstanding reads own error ordering, never job status. Valid older successes
-// may still advance a job; settled groups retain no domain state.
+// Outstanding reads order replaceable fields and errors. Valid older successes
+// may still advance execution or fill output; settled groups retain no domain state.
 const auxiliaryReads: Record<SessionAuxiliaryKind, SnapshotReads> = {
   background: new SnapshotReads(), research: new SnapshotReads(),
 };
@@ -134,6 +134,7 @@ async function loadAuxiliarySnapshot(
   sessionId: string, kind: SessionAuxiliaryKind, start: SnapshotStart,
   acceptedDetail?: Promise<Record<string, unknown> | null>,
   current = () => true,
+  bgTaskId?: string,
 ): Promise<void> {
   const lifetime = sessions.observe(sessionId, start);
   const { observation } = lifetime;
@@ -143,11 +144,15 @@ async function loadAuxiliarySnapshot(
   const label = kind === "background" ? "background task details" : "research updates";
   // Start alongside detail, handling rejection immediately. Only its accepted
   // service generation can authorize this paired read's eventual publication.
-  const response = fetch(`${API}/api/sessions/${sessionId}/${kind === "background" ? "bg-tasks" : "research"}`, {
+  const path = kind === "background" ? `bg-tasks${bgTaskId ? `/${encodeURIComponent(bgTaskId)}` : ""}` : "research";
+  const response = fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/${path}`, {
     headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
   }).then(async (res) => {
     if (!res.ok) throw new Error(`Could not refresh ${label} (HTTP ${res.status}).`);
-    const rows: unknown = await res.json();
+    const data: unknown = await res.json();
+    if (bgTaskId && (!data || typeof data !== "object" || !("id" in data) || data.id !== bgTaskId ||
+        !("session_id" in data) || data.session_id !== sessionId)) throw new Error("Invalid background task detail.");
+    const rows: unknown = bgTaskId ? [data] : data;
     if (!Array.isArray(rows)) throw new Error(`Could not read ${label}.`);
     return rows;
   }).then((rows) => ({ rows }), (error: unknown) => ({ error }));
@@ -160,15 +165,17 @@ async function loadAuxiliarySnapshot(
       if ("error" in result) throw result.error;
       return;
     }
-    // Response ordering governs errors. Valid successes still contribute
-    // terminal facts even if a newer-started read has already returned.
+    // Valid older successes contribute terminal facts and output without
+    // replacing a newer snapshot's delivery diagnostics or explicit clearing.
     const ownsError = read.claim();
     const store = useSessionStore.getState();
     if ("error" in result) {
       if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, `Could not refresh ${label}.`);
       throw result.error;
     }
-    if (kind === "background") store.setBgTasks(sessionId, result.rows as BgTask[], start.bgTasks[sessionId] || [], !ownsError);
+    if (kind === "background" && bgTaskId) store.upsertBgTask(sessionId, result.rows[0] as BgTask,
+      start.bgTasks[sessionId]?.find((task) => task.id === bgTaskId) ?? null, !ownsError);
+    else if (kind === "background") store.setBgTasks(sessionId, result.rows as BgTask[], start.bgTasks[sessionId] || [], !ownsError);
     else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] || [], !ownsError);
     if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, null);
   } finally {

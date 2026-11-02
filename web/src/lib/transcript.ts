@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "./accountFetch";
-import { useSessionStore, type Message, type StreamingItem } from "../stores/sessionStore";
+import { useSessionStore, type Message, type MessagePageResult, type StreamingItem } from "../stores/sessionStore";
 import type { MessageInput } from "./turnOutcome";
 import { sessions } from "./sessionList";
 
@@ -60,47 +60,45 @@ export function applyTranscript(
   }
 }
 
-/** Fetch the page of transcript before what is held and prepend it.
- *
- * Returns how many messages were added — the chat list needs that number to
- * keep its scroll position across the prepend. Returns 0 when there is nothing
- * older, when a page is already in flight, or on any failure: scroll-back that
- * fails must leave the conversation exactly as it was.
- */
-const inFlight = new Set<string>();
+export type OlderMessagesResult = MessagePageResult | { state: "unneeded" | "in_flight" };
+const inFlight = new Map<string, object>();
 
-export async function loadOlderMessages(sessionId: string): Promise<number> {
-  const store = useSessionStore.getState();
-  const oldest = store.oldestSeq[sessionId];
-  if (
-    !sessionId ||
-    !store.token ||
-    !store.hasMoreMessages[sessionId] ||
-    typeof oldest !== "number" ||
-    oldest <= 0 ||
-    inFlight.has(sessionId)
-  ) {
-    return 0;
-  }
-  inFlight.add(sessionId);
-  try {
-    const res = await fetch(
-      `${API}/api/sessions/${sessionId}/messages?before_seq=${oldest}`,
-      { headers: { Authorization: `Bearer ${store.token}` } }
-    );
-    if (!res.ok) return 0;
-    const page = await res.json();
-    return useSessionStore
-      .getState()
-      .prependMessages(
-        sessionId,
-        (page.messages as Message[]) || [],
+/** One reader owns the original observation and window. Ending a view frees
+ * its read slot without allowing its late response to publish into a new view. */
+export function observeOlderMessages(sessionId: string, beforeMerge?: () => void) {
+  const start = useSessionStore.getState();
+  const lifetime = sessions.observe(sessionId, start);
+  const identity = {};
+  const oldest = start.oldestSeq[sessionId];
+  const basis = { window: start.messageWindows[sessionId], beforeSeq: oldest as number };
+  let active = true;
+  const current = () => active && sessions.current(lifetime.observation) &&
+    useSessionStore.getState().messageWindows[sessionId] === basis.window;
+  const finish = () => {
+    if (inFlight.get(sessionId) === identity) inFlight.delete(sessionId);
+    lifetime.finish();
+  };
+  const done = (async (): Promise<OlderMessagesResult> => {
+    try {
+      if (!sessionId || !start.token || !start.hasMoreMessages[sessionId] || typeof oldest !== "number" || oldest <= 0) return { state: "unneeded" };
+      if (inFlight.has(sessionId)) return { state: "in_flight" };
+      inFlight.set(sessionId, identity);
+      const response = await fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/messages?before_seq=${oldest}`, {
+        headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) throw new Error(`Could not load earlier messages (HTTP ${response.status}).`);
+      const page = await response.json();
+      if (!current()) return { state: "obsolete" };
+      if (!Array.isArray(page.messages)) throw new Error("Invalid history page.");
+      beforeMerge?.();
+      return useSessionStore.getState().prependMessages(sessionId, page.messages as Message[],
         typeof page.oldest_loaded_seq === "number" ? page.oldest_loaded_seq : null,
-        Boolean(page.has_more_messages)
-      );
-  } catch {
-    return 0;
-  } finally {
-    inFlight.delete(sessionId);
-  }
+        Boolean(page.has_more_messages), basis);
+    } catch (error) {
+      return current() ? { state: "failed", error: error instanceof Error ? error.message : String(error) } : { state: "obsolete" };
+    } finally {
+      finish();
+    }
+  })();
+  return { done, current, cancel: () => { active = false; finish(); } };
 }

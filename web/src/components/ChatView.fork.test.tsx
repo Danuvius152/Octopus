@@ -6,6 +6,7 @@ import { mockChatViewport } from "./chatViewport.test-support";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
+import { applyTranscript } from "../lib/transcript";
 
 const { child } = vi.hoisted(() => ({ child: {
   id: "fork-child", name: "Fork", status: "idle", backend: "codex", agent_id: "agent",
@@ -55,7 +56,7 @@ function mockSessionFetch(handler: (url: string) => Promise<Response>) {
 }
 
 function mount() {
-  render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
+  return render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
     <ChatView sendMessage={vi.fn()} interrupt={vi.fn()}
       answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
   </VirtuosoMockContext.Provider>);
@@ -66,6 +67,56 @@ async function launch(mode: string) {
   fireEvent.click(document.querySelector<HTMLButtonElement>(".btn-send")!);
   if (mode === "rewind") await act(async () => fireEvent.click(screen.getByText("Confirm test rewind")));
 }
+
+it.each(["connection", "service"])("releases paging UI after an obsolete %s observation with a continuous snapshot", async (boundary) => {
+  const replies: ((response: Response) => void)[] = [];
+  mockSessionFetch(async (url) => {
+    if (url.includes("/messages?")) return new Promise<Response>((resolve) => { replies.push(resolve); });
+    return Response.json([parent]);
+  });
+  const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+  sessionList.connect(source);
+  const snapshot = { messages: [{ role: "assistant", type: "text", seq: 200, content: "Reading" }],
+    oldest_loaded_seq: 200, has_more_messages: true, next_message_seq: 201 };
+  applyTranscript(parent.id, snapshot);
+  mount();
+  await waitFor(() => expect(replies).toHaveLength(1));
+  const replacement = { ...source, socket: {} };
+  act(() => {
+    if (boundary === "connection") { sessionList.disconnect(source); sessionList.connect(replacement); }
+    else useSessionStore.getState().applyDispatchState(parent.id, dispatch("replacement-service"));
+    applyTranscript(parent.id, snapshot);
+  });
+  const page = { messages: [{ role: "assistant", type: "text", seq: 199, content: "Earlier" }],
+    oldest_loaded_seq: 199, has_more_messages: false };
+  await act(async () => replies[0](Response.json(page)));
+  expect(useSessionStore.getState().oldestSeq.parent).toBe(200);
+  await waitFor(() => expect(screen.queryByText("Loading earlier messages…")).toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "Load earlier messages" }));
+  await waitFor(() => expect(replies).toHaveLength(2));
+  await act(async () => replies[1](Response.json(page)));
+  expect(useSessionStore.getState().oldestSeq.parent).toBe(199);
+  sessionList.disconnect(boundary === "connection" ? replacement : source);
+});
+
+it("gives identical unsequenced notices distinct stable display identities", async () => {
+  mockSessionFetch(async () => Response.json([]));
+  const notice = { role: "system" as const, type: "notice", content: "Model for this session: unchanged" };
+  const store = useSessionStore.getState();
+  store.setMessages(parent.id, [{ role: "assistant", type: "text", seq: 200, content: "Reading" }]);
+  store.setMessageWindow(parent.id, 200, false);
+  store.addMessage(parent.id, notice);
+  store.addMessage(parent.id, notice);
+  mount();
+  await waitFor(() => expect(screen.getAllByText(notice.content)).toHaveLength(2));
+  const keys = () => screen.getAllByText(notice.content).map((node) => node.closest<HTMLElement>("[data-message-key]")!.dataset.messageKey);
+  const original = keys();
+  expect(new Set(original).size).toBe(2);
+  act(() => useSessionStore.getState().prependMessages(parent.id,
+    [{ role: "assistant", type: "text", seq: 199, content: "Earlier" }], 199, false,
+    { beforeSeq: 200, window: useSessionStore.getState().messageWindows.parent }));
+  await waitFor(() => expect(keys()).toEqual(original));
+});
 
 it.each(["rewind", "duplicate"])("%s loads a paged snapshot without overwriting newer WS rows/questions", async (mode) => {
   let finish!: (response: Response) => void;
@@ -114,6 +165,41 @@ it.each(["rewind", "duplicate"])("%s loads a paged snapshot without overwriting 
   expect(paged.messages[child.id][0].seq).toBe(199);
   expect(paged.messages[child.id].find((row) => row.seq === 400)?.content).toBe("new WS row");
   expect(paged.pendingQuestions[child.id][0].question_id).toBe("late-question");
+});
+
+it.each(["switch", "return", "remount"])("a late old page cannot settle the current view during %s", async (transition) => {
+  const replies: Record<string, ((response: Response) => void)[]> = { parent: [], "fork-child": [] };
+  mockSessionFetch((url) => new Promise<Response>((resolve) => {
+    const id = url.includes("/parent/") ? "parent" : "fork-child";
+    replies[id].push(resolve);
+  }));
+  const row = (id: string) => ({ role: "assistant" as const, type: "text", seq: 200, content: `Reading ${id}` });
+  useSessionStore.setState({ sessions: [parent, child as SessionInfo],
+    messages: { parent: [row("parent")], "fork-child": [row("child")] },
+    oldestSeq: { parent: 200, "fork-child": 200 }, hasMoreMessages: { parent: true, "fork-child": true },
+  });
+  const view = mount();
+  await waitFor(() => expect(replies.parent).toHaveLength(1));
+  if (transition === "remount") { view.unmount(); mount(); }
+  else {
+    act(() => useSessionStore.getState().setActiveSessionId(child.id));
+    await waitFor(() => expect(replies[child.id]).toHaveLength(1));
+    if (transition === "return") act(() => useSessionStore.getState().setActiveSessionId(parent.id));
+  }
+  const active = transition === "switch" ? child.id : parent.id;
+  await waitFor(() => expect(replies[active]).toHaveLength(active === "parent" ? 2 : 1));
+  const page = { messages: [{ role: "assistant", type: "text", seq: 199, content: "Earlier" }],
+    oldest_loaded_seq: 199, has_more_messages: false };
+  await act(async () => replies.parent[0](Response.json(page)));
+  expect(useSessionStore.getState().oldestSeq.parent).toBe(200);
+  expect(screen.getByText("Loading earlier messages…")).toBeInTheDocument();
+  await act(async () => replies[active].at(-1)!(Response.json(page)));
+  await waitFor(() => expect(screen.queryByText("Loading earlier messages…")).toBeNull());
+  expect(useSessionStore.getState().oldestSeq[active]).toBe(199);
+  if (transition === "return") {
+    await act(async () => replies[child.id][0](Response.json(page)));
+    expect(useSessionStore.getState().oldestSeq[child.id]).toBe(200);
+  }
 });
 
 it.each(["rewind", "duplicate"])("%s rejects an old service response after a newer service arrives", async (mode) => {

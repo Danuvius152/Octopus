@@ -274,7 +274,7 @@ model.write_text("import json,os,sys\\nfrom pathlib import Path\\n"
                  "sys.stdin.read()\\n")
 harness=get_harness('codex')
 harness.profile=replace(harness.profile,binary=sys.executable,prepare_resume=None,activity_observer=None,
-    new_driver=ClaudeDriver, can_steer=True, reusable=True,
+    new_driver=ClaudeDriver, can_steer=True, reusable=True, native_input_evidence=False,
     build_turn_argv=lambda context: ([sys.executable,'-u',str(model)],{'cwd':str(root)}))
 spawn=asyncio.create_subprocess_exec
 async def interrupted_spawn(*args,**kwargs):
@@ -285,9 +285,10 @@ async def interrupted_spawn(*args,**kwargs):
         async with asyncio.timeout(3):
             while not (root/'spawned').exists(): await asyncio.sleep(.01)
     with sqlite3.connect(settings.db_path) as db:
-        row=db.execute("SELECT session_id,request_id,execution_state,process_group,execution_generation "
+        row=db.execute("SELECT session_id,request_id,execution_state,process_group,execution_generation,native_inputs "
                        "FROM client_submissions WHERE client_id='original'").fetchone()
     assert row is not None and row[2]=='running' and row[3] is None, row
+    assert json.loads(row[5])==[], 'This legacy-writer probe must not fabricate native delivery evidence'
     (root/'loss.json').write_text(json.dumps(row))
     if 'WINDOW'=='late_spawn':
         while not (root/'release').exists(): await asyncio.sleep(.01)

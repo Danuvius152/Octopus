@@ -165,6 +165,7 @@ async def test_changing_a_password_needs_the_current_one(client):
     )
     assert wrong.status_code == 403
 
+    elsewhere = await users.issue_token(user["id"])
     ok = await c.post(
         "/api/auth/password",
         json={"current_password": "password1", "new_password": "a-new-password"},
@@ -173,6 +174,10 @@ async def test_changing_a_password_needs_the_current_one(client):
     assert ok.status_code == 204
     # The tab that changed it stays in; the password really changed.
     assert (await c.get("/api/auth/identity", headers=_bearer(token))).status_code == 200
+    assert (await c.get("/api/auth/identity", headers=_bearer(elsewhere))).status_code == 401
+    assert (await c.post(
+        "/api/auth/login", json={"username": "archer", "password": "password1"}
+    )).status_code == 401
     assert (
         await c.post(
             "/api/auth/login", json={"username": "archer", "password": "a-new-password"}

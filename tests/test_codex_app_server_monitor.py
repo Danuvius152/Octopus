@@ -104,10 +104,9 @@ async def test_cold_resume_does_not_recount_completed_responses(native_runtime, 
 async def test_response_before_delayed_start_ack_uses_the_eventually_accepted_root(
     native_runtime, metrics, tmp_path, monkeypatch,
 ):
-    from server.harness import codex_app_server
     from tests.native_app_server import wire_frames
 
-    monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 3)
+    monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", 3)
     manager, database, session, mode, _, _ = native_runtime
     mode[0] = "control_delayed_ack"
     receipt = await submit_client_message(manager, session.id, "Delayed proof", [], "delayed-proof", wiki_mode=None)
@@ -184,7 +183,7 @@ async def test_unassociated_usage_capacity_loss_does_not_change_business_result(
     from server.harness.codex_activity import CodexActivityObserver
     from tests.native_app_server import wire_frames
 
-    monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 3)
+    monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", 3)
     monkeypatch.setattr(codex_app_server, "_METRICS_PENDING_COUNT", 2)
     observed = asyncio.Event()
     attach = CodexActivityObserver.set_event_handler

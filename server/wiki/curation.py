@@ -210,7 +210,8 @@ class WikiCuration:
             raise WikiError("Supporting links require an existing navigation page", 403)
         from . import navigation_context, raw_blocks
 
-        source, text = raw_blocks.snapshot(self.store, path, expected_revision)
+        snapshot = raw_blocks.snapshot(self.store, path, expected_revision)
+        source, text = snapshot.document, snapshot.original_text
         navigation_context.require(task, self.store, source, text)
         for relation in relations:
             tasks.require_source_read(task, self.store, relation)

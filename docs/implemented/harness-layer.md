@@ -39,6 +39,17 @@ retains native resources and bounded event delivery through confirmed retirement
 Input delivery, committed business outcome, notification and resource exit are
 separate facts under the [execution contract](architecture-contract.md#输入完成与资源退休).
 
+One-shot calls are owned by their original registry Harness. Before the first
+possible suspension it registers the caller and resource operation, retaining
+the original spawn, process-group retirement and private-settings cleanup.
+A public timeout, repeated cancellation or a finished waiter does not prove
+retirement. A late spawn is joined by that same operation; only confirmed group
+exit and private-settings cleanup release its installation drain blocker.
+Confirmed launch failure without a child still closes private settings. Failed
+exit or cleanup proof retains the blocker and causes shutdown to report failure.
+Installation quiesce closes admission synchronously; shutdown joins the original
+retirement futures. Reopening cannot discard unresolved resources.
+
 `RunDriver` owns protocol state, without owning a process, lease or product
 outcome. `ArgvDriver` supplies Codex exec's initial EOF; `ClaudeDriver` encodes
 stream-JSON inputs and gives every opening or steering frame a unique UUID.
@@ -204,6 +215,9 @@ remain the behavior checks; the seam does not replace them.
 `tests/test_harness_core.py`, `tests/test_harness_claude.py`,
 `tests/test_harness_codex.py`, `tests/test_harness_flow_control.py` and
 `tests/test_harness_authorization_stop.py` exercise these boundaries.
+`tests/test_installation_drain.py` follows a timed-out or twice-cancelled one-shot
+through a refused quiesce, its late real process exit and successful quiesce;
+failed private-settings or exit proof remains a blocker.
 `tests/test_session_capability_projection.py` checks all four steering/reuse
 combinations through real subprocess input, API projection and Wiki tool visibility.
 

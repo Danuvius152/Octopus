@@ -1,6 +1,5 @@
 """Current evidence batches with shared content ranges and truthful receipts."""
 
-from .line_coordinates import LineCoordinates
 from .store import WikiError, is_maintainable_text
 
 
@@ -50,12 +49,11 @@ def read_many(store, requests, budget_chars, task=None, view="full", *, reuse_de
                 identity = store.resolve_identity(request.doc)
                 cache_key = identity[0] if identity else request.doc
                 if cache_key not in cache:
-                    document = store.read(request.doc, length=1, index_error_limit=0 if view == "compact" else None)
-                    with store.connect() as db:
-                        text = db.execute("SELECT text FROM documents WHERE id=?", (document["id"],)).fetchone()[0]
-                    cache[cache_key] = (document, text)
-                    cache[document["id"]] = (document, text)
-                document, text = cache[cache_key]
+                    snapshot = store.read_snapshot(request.doc, length=1, index_error_limit=0 if view == "compact" else None)
+                    cache[cache_key] = snapshot
+                    cache[snapshot.document["id"]] = snapshot
+                snapshot = cache[cache_key]
+                document, text = snapshot.document, snapshot.text
                 item |= {"id": document["id"], "revision": document["revision"]}
                 if request.expected_revision and request.expected_revision != document["revision"]:
                     items.append(item | {"status": "changed", "error": "Read the current revision"})
@@ -95,8 +93,8 @@ def read_many(store, requests, budget_chars, task=None, view="full", *, reuse_de
                 items.append(item | {"status": "not_found" if exc.status == 404 else "unavailable", "error": str(exc)})
         ranges = []
         for identifier, selected in intervals.items():
-            document, text = cache[identifier]
-            lines = LineCoordinates(text)
+            snapshot = cache[identifier]
+            document, text, lines = snapshot.document, snapshot.text, snapshot.lines
             for start, end in selected:
                 range_id = f"{identifier}:{document['revision']}:{start}:{end}"
                 ranges.append({"id": range_id, "doc": identifier, "revision": document["revision"], "start": start, "end": end, "content": text[start:end], "line_start": lines.line(start), "line_end": lines.line(end)})
@@ -107,6 +105,5 @@ def read_many(store, requests, budget_chars, task=None, view="full", *, reuse_de
         if view == "compact" or task is not None:
             result = compact_batch(result, view=view)
         for piece in result["ranges"]:
-            document, _ = cache[piece["doc"]]
-            tasks.record_read(task, document | {"start": piece["start"], "end": piece["end"], "page": None})
+            tasks.record_read(task, cache[piece["doc"]].document | {"start": piece["start"], "end": piece["end"], "page": None})
         return result

@@ -28,6 +28,7 @@ import {
 
 import { useSessionStore, type BgTask } from "../stores/sessionStore";
 import { cn } from "../lib/utils";
+import { observeSessionAuxiliary } from "../lib/hydrateSession";
 
 interface Props {
   sessionId: string;
@@ -84,45 +85,20 @@ function stopDescription(task: BgTask): string | null {
 
 export function BgTaskChip({ sessionId, taskId }: Props) {
   const token = useSessionStore((s) => s.token);
-  const upsertBgTask = useSessionStore((s) => s.upsertBgTask);
   const task = useSessionStore((s) =>
     (s.bgTasks[sessionId] || []).find((t) => t.id === taskId)
   );
   const [expanded, setExpanded] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
-  // When the chip is first rendered (e.g. from chat history that
-  // pre-existed the WS connection), we may not have the task in the
-  // store. Fetch it once so the chip has *something* to show.
+  // The read owns its observation until this view ends it. A WS insert while
+  // it waits must not cancel a valid response that can still supply full output.
   useEffect(() => {
-    if (task) return;
-    const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
-      sessionId
-    )}/bg-tasks/${encodeURIComponent(taskId)}`;
-    const baseline = useSessionStore.getState().bgTasks[sessionId]?.find((t) => t.id === taskId) ?? null;
-    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data) upsertBgTask(sessionId, data as BgTask, baseline);
-      })
-      .catch(() => {});
-  }, [sessionId, taskId, token, task, upsertBgTask]);
-
-  // When expanded, we want the full stdout/stderr — refetch to pick up
-  // bytes that didn't ride the WS event.
-  useEffect(() => {
-    if (!expanded) return;
-    const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
-      sessionId
-    )}/bg-tasks/${encodeURIComponent(taskId)}`;
-    const baseline = useSessionStore.getState().bgTasks[sessionId]?.find((t) => t.id === taskId) ?? null;
-    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data) upsertBgTask(sessionId, data as BgTask, baseline);
-      })
-      .catch(() => {});
-  }, [expanded, sessionId, taskId, token, upsertBgTask]);
+    if (!expanded && useSessionStore.getState().bgTasks[sessionId]?.some((item) => item.id === taskId)) return;
+    const read = observeSessionAuxiliary(sessionId, "background", taskId);
+    void read.done.catch(() => {});
+    return read.cancel;
+  }, [expanded, sessionId, taskId, token]);
 
   if (!task) {
     return (

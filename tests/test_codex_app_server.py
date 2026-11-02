@@ -13,7 +13,7 @@ from server.harness.codex import CODEX
 @pytest.mark.parametrize("confirmation", ["delayed_ack", "input_echo", "unicode_echo", "none"])
 async def test_native_root_binding_requires_correlated_acceptance(tmp_path, monkeypatch, confirmation):
     monkeypatch.setattr(codex_app_server, "verify_binary", lambda path: None)
-    monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 0.5)
+    monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", 0.5)
     received = tmp_path / "business-input"
     script = '''import json,sys
 from pathlib import Path

@@ -33,7 +33,7 @@ class NativeRuntime(NamedTuple):
 @pytest.fixture
 async def native_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_app_server, "verify_binary", lambda path: None)
-    monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 0.5)
+    monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", 0.5)
     mode, starts, events = ["normal"], [], []
 
     def argv(context):

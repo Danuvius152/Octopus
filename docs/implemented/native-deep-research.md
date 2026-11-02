@@ -60,9 +60,11 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
 - Owns a **hard overall timeout** and an **idle/heartbeat** — the gap that let
   the CLI Workflow hang forever simply cannot happen here because we control
   the loop and never block on an unbounded external stream.
-- Is **cancellable**: cancel reaps all in-flight `run_oneshot` subprocesses
-  (we hold their `HarnessRun`s) and fetch tasks — no orphans (contrast the CLI
-  Workflow, whose nested `claude` processes orphaned on interrupt).
+- Is **cancellable**: cancellation joins the original leaf and fetch operations.
+  One-shot subprocesses remain owned by their registry Harness through confirmed
+  retirement, including late spawn and private-settings cleanup. An unconfirmed
+  cleanup remains visible to installation drain; a returned waiter is not proof
+  that its process has exited.
 - Persists to a `research_jobs` table, with **completion and delivery tracked
   separately** (Vera): `status`/`phase`/`completed_at` AND `injection_status`/
   `injected_at`/`delivery_error`/`report_path`. Because the report is delivered
@@ -85,8 +87,19 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   response directly through its existing state merge. A boot sweep marks running jobs
   `interrupted`/`failed`; v1 does NOT resume mid-pipeline.
 
-Research captures execution configuration when admitted, including while it
-waits for a job slot. A new lawful return may restore its original archived
+Before admitting a job, Research captures the session overrides and Agent defaults
+through SessionManager's short configuration boundary, resolving the actual model
+and credential ID into the job's private request value. Capacity waits, credential
+resolution and model execution occur outside that lock. A queued job therefore
+keeps its admitted choice when defaults change; a later job sees the new defaults.
+Every leaf spawn rechecks current account, credential and execution authority;
+revocation ends the original job rather than switching it to another credential.
+After configuration waiting, admission rechecks shutdown synchronously before
+registering the task. Configuration capture rejects a missing or closed target
+and checks that the same target remains after Agent loading; Research maps that typed
+refusal to its normal admission error without creating a job or pipeline.
+
+A new lawful return may restore its original archived
 session through SessionManager; the original account, agent, work and receipt
 still govern admission. Archive interrupts the current input and revokes all
 queued inputs, while later returns may wake the caller. Previously selected
@@ -156,7 +169,10 @@ Source: [manager](../../server/research/manager.py),
 [leaf executor](../../server/research/leaf.py).
 Regression entry points: `tests/test_research_orchestrator.py`,
 `tests/test_research_leaf.py`, `tests/test_research_manager.py` and
-`tests/test_research_session_return.py`.
+`tests/test_research_session_return.py`. Manager regressions queue jobs across
+Agent-default/session-override changes, credential deletion and shutdown while
+configuration capture waits. `tests/test_research_api.py` deletes or archives
+the real session during that wait and verifies HTTP refusal with no job created.
 
 Research does not resume an interrupted pipeline on startup, add a new search
 provider, or claim that browser display proves human reading. Current authorization

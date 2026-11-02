@@ -38,6 +38,11 @@ def all_backends() -> list[str]:
     return list(_REGISTRY.keys())
 
 
+def all_harnesses() -> tuple[Harness, ...]:
+    """The original kind-level owners, including pending one-shot resources."""
+    return tuple(_REGISTRY.values())
+
+
 def available_backends() -> list[str]:
     """Registered kinds whose CLI resolves on this host."""
     return [b for b, h in _REGISTRY.items() if h.is_available()]

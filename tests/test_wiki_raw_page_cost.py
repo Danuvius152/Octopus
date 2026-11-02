@@ -36,8 +36,10 @@ def test_locator_page_does_not_copy_omitted_body_but_still_checks_current_bytes(
             return result
 
     def observed_snapshot(*args, **kwargs):
-        document, content = snapshot(*args, **kwargs)
-        return document, ObservedText(content)
+        from dataclasses import replace
+
+        value = snapshot(*args, **kwargs)
+        return replace(value, original_text=ObservedText(value.original_text))
 
     def observed_bytes(file):
         content = read_bytes(file)

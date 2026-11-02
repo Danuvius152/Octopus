@@ -68,6 +68,22 @@ it("keeps real BG completion and a new task while both old lists finish", async 
   ]);
 });
 
+it.each(["unknown", null] as const)("allows an old list's terminal fact without replacing newer detail delivery (%s)", async (disposition) => {
+  const a = deferred(), b = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
+  const list = loadBgTaskSnapshot("s");
+  const detail = observeSessionAuxiliary("s", "background", "task");
+  b.resolve(Response.json({ ...bg, stdout: "Complete fetched output", delivery_disposition: disposition,
+    delivery_error: disposition ? "New delivery" : null }));
+  await detail.done;
+  a.resolve(Response.json([{ ...bg, status: "completed", delivery_disposition: "stopped", delivery_error: "Old delivery" }]));
+  await list;
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({
+    status: "completed", stdout: "Complete fetched output",
+    delivery_disposition: disposition, delivery_error: disposition ? "New delivery" : null,
+  });
+});
+
 it.each(["background", "research"] as const)("cancels only the %s observation", async (kind) => {
   const response = deferred();
   const fetcher = vi.fn((_url: RequestInfo | URL) => response.promise);

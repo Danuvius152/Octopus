@@ -538,8 +538,9 @@ Zustand 仍持有唯一任务状态。不可变记录上的弱引用标记只证
 
 各原 owner 的 `drain_blockers()` 即时解释自己的接纳、执行、交付与清理责任。
 安装层显式组合 HTTP/WS、会话、BG、Research、委派、Wiki worker/Registry/通知、
-AppAgent/backend/bridge、登录、scheduler 与主库事实，不读取其私有队列、锁或
-第三方 executor 字段；不另建活动账本、持久 idle 状态或通用关闭事务。
+AppAgent/backend/bridge、各 Harness 的 one-shot、登录、scheduler 与主库事实，
+不读取其私有队列、锁或第三方 executor 字段；不另建活动账本、持久 idle 状态
+或通用关闭事务。
 观察只说明本次阻塞，不能跨 await 当作交接许可，也不启动、取消或重绑业务。
 
 会话包括 Owner 命令、准备与迟到 spawn、输入队列、问题、发布、退休和失败接管，
@@ -547,6 +548,11 @@ AppAgent/backend/bridge、登录、scheduler 与主库事实，不读取其私�
 启动、终态回流和保存责任，已结束但清理未确认的任务仍阻塞。失败 Owner 只有原
 清理成功、原通知退出且没有保留输入时才能解除阻塞。空闲 held 模型宿主及 App
 server 可留到正常 shutdown 退休，不能仅因进程存活永久等待。
+
+one-shot 在首次可能挂起前由原 Harness 登记，公共调用超时或二次取消后仍持有
+迟到 spawn、原进程组和私有配置清理。只有真实退出与清理都确认才解除 blocker；
+task.done() 不能代替退休成功，失败证据继续阻塞。quiesce 同步关闭各 Harness
+准入，shutdown 等待原退休 future；详细责任归[Harness 合同](harness-layer.md)。
 
 Registry 在排出同步线程前登记原操作，覆盖尚未借用 Store 的空隙；取消等待不
 释放仍在运行的线程责任。最终交接以非阻塞短 guard 保护 Registry 与 Store 借用

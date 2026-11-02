@@ -30,6 +30,9 @@ from .workspace import paths_for
 
 MAX_FILE_BYTES = 25 * 1024 * 1024  # 25 MB / file
 MAX_ATTACHMENTS_PER_MESSAGE = 10
+# Preserve the existing ASCII limit (12-byte id + '__' + 200-byte name),
+# leaving room for the temporary suffix used when preserving fork attachments.
+_MAX_DISK_NAME_BYTES = 214
 
 # Strip path separators, NUL, and other control chars from the user-supplied
 # filename. We keep the rest (incl. unicode) so the agent sees something
@@ -95,23 +98,28 @@ def session_dir(session_id: str, *, user_id: str) -> Path:
     return d
 
 
-def _sanitize_filename(name: str) -> str:
+def _sanitize_filename(name: str, byte_budget: int) -> str:
     """Reduce a user-supplied filename to something safe to put on disk.
 
-    Strips path separators / control chars, collapses `..` runs, and caps
-    length to 200 chars so the final path stays well under the FS limit
-    even after the id prefix and parent dirs.
+    Reserve the actual id prefix before truncating UTF-8 at a whole character.
+    Short extensions retain their existing meaning (at most 16 characters).
     """
     cleaned = _UNSAFE_CHAR_RE.sub("_", name or "").strip()
     cleaned = _DOTDOT_RE.sub("_", cleaned)
     cleaned = cleaned.strip("._") or "file"
-    if len(cleaned) > 200:
+    try:
+        encoded = cleaned.encode("utf-8")
+    except UnicodeError as error:
+        raise AttachmentError("attachment filename must be valid UTF-8") from error
+    if len(encoded) > byte_budget:
         # Preserve the extension when truncating.
         stem, dot, ext = cleaned.rpartition(".")
         if dot and len(ext) <= 16:
-            cleaned = stem[: 200 - len(ext) - 1] + "." + ext
+            suffix = "." + ext
+            available = byte_budget - len(suffix.encode("utf-8"))
+            cleaned = stem.encode("utf-8")[:available].decode("utf-8", errors="ignore") + suffix
         else:
-            cleaned = cleaned[:200]
+            cleaned = encoded[:byte_budget].decode("utf-8", errors="ignore")
     return cleaned
 
 
@@ -144,11 +152,12 @@ def save_upload(
             f"({len(content)} given)"
         )
 
-    sanitized = _sanitize_filename(filename)
     attachment_id = uuid.uuid4().hex[:12]
+    prefix = f"{attachment_id}__"
+    sanitized = _sanitize_filename(filename, _MAX_DISK_NAME_BYTES - len(prefix.encode("utf-8")))
     # `<id>__<name>` so listing the dir is human-readable AND `id` alone
     # is enough to recover the file (we glob for `<id>__*`).
-    on_disk_name = f"{attachment_id}__{sanitized}"
+    on_disk_name = prefix + sanitized
     dest = session_dir(session_id, user_id=user_id) / on_disk_name
     dest.write_bytes(content)
 

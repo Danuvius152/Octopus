@@ -131,7 +131,7 @@ async def test_fast_model_can_be_on_a_later_catalog_page(native_runtime, tmp_pat
 
 async def test_oversized_jsonl_controller_is_rejected_before_saving(native_runtime, monkeypatch):
     manager, database, session, mode, starts, events = native_runtime
-    monkeypatch.setattr(codex_app_server, "_FRAME_LIMIT_BYTES", 128 * 1024, raising=False)
+    monkeypatch.setattr("server.harness.codex_rpc.FRAME_LIMIT_BYTES", 128 * 1024)
     before = await database.get_agent(session.agent_id)
     with pytest.raises(AgentError, match="JSONL.*bytes"):
         await AgentManager(database).update_agent(session.agent_id, user_id=session.user_id,
@@ -160,7 +160,7 @@ async def test_unverified_binary_fails_preparation_without_business_send(native_
 @pytest.mark.parametrize("characters,accepted", [(30000, True), (50000, False)])
 async def test_jsonl_budget_counts_utf8_without_truncating_input(native_runtime, tmp_path, monkeypatch, characters, accepted):
     manager, database, session, mode, starts, events = native_runtime
-    monkeypatch.setattr(codex_app_server, "_FRAME_LIMIT_BYTES", 128 * 1024, raising=False)
+    monkeypatch.setattr("server.harness.codex_rpc.FRAME_LIMIT_BYTES", 128 * 1024)
     content = "中" * characters
     await submit_client_message(manager, session.id, content, [], "utf8-input", wiki_mode=None)
     await wait_dispatch_idle(manager, session.id)

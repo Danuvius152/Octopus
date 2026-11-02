@@ -299,6 +299,21 @@ admission, late input proof, outcome recording and confirmed resource retirement
 
 ### Native history branching
 
+Dialogue and the management driver each compose one `RpcConnection`; management
+does not inherit the conversation Driver or its private turn state. The connection
+owns request IDs, frame encoding/budget, response waiters, exact RPC error data
+and close association within its original generation. It owns no authorization,
+business write policy, input proof, controller uncertainty or fork checkpoint.
+Both callers reuse native initialization and configuration validation.
+
+Releasing a timed-out waiter does not remove root/steer evidence. The dialogue
+driver still receives and persists late ACKs on the original connection before
+settling their proof; a later connection cannot supply that proof. During qualified
+cleanup, only the exact missing-thread response together with an absent saved
+original path confirms that the artifact is already absent. If that path still
+exists, or the RPC reports permission failure or another error, recovery material
+is retained. Raw RPC errors remain distinguishable for this check.
+
 With App Server selected, full `/fork` uses `thread/fork` in the selected
 `CODEX_HOME`, for both exec-origin and App Server histories. Paginated native
 storage cannot be cloned by changing a rollout ID or relocating its home.
@@ -427,6 +442,8 @@ keystore cases cover bound/unbound behavior without claiming a live keyring test
 Code: [profile](../../server/harness/codex.py),
 [native control](../../server/harness/codex_control.py),
 [App Server driver](../../server/harness/codex_app_server.py),
+[connection coordinator](../../server/harness/codex_rpc.py),
+[history management](../../server/harness/codex_history.py),
 [text worker](../../server/harness/codex_text.py).
 Regression entry points: `tests/test_harness_codex.py`,
 `tests/test_codex_controller.py`, `tests/test_codex_text.py`,
@@ -445,6 +462,9 @@ exec-to-App Server and App Server-to-App Server precise resume with real
 attachment/tool effects. `web/e2e/codex-app-server.spec.ts` verifies original
 receipts and subsequent native resume after reopening the same session across
 reloads. These checks do not establish production deployment.
+`tests/test_codex_app_server_fork.py` also distinguishes exact missing history
+from denied cleanup during cold recovery; neither case deletes the source or
+guesses an API-created identity.
 
 `tests/test_codex_app_server_configuration.py` covers transport-aware saves,
 current defaults, Fast rejection and UTF-8 refusal without sending input.

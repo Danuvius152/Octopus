@@ -327,9 +327,8 @@ class UserManager:
         if user is None:
             raise UserError("No such user", status_code=404)
         validate_password(password, username=user["username"])
-        await self.db.update_user_field(user_id, password_hash=hash_password(password))
-        return await self.db.revoke_all_tokens(
-            user_id, at=_now(), keep=keep_token_hash
+        return await self.db.change_password(
+            user_id, hash_password(password), at=_now(), keep=keep_token_hash
         )
 
     async def set_disabled(self, user_id: str, disabled: bool) -> None:

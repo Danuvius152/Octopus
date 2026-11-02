@@ -16,6 +16,8 @@ import asyncio
 import logging
 import signal
 import time
+from dataclasses import dataclass
+from typing import Any
 
 from ..config import settings
 from ..diagnostics import diagnostic_text, exception_diagnostic
@@ -30,12 +32,47 @@ from .run import HarnessRun, RunConfig, _which_with_fallback, prepare_spawn
 logger = logging.getLogger(__name__)
 
 
+@dataclass(eq=False)
+class _OneShotOperation:
+    waiter: asyncio.Task[Any] | None
+    retired: asyncio.Future[None]
+    spawn: asyncio.Task[asyncio.subprocess.Process | None] | None = None
+    retirement: asyncio.Task[None] | None = None
+
+
 class Harness:
-    """Kind-level adapter for one model runtime. Stateless; one instance per
-    backend lives in the registry."""
+    """Kind-level adapter, owning one-shot resources until confirmed retirement."""
 
     def __init__(self, profile: RuntimeProfile) -> None:
         self.profile = profile
+        self._oneshots: set[_OneShotOperation] = set()
+        self._closing = False
+
+    def open_admission(self) -> None:
+        if self._oneshots:
+            raise RuntimeError("Cannot reopen Harness with unretired one-shot resources")
+        self._closing = False
+
+    def drain_blockers(self) -> tuple[str, ...]:
+        return ("one-shot process or private configuration retirement",) if self._oneshots else ()
+
+    def begin_shutdown(self) -> None:
+        self._closing = True
+        for operation in self._oneshots:
+            waiter = operation.waiter
+            if waiter is not None and not waiter.done() and not waiter.cancelling():
+                waiter.cancel("Harness shutting down")
+
+    async def shutdown(self, *, timeout: float = 5.0) -> None:
+        self.begin_shutdown()
+        owned = tuple(self._oneshots)
+        if not owned:
+            return
+        _, pending = await asyncio.wait({op.retired for op in owned}, timeout=timeout)
+        if pending:
+            raise RuntimeError("One-shot process retirement remains unconfirmed during shutdown")
+        for operation in owned:
+            operation.retired.result()
 
     def model_settings(self, credential: HarnessCredential | None = None) -> ModelSettings:
         if self.profile.model_settings:
@@ -242,6 +279,22 @@ class Harness:
 
         The profile builds the argv (applying the credential its own way)
         and extracts the result text from stdout."""
+        if self._closing:
+            raise HarnessOneshotError("unavailable", "Harness is shutting down")
+        operation = _OneShotOperation(asyncio.current_task(), asyncio.get_running_loop().create_future())
+        # No await separates admission from ownership. The public waiter may
+        # leave before a late spawn handle or its cleanup can be confirmed.
+        self._oneshots.add(operation)
+        operation.retired.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        try:
+            return await self._run_oneshot(ctx, operation, timeout=timeout)
+        finally:
+            operation.waiter = None
+            if operation.spawn is None:
+                self._oneshots.discard(operation)
+                operation.retired.set_result(None)
+
+    async def _run_oneshot(self, ctx: OneShotContext, operation: _OneShotOperation, *, timeout: float) -> str:
         started_at = time.monotonic()
         diagnostic_secrets = (settings.auth_token, ctx.credential.secret if ctx.credential else "")
         try:
@@ -267,54 +320,52 @@ class Harness:
                     raise HarnessOneshotError("unauthorized", str(error)) from error
             launch_argv = private_settings.materialize(argv) if private_settings else argv
             try:
-                try:
-                    validate_launch(launch_argv, kwargs.get("env"))
-                except LaunchConfigurationError as error:
-                    raise HarnessOneshotError("configuration", str(error)) from error
-                return await asyncio.create_subprocess_exec(
-                    *launch_argv,
-                    # DEVNULL gives a stdin-reading CLI EOF immediately.
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    **kwargs,
-                )
-            except BaseException:
-                if private_settings is not None:
-                    private_settings.close()
-                raise
+                validate_launch(launch_argv, kwargs.get("env"))
+            except LaunchConfigurationError as error:
+                raise HarnessOneshotError("configuration", str(error)) from error
+            return await asyncio.create_subprocess_exec(
+                *launch_argv,
+                # DEVNULL gives a stdin-reading CLI EOF immediately.
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **kwargs,
+            )
 
-        spawn = asyncio.create_task(spawn_process(), name="one-shot-process-startup")
-        retirement: asyncio.Task[None] | None = None
+        spawn = operation.spawn = asyncio.create_task(spawn_process(), name="one-shot-process-startup")
 
         async def retire_spawn() -> None:
             try:
                 captured = await asyncio.shield(spawn)
-            except (FileNotFoundError, HarnessOneshotError):
-                return  # launch failed before creating a process
-            if captured is None:
-                if private_settings is not None:
-                    private_settings.close()
-                return
-            _terminate_process_group(captured, signal.SIGKILL)
-            await captured.wait()
-            await wait_group_exit(captured.pid, timeout=2.0, after_kill=True)
+            except (OSError, HarnessOneshotError):
+                # A known launch failure has no process to retire. Private
+                # settings still have this same cleanup owner and must close.
+                captured = None
+            if captured is not None:
+                _terminate_process_group(captured, signal.SIGKILL)
+                await captured.wait()
+                await wait_group_exit(captured.pid, timeout=2.0, after_kill=True)
             if private_settings is not None:
                 private_settings.close()
 
         def retirement_finished(done: asyncio.Task[None]) -> None:
-            if not done.cancelled() and (error := done.exception()) is not None:
+            error = asyncio.CancelledError() if done.cancelled() else done.exception()
+            if error is not None:
+                operation.retired.set_exception(error)
                 # Retirement can finish after the bounded caller has already
                 # reported uncertainty; still observe its actual failure.
                 logger.error("Harness one-shot retirement failed provider=%s error_type=%s\n%s",
                              self.profile.backend, type(error).__name__,
                              exception_diagnostic(error, secrets=diagnostic_secrets))
+            else:
+                self._oneshots.discard(operation)
+                operation.retired.set_result(None)
 
         async def confirm_retirement() -> None:
-            nonlocal retirement
-            if retirement is None:
-                retirement = asyncio.create_task(retire_spawn(), name="one-shot-process-retirement")
-                retirement.add_done_callback(retirement_finished)
+            if operation.retirement is None:
+                operation.retirement = asyncio.create_task(retire_spawn(), name="one-shot-process-retirement")
+                operation.retirement.add_done_callback(retirement_finished)
+            retirement = operation.retirement
             try:
                 _, pending = await asyncio.wait({retirement}, timeout=2.0)
             except asyncio.CancelledError as error:
@@ -333,8 +384,9 @@ class Harness:
             if proc is None:
                 raise asyncio.CancelledError
         except FileNotFoundError:
+            await confirm_retirement()
             raise HarnessOneshotError("not_found", f"{self.profile.binary} CLI not found")
-        except asyncio.CancelledError:
+        except BaseException:
             await confirm_retirement()
             raise
 

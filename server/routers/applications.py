@@ -30,8 +30,15 @@ from fastapi.responses import (
 )
 
 from .. import deps
+from ..aio import complete_cleanup
 from ..app_agent import AppAgentError, app_agent_manager
-from ..app_backends import ABSENT, RUNNING, BackendCapacityError, backend_supervisor
+from ..app_backends import (
+    ABSENT,
+    RUNNING,
+    BackendCapacityError,
+    BackendTarget,
+    backend_supervisor,
+)
 from ..applications import (
     ApplicationError,
     ApplicationManager,
@@ -396,7 +403,8 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
             state.error or f"backend is {state.state}",
         )
 
-    url = f"http://127.0.0.1:{state.port}/api/{path}"
+    target = BackendTarget(state.port, state.process)
+    url = f"http://127.0.0.1:{target.port}/api/{path}"
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in _SKIP_REQUEST_HEADERS
@@ -404,79 +412,32 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     # A long read timeout because a backend may legitimately be slow (a clone,
     # a build); a short connect timeout because a backend we just confirmed is
     # listening should answer the socket immediately.
-    from ..aio import complete_cleanup
-    from ..wiki.app_bridge import begin
+    from ..wiki.app_bridge import forward
 
     request_body = await request.body()
-    mutation = await begin(row, request.method, path, request.query_params, request_body)
-    client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
-    transferred = False
-    dispatched = False
+    # Preserve pair order; the query token belongs only to Octopus.
+    query = urlencode([(key, value) for key, value in request.query_params.multi_items() if key != "token"]).encode("ascii")
+    upstream = httpx.Request(request.method, httpx.URL(url).copy_with(query=query or None), headers=headers, content=request_body)
     try:
-        if mutation:
-            # A preceding uncertain writer may have stopped its backend while
-            # this request waited for the shared vault lock.
-            try:
-                state = await backend_supervisor.ensure_running(app_id, row["app_dir"])
-            except BackendCapacityError as exc:
-                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
-            if state.state != RUNNING or not state.port:
-                raise HTTPException(503, state.error or "Application backend stopped")
-            url = f"http://127.0.0.1:{state.port}/api/{path}"
-        # Preserve the full pair order: httpx's params helper groups repeated
-        # keys. The query token authenticates to Octopus, never to app code.
-        query = urlencode([(key, value) for key, value in request.query_params.multi_items() if key != "token"]).encode("ascii")
-        upstream = client.build_request(
-            request.method, httpx.URL(url).copy_with(query=query or None), headers=headers,
-            content=request_body,
-        )
-        dispatched = True
+        managed = await forward(row, target, upstream)
+    except BackendCapacityError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"backend did not answer: {exc}") from exc
+    if managed is not None:
+        return Response(managed.content, status_code=managed.status_code, headers={
+            key: value for key, value in managed.headers.items() if key.lower() not in _SKIP_RESPONSE_HEADERS
+        })
+
+    client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
+    try:
         resp = await client.send(upstream, stream=True)
-        response_headers = {
-            k: v for k, v in resp.headers.items()
-            if k.lower() not in _SKIP_RESPONSE_HEADERS
-        }
-        if mutation:
-            # Mutation responses are JSON receipts. Consume them before returning
-            # ownership to ASGI so disconnects cannot bypass lock cleanup.
-            payload = await resp.aread()
-            # aread() decodes content encodings; the streaming path below
-            # forwards raw bytes and keeps their encoding header instead.
-            if response_headers.pop("content-encoding", None):
-                for header in ("etag", "content-md5", "digest", "content-digest", "repr-digest"):
-                    response_headers.pop(header, None)
-            await resp.aclose()
-            if path == "save" and resp.status_code == 409:
-                await mutation.conflict(mutation.body)
-            if path == "delete" and resp.is_success:
-                await mutation.receipt(json.loads(payload))
-            if resp.status_code == 202:
-                job_id = json.loads(payload).get("id")
-                if not isinstance(job_id, str) or not job_id:
-                    raise ValueError("Application returned no async job receipt")
-                mutation.follow_job(client, f"http://127.0.0.1:{state.port}", job_id, app_id)
-                transferred = True
-            else:
-                await complete_cleanup(mutation.finish())
-                mutation = None
-                await client.aclose()
-            return Response(payload, status_code=resp.status_code, headers=response_headers)
-        transferred = True
     except BaseException as exc:
-        async def cleanup():
-            try:
-                if mutation and not transferred:
-                    if dispatched:
-                        await mutation.abort(app_id)
-                    else:
-                        await mutation.finish()
-            finally:
-                if not transferred:
-                    await client.aclose()
-        await complete_cleanup(cleanup())
+        await complete_cleanup(client.aclose())
         if isinstance(exc, httpx.HTTPError):
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"backend did not answer: {exc}") from exc
+            raise HTTPException(502, f"backend did not answer: {exc}") from exc
         raise
+    response_headers = {key: value for key, value in resp.headers.items() if key.lower() not in _SKIP_RESPONSE_HEADERS}
 
     async def body():
         try:

@@ -234,6 +234,32 @@ async def test_upload_requires_auth(client, account_user_id):
     assert resp.status_code in (401, 403)
 
 
+@pytest.mark.parametrize(("filename", "stored"), [
+    ("a" * 250 + ".txt", "a" * 196 + ".txt"),
+    ("中" * 100 + ".txt", "中" * 65 + ".txt"),
+    ("😀" * 100 + ".txt", "😀" * 49 + ".txt"),
+    ("中" * 100 + "." + "界" * 16, "中" * 50 + "." + "界" * 16),
+    ("n." + "扩" * 100, "n." + "扩" * 66),
+    ("a" * 200, "a" * 200),
+])
+async def test_unicode_attachment_names_roundtrip_with_a_byte_budget(client, account_user_id, filename, stored):
+    agent = await session_manager.db.get_system_agent(account_user_id)
+    created = await client.post("/api/sessions", json={"agent_id": agent["id"], "name": "Names"})
+    sid = created.json()["id"]
+    uploaded = await client.post(
+        f"/api/sessions/{sid}/attachments", files={"file": (filename, b"contents", "text/plain")}
+    )
+    assert uploaded.status_code == 201
+    meta = uploaded.json()
+    assert meta["filename"] == stored
+    path = get_path(sid, meta["id"], user_id=account_user_id)
+    assert path.name == meta["id"] + "__" + stored
+    assert len(path.name.encode("utf-8")) <= 214
+    downloaded = await client.get(f"/api/sessions/{sid}/attachments/{meta['id']}")
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"contents"
+
+
 @pytest.mark.asyncio
 async def test_upload_unknown_session_404(client):
     files = {"file": ("x.txt", b"x", "text/plain")}

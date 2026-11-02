@@ -440,7 +440,7 @@ async def test_ack_updates_saved_input_notices_while_root_remains_active(native_
     mode[0] = "steer_gate"
     await active_root(native_runtime, tmp_path)
     # Only the steer ACK is late; native initialization has already finished.
-    monkeypatch.setattr(native_tests.codex_app_server, "_RPC_TIMEOUT", .05 if late else 5)
+    monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", .05 if late else 5)
     anchor = [("a" * 40, False)]
 
     async def capture_anchor(_working_dir):

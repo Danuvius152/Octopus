@@ -6,6 +6,8 @@ and its original supervisor own the short host, pipes and process group.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -14,14 +16,17 @@ from typing import Any
 
 from ..config import settings
 from ..diagnostics import diagnostic_text
+from . import codex_rpc
 from .codex import _cleanup_legacy_fork, _codex_sessions_dir
 from .codex_app_server import (
     _REQUIRED_FEATURES,
-    AppServerDriver,
-    NativeProtocolError,
+    initialize_connection,
     profile,
 )
-from .events import HarnessCredential
+from .codex_items import NATIVE_LINE_BYTES, diagnostic_frame
+from .codex_rpc import NativeProtocolError, NativeRpcError, RpcConnection
+from .driver import RunDriver
+from .events import HarnessCredential, HarnessEvent
 from .fork import ForkArtifact, ForkHooks
 from .profile import ParseOutput, RuntimeProfile, TurnContext
 from .registry import get_harness
@@ -30,39 +35,63 @@ from .run import HarnessRun, RunConfig
 logger = logging.getLogger(__name__)
 
 
-class _RpcError(NativeProtocolError):
-    def __init__(self, error: dict[str, Any]) -> None:
-        self.error = error
-        super().__init__(str(error))
+class _HistoryDriver(RunDriver):
+    input_in_argv = False
+    multiplexed = True
+    stdout_line_limit_bytes = NATIVE_LINE_BYTES
 
-
-class _HistoryDriver(AppServerDriver):
     def __init__(self, selected: RuntimeProfile, operation: Callable[[_HistoryDriver], Awaitable[dict[str, Any]]]) -> None:
         super().__init__(selected)
         self.operation = operation
         self.result: dict[str, Any] = {}
+        self._io: HarnessRun | None = None
+        self._rpc = RpcConnection()
+
+    @property
+    def connection_generation(self) -> str:
+        return self._rpc.generation
 
     async def begin_input(self, io: HarnessRun, resume_id: str | None) -> None:
         self._io = io  # No model input, input recorder or accepted root exists.
 
     async def start_input(self, io: HarnessRun, context: TurnContext) -> None:
-        await self._initialize(io, context)
+        await initialize_connection(io, context.working_dir, self.request)
         self.result = await self.operation(self)
 
-    def _receive(self, obj: dict[str, Any]) -> ParseOutput:
-        if "method" in obj:
-            if obj["method"].startswith(("turn/", "item/")) or "id" in obj:
-                raise NativeProtocolError("Native history operation attempted implicit execution")
-            return ParseOutput(activity=False)
-        future = self._pending.get(obj.get("id"))
-        if future is not None and not future.done():
-            if "error" in obj:
-                future.set_exception(_RpcError(obj["error"]))
-            elif isinstance(obj.get("result"), dict):
-                future.set_result(obj["result"])
+    async def prepare(self, io: HarnessRun, context: TurnContext, argv: list[str], kwargs: dict[str, Any]) -> None:
+        from . import codex_app_server
+
+        await asyncio.to_thread(codex_app_server.verify_binary, argv[0])
+
+    async def request(self, method: str, params: dict[str, Any], *,
+                      before_write: Callable[[str], Awaitable[None]] | None = None) -> dict[str, Any]:
+        assert self._io is not None
+        with self._rpc.request(method, params) as request:
+            await self._io.authorize_input()
+            if before_write is not None:
+                await before_write(request.identifier)
+            await self._io.write_control(request.data)
+            async with asyncio.timeout(codex_rpc.RPC_TIMEOUT):
+                return await request.response
+
+    def receive(self, obj: dict[str, Any]) -> ParseOutput:
+        try:
+            if "method" in obj:
+                if obj["method"].startswith(("turn/", "item/")) or "id" in obj:
+                    raise NativeProtocolError("Native history operation attempted implicit execution")
             else:
-                raise NativeProtocolError("Malformed native history response")
-        return ParseOutput(activity=False)
+                self._rpc.receive(obj)
+            return ParseOutput(activity=False)
+        except Exception as error:
+            self._rpc.reject_all(error)
+            if self._io is not None:
+                self._io._note_protocol_issue("fatal_protocol_error", json.dumps(diagnostic_frame(obj)), error=error)
+                self._io.retire()
+            return ParseOutput(events=[HarnessEvent(type="result", is_error=True,
+                error_code="native_protocol_failed", content=str(error))], end_of_stream=True)
+
+    def connection_closed(self) -> None:
+        self._rpc.close(NativeProtocolError("Native history connection ended without acknowledgment"))
 
 
 async def _operate(working_dir: str, credential: HarnessCredential | None, hooks: ForkHooks,
@@ -95,7 +124,7 @@ async def _operate(working_dir: str, credential: HarnessCredential | None, hooks
         return driver.result
     except BaseException as error:
         logger.error("Native history failed session=%s connection=%s\n%s\nstderr:\n%s",
-                     hooks.session_id, driver._generation, run.format_exception(error),
+                     hooks.session_id, driver.connection_generation, run.format_exception(error),
                      diagnostic_text(run.stderr_text, secrets=(settings.auth_token, credential.secret if credential else "")))
         raise
 
@@ -112,10 +141,10 @@ async def fork_copy(*, parent_working_dir: str, parent_resume_id: str | None, pa
 
     async def create(driver: _HistoryDriver) -> dict[str, Any]:
         async def before_write(rpc_id: str) -> None:
-            state.update(rpc_id=rpc_id, connection_generation=driver._generation)
+            state.update(rpc_id=rpc_id, connection_generation=driver.connection_generation)
             await hooks.checkpoint(state)
 
-        result = await driver._request("thread/fork", {"threadId": parent_resume_id,
+        result = await driver.request("thread/fork", {"threadId": parent_resume_id,
             "cwd": dest_working_dir, "approvalPolicy": "never", "sandbox": "danger-full-access",
             "config": _REQUIRED_FEATURES, "deferGoalContinuation": True, "excludeTurns": True}, before_write=before_write)
         thread = result.get("thread") or {}
@@ -158,8 +187,8 @@ async def fork_cleanup(working_dir: str, resume_id_hint: str | None, fork_id: st
 
     async def remove(driver: _HistoryDriver) -> dict[str, Any]:
         try:
-            current = (await driver._request("thread/read", {"threadId": identity, "includeTurns": False}))["thread"]
-        except _RpcError as error:
+            current = (await driver.request("thread/read", {"threadId": identity, "includeTurns": False}))["thread"]
+        except NativeRpcError as error:
             if (error.error == {"code": -32600, "message": f"thread not found: {identity}"}
                     and not Path(path).exists()):
                 return {}  # The exact original artifact is already absent.
@@ -169,6 +198,6 @@ async def fork_cleanup(working_dir: str, resume_id_hint: str | None, fork_id: st
             raise NativeProtocolError("Native fork cleanup identity, path or ownership changed")
         # This never ran a turn, so it has no spawned subtree. Upstream checks
         # external references; a refusal retains this saga, without expanding it.
-        return await driver._request("thread/delete", {"threadId": identity})
+        return await driver.request("thread/delete", {"threadId": identity})
 
     await _operate(working_dir, credential, hooks, remove, artifact)

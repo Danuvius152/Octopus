@@ -1332,7 +1332,8 @@ class WikiJobs:
                 item["retry_count"] += 1
                 persisted.update(item)
                 self.update(job_id, expected_status="running", items=fresh["items"])
-            current, raw = self.store.read_snapshot(item["doc"], length=1)
+            snapshot = self.store.read_snapshot(item["doc"], length=1)
+            current, raw = snapshot.document, snapshot.raw
             candidate = history.record(current["path"], raw, raw, "curator-worker", error, "conflict", document_id=current["id"], proposal={
                 "job_id": job_id, "source_doc": current["id"], "source_path": current["path"], "expected_revision": item["revision"],
                 "source_revision": current["revision"],

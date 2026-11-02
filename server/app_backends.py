@@ -118,6 +118,14 @@ def script_env(app_id: str, app_dir: str, *, port: int | None = None) -> dict[st
     return env
 
 
+@dataclass(frozen=True)
+class BackendTarget:
+    """The original listening process, captured before body or writer-lock waits."""
+
+    port: int
+    process: asyncio.subprocess.Process | None
+
+
 @dataclass
 class BackendState:
     """Live state for one application's backend."""
@@ -175,6 +183,15 @@ class BackendSupervisor:
 
     def get(self, app_id: str) -> BackendState | None:
         return self._backends.get(app_id)
+
+    def require_running(self, app_id: str, target: BackendTarget) -> BackendState:
+        """Readmit the original backend after a managed writer waits for its lock."""
+        state = self.get(app_id)
+        if (self._shutting_down or app_id in self._blocked_apps or state is None
+                or state.state != RUNNING or state.port != target.port or state.process is not target.process
+                or target.process is None or target.process.returncode is not None):
+            raise BackendCapacityError("Application backend stopped or changed while waiting for write admission")
+        return state
 
     def describe(self, app_id: str, app_dir: str) -> dict[str, Any]:
         """Public backend status for the API, without starting anything."""

@@ -137,6 +137,17 @@ class UsersMixin(DatabaseBase):
                 (*fields.values(), user_id),
             )
 
+    async def change_password(
+        self, user_id: str, password_hash: str, *, at: str, keep: str | None = None
+    ) -> int:
+        """Commit the new password and other-device revocation together."""
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (password_hash, user_id),
+            )
+            return await self._revoke_all_tokens(tx, user_id, at=at, keep=keep)
+
 
     # -- invites ------------------------------------------------------------
 
@@ -313,13 +324,18 @@ class UsersMixin(DatabaseBase):
         which is what "change my password" wants: other devices out, this one
         still in."""
         async with self.transaction(write=True) as tx:
-            sql = (
-                "UPDATE auth_tokens SET revoked_at = ? WHERE user_id = ? "
-                " AND revoked_at IS NULL"
-            )
-            params: list[Any] = [at, user_id]
-            if keep is not None:
-                sql += " AND token_hash != ?"
-                params.append(keep)
-            cursor = await tx.execute(sql, params)
-            return cursor.rowcount or 0
+            return await self._revoke_all_tokens(tx, user_id, at=at, keep=keep)
+
+    async def _revoke_all_tokens(
+        self, tx: Transaction, user_id: str, *, at: str, keep: str | None
+    ) -> int:
+        sql = (
+            "UPDATE auth_tokens SET revoked_at = ? WHERE user_id = ? "
+            " AND revoked_at IS NULL"
+        )
+        params: list[Any] = [at, user_id]
+        if keep is not None:
+            sql += " AND token_hash != ?"
+            params.append(keep)
+        cursor = await tx.execute(sql, params)
+        return cursor.rowcount or 0

@@ -1,7 +1,7 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
 import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowUp,
   IconCpu,
@@ -11,7 +11,7 @@ import {
   IconPlayerStop,
   IconX,
 } from "@tabler/icons-react";
-import { Virtuoso } from "react-virtuoso";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
   useSessionStore,
   type Message,
@@ -52,7 +52,7 @@ import {
 } from "./SlashCommandMenu";
 import { Button } from "./ui/button";
 import { isSessionBusy } from "../lib/deferredFork";
-import { loadOlderMessages } from "../lib/transcript";
+import { observeOlderMessages } from "../lib/transcript";
 import { selectSession } from "../lib/selectSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
@@ -96,6 +96,23 @@ interface Props {
 }
 
 const EMPTY_QUESTIONS: PendingQuestion[] = [];
+// Local notices have no persisted seq. Their occurrence identity follows the
+// immutable store message through prepends, without retaining another transcript.
+const localMessageKeys = new WeakMap<Message, string>();
+let localMessageSerial = 0;
+
+function chatMessageKey(message: Message): string {
+  if (message.type === "native_subagent") {
+    const source = message.runtime_metadata;
+    return source && message.tool_input?.native_thread_id && message.tool_input?.native_turn_id
+      ? JSON.stringify(["child", source.request_id, source.attempt_id, message.tool_input.native_thread_id, message.tool_input.native_turn_id])
+      : `child:${message.tool_input?.card_id}`;
+  }
+  if (message.seq !== undefined) return `message:${message.seq}`;
+  let key = localMessageKeys.get(message);
+  if (!key) { key = `local-message:${++localMessageSerial}`; localMessageKeys.set(message, key); }
+  return key;
+}
 
 export function ChatView({
   sendMessage,
@@ -214,14 +231,11 @@ export function ChatView({
     forkAttempts.current.delete(sid);
   };
 
-  // Scroll-back over a windowed transcript (polish-2026-09.md §4 B2). An open
-  // returns the most recent 200 messages; reaching the top asks for the page
-  // before them. Prepending has to leave the view exactly where it was, which
-  // Virtuoso does through `firstItemIndex`: the list is addressed from a large
-  // start index that decreases by the number of items added in front. It resets
-  // per session, because each carries its own window.
-  const START_INDEX = 1_000_000;
-  const [firstItemIndex, setFirstItemIndex] = useState(START_INDEX);
+  // A prepend can also move or regroup child cards. Preserve the actual
+  // visible identity and offset, independently of total row counts.
+  const virtuoso = useRef<VirtuosoHandle>(null);
+  const scroller = useRef<HTMLElement | null>(null);
+  const pageAnchor = useRef<{ key: string; offset: number } | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   // Whether the conversation has been parked at its newest message yet. Until
   // it has, "at the top" means nothing: the list mounts at scroll 0 and
@@ -233,33 +247,67 @@ export function ChatView({
   // tries again — and the header's button always works.
   const [atTop, setAtTop] = useState(false);
   const [olderStalled, setOlderStalled] = useState(false);
+  const olderRead = useRef<ReturnType<typeof observeOlderMessages> | null>(null);
+  const messageWindow = useSessionStore((state) => activeSessionId ? state.messageWindows[activeSessionId] : undefined);
   const hasOlder = useSessionStore((s) =>
     activeSessionId ? Boolean(s.hasMoreMessages[activeSessionId]) : false
   );
-  useEffect(() => {
-    setFirstItemIndex(START_INDEX);
+  useLayoutEffect(() => {
+    pageAnchor.current = null;
     setLoadingOlder(false);
     setParked(false);
     setAtTop(false);
     setOlderStalled(false);
-  }, [activeSessionId]);
+    return () => { olderRead.current?.cancel(); olderRead.current = null; };
+  }, [activeSessionId, messageWindow]);
   const loadOlder = useCallback(() => {
     const sid = activeSessionId;
-    if (!sid) return;
-    const visibleCount = () => {
-      const current = useSessionStore.getState();
-      return nativeChatMessages(current.messages[sid] || [], Object.values(current.subagents[sid] || {}),
-        current.dispatchStates[sid]?.active_request_id).length;
-    };
-    const visibleBefore = visibleCount();
+    if (!sid || olderRead.current?.current()) return;
     setLoadingOlder(true);
-    void loadOlderMessages(sid).then((added) => {
+    const read = observeOlderMessages(sid, () => {
+      const viewport = scroller.current?.getBoundingClientRect();
+      if (!viewport) return;
+      const visible = Array.from(scroller.current!.querySelectorAll<HTMLElement>("[data-message-key]")).find((element) => {
+        const rectangle = element.getBoundingClientRect();
+        return rectangle.bottom > viewport.top && rectangle.top < viewport.bottom;
+      });
+      pageAnchor.current = visible ? { key: visible.dataset.messageKey!, offset: visible.getBoundingClientRect().top - viewport.top } : null;
+    });
+    olderRead.current = read;
+    void read.done.then((result) => {
+      // Store publication and this view's request status have different lives.
+      // An obsolete connection must release its own spinner, while an old view
+      // can never settle a replacement view's request.
+      if (olderRead.current !== read) return;
+      olderRead.current = null;
       setLoadingOlder(false);
-      const visibleAdded = visibleCount() - visibleBefore;
-      if (added > 0) setFirstItemIndex((i) => i - visibleAdded);
-      else setOlderStalled(true);
+      if (!read.current() || result.state === "obsolete") {
+        pageAnchor.current = null;
+        setOlderStalled(true);
+        return;
+      }
+      if (result.state === "failed" || result.state === "in_flight" || result.state === "merged" && result.added === 0) {
+        pageAnchor.current = null;
+        setOlderStalled(true);
+      }
     });
   }, [activeSessionId]);
+
+  useLayoutEffect(() => {
+    const anchor = pageAnchor.current;
+    if (!anchor) return;
+    const index = chatMessages.findIndex((message) => chatMessageKey(message) === anchor.key);
+    if (index < 0) { pageAnchor.current = null; return; }
+    virtuoso.current?.scrollToIndex({ index, align: "start", offset: -anchor.offset });
+    const frame = requestAnimationFrame(() => {
+      const viewport = scroller.current;
+      const element = Array.from(viewport?.querySelectorAll<HTMLElement>("[data-message-key]") || [])
+        .find((row) => row.dataset.messageKey === anchor.key);
+      if (viewport && element) viewport.scrollTop += element.getBoundingClientRect().top - viewport.getBoundingClientRect().top - anchor.offset;
+      pageAnchor.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [chatMessages, loadingOlder]);
 
   // Remember reaching the top even if Virtuoso's initial bottom report lands
   // afterward. The bottom report arms paging; the mount-time scroll 0 alone
@@ -399,7 +447,7 @@ export function ChatView({
       const body = renderMessageBody(index, msg);
       if (body === null) return body;
       return (
-        <div className="msg-row group/msg relative">
+        <div className="msg-row group/msg relative" data-message-key={chatMessageKey(msg)}>
           {body}
           <MessageTime iso={msg.created_at} />
         </div>
@@ -1619,12 +1667,14 @@ export function ChatView({
       )}
 
       <Virtuoso
+        ref={virtuoso}
+        scrollerRef={(element) => { scroller.current = element instanceof HTMLElement ? element : null; }}
         key={`${activeSessionId}:${hasMessages}`}
         className="chat-messages flex-1 min-h-0"
         data={chatMessages}
         itemContent={renderMessage}
         initialTopMostItemIndex={{ index: "LAST", align: "end" }}
-        firstItemIndex={firstItemIndex}
+        computeItemKey={(_index, message) => chatMessageKey(message)}
         atBottomStateChange={(bottom) => {
           if (bottom && hasMessages) setParked(true);
         }}

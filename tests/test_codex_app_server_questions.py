@@ -150,8 +150,7 @@ async def test_closure_at_write_lock_prevents_old_answer(native_runtime, tmp_pat
 
 
 async def test_terminal_is_read_while_input_proof_commit_waits(native_runtime, tmp_path, monkeypatch):
-    from server.harness import codex_app_server
-    monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 30)
+    monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", 30)
     manager, database, session, mode, _, _ = native_runtime
     mode[0] = "control_question"
     entered, release = asyncio.Event(), asyncio.Event()
@@ -368,11 +367,10 @@ async def test_retained_question_budget_cannot_be_bypassed_by_draining_inbox(nat
 
 
 async def test_rejected_input_commit_does_not_block_root_terminal(native_runtime, tmp_path, monkeypatch):
-    from server.harness import codex_app_server
     from tests.native_app_server import active_root
     manager, database, session, mode, _, _ = native_runtime
     mode[0] = "steer_reject"
-    monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 30)
+    monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", 30)
     await active_root(native_runtime, tmp_path)
     entered, release = asyncio.Event(), asyncio.Event()
     record = database.record_native_input

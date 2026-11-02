@@ -238,9 +238,10 @@ it("preserves recovery progress through reconnect and paged history without endi
   useSessionStore.getState().setMessages("recovery-test", [
     { role: "assistant", type: "text", seq: 5, content: "continued" },
   ]);
+  useSessionStore.getState().setMessageWindow("recovery-test", 5, true);
   useSessionStore.getState().prependMessages("recovery-test", [
     { role: "system", type: "recovery", seq: 4, content: recovery },
-  ], 4, false);
+  ], 4, false, { beforeSeq: 5, window: useSessionStore.getState().messageWindows["recovery-test"] });
   expect(useSessionStore.getState().messages["recovery-test"][0]).toEqual(live);
   expect(useSessionStore.getState().messages["recovery-test"].some((m) => m.type === "result")).toBe(false);
 });

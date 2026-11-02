@@ -26,14 +26,12 @@ class RawCoordinates:
 
 
 def snapshot(store, doc, expected_revision=None):
-    document, raw = store.read_snapshot(doc, length=1, expected_revision=expected_revision)
-    if Path(document["path"]).suffix.lower() not in {".md", ".markdown", ".txt"}:
+    value = store.read_snapshot(doc, length=1, expected_revision=expected_revision)
+    if Path(value.document["path"]).suffix.lower() not in {".md", ".markdown", ".txt"}:
         raise WikiError("Raw block editing supports UTF-8 Markdown/text, not extracted HTML", 422)
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeError as exc:
-        raise WikiError("Original encoding requires review", 422) from exc
-    return document, text
+    if value.original_text is None:
+        raise WikiError("Original encoding requires review", 422)
+    return value
 
 
 def coordinates(store, document, text, *, parsed=None):
@@ -89,13 +87,9 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
     if tail is not None and (isinstance(tail, bool) or not isinstance(tail, int) or not 1 <= tail <= 100 or offset or ids is not None):
         raise WikiError("tail selects 1..100 final blocks and cannot combine with offset or ids", 422)
     with curation.history.locked():
-        document, text = snapshot(curation.store, doc, expected_revision)
-        equivalent_text = False
-        if task is not None:
-            with curation.store.connect() as db:
-                indexed = db.execute('SELECT text FROM documents WHERE id=? AND revision=?',
-                                     (document['id'], document['revision'])).fetchone()
-            equivalent_text = indexed is not None and indexed[0] == text
+        value = snapshot(curation.store, doc, expected_revision)
+        document, text = value.document, value.original_text
+        equivalent_text = value.text == text
 
         def record(first, last):
             tasks.record_raw_read(task, document, first, last, len(text))

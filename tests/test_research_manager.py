@@ -560,6 +560,75 @@ async def test_shutdown_closes_research_admission_before_awaiting(rm, mgr, db):
     await rm.shutdown()
 
 
+@pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_queued_research_keeps_admitted_choices_and_rechecks_authority(
+    rm, mgr, db, monkeypatch, override, revoke,
+):
+    from server.agent_manager import AgentManager
+    from server.crypto import encrypt
+    from server.users import UserManager
+
+    session = await _session(mgr, db)
+    key = await UserManager(db).data_key_for(session.user_id)
+    for identifier in ("original", "replacement"):
+        await db.save_credential(identifier, session.backend, identifier, "api_key",
+                                 encrypt(identifier, key), "now", user_id=session.user_id)
+    agents = AgentManager(db)
+    await agents.update_agent(session.agent_id, model="agent-original", credential_id="original")
+    if override:
+        await mgr.update_session_configuration(session.id, {"model": "session-original"}, session.user_id)
+    launched = []
+
+    async def pipeline(question, *, credential, model, authorize_spawn, **kwargs):
+        assert not db.configuration_lock.locked()
+        await authorize_spawn()
+        launched.append((question, model, credential.secret))
+        return _fake_report(question)
+
+    async def accept(*args, **kwargs):
+        return accepted_receipt()
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(mgr, "start_message", accept)
+    rm._job_sem = asyncio.Semaphore(0)
+    first = await rm.start(session.id, "old job")
+    await agents.update_agent(session.agent_id, model="agent-replacement", credential_id="replacement")
+    if override:
+        await mgr.update_session_configuration(session.id, {"model": "session-replacement"}, session.user_id)
+    if revoke:
+        await mgr.delete_credential_binding("original", session.user_id)
+    second = await rm.start(session.id, "new job")
+    rm._job_sem.release()
+    await asyncio.wait_for(rm.wait_for_idle(), 3)
+
+    expected_new = ("new job", "session-replacement" if override else "agent-replacement", "replacement")
+    if revoke:
+        assert launched == [expected_new]
+        failed = await db.get_research_job(first["id"])
+        assert failed["status"] == "failed" and "credential" in failed["error"].lower()
+    else:
+        assert launched == [
+            ("old job", "session-original" if override else "agent-original", "original"), expected_new,
+        ]
+        assert (await db.get_research_job(first["id"]))["status"] == "completed"
+    assert (await db.get_research_job(second["id"]))["status"] == "completed"
+
+
+async def test_research_waiting_for_configuration_cannot_admit_after_shutdown(rm, mgr, db):
+    session = await _session(mgr, db)
+    async with db.configuration_lock:
+        admission = asyncio.create_task(rm.start(session.id, "waiting configuration"))
+        await asyncio.sleep(0)
+        rm.begin_shutdown()
+    with pytest.raises(rm_mod.ResearchError, match="shutting down"):
+        await admission
+    await rm.shutdown()
+    assert not rm.drain_blockers()
+    async with db.transaction(write=False) as tx:
+        assert await tx.fetch_one("SELECT id FROM research_jobs") is None
+
+
 def _blocking_research_cli(monkeypatch, tmp_path: Path, *, stage: str) -> Path:
     """Install a synthetic provider at the actual subprocess boundary."""
     pid_file = tmp_path / "research-cli.pid"

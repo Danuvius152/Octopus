@@ -83,7 +83,8 @@ def output_page(jobs, job_id, receipt_id, *, attempt, view="history", start=0, l
     if original_attempt != attempt and not (original_attempt is None and attempt == job["attempt"]):
         raise WikiError("This receipt belongs to another maintenance attempt", 409)
     if view == "current":
-        document, raw = jobs.store.read_snapshot(receipt["doc_id"], length=1, expected_revision=expected_revision)
+        snapshot = jobs.store.read_snapshot(receipt["doc_id"], length=1, expected_revision=expected_revision)
+        document, raw = snapshot.document, snapshot.raw
         path, digest = document["path"], document["revision"]
     else:
         digest = receipt["output_revision"]

@@ -261,7 +261,7 @@ async def test_codex_smoke_effort_is_scoped_and_preserves_callers(monkeypatch, m
     harness = Harness()
     monkeypatch.setattr("server.harness.get_harness", lambda backend: harness)
     request = SimpleNamespace(node=SimpleNamespace(get_closest_marker=lambda name: name in markers))
-    conftest._codex_smoke_uses_low_effort.__wrapped__(request, monkeypatch)
+    conftest._codex_smoke_uses_low_effort.__wrapped__(request, monkeypatch, None)
 
     config = RunConfig(reasoning_effort="high", service_tier="fast", mcp_servers=[])
     context = OneShotContext(prompt="A protocol probe", reasoning_effort="high", service_tier="fast")

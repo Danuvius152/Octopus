@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import json
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager, closing
@@ -23,6 +24,8 @@ from server.bg_tasks import BgTaskManager
 from server.config import settings
 from server.database import Database
 from server.delegations import DelegationManager
+from server.harness import Harness, OneShotContext, get_harness
+from server.harness.registry import _REGISTRY
 from server.installation_admission import InstallationAdmission
 from server.research.manager import ResearchManager
 from server.service_health import ServiceHealth
@@ -95,6 +98,93 @@ async def test_handoff_waits_for_an_admitted_lifecycle_operation_outside_its_sho
         assert not running.manager._admission_closed
     response = await running.client.post("/api/installation/quiesce", json={"request_id": request_id})
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("interruption", ["cancelled", "timeout"])
+async def test_oneshot_unknown_keeps_original_process_in_handoff_drain(
+    installation, tmp_path, monkeypatch, interruption, short_process_shutdown,
+):
+    from dataclasses import replace
+
+    running = installation
+    spawn = asyncio.create_subprocess_exec
+    created = asyncio.get_running_loop().create_future()
+    release = asyncio.Event()
+
+    async def late_handle(*argv, **kwargs):
+        process = await spawn(*argv, **kwargs)
+        created.set_result(process)
+        await release.wait()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", late_handle)
+    harness = Harness(replace(get_harness("codex").profile, binary=sys.executable,
+        build_oneshot_argv=lambda ctx: ([sys.executable, "-c", "import time; time.sleep(60)"], {"cwd": str(tmp_path)})))
+    monkeypatch.setitem(_REGISTRY, "codex", harness)
+    calling = asyncio.create_task(harness.run_oneshot(OneShotContext(prompt="original")))
+    process = await asyncio.wait_for(created, 2)
+    try:
+        calling.cancel("first cancellation")
+        await asyncio.sleep(0)
+        if interruption == "cancelled":
+            calling.cancel("second cancellation")
+        with pytest.raises(RuntimeError, match="retirement.*unconfirmed"):
+            await asyncio.wait_for(asyncio.shield(calling), 3)
+        assert process.returncode is None
+        refused = await running.client.post("/api/installation/quiesce", json={"request_id": str(uuid4())})
+        assert refused.status_code == 409
+        assert any("harness" in reason for reason in refused.json()["blockers"])
+        release.set()
+        await asyncio.wait_for(process.wait(), 2)
+        async with asyncio.timeout(2):
+            while harness.drain_blockers():
+                await asyncio.sleep(0)
+        accepted = await running.client.post("/api/installation/quiesce", json={"request_id": str(uuid4())})
+        assert accepted.status_code == 200
+        with pytest.raises(Exception, match="closing|shutting down"):
+            await harness.run_oneshot(OneShotContext(prompt="too late"))
+    finally:
+        release.set()
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        await asyncio.gather(calling, return_exceptions=True)
+
+
+@pytest.mark.parametrize("failure", ["exit_proof", "private_configuration"])
+async def test_failed_oneshot_cleanup_remains_a_handoff_blocker(installation, tmp_path, monkeypatch, failure):
+    from dataclasses import replace
+
+    from server import process_groups
+    from server.harness.private_settings import PrivateSettings
+
+    private = PrivateSettings(3, {"env": {"SYNTHETIC_KEY": "test-only"}})
+    close = private.close
+    if failure == "exit_proof":
+        async def reject_exit(*args, **kwargs):
+            raise RuntimeError("exit proof unavailable")
+        monkeypatch.setattr(process_groups, "wait_group_exit", reject_exit)
+    else:
+        def reject_close():
+            raise RuntimeError("private configuration cleanup failed")
+        monkeypatch.setattr(private, "close", reject_close)
+
+    harness = Harness(replace(get_harness("codex").profile, binary=sys.executable,
+        build_oneshot_argv=lambda ctx: (
+            [sys.executable, "-c", "print('finished')", "settings"],
+            {"cwd": str(tmp_path), "private_settings": private},
+        ), parse_oneshot_stdout=lambda output: output))
+    monkeypatch.setitem(_REGISTRY, "codex", harness)
+    try:
+        with pytest.raises(RuntimeError, match="retirement.*unconfirmed"):
+            await harness.run_oneshot(OneShotContext(prompt="original"))
+        refused = await installation.client.post("/api/installation/quiesce", json={"request_id": str(uuid4())})
+        assert refused.status_code == 409
+        assert any("harness" in reason for reason in refused.json()["blockers"])
+        with pytest.raises(RuntimeError, match="exit proof|private configuration"):
+            await harness.shutdown()
+    finally:
+        close()
 
 
 @pytest.mark.parametrize("resource", ["configuration", "database", "question"])

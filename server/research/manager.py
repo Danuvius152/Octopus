@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..aio import complete_cleanup
 from ..config import settings
-from ..harness import get_harness, has_backend
+from ..harness import get_harness, has_backend, model_settings
 from ..knowledge import (
     OwnedTaskContext,
     capture,
@@ -38,6 +38,7 @@ from ..knowledge import (
 )
 from ..mcp_identity import McpScope, work_is_open
 from ..sessions.base import Session
+from ..sessions.configuration import SessionConfigurationError
 from ..sessions.owner_runtime import capture_configuration
 from ..sessions.runtime_types import (
     AdmissionIntegrityError,
@@ -192,9 +193,20 @@ class ResearchManager:
             owned = derive(parent, question, sources=("web",))
         except ValueError as error:
             raise ResearchError(str(error), status_code=409) from error
-        if not has_backend(session.backend):
-            raise ResearchError(f"unknown backend {session.backend!r}", status_code=400)
-        harness = get_harness(session.backend)
+        try:
+            configured, agent = await self.session_mgr.capture_request_configuration(capture_configuration(session))
+        except SessionConfigurationError as error:
+            raise ResearchError(str(error), status_code=error.status_code) from error
+        selected = model_settings.effective_settings(configured, agent)
+        configured.model = selected["model"]
+        configured.credential_id = selected["credential_id"]
+        # Configuration capture can wait. Admission and registration below are
+        # synchronous, so shutdown cannot miss a job admitted after its snapshot.
+        if self._closing:
+            raise ResearchError("ResearchManager is shutting down", status_code=503)
+        if not has_backend(configured.backend):
+            raise ResearchError(f"unknown backend {configured.backend!r}", status_code=400)
+        harness = get_harness(configured.backend)
         if harness.profile.web is None:
             raise ResearchError(
                 f"the {session.backend} backend has no web tools, so deep "
@@ -206,7 +218,7 @@ class ResearchManager:
         ready: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         # Own the whole launch before SQLite or subscribers can suspend it.
         task = asyncio.create_task(
-            self._start_job(job_id, session_id, question, ready, owned, capture_configuration(session)),
+            self._start_job(job_id, session_id, question, ready, owned, configured),
             name=f"research-{job_id}",
         )
         self._contexts[job_id] = owned
@@ -267,10 +279,8 @@ class ResearchManager:
         try:
             async with self._job_sem:  # bound concurrent jobs
                 harness = get_harness(session.backend)
-                agent = await self.db.get_agent(session.agent_id) if session.agent_id else None
-                model = (agent or {}).get("model")
                 user_id = self._contexts[job_id].execution.origin.user_id
-                credential_id, backend = session.credential_id or (agent or {}).get("credential_id"), session.backend
+                credential_id, backend = session.credential_id, session.backend
                 database = self.db
 
                 async def authorize_spawn():
@@ -309,7 +319,7 @@ class ResearchManager:
                         question,
                         harness=harness,
                         credential=credential,
-                        model=model,
+                        model=session.model,
                         working_dir=scratch,
                         limits=ResearchLimits(),
                         on_progress=on_progress,

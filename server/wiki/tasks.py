@@ -380,10 +380,9 @@ class WikiTasks:
     def require_source_read(self, task, store, source):
         from .links import source_span
 
-        document = store.read(source["doc"], length=1, expected_revision=source["revision"])
-        with store.connect() as db:
-            text = db.execute("SELECT text FROM documents WHERE id=?", (document["id"],)).fetchone()[0]
-        span = source_span(text, source["location"])
+        snapshot = store.read_snapshot(source["doc"], length=1, expected_revision=source["revision"])
+        document = snapshot.document
+        span = source_span(snapshot.text, source["location"])
         if span is None:
             raise WikiError("A relation needs an existing line, heading or block locator", 422)
         if task is None:

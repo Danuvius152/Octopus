@@ -1,4 +1,4 @@
-"""Opt-in, single-root Codex 0.166.0 stdio protocol.
+"""Ordinary single-root Codex 0.166.0 stdio protocol.
 
 The driver reports native facts. HarnessRun owns the host and retirement;
 the original submission recorder commits input evidence before business I/O.
@@ -18,6 +18,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ..submission_models import NativeInputEvidence
+from . import codex_rpc
 from .codex import (
     _CODEX_TRANSIENT_ERROR_PATTERNS,
     _OCTOPUS_SYSTEM_PROMPT_CODEX,
@@ -34,6 +35,8 @@ from .codex_items import (
     item_events,
     observation_frame,
 )
+from .codex_rpc import NativeProtocolError, NativeRpcError, RpcConnection
+from .codex_rpc import encode_frame as _encode_frame
 from .driver import ActiveTurnRef, RunDriver, SteerNotAccepted
 from .events import HarnessEvent, HarnessPreparationError, NativeQuestionRef
 from .native_output import NativeOutput
@@ -45,13 +48,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 BINARY_SHA256 = "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8"
-_RPC_TIMEOUT = 20.0
 _METRICS_CLOSE_GRACE = 1.0
 _METRICS_PENDING_COUNT = 256
 _METRICS_PENDING_BYTES = 1024 * 1024
-# Leave room for native item/identity metadata below HarnessRun's 4 MiB
-# stdout line budget when the server echoes a submitted text item.
-_FRAME_LIMIT_BYTES = 4 * 1024 * 1024 - 4096
 _REQUIRED_FEATURES = {"features.fast_mode": True, "features.wake_on_agent_messages": False, "features.goals": False,
                 "features.sleep_tool": False, "features.multi_agent": True,
                 "features.multi_agent_v2.enabled": True, "features.multi_agent_v2.wait_agent_enabled": True}
@@ -89,19 +88,6 @@ def profile(base: RuntimeProfile) -> RuntimeProfile:
                    auth_error_patterns=(), transient_error_patterns=_CODEX_TRANSIENT_ERROR_PATTERNS,
                    transient_error_codes=("server_overloaded", "native_provider_transient"), inline_large_inputs=True,
                    fork_copy=fork_copy, fork_cleanup=fork_cleanup)
-
-
-class NativeProtocolError(RuntimeError):
-    pass
-
-
-class NativeRpcError(NativeProtocolError):
-    """A refusal on this connection's original RPC, with its provider facts."""
-
-    def __init__(self, error: dict[str, Any]) -> None:
-        details = error.get("data")
-        self.provider_error = {**(details if isinstance(details, dict) else {}), "message": error.get("message")}
-        super().__init__(json.dumps(error))
 
 
 def _provider_error_code(error: dict[str, Any]) -> str:
@@ -142,11 +128,24 @@ def _provider_error_code(error: dict[str, Any]) -> str:
             "serverOverloaded": "server_overloaded"}.get(info if isinstance(info, str) else "", "native_turn_failed")
 
 
-def _encode_frame(identifier: str, method: str, params: dict[str, Any]) -> bytes:
-    data = (json.dumps({"id": identifier, "method": method, "params": params}, ensure_ascii=False) + "\n").encode()
-    if len(data) > _FRAME_LIMIT_BYTES:
-        raise ValueError(f"Codex JSONL {method} uses {len(data)} bytes; limit is {_FRAME_LIMIT_BYTES} bytes")
-    return data
+async def initialize_connection(io: HarnessRun, working_dir: str,
+                                request: Callable[..., Awaitable[dict[str, Any]]]) -> dict[str, Any]:
+    """Shared native handshake and required configuration, without turn state."""
+    await request("initialize", {"clientInfo": {"name": "octopus", "version": "1"},
+                                  "capabilities": {"experimentalApi": True}})
+    await io.write_control(b'{"method":"initialized"}\n')
+    config = (await request("config/read", {"includeLayers": True, "cwd": working_dir}))["config"]
+    for key, expected in _REQUIRED_FEATURES.items():
+        actual: Any = config
+        for part in key.split("."):
+            actual = actual.get(part) if isinstance(actual, dict) else None
+        if actual is not expected:
+            raise NativeProtocolError(f"Codex required configuration mismatch: {key}")
+    reminder = (config.get("features") or {}).get("current_time_reminder")
+    if (isinstance(reminder, dict) and reminder.get("enabled") is True
+            and reminder.get("clock_source") == "external"):
+        raise NativeProtocolError("Codex external current-time reminders require currentTime/read, which is not supported")
+    return config
 
 
 class AppServerDriver(RunDriver):
@@ -157,13 +156,11 @@ class AppServerDriver(RunDriver):
     def __init__(self, profile: RuntimeProfile) -> None:
         super().__init__(profile)
         self._io: HarnessRun | None = None
-        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
-        self._serial = 0
+        self._rpc = RpcConnection()
         self._input: NativeInputEvidence | None = None
         self._buffer: list[dict[str, Any]] = []
         self._buffer_bytes = 0
         self._terminal: str | None = None
-        self._generation = uuid.uuid4().hex
         # Retain original evidence after a waiter times out or is cancelled;
         # a late ACK can still settle only that input on this connection.
         self._steers: dict[str, NativeInputEvidence] = {}
@@ -209,9 +206,7 @@ class AppServerDriver(RunDriver):
             except Exception as error:
                 assert self._io is not None
                 self._io.fail_stream("native_input_recording_failed", self._io.format_exception(error))
-                for future in self._pending.values():
-                    if not future.done():
-                        future.set_exception(error)
+                self._rpc.reject_all(error)
 
         task = self._proof_tail = asyncio.create_task(save(), name="native-input-proof")
         self._proofs.add(task)
@@ -339,7 +334,7 @@ class AppServerDriver(RunDriver):
         return observer
 
     def question_open(self, ref: NativeQuestionRef) -> bool:
-        return (not self._terminal and ref.connection_generation == self._generation
+        return (not self._terminal and ref.connection_generation == self._rpc.generation
                 and self._questions.get(ref.server_request_id) == ref)
 
     def question_sent(self, ref: NativeQuestionRef) -> None:
@@ -375,7 +370,7 @@ class AppServerDriver(RunDriver):
                        or not isinstance(question.get("question"), str) for question in questions)
                 or len({question["id"] for question in questions}) != len(questions)):
             raise NativeProtocolError("Malformed native question form")
-        ref = NativeQuestionRef(uuid.uuid4().hex, self._generation, identifier, self._input.input_id,
+        ref = NativeQuestionRef(uuid.uuid4().hex, self._rpc.generation, identifier, self._input.input_id,
             self._input.attempt_id, params["threadId"], params["turnId"], params["itemId"],
             tuple(question["id"] for question in questions), params["isBlocking"])
         self._questions[identifier] = ref
@@ -393,7 +388,7 @@ class AppServerDriver(RunDriver):
         if evidence is None or evidence.state != "accepted":
             return None
         assert evidence.thread_id and evidence.turn_id
-        return ActiveTurnRef(self._generation, evidence.attempt_id, evidence.thread_id, evidence.turn_id)
+        return ActiveTurnRef(self._rpc.generation, evidence.attempt_id, evidence.thread_id, evidence.turn_id)
 
     @property
     def native_terminal_status(self) -> str | None:
@@ -407,49 +402,44 @@ class AppServerDriver(RunDriver):
                     target: ActiveTurnRef | None) -> str:
         if target is None or io.active_turn != target or input_id is None:
             raise SteerNotAccepted("The original native target is not active")
-        self._serial += 1
-        identifier = f"octopus:{self._serial}"
         try:
-            data = _encode_frame(identifier, "turn/steer", {"threadId": target.thread_id,
+            request = self._rpc.request("turn/steer", {"threadId": target.thread_id,
                 "expectedTurnId": target.turn_id, "input": [{"type": "text", "text": text}],
                 "clientUserMessageId": input_id})
         except ValueError as error:
             raise SteerNotAccepted(str(error)) from error
-        evidence = NativeInputEvidence(input_id=input_id, attempt_id=target.attempt_id, kind="steer",
-            connection_generation=target.connection_generation, thread_id=target.thread_id, target_turn_id=target.turn_id)
-        future = asyncio.get_running_loop().create_future()
-        self._pending[identifier] = future
-        writing = False
-        try:
-            await io.record_input(evidence)
-            evidence = evidence.model_copy(update={"rpc_id": identifier, "state": "unknown"})
-            await io.record_input(evidence)
-            self._steers[identifier] = evidence
-            self._steer_started[identifier] = time.monotonic()
-            writing = True
-            await io.write_input(data, target=target)
-            async with asyncio.timeout(_RPC_TIMEOUT):
-                await future
-            return identifier
-        except (SteerNotAccepted, asyncio.CancelledError) as error:
-            if not writing or isinstance(error, SteerNotAccepted):
-                # Only this pre-write boundary can prove no bytes escaped.
+        identifier = request.identifier
+        with request:
+            evidence = NativeInputEvidence(input_id=input_id, attempt_id=target.attempt_id, kind="steer",
+                connection_generation=target.connection_generation, thread_id=target.thread_id, target_turn_id=target.turn_id)
+            writing = False
+            try:
+                await io.record_input(evidence)
+                evidence = evidence.model_copy(update={"rpc_id": identifier, "state": "unknown"})
+                await io.record_input(evidence)
+                self._steers[identifier] = evidence
+                self._steer_started[identifier] = time.monotonic()
+                writing = True
+                await io.write_input(request.data, target=target)
+                async with asyncio.timeout(codex_rpc.RPC_TIMEOUT):
+                    await request.response
+                return identifier
+            except (SteerNotAccepted, asyncio.CancelledError) as error:
+                if not writing or isinstance(error, SteerNotAccepted):
+                    # Only this pre-write boundary can prove no bytes escaped.
+                    known = self._steers.get(identifier)
+                    if evidence.state == "unknown" and (known is None or known.state != "rejected"):
+                        rejected = evidence.model_copy(update={"state": "rejected"})
+                        await io.record_input(rejected)
+                        self._steers[identifier] = rejected
+                    raise SteerNotAccepted("Native input was not accepted",
+                        submitted=isinstance(error, SteerNotAccepted) and error.submitted) from error
+                raise
+            finally:
                 known = self._steers.get(identifier)
-                if evidence.state == "unknown" and (known is None or known.state != "rejected"):
-                    rejected = evidence.model_copy(update={"state": "rejected"})
-                    await io.record_input(rejected)
-                    self._steers[identifier] = rejected
-                raise SteerNotAccepted("Native input was not accepted",
-                    submitted=isinstance(error, SteerNotAccepted) and error.submitted) from error
-            raise
-        finally:
-            self._pending.pop(identifier, None)
-            known = self._steers.get(identifier)
-            if known is not None and known.state in {"accepted", "rejected"}:
-                self._steers.pop(identifier)
-                self._steer_started.pop(identifier, None)
-            if future.done() and not future.cancelled():
-                future.exception()
+                if known is not None and known.state in {"accepted", "rejected"}:
+                    self._steers.pop(identifier)
+                    self._steer_started.pop(identifier, None)
 
     def _accept_steer(self, identifier: str, evidence: NativeInputEvidence, source: str) -> None:
         assert self._io is not None and self._input is not None
@@ -466,10 +456,8 @@ class AppServerDriver(RunDriver):
             self._steers[identifier] = updated
 
             def completed() -> None:
-                future = self._pending.get(identifier)
-                if future is not None and not future.done():
-                    future.set_result({"turnId": evidence.target_turn_id})
-                if future is None:
+                self._rpc.resolve(identifier, {"turnId": evidence.target_turn_id})
+                if not self._rpc.waiting(identifier):
                     self._steers.pop(identifier, None)
 
             self._save_proof(updated, completed)
@@ -490,7 +478,7 @@ class AppServerDriver(RunDriver):
         self._preparation_mode = "resume" if resume_id else "new"
         request_id, attempt_id = io.input_identity
         self._input = NativeInputEvidence(input_id=request_id, attempt_id=attempt_id, thread_id=resume_id,
-                                          connection_generation=self._generation)
+                                          connection_generation=self._rpc.generation)
         await self._record()
 
     async def prepare(self, io: HarnessRun, context: TurnContext, argv: list[str], kwargs: dict[str, Any]) -> None:
@@ -524,62 +512,34 @@ class AppServerDriver(RunDriver):
         self._input = updated
 
     async def _request(self, method: str, params: dict[str, Any], *, business: bool = False,
-                       controller_change: bool = False,
-                       before_write: Callable[[str], Awaitable[None]] | None = None) -> dict[str, Any]:
+                       controller_change: bool = False) -> dict[str, Any]:
         assert self._io is not None
-        self._serial += 1
-        identifier = f"octopus:{self._serial}"
-        future = asyncio.get_running_loop().create_future()
-        self._pending[identifier] = future
-        try:
-            data = _encode_frame(identifier, method, params)
-            if business:
-                await self._record(rpc_id=identifier, state="unknown")
-                self._submitted_at = time.monotonic()
-                await self._io.write_input(data)
-            else:
-                if controller_change:
-                    await self._record(controller="unknown")
-                await self._io.authorize_input()
-                if before_write is not None:
-                    await before_write(identifier)
-                await self._io.write_control(data)
-            async with asyncio.timeout(_RPC_TIMEOUT):
-                return await future
-        except TimeoutError as error:
-            if business:
-                raise NativeProtocolError(
-                    "Native input acceptance is unknown; no input will be replayed. "
-                    f"Unbound native observations: {json.dumps(self._buffer, ensure_ascii=False)}"
-                ) from error
-            raise
-        finally:
-            self._pending.pop(identifier, None)
-            if future.done() and not future.cancelled():
-                future.exception()
-
-    async def _initialize(self, io: HarnessRun, context: TurnContext) -> dict[str, Any]:
-        await self._request("initialize", {"clientInfo": {"name": "octopus", "version": "1"},
-                                              "capabilities": {"experimentalApi": True}})
-        await io.write_control(b'{"method":"initialized"}\n')
-        config = (await self._request("config/read", {"includeLayers": True, "cwd": context.working_dir}))["config"]
-        for key, expected in _REQUIRED_FEATURES.items():
-            actual: Any = config
-            for part in key.split("."):
-                actual = actual.get(part) if isinstance(actual, dict) else None
-            if actual is not expected:
-                raise NativeProtocolError(f"Codex required configuration mismatch: {key}")
-        reminder = (config.get("features") or {}).get("current_time_reminder")
-        if (isinstance(reminder, dict) and reminder.get("enabled") is True
-                and reminder.get("clock_source") == "external"):
-            raise NativeProtocolError("Codex external current-time reminders require currentTime/read, which is not supported")
-        return config
+        with self._rpc.request(method, params) as request:
+            try:
+                if business:
+                    await self._record(rpc_id=request.identifier, state="unknown")
+                    self._submitted_at = time.monotonic()
+                    await self._io.write_input(request.data)
+                else:
+                    if controller_change:
+                        await self._record(controller="unknown")
+                    await self._io.authorize_input()
+                    await self._io.write_control(request.data)
+                async with asyncio.timeout(codex_rpc.RPC_TIMEOUT):
+                    return await request.response
+            except TimeoutError as error:
+                if business:
+                    raise NativeProtocolError(
+                        "Native input acceptance is unknown; no input will be replayed. "
+                        f"Unbound native observations: {json.dumps(self._buffer, ensure_ascii=False)}"
+                    ) from error
+                raise
 
     async def start_input(self, io: HarnessRun, context: TurnContext) -> None:
         assert self._input is not None
         request_id = self._input.input_id
         try:
-            config = await self._initialize(io, context)
+            config = await initialize_connection(io, context.working_dir, self._request)
             controller = controller_message(context.system_prompt)
             # Null product overrides select this invocation's native defaults,
             # rather than the settings persisted in the resumed history.
@@ -679,9 +639,7 @@ class AppServerDriver(RunDriver):
 
             def completed() -> None:
                 assert self._input is not None
-                future = self._pending.get(self._input.rpc_id or "")
-                if future is not None and not future.done():
-                    future.set_result({"turn": {"id": turn_id}})
+                self._rpc.resolve(self._input.rpc_id or "", {"turn": {"id": turn_id}})
 
             self._save_proof(self._input, completed)
             assert self._input.thread_id is not None
@@ -732,12 +690,10 @@ class AppServerDriver(RunDriver):
         detail = f"{error}; native frame: {json.dumps(obj)}"
         if self._input is not None and self._input.state == "unknown":
             detail += f"; unbound observations: {json.dumps(self._buffer, ensure_ascii=False)}"
-        for identifier, future in self._pending.items():
-            if (self._input is not None and self._input.state == "accepted" and identifier == self._input.rpc_id
-                    or identifier in self._steers and self._steers[identifier].state == "accepted"):
-                continue  # An already observed acceptance commits independently.
-            if not future.done():
-                future.set_exception(NativeProtocolError(detail))
+        protected = {identifier for identifier, evidence in self._steers.items() if evidence.state == "accepted"}
+        if self._input is not None and self._input.state == "accepted" and self._input.rpc_id:
+            protected.add(self._input.rpc_id)
+        self._rpc.reject_all(NativeProtocolError(detail), exclude=protected)
         if self._io is not None:
             self._io._note_protocol_issue("fatal_protocol_error", json.dumps(obj), error=error)
             self._io.retire()
@@ -748,7 +704,7 @@ class AppServerDriver(RunDriver):
         assert self._input is not None
         identifier = obj.get("id")
         if "method" not in obj:
-            future = self._pending.get(identifier)
+            waiting = self._rpc.waiting(identifier)
             steer = self._steers.get(identifier)
             if steer is not None:
                 assert isinstance(identifier, str)
@@ -757,16 +713,14 @@ class AppServerDriver(RunDriver):
                         # The pinned server uses InvalidRequest for explicit
                         # NotSubmitted reasons. A generic internal failure
                         # does not prove that no input was accepted.
-                        if future is not None and not future.done():
-                            future.set_exception(NativeProtocolError(json.dumps(obj["error"])))
+                        self._rpc.reject(identifier, NativeProtocolError(json.dumps(obj["error"])))
                         return ParseOutput()
                     updated = steer.model_copy(update={"state": "rejected"})
                     assert self._io is not None
                     self._steers[identifier] = updated
 
                     def rejected() -> None:
-                        if future is not None and not future.done():
-                            future.set_exception(SteerNotAccepted(json.dumps(obj["error"]), submitted=True))
+                        self._rpc.reject(identifier, SteerNotAccepted(json.dumps(obj["error"]), submitted=True))
 
                     self._save_proof(updated, rejected)
                 else:
@@ -775,7 +729,7 @@ class AppServerDriver(RunDriver):
                         raise NativeProtocolError("Native steer response does not name its original root")
                     self._accept_steer(identifier, steer, "steer_response")
                 return ParseOutput()
-            if future is None and identifier != self._input.rpc_id:
+            if not waiting and identifier != self._input.rpc_id:
                 return ParseOutput()
             output = ParseOutput()
             if "error" in obj:
@@ -783,20 +737,19 @@ class AppServerDriver(RunDriver):
                     self._input = self._input.model_copy(update={"state": "rejected"})
 
                     def rejected_start() -> None:
-                        if future is not None and not future.done():
-                            future.set_exception(NativeProtocolError(json.dumps(obj["error"])))
+                        self._rpc.reject(identifier, NativeProtocolError(json.dumps(obj["error"])))
 
                     self._save_proof(self._input, rejected_start)
-                elif future is not None and not future.done():
-                    future.set_exception(NativeRpcError(obj["error"]))
+                else:
+                    self._rpc.receive(obj)
             else:
                 result = obj.get("result")
                 if not isinstance(result, dict):
                     raise NativeProtocolError("Malformed native RPC response")
                 if identifier == self._input.rpc_id:
                     output = self._bind(result.get("turn", {}).get("id"), "start_response")
-                elif future is not None and not future.done():
-                    future.set_result(result)
+                else:
+                    self._rpc.receive(obj)
             return output
         if identifier is not None:
             if obj["method"] == "item/tool/requestUserInput":
@@ -979,7 +932,7 @@ class AppServerDriver(RunDriver):
             error = params["error"]
             return ParseOutput(events=[HarnessEvent(type="error", content=error.get("message"),
                 error_code="native_provider_retry" if params["willRetry"] else "native_provider_error" if root else "native_child_error",
-                error_details={**error, "willRetry": params["willRetry"], "connection_generation": self._generation}, raw=obj)],
+                error_details={**error, "willRetry": params["willRetry"], "connection_generation": self._rpc.generation}, raw=obj)],
                 activity=bool(params["willRetry"] and not self._terminal and self._output
                     and self._output.active_turn(params["threadId"], turn_id)
                     and self._io and self._io.question_admission_open))
@@ -1030,13 +983,12 @@ class AppServerDriver(RunDriver):
                        if key[:2] == (self._input.thread_id, self._input.turn_id) and value == "started"]
             if missing:
                 self._io.fail_stream("native_collection_incomplete", f"Native root items did not complete: {missing}")
-        for identifier, future in self._pending.items():
-            if identifier == (self._input.rpc_id if self._input else None) and self._input and self._input.state in {"accepted", "rejected"}:
-                continue  # Its observed proof still has an owned commit task.
-            if identifier in self._steers and self._steers[identifier].state in {"accepted", "rejected"}:
-                continue
-            if not future.done():
-                detail = "Native connection ended without acknowledgment"
-                if self._input is not None and identifier == self._input.rpc_id and self._input.state == "unknown":
-                    detail += f"; acceptance unknown; unbound observations: {json.dumps(self._buffer, ensure_ascii=False)}"
-                future.set_exception(NativeProtocolError(detail))
+        protected = {identifier for identifier, evidence in self._steers.items() if evidence.state in {"accepted", "rejected"}}
+        if self._input and self._input.rpc_id:
+            if self._input.state in {"accepted", "rejected"}:
+                protected.add(self._input.rpc_id)  # Its original proof still owns its commit.
+            elif self._input.state == "unknown":
+                self._rpc.reject(self._input.rpc_id, NativeProtocolError(
+                    "Native connection ended without acknowledgment; acceptance unknown; "
+                    f"unbound observations: {json.dumps(self._buffer, ensure_ascii=False)}"))
+        self._rpc.close(NativeProtocolError("Native connection ended without acknowledgment"), exclude=protected)

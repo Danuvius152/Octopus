@@ -112,6 +112,7 @@ async def test_settings_cleanup_when_os_spawn_fails(settings_harness, tmp_path, 
     if oneshot:
         with pytest.raises(OSError, match="synthetic"):
             await harness.run_oneshot(OneShotContext(prompt="hello", credential=_credential()))
+        assert not harness.drain_blockers(), "a failed launch with cleaned settings has no remaining writer"
     else:
         run = harness.create_run(RunConfig(mcp_servers=[]))
         with pytest.raises(OSError, match="synthetic"):

@@ -12,8 +12,13 @@ the explicit [offline operation](../backup-and-migrate.md#account-export-and-imp
 
 Passwords authenticate; opaque server-side tokens authorize API/WebSocket access.
 Session/PAT tokens are stored by digest with revocation and applicable expiry.
-Changing a password and disabling an account revoke bearers under their current
-rules. Login throttling bounds guessing. Opaque tokens were chosen because
+Changing a password commits the new hash and revocation of other bearers in one
+short database transaction, preserving the existing current-token exception.
+UserManager owns password policy and hashing; the database owns this complete
+operation. Cancellation, a failed revocation or reopening the database exposes
+either the old state or the complete new state. No recovery queue finishes half
+a password change. Disabling an account also revokes its bearers.
+Login throttling bounds guessing. Opaque tokens were chosen because
 revocation can be checked against the already-open SQLite authority without
 adding a JWT refresh/revocation subsystem.
 
@@ -63,6 +68,14 @@ paths are validated against the account root and granted extra roots after
 symlink resolution. Applications legitimately work in their account-owned sibling
 directory, not necessarily below `workspace/` itself.
 
+Attachment storage owns filename sanitization and the final UTF-8 byte budget.
+The on-disk basename is at most 214 bytes, including the 12-character attachment
+ID and `__` separator. Truncation preserves whole characters and extensions of
+at most 16 characters; longer extensions follow the ordinary name budget. This
+keeps the previous ASCII limit and reserves space for fork-preservation temporary
+names. Invalid UTF-8 names produce an attachment error. Existing account paths,
+attachment identity and download authorization retain their original owners.
+
 This validates session directory selection. The local deployment runs trusted
 agents and applications under the host user; it is not an OS sandbox against
 hostile tenants or root. Per-tenant execution isolation would require a separate
@@ -76,6 +89,10 @@ Code: [users](../../server/users.py), [keys](../../server/crypto.py),
 [MCP identity](../../server/mcp_identity.py) and [database](../../server/db/).
 `tests/test_route_scoping.py`, `tests/test_tenant_isolation.py` and
 `tests/test_agent_credential_bindings.py` provide regression entry points.
+Password regressions in `tests/test_users.py` reopen real SQLite after cancellation
+or failure at the password, revocation and commit boundaries; `tests/test_auth_routes.py`
+checks the current-token exception. `tests/test_attachments.py` covers upload and
+download of ASCII, Chinese and emoji filenames at the final byte boundary.
 
 SSO, self-service password recovery, billing and hostile-tenant sandboxing are
 not implied by account support. The current storage model validates a complete

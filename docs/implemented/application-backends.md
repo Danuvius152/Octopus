@@ -139,7 +139,12 @@ so concurrent opens share a single start without retiring extra victims.
 Stop and install use only the lifecycle lock; admission never nests two apps'
 lifecycle locks. Startup and retirement do not hold a global capacity lock.
 If all slots are starting, busy or retiring, the new request gets HTTP 503 without forwarding its
-body. The same rule applies when a Wiki mutation reacquires backend admission.
+body. A Wiki mutation waiting for its file lock readmits only the original
+backend; it never invokes lazy startup again. Proxy captures an immutable port
+and process target before awaiting the request body. The URL and check after
+lock acquisition use that same target, rejecting missing, stopped, replaced or exited
+processes with HTTP 503 before dispatch. A replacement backend retains its own
+lifecycle and is not stopped by refusal of the old writer.
 Capacity refusal does not mark the application failed or start crash backoff;
 there is no capacity wait queue. Failed retirement retains the original slot,
 including a process handle that arrives after its startup waiter is cancelled.
@@ -187,15 +192,33 @@ whether a file happens to share its path — a rename in the code directory
 silently changes routing. A fixed prefix is predictable and greppable, and an
 agent can be told it in one line.
 
-The proxy carries the existing app-cookie auth (`_authorized`), streams request
-and response bodies rather than buffering them, and forwards the method, path,
-query and a conservative header set. `no-store` stays on app content; the
+The proxy carries the existing app-cookie auth (`_authorized`), buffers the
+request body, streams ordinary backend responses as raw bytes, and forwards the
+method, path, query and a conservative header set. `no-store` stays on app content; the
 backend's own cache headers pass through for its responses.
 
 The reserved `token` query parameter authenticates to Octopus and is removed
 in every occurrence before forwarding. All other pairs retain their original
 order, including interleaved repeated keys, empty values and Unicode text.
 Authentication headers and cookies are excluded from the forwarded header set.
+
+For a protected Wiki mutation, `app_bridge`/`AppMutation` own admission, original
+backend revalidation, dispatch, response consumption, effect recording and cleanup.
+The proxy consumes the managed result. Decoded managed responses drop encoded
+representation headers; ordinary responses retain their compressed bytes and
+matching headers. A valid 202 transfers the same client and mutation to the
+existing job follower, retaining the lock and original job ID after the HTTP
+consumer leaves. Malformed receipts, mismatched job identity, unknown terminal
+status or uncertain dispatch use the original abort/retirement path and preserve
+file effects for reconciliation. The proxy does not orchestrate transfer flags or finish/abort
+ordering. Its ordinary exception path also retains transport cleanup across
+repeated cancellation.
+
+`tests/test_app_proxy_wiki_target.py` covers real stop/restart and spontaneous
+exit during waits, including another HTTP service reusing the old port with zero
+body dispatch after refusal. It also covers transferred 202 work, consumer
+cancellation and invalid receipts. `tests/test_application_proxy_encoding.py`
+retains the raw/decoded encoding contract and repeated-cancellation cleanup.
 
 A backend is reachable **only** through this proxy. It binds `127.0.0.1`, so it
 is not exposed on the network, and the tunnel exposes Octopus, not the app.

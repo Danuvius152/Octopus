@@ -31,11 +31,18 @@ class ConfigurationMixin(SessionManagerBase):
         this returns. Retries retain this value instead of reading it again.
         """
         async with self.configuration_lock:
-            defaults = self.sessions[context.id]
+            defaults = self.get_session(context.id, context.user_id)
+            if defaults is None:
+                raise SessionConfigurationError("Session not found", 404)
             configured = replace(context, backend=defaults.backend, credential_id=defaults.credential_id,
                                  model=defaults.model, reasoning_effort=defaults.reasoning_effort,
                                  service_tier=defaults.service_tier)
-            return configured, await self._load_agent(configured)
+            agent = await self._load_agent(configured)
+            if self.get_session(context.id, context.user_id) is not defaults:
+                raise SessionConfigurationError("Session not found", 404)
+            if defaults._admission_closed:
+                raise SessionConfigurationError("Session admission is closed", 409)
+            return configured, agent
 
     async def update_session_configuration(
         self, session_id: str, fields: dict[str, Any], user_id: str | None = None,

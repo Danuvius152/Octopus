@@ -44,7 +44,7 @@ test("history pagination rebuilds native cards without child text leaking into m
   store.prependMessages("s", [
     { role: "system", type: "native_subagent", seq: 1, tool_input: { task_id: "child", card_id: "c", name: "/root/reviewer", status: "running", native_thread_id: "child", native_turn_id: "t" } },
     { role: "assistant", type: "text", seq: 2, content: "Saved child", runtime_metadata: identity("child") },
-  ], 1, false);
+  ], 1, false, { beforeSeq: 7, window: useSessionStore.getState().messageWindows.s });
   const state = useSessionStore.getState();
   expect(nativeChatMessages(state.messages.s).map((message) => message.seq)).toEqual([1, 8, 9]);
   expect(nativeCard(state.messages.s, "c")).toMatchObject({ name: "/root/reviewer", status: "completed", summary: "Saved child" });

@@ -14,9 +14,11 @@ import threading
 import uuid
 import weakref
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from ..service_health import ServiceHealth
@@ -32,6 +34,7 @@ from . import (
 from . import format as document_format
 from .extract import HTML_BODY_VERSION, SUPPORTED, extract
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
+from .line_coordinates import LineCoordinates
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,6 +53,18 @@ class WikiError(Exception):
 class StoreBorrow:
     store: Any
     active: bool = True
+
+
+@dataclass(frozen=True)
+class _DocumentRead:
+    """Private current-version facts; only document is a public projection."""
+
+    document: Mapping[str, Any]
+    raw: bytes
+    text: str
+    original_text: str | None
+    lines: LineCoordinates
+    page_offset: int
 
 
 def revision(raw: bytes) -> str:
@@ -1072,11 +1087,11 @@ class WikiStore:
         location: str | None = None,
         index_error_limit: int | None = None,
     ) -> dict[str, Any]:
-        document, _ = self.read_snapshot(
+        snapshot = self.read_snapshot(
             doc, start=start, length=length, expected_revision=expected_revision, page=page, location=location,
             index_error_limit=index_error_limit,
         )
-        return document
+        return dict(snapshot.document)
 
     @vault_read
     def read_snapshot(
@@ -1089,8 +1104,8 @@ class WikiStore:
         page: int | None = None,
         location: str | None = None,
         index_error_limit: int | None = None,
-    ) -> tuple[dict[str, Any], bytes]:
-        """Return the public read and the exact bytes from which it was indexed."""
+    ) -> _DocumentRead:
+        """Keep the public range, raw and extracted coordinates in one value."""
         if start < 0 or not 1 <= length <= 24000 or (page is not None and page < 1):
             raise WikiError("Invalid read range", 422)
         if location is not None and page is not None:
@@ -1129,10 +1144,8 @@ class WikiStore:
             else:
                 start = min(start, page_end)
                 end = min(page_end, start + length)
-            from .line_coordinates import LineCoordinates
-
             lines = LineCoordinates(text)
-            return self.public(row, raw=raw, db=db) | {
+            document = self.public(row, raw=raw, db=db) | {
                 "content": text[start:end],
                 "page": page,
                 "start": start - page_offset,
@@ -1142,7 +1155,12 @@ class WikiStore:
                 "line_end": lines.line(end),
                 "freshness": "live", **self._index_state(db=db, error_limit=index_error_limit),
                 **({"source_location": location} if location is not None else {}),
-            }, raw
+            }
+            try:
+                original_text = raw.decode("utf-8")
+            except UnicodeError:
+                original_text = None
+            return _DocumentRead(MappingProxyType(document), raw, text, original_text, lines, page_offset)
 
     def resolve_identity(self, doc, *, db=None):
         with self.connect() if db is None else contextlib.nullcontext(db) as connection:

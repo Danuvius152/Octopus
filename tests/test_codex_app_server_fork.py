@@ -233,6 +233,37 @@ async def test_restart_cleans_only_acknowledged_artifact_using_saved_strategy(fo
     assert len((tmp_path / "native-business.jsonl").read_text().splitlines()) == 1
 
 
+@pytest.mark.parametrize("missing_is_proven", [False, True])
+async def test_cold_cleanup_requires_the_exact_missing_history_error(fork_source, tmp_path, monkeypatch, missing_is_proven):
+    runtime, _ = fork_source
+    manager, database, parent, mode, _, _ = runtime
+    update = database.update_session_field
+
+    async def fail_install(session_id, **fields):
+        if fields.get("fork_status") == "ready":
+            raise OSError("Lost final product installation")
+        await update(session_id, **fields)
+
+    monkeypatch.setattr(database, "update_session_field", fail_install)
+    with pytest.raises(OSError):
+        await manager.duplicate_session(parent.id, user_id=parent.user_id)
+    monkeypatch.setattr(database, "update_session_field", update)
+    row, = await database.load_incomplete_forks()
+    artifact = json.loads(row["fork_metadata"])["native_fork"]
+    Path(artifact["path"]).unlink()
+    mode[0] = "normal" if missing_is_proven else "fork_missing_denied"
+    await manager.close_session_owners()
+    cold = SessionManager()
+    try:
+        await cold.initialize(database)
+        assert bool(await database.load_incomplete_forks()) is not missing_is_proven
+        assert Path(row["working_dir"]).exists() is not missing_is_proven
+        assert not any(frame.get("method") == "thread/delete" for frame in wire_frames(tmp_path))
+        assert (tmp_path / "native-history.jsonl").exists()
+    finally:
+        await cold.close_session_owners()
+
+
 @pytest.mark.parametrize("artifact", [None, {}, [], {"transport": "exec"}])
 async def test_corrupt_native_fork_checkpoint_never_uses_legacy_cleanup(
     fork_source, tmp_path, monkeypatch, artifact,

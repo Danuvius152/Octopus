@@ -114,7 +114,7 @@ async def test_changed_subagents_replace_held_process_and_deliver_new_configurat
 @pytest.mark.parametrize("backend", ["claude-code", "codex"])
 async def test_oversized_saved_system_prompt_is_refused_without_changing_original(bindings, backend, monkeypatch):
     if backend == "codex":
-        monkeypatch.setattr("server.harness.codex_app_server._FRAME_LIMIT_BYTES", 128 * 1024)
+        monkeypatch.setattr("server.harness.codex_rpc.FRAME_LIMIT_BYTES", 128 * 1024)
     client, headers, _, _ = bindings
     created = await client.post("/api/agents", headers=headers, json={"name": "Unchanged", "backend": backend, "system_prompt": "Keep original"})
     assert created.status_code == 201
@@ -163,7 +163,7 @@ def test_combined_budget_counts_argument_and_environment_pointer_slots(delta):
 @pytest.mark.parametrize("surface", ["controller", "MCP", "environment"])
 async def test_dynamic_configuration_budget_refuses_before_any_spawn(tmp_path, monkeypatch, backend, surface):
     if backend == "codex":
-        monkeypatch.setattr("server.harness.codex_app_server._FRAME_LIMIT_BYTES", 128 * 1024)
+        monkeypatch.setattr("server.harness.codex_rpc.FRAME_LIMIT_BYTES", 128 * 1024)
     profile = get_harness(backend).profile
     original = profile.build_turn_argv
     spawned = []

@@ -300,7 +300,7 @@ async def test_mutation_readmission_capacity_refusal_never_forwards_the_body(tmp
     async def running(*args):
         attempts.append(True)
         if len(attempts) == 1:
-            return SimpleNamespace(state=RUNNING, port=12345)
+            return SimpleNamespace(state=RUNNING, port=12345, process=None)
         raise BackendCapacityError("Application backend capacity is unavailable")
 
     class Mutation:
@@ -329,9 +329,12 @@ async def test_mutation_readmission_capacity_refusal_never_forwards_the_body(tmp
     }, receive)
     monkeypatch.setattr(route, "_application_for_request", authorized)
     monkeypatch.setattr(route.backend_supervisor, "ensure_running", running)
+    def refuse_readmission(*args, **kwargs):
+        raise BackendCapacityError("Application backend capacity is unavailable")
+    monkeypatch.setattr(route.backend_supervisor, "require_running", refuse_readmission)
     monkeypatch.setattr(app_bridge, "begin", begin)
     monkeypatch.setattr(httpx, "AsyncClient", client)
     with pytest.raises(HTTPException) as refused:
         await route.proxy_application_api(request, "app", "save")
     assert refused.value.status_code == 503
-    assert len(attempts) == 2 and finished == [True] and forwarded == []
+    assert len(attempts) == 1 and finished == [True] and forwarded == []

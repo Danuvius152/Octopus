@@ -11,6 +11,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { BgTaskChip } from "./BgTaskChip";
 import { useSessionStore, type BgTask } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
+import { loadBgTaskSnapshot } from "../lib/hydrateSession";
 
 function makeTask(overrides: Partial<BgTask> = {}): BgTask {
   return {
@@ -31,6 +32,7 @@ function makeTask(overrides: Partial<BgTask> = {}): BgTask {
 }
 
 beforeEach(() => {
+  useSessionStore.setState(useSessionStore.getInitialState(), true);
   useSessionStore.setState({ token: "tok", bgTasks: {} });
 });
 
@@ -38,9 +40,70 @@ afterEach(() => {
   cleanup();
   useSessionStore.setState({ bgTasks: {} });
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("BgTaskChip", () => {
+  it.each(["unknown", null] as const)("keeps newer HTTP list delivery (%s) while an old detail fills output", async (disposition) => {
+    const old = makeTask({ status: "completed", exit_code: 0,
+      delivery_disposition: "stopped", delivery_error: "Old delivery" });
+    let detailResponse!: (response: Response) => void;
+    let listResponse!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { detailResponse = resolve; }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { listResponse = resolve; })));
+    useSessionStore.getState().upsertBgTask("s1", old);
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    await act(async () => screen.getByRole("button", { expanded: false }).click());
+    const list = loadBgTaskSnapshot("s1");
+    await act(async () => {
+      listResponse(Response.json([{ ...old, delivery_disposition: disposition,
+        delivery_error: disposition ? "New delivery" : null }]));
+      await list;
+    });
+    await act(async () => detailResponse(Response.json({ ...old, stdout: "Full HTTP detail" })));
+    expect(screen.getByText("Full HTTP detail")).toBeInTheDocument();
+    expect(screen.queryByText("Old delivery")).toBeNull();
+    if (disposition) expect(screen.getByText("New delivery")).toBeInTheDocument();
+    expect(useSessionStore.getState().bgTasks.s1[0]).toMatchObject({
+      status: "completed", delivery_disposition: disposition, delivery_error: disposition ? "New delivery" : null,
+    });
+  });
+
+  it("keeps completed WS facts while a late running detail supplies output", async () => {
+    let respond!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; })));
+    useSessionStore.getState().upsertBgTask("s1", makeTask());
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    await act(async () => screen.getByRole("button", { expanded: false }).click());
+    act(() => {
+      handleWsMessage({ type: "bg_completed", session_id: "s1", task_id: "t1",
+        status: "completed", exit_code: 0, completed_at: "finished", truncated: true });
+      handleWsMessage({ type: "bg_delivery", session_id: "s1", task_id: "t1",
+        delivery_disposition: "unknown", delivery_error: "Later delivery error" });
+    });
+    await act(async () => respond(Response.json(makeTask({ stdout: "Full original output" }))));
+    expect(screen.getByText("bg · completed")).toBeInTheDocument();
+    expect(screen.getByText("Full original output")).toBeInTheDocument();
+    expect(screen.getByText("Later delivery error")).toBeInTheDocument();
+    expect(useSessionStore.getState().bgTasks.s1[0]).toMatchObject({
+      status: "completed", exit_code: 0, completed_at: "finished", truncated: true,
+    });
+  });
+
+  it.each(["unmount", "account", "service"] as const)("discards details after %s invalidates the observation", async (boundary) => {
+    let respond!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; })));
+    const view = render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    act(() => {
+      if (boundary === "unmount") view.unmount();
+      else if (boundary === "account") useSessionStore.setState({ accountGeneration: 22 });
+      else useSessionStore.setState({ dispatchGeneration: "replacement" });
+    });
+    await act(async () => respond(Response.json(makeTask({ status: "completed", stdout: "obsolete" }))));
+    expect(useSessionStore.getState().bgTasks.s1).toBeUndefined();
+  });
+
   it("accepts newer detail diagnostics after an old list inserted the task", async () => {
     const old = makeTask({ status: "completed", exit_code: 0, delivery_disposition: null, delivery_error: null });
     let respond!: (response: Response) => void;

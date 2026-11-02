@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useSessionStore, type Message } from "../stores/sessionStore";
-import { applyTranscript, loadOlderMessages } from "./transcript";
+import { applyTranscript, observeOlderMessages } from "./transcript";
 import { handleWsMessage } from "../hooks/useWebSocket";
 
 const msg = (seq: number): Message => ({
@@ -10,6 +10,7 @@ const msg = (seq: number): Message => ({
   content: `msg-${seq}`,
   seq,
 });
+const loadOlderMessages = (sessionId: string) => observeOlderMessages(sessionId).done;
 
 /** A windowed transcript, and the scroll-back that fills it in
  * (polish-2026-09.md §4 B2).
@@ -156,7 +157,7 @@ describe("loadOlderMessages", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    expect(await loadOlderMessages("s1")).toBe(2);
+    expect(await loadOlderMessages("s1")).toEqual({ state: "merged", added: 2 });
     const s = useSessionStore.getState();
     expect(s.messages.s1.map((m) => m.seq)).toEqual([8, 9, 10, 11]);
     expect(s.oldestSeq.s1).toBe(8);
@@ -177,14 +178,14 @@ describe("loadOlderMessages", () => {
         }),
       }))
     );
-    expect(await loadOlderMessages("s1")).toBe(1);
+    expect(await loadOlderMessages("s1")).toEqual({ state: "merged", added: 1 });
     expect(useSessionStore.getState().messages.s1.map((m) => m.seq)).toEqual([
       9, 10, 11,
     ]);
     vi.unstubAllGlobals();
   });
 
-  it("stops asking when a page adds nothing", async () => {
+  it("reports a stalled page without closing the retry entry", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -196,9 +197,8 @@ describe("loadOlderMessages", () => {
         }),
       }))
     );
-    expect(await loadOlderMessages("s1")).toBe(0);
-    // Believing the server's `has_more` here would poll forever.
-    expect(useSessionStore.getState().hasMoreMessages.s1).toBe(false);
+    expect(await loadOlderMessages("s1")).toMatchObject({ state: "failed" });
+    expect(useSessionStore.getState().hasMoreMessages.s1).toBe(true);
     vi.unstubAllGlobals();
   });
 
@@ -206,9 +206,36 @@ describe("loadOlderMessages", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     useSessionStore.setState({ hasMoreMessages: { s1: false } });
-    expect(await loadOlderMessages("s1")).toBe(0);
-    expect(await loadOlderMessages("")).toBe(0);
+    expect(await loadOlderMessages("s1")).toEqual({ state: "unneeded" });
+    expect(await loadOlderMessages("")).toEqual({ state: "unneeded" });
     expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects a late page across a replaced window without closing its gap", async () => {
+    let respond!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; })));
+    const older = loadOlderMessages("s1");
+    applyTranscript("s1", { messages: [msg(600), msg(601)], oldest_loaded_seq: 600,
+      has_more_messages: true, next_message_seq: 602 });
+    respond(Response.json({ messages: [msg(8), msg(9)], oldest_loaded_seq: 8, has_more_messages: false }));
+    await older;
+    expect(useSessionStore.getState().messages.s1.map((message) => message.seq)).toEqual([600, 601]);
+    expect(useSessionStore.getState().oldestSeq.s1).toBe(600);
+    expect(useSessionStore.getState().hasMoreMessages.s1).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("accepts a valid old page across WS tail appends and equivalent row copies", async () => {
+    let respond!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; })));
+    const older = loadOlderMessages("s1");
+    handleWsMessage({ type: "assistant_text", session_id: "s1", seq: 12, content: "new tail" });
+    const state = useSessionStore.getState();
+    state.setMessages("s1", state.messages.s1.map((message) => ({ ...message })));
+    respond(Response.json({ messages: [msg(8), msg(9)], oldest_loaded_seq: 8, has_more_messages: true }));
+    await older;
+    expect(useSessionStore.getState().messages.s1.map((message) => message.seq)).toEqual([8, 9, 10, 11, 12]);
     vi.unstubAllGlobals();
   });
 
@@ -223,7 +250,7 @@ describe("loadOlderMessages", () => {
     vi.stubGlobal("fetch", fetchMock);
     const first = loadOlderMessages("s1");
     const second = loadOlderMessages("s1");
-    expect(await second).toBe(0);
+    expect(await second).toEqual({ state: "in_flight" });
     resolve({
       ok: true,
       json: async () => ({
@@ -232,20 +259,36 @@ describe("loadOlderMessages", () => {
         has_more_messages: false,
       }),
     });
-    expect(await first).toBe(1);
+    expect(await first).toEqual({ state: "merged", added: 1 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
   });
 
   it("leaves the transcript alone when the fetch fails", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, json: async () => ({}) })));
-    expect(await loadOlderMessages("s1")).toBe(0);
+    expect(await loadOlderMessages("s1")).toMatchObject({ state: "failed" });
     expect(useSessionStore.getState().messages.s1.map((m) => m.seq)).toEqual([
       10, 11,
     ]);
     // Still true, so the user can try again rather than being told there is
     // nothing older when the request simply failed.
     expect(useSessionStore.getState().hasMoreMessages.s1).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("releases a cancelled view's slot without letting its late page settle the replacement", async () => {
+    const responses: ((response: Response) => void)[] = [];
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { responses.push(resolve); })));
+    const oldView = observeOlderMessages("s1");
+    oldView.cancel();
+    const newView = observeOlderMessages("s1");
+    responses[0](Response.json({ messages: [msg(9)], oldest_loaded_seq: 9, has_more_messages: false }));
+    expect(await oldView.done).toEqual({ state: "obsolete" });
+    expect(useSessionStore.getState().oldestSeq.s1).toBe(10);
+    expect(newView.current()).toBe(true);
+    responses[1](Response.json({ messages: [msg(8), msg(9)], oldest_loaded_seq: 8, has_more_messages: true }));
+    expect(await newView.done).toEqual({ state: "merged", added: 2 });
+    expect(useSessionStore.getState().oldestSeq.s1).toBe(8);
     vi.unstubAllGlobals();
   });
 });

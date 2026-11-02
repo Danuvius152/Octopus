@@ -34,7 +34,17 @@ def short_process_shutdown(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _codex_smoke_uses_low_effort(request, monkeypatch):
+def _harness_installation(monkeypatch):
+    """Each temporary installation has its own one-shot resource owners."""
+    from server.harness import Harness
+    from server.harness.registry import _REGISTRY
+
+    for backend, harness in tuple(_REGISTRY.items()):
+        monkeypatch.setitem(_REGISTRY, backend, Harness(harness.profile))
+
+
+@pytest.fixture(autouse=True)
+def _codex_smoke_uses_low_effort(request, monkeypatch, _harness_installation):
     """Pin live protocol checks without changing the caller or host configuration."""
     marker = request.node.get_closest_marker
     if not marker("real") or marker("knowledge_eval") or not (marker("real_codex") or marker("codex_bin")):
