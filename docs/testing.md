@@ -246,6 +246,15 @@ support the patched renderer. The
 chat/file preview math, layout and locally loaded fonts; only model-based file
 name resolution is mocked.
 
+Shared JSON fixtures are imported as data, including the Wiki command cases used
+by frontend and backend tests. Do not widen Vite's filesystem roots to make an
+external `?raw` import pass: patched Vite checks those raw reads more strictly.
+The `vite-filesystem` browser regression verifies that the development server
+still rejects both the shared backend fixture and backend configuration outside
+the web roots. Vitest and its V8 provider keep the same exact locked version when
+applying security updates; the older coverage baseline below retains its original
+measurement versions.
+
 ### Coverage measurement (opt-in)
 
 Coverage is diagnostic and has no percentage threshold. Install the backend

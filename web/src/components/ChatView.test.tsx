@@ -5,9 +5,9 @@ import { mockChatViewport } from "./chatViewport.test-support";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { schedules } from "../lib/scheduleList";
-import commandCasesText from "../../../tests/fixtures/wiki-command-cases.json?raw";
+import commandCasesData from "../../../tests/fixtures/wiki-command-cases.json";
 
-const commandCases: { message: string; mode: "read" | "maintain" | null }[] = JSON.parse(commandCasesText);
+const commandCases = commandCasesData as { message: string; mode: "read" | "maintain" | null }[];
 
 const session = {
   id: "wiki-session", name: "Wiki chat", working_dir: "/tmp",
