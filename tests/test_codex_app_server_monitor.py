@@ -14,17 +14,19 @@ from server.config import settings
 from server.monitor import MetricsStore, query
 from server.routers.monitor import router
 from server.sessions.client_submissions import submit_client_message
-from tests import test_codex_app_server_submission as native_tests
+from tests import native_app_server as native_tests
 from tests.accounts import create_account
-from tests.test_codex_app_server_output import (
+from tests.native_app_server import (
     ROOT,
     child_end,
     child_start,
+    inject,
     item,
     start_output,
+    terminal,
+    until,
 )
-from tests.test_codex_app_server_questions import inject, terminal, until
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests.session_runtime import wait_dispatch_idle
 
 native_runtime = native_tests.native_runtime
 
@@ -103,7 +105,7 @@ async def test_response_before_delayed_start_ack_uses_the_eventually_accepted_ro
     native_runtime, metrics, tmp_path, monkeypatch,
 ):
     from server.harness import codex_app_server
-    from tests.test_codex_app_server_questions import wire_frames
+    from tests.native_app_server import wire_frames
 
     monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 3)
     manager, database, session, mode, _, _ = native_runtime
@@ -180,7 +182,7 @@ async def test_unassociated_usage_capacity_loss_does_not_change_business_result(
 ):
     from server.harness import codex_app_server
     from server.harness.codex_activity import CodexActivityObserver
-    from tests.test_codex_app_server_questions import wire_frames
+    from tests.native_app_server import wire_frames
 
     monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 3)
     monkeypatch.setattr(codex_app_server, "_METRICS_PENDING_COUNT", 2)

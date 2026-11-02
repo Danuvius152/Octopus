@@ -226,12 +226,22 @@ async def test_engine_captures_stderr(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_engine_stop_kills_hung_subprocess(tmp_path):
-    # sleep-then ignores stdin close; stop() must escalate to SIGKILL and
-    # still return within its bounded budget.
+async def test_engine_stop_retires_sleeping_subprocess_with_default_budget(tmp_path):
+    # Keep the production grace periods here. The backpressure cases cover
+    # explicit TERM resistance with shortened test budgets.
     run = Harness(_mode_profile("sleep-then", "30")).create_run()
     await run.start("p", str(tmp_path))
-    await asyncio.wait_for(run.stop(), timeout=6.0)
+    process = run._process
+    assert process is not None and process.returncode is None
+    try:
+        await asyncio.wait_for(run.stop(), timeout=6.0)
+        assert process.returncode is not None, "Stop returned while its original subprocess could still execute"
+        assert not run.is_alive()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        await run.stop()
 
 
 @pytest.mark.asyncio
@@ -523,20 +533,13 @@ def test_prepare_spawn_sets_session_leader():
 
 
 @pytest.mark.asyncio
-async def test_terminate_process_group_reaps_children(tmp_path):
-    """Killing the group must take down a CHILD the spawned process started —
-    the orphan leak the old direct-child kill() left behind."""
+async def test_terminate_process_group_stops_original_child(tmp_path):
+    """The original child exits even when PID1 has not reaped its zombie."""
     import os
+    import select
     import signal as _signal
 
     from server.harness.run import _terminate_process_group, prepare_spawn
-
-    def _alive(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        return True
 
     # Parent starts a backgrounded `sleep`, prints its pid, then waits — so the
     # child shares the parent's new process group.
@@ -547,16 +550,24 @@ async def test_terminate_process_group_reaps_children(tmp_path):
         *argv, stdout=asyncio.subprocess.PIPE, **kwargs
     )
     child_pid = int((await proc.stdout.readline()).strip())
-    assert _alive(child_pid)
-
-    sent_group = _terminate_process_group(proc, _signal.SIGKILL)
-    await proc.wait()
-    for _ in range(50):  # let the kernel reap the child
-        if not _alive(child_pid):
-            break
-        await asyncio.sleep(0.02)
-    assert sent_group is True
-    assert not _alive(child_pid), "child process was orphaned, not reaped"
+    descriptor = os.pidfd_open(child_pid)
+    try:
+        assert not select.select([descriptor], [], [], 0)[0]
+        sent_group = _terminate_process_group(proc, _signal.SIGKILL)
+        await asyncio.wait_for(proc.wait(), 3)
+        exited, _, _ = await asyncio.to_thread(select.select, [descriptor], [], [], 3)
+        assert sent_group is True
+        assert exited, "The original child can still execute after group termination"
+        assert proc.returncode == -_signal.SIGKILL, "The owned parent must also be waited and reaped"
+    finally:
+        try:
+            _signal.pidfd_send_signal(descriptor, _signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        os.close(descriptor)
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
 
 
 @pytest.mark.asyncio

@@ -102,14 +102,14 @@ def _file_identity(path: Path) -> tuple | None:
     return str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
-def codex_home_works(home: str | Path) -> bool:
+def codex_home_works(home: str | Path, *, executable: str | None = None) -> bool:
     """Probe the selected login once; keep every probe's output in a temp home.
 
     The cache belongs to this pytest process. Only the same executable and
     unchanged auth/config files share a result. A timeout never becomes a
     cached login failure. Missing auth stays scoped to its original home.
     """
-    exe = _resolve_cli("codex")
+    exe = executable or _resolve_cli("codex")
     if exe is None:
         return False
     root = Path(home).expanduser().resolve()
@@ -136,6 +136,23 @@ def codex_home_works(home: str | Path) -> bool:
 def codex_cli_works() -> bool:
     """Check actual usability of the ambient login, not auth.json presence."""
     return codex_home_works(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def codex_app_server_works() -> bool:
+    """Verify the product's selected native binary and the selected login.
+
+    An invalid pin fails validation instead of becoming an unavailable-login
+    skip. The authentication probe uses that same executable in an isolated
+    home; an unrelated PATH codex cannot decide whether native tests run.
+    """
+    from server.config import settings
+    from server.harness.codex_app_server import verify_binary
+
+    exe = _resolve_cli(settings.codex_app_server_binary)
+    if exe is None:
+        return False
+    verify_binary(exe)
+    return codex_home_works(os.environ.get("CODEX_HOME") or Path.home() / ".codex", executable=exe)
 
 
 def codex_home_with_auth() -> str | None:

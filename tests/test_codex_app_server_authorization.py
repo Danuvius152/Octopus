@@ -13,9 +13,9 @@ from server.deps import get_session_manager
 from server.harness import codex_app_server
 from server.routers import schedules
 from server.sessions.client_submissions import submit_client_message
-from tests.test_codex_app_server_submission import PEER
-from tests.test_codex_app_server_submission import native_runtime as native_runtime
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests.native_app_server import PEER
+from tests.native_app_server import native_runtime as native_runtime
+from tests.session_runtime import wait_dispatch_idle
 
 
 @pytest.mark.parametrize("ending", ["terminal", "stop"])

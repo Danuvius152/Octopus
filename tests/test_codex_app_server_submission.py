@@ -2,59 +2,15 @@
 
 import asyncio
 import json
-import os
-import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from server.database import Database
-from server.harness import codex_app_server, get_harness
-from server.sessions import SessionManager
+from server.harness import codex_app_server
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.sessions.owner_runtime import RuntimeReader
-from tests.accounts import create_account
-from tests.test_runtime_review_races import wait_dispatch_idle
-
-PEER = Path(__file__).parent / "_fixtures" / "fake_app_server.py"
-
-
-@pytest.fixture
-async def native_runtime(tmp_path, monkeypatch):
-    monkeypatch.setattr(codex_app_server, "verify_binary", lambda path: None)
-    monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 0.5)
-    mode, starts, events = ["normal"], [], []
-
-    def argv(context):
-        starts.append(context)
-        return [sys.executable, "-u", str(PEER), str(tmp_path), mode[0]], {
-            "cwd": context.working_dir, "env": {**os.environ, "CODEX_HOME": str(tmp_path / "codex-home")},
-        }
-
-    monkeypatch.setattr(codex_app_server, "build_argv", argv)
-    harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(codex_app_server.profile(harness.profile),
-        build_turn_argv=lambda context: codex_app_server.build_argv(context)))
-    database = Database(str(tmp_path / "product.db"))
-    await database.initialize()
-    await create_account(database, extra_roots=[tmp_path])
-    manager = SessionManager()
-    await manager.initialize(database)
-    agent = await database.get_system_agent()
-    session = await manager.create_session(agent["id"], "Native input", str(tmp_path), backend="codex")
-
-    async def observe(event):
-        events.append(event)
-
-    manager.on_broadcast("native-input-tests", observe)
-    try:
-        yield manager, database, session, mode, starts, events
-    finally:
-        await manager.interrupt(session.id)
-        await manager.await_session_execution(session.id, timeout=5)
-        await manager.close_session_owners()
-        await database.close()
+from tests.native_app_server import native_runtime as native_runtime
+from tests.session_runtime import wait_dispatch_idle
 
 
 async def test_browser_deduplication_and_exact_history_resume(native_runtime, tmp_path):

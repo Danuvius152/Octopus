@@ -9,10 +9,17 @@ from server.app_agent import AppAgentManager
 from server.applications import ApplicationManager
 from server.config import settings
 from server.delegations import DelegationManager
-from tests import test_codex_app_server_submission as native_tests
-from tests.test_codex_app_server_output import ROOT, child_end, child_start, item
-from tests.test_codex_app_server_questions import inject, terminal, until
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests import native_app_server as native_tests
+from tests.native_app_server import (
+    ROOT,
+    child_end,
+    child_start,
+    inject,
+    item,
+    terminal,
+    until,
+)
+from tests.session_runtime import wait_dispatch_idle
 
 native_runtime = native_tests.native_runtime
 

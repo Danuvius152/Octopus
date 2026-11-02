@@ -9,7 +9,8 @@ from tests.test_submission_recovery import runtime as runtime
 
 
 async def test_http_reuses_the_same_durable_admission_as_socket_input(runtime):
-    from tests.test_runtime_review_races import session_client, wait_dispatch_idle
+    from tests.session_runtime import wait_dispatch_idle
+    from tests.test_runtime_review_races import session_client
 
     manager, db, session, _, starts, _ = runtime
     async with await session_client(manager, session) as client:

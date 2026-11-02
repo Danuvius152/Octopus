@@ -122,6 +122,12 @@ The full backend gate uses four pytest-xdist workers grouped by file, with worke
 restart disabled. Focused development checks and live-provider checks stay serial;
 parallelism is selected by the full-gate commands, not global pytest `addopts`.
 
+Bare `pytest` selects offline correctness. Tests marked `real` are deselected
+before setup unless `--run-real` is present; a marker expression alone cannot
+enable provider probes or supervisor integration. The optional `knowledge_eval`
+and `wiki_perf` switches remain independent. A test carrying several opt-in
+markers requires every corresponding switch.
+
 **All required correctness checks must pass before committing.** Investigate
 and fix failures. Reuse passing evidence for unchanged code, environment and
 checks; rerun checks invalidated by subsequent changes. Release adds the
@@ -148,8 +154,8 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 |-------|---------|------------------------------|
 | Backend hermetic | `.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -q` | Full correctness for **Claude Code and Codex**, including simulated CLI processes, Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
 | Wiki performance (opt-in) | `.venv/bin/pytest tests/ --run-wiki-perf -m wiki_perf -v -s` | Large-dataset projection and grant-lookup cost measurements. Outside default full checks and release gates; small correctness and query-boundary checks remain in the hermetic tier. |
-| Live Codex pytest | `.venv/bin/pytest tests/ --ignore=tests/test_codex_login_real.py -m "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval" -v` | Actual Codex execution, streaming/tools, scheduling, memory, fork, research and Wiki through the selected existing login. New device authentication is excluded from routine release checks. Use the isolated credential setup in [本机测试](local-wsl.md#本机测试). |
-| Supervisor integration | `.venv/bin/pytest tests/ -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
+| Live Codex pytest | `.venv/bin/pytest tests/ --run-real --ignore=tests/test_codex_login_real.py -m "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval" -v` | Actual Codex execution, streaming/tools, scheduling, memory, fork, research and Wiki through the selected existing login. New device authentication is excluded from routine release checks. Use the isolated credential setup in [本机测试](local-wsl.md#本机测试). |
+| Supervisor integration | `.venv/bin/pytest tests/ --run-real -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
 | Frontend unit | `cd web && bun run test` | Stores, HTTP/WS events, components, input lifecycle, account/service generation boundaries and Wiki job cards. Vitest tests are colocated with source. |
 | Offline browser E2E | `cd web && bun run test:e2e:fast` | Real browser plus isolated backend: login/accounts, sessions, input recovery, sidebar/pins, attachments, Wiki cards and page readiness. Uses a test-only harness and verifies an offline execution audit; actual provider behavior needs the live tier. |
 | Codex browser E2E | `cd web && bun run test:e2e:llm codex.spec.ts codex-app-server.spec.ts` | Real default Codex creation, complete streamed response, Monitor, original-receipt deduplication and precise native resume after reload/reopen. Needs the pinned, signed-in Codex CLI. |
@@ -174,10 +180,19 @@ and removal of the ordinary exec entry; `tests/test_fork_native_copy.py` and
 
 Native question/control and output regressions use controlled stdio peers in
 `tests/test_codex_app_server_questions.py` and `tests/test_codex_app_server_output.py`.
+Their function-scoped runtime, frame builders and injection tools live in
+[`tests/native_app_server.py`](../tests/native_app_server.py), which keeps the
+original Manager, SQLite database and cleanup together and imports no case modules.
+[`tests/session_runtime.py`](../tests/session_runtime.py) owns shared dispatcher
+observations. Consumers import these support modules directly and retain their
+separate behavior assertions.
 They exercise the original Owner, SQLite and publication path with explicit
 storage, writer, reader and process-group barriers: dual RPC IDs, late answers,
 Stop/conflicting controls, input-proof waits, retained late items, scoped work
-rounds and failure before/after child terminal. Shared Harness/Owner regressions
+rounds and failure before/after child terminal. Nonblocking questions leave the
+idle deadline active; mixed text/choice answers preserve both native question IDs
+and the saved product question. Wrong binary preparation preserves the unsent
+input without launching the peer. Shared Harness/Owner regressions
 retain both Claude and Codex offline coverage. The selected nested G0 frame
 fixture is protocol replay, not a new live execution.
 
@@ -244,10 +259,19 @@ establish default cutover or stronger recursive completion.
 
 ### Markers, providers and isolation
 
-- **`real` selects live-provider and supervisor integration.** `real_claude`
+- **`real` selects live-provider and supervisor integration with `--run-real`.** `real_claude`
   and `real_codex` require a signed-in CLI; `claude_bin` and `codex_bin` require
   the binary. Availability probes run at setup in `tests/conftest.py`, so
   collection and hermetic checks do not invoke model CLIs.
+- **`native_codex` checks the configured App Server executable.** The native
+  live module retains `real_codex` for release selection, verifies the selected
+  G0 binary, and probes the selected login with that executable in an isolated
+  home. An invalid binary pin fails validation. PATH Codex availability applies
+  separately to exec-origin history seeding. The active-root steer smoke checks
+  original turn/generation identity, accepted input, a file effect and retirement.
+  Report required live cases as passed, skipped, failed or unexecuted; collection
+  and skipped cases do not establish acceptance. HTTP MCP question tests do not
+  prove the native server-request/reply contract.
 - **This installation's live gate selects Codex only.** Claude's live CLI and
   browser tests remain outside routine checks and the release gate, regardless
   of whether its binary is installed. Keep both backends' offline coverage and
@@ -273,7 +297,8 @@ establish default cutover or stronger recursive completion.
   tests cover acceptance of those records.
 - **`knowledge_eval` is opt-in**, deselected before setup/CLI probes and outside
   fast checks, full checks and release gates. It requires
-  `--run-knowledge-evals`; `wiki_perf` independently requires `--run-wiki-perf`.
+  `--run-knowledge-evals` and, for real execution, `--run-real`;
+  `wiki_perf` independently requires `--run-wiki-perf`.
   Both are excluded from `scripts/check.sh` and the Python pre-commit hook.
   Setup and evidence rules are in
   [本机测试](local-wsl.md#本机测试). Assess answers against recorded source

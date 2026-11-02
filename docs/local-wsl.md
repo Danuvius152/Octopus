@@ -235,7 +235,7 @@ CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式�
   mkdir "$octopus_test_root/credentials" || exit
   ln -s "$CODEX_HOME" "$octopus_test_root/credentials/selected" || exit
   TMPDIR="$octopus_test_root" OCTOPUS_CODEX_HOME_DIR="$octopus_test_root/credentials" \
-    .venv/bin/pytest tests/ -v \
+    .venv/bin/pytest tests/ --run-real -v \
     --ignore=tests/test_codex_login_real.py \
     -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'
 )
@@ -247,7 +247,7 @@ CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式�
 完整的维护提交 → Weber 执行 → 持久化结算链路，以及 Wiki 读取、原生助手、
 resume 指令更新和大任务导出协议；授权、写入范围、事务及恢复仍由默认离线测试覆盖。
 评估维护意图时单独运行
-`.venv/bin/pytest tests/test_wiki_intent_real.py --run-knowledge-evals -m knowledge_eval`。
+`.venv/bin/pytest tests/test_wiki_intent_real.py --run-real --run-knowledge-evals -m knowledge_eval`。
 
 Wiki 自然问答使用独立的 `knowledge_eval` 标记，默认排除，不作发布必过项，
 也不记为通过。只为具体质量问题显式运行，不能为补一条文档记录重跑。
@@ -257,7 +257,7 @@ Wiki 自然问答使用独立的 `knowledge_eval` 标记，默认排除，不作
 ```bash
 cd ~/Octopus
 octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
-.venv/bin/pytest tests/test_wiki_query_real.py --run-knowledge-evals \
+.venv/bin/pytest tests/test_wiki_query_real.py --run-real --run-knowledge-evals \
   --knowledge-eval-output="$octopus_knowledge_evidence" -q
 ```
 
@@ -274,7 +274,7 @@ octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
 `sort_keys=True, separators=(",", ":")`，再计算 UTF-8 SHA-256。
 
 ```bash
-.venv/bin/pytest tests/test_wiki_chat_real.py --run-knowledge-evals \
+.venv/bin/pytest tests/test_wiki_chat_real.py --run-real --run-knowledge-evals \
   --wiki-chat-registration=/path/to/registration.json \
   --knowledge-eval-output=/path/to/fresh-chat-evidence -q
 ```

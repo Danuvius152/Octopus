@@ -5,9 +5,16 @@ import asyncio
 import pytest
 
 from server.config import settings
-from tests import test_codex_app_server_submission as native_tests
-from tests.test_codex_app_server_output import ROOT, child_end, child_start, item
-from tests.test_codex_app_server_questions import inject, terminal, until
+from tests import native_app_server as native_tests
+from tests.native_app_server import (
+    ROOT,
+    child_end,
+    child_start,
+    inject,
+    item,
+    terminal,
+    until,
+)
 from tests.test_session_manager import _bind_credential
 
 native_runtime = native_tests.native_runtime

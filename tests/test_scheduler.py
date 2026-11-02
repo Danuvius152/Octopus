@@ -549,7 +549,7 @@ async def test_run_at_schedule_deleted_after_fire_with_origin_session(setup, mon
 
     await runner._fire("once3")
 
-    from tests.test_runtime_review_races import wait_dispatch_idle
+    from tests.session_runtime import wait_dispatch_idle
     await wait_dispatch_idle(mgr, origin.id)
     assert [run.session_id for run in runs] == [origin.id]
     # DB row auto-deleted after the one-time fire.

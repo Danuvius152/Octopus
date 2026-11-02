@@ -481,6 +481,16 @@ async def test_signed_work_survives_mcp_thread_and_late_loopback_is_refused(work
         return original(url, **kwargs)
 
     monkeypatch.setattr(httpx, "post", blocked_post)
+    cancellation = None
+    closed = asyncio.Event()
+    close_work = manager.close_work
+
+    async def observe_close(work_id):
+        retirement = await close_work(work_id)
+        closed.set()
+        return retirement
+
+    monkeypatch.setattr(manager, "close_work", observe_close)
     try:
         rec = await delegations.start_delegation(
             parent_session_id=parent.id, agent_name="Worker", request="held work",
@@ -498,15 +508,24 @@ async def test_signed_work_survives_mcp_thread_and_late_loopback_is_refused(work
                     assert len(tasks) == 1 and tasks[0].work_id == rec.work_id
                     late = asyncio.create_task(mcp.call_tool("run", {"command": f"touch {tmp_path}/late-mcp"}))
                     assert await asyncio.to_thread(entered.wait, 3)
-                    await delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id)
+                    cancellation = asyncio.create_task(delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id))
+                    # The original work scope is now revoked. Release the
+                    # loopback thread before waiting for process retirement;
+                    # cleanup and the thread no longer share a five-second race.
+                    await asyncio.wait_for(closed.wait(), 3)
                     release.set()
                     result = await asyncio.wait_for(late, 5)
+                    assert await asyncio.wait_for(cancellation, 5) is rec
                     assert "Error" in result.content[0].text
                     assert not (tmp_path / "late-mcp").exists()
                     assert len(await manager.work_test_bg.list_tasks(rec.delegation_id)) == 1
     finally:
         release.set()
-        await api.stop()
+        try:
+            if cancellation is not None:
+                await asyncio.wait_for(asyncio.shield(cancellation), 5)
+        finally:
+            await api.stop()
 
 
 async def test_shutdown_retires_in_flight_background_startup(work_runtime, monkeypatch):
@@ -671,10 +690,13 @@ async def test_cancel_reaps_model_process_when_spawn_handle_returns_late(work_ru
 async def test_cancel_during_claim_prevents_owned_turn_from_starting(work_runtime):
     manager, delegations, parent, starts = work_runtime
     cancelled = asyncio.Event()
+    executions = []
 
     async def cancel_claim(event):
         if event["type"] == "dequeued" and event["session_id"] != parent.id and not cancelled.is_set():
             rec = delegations.get_delegation(event["session_id"])
+            child = manager.get_session(rec.delegation_id)
+            executions.append(manager._session_owners[id(child)].runtime.current)
             await delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id)
             cancelled.set()
 
@@ -683,7 +705,9 @@ async def test_cancel_during_claim_prevents_owned_turn_from_starting(work_runtim
         parent_session_id=parent.id, agent_name="Worker", request="held work",
     )
     await asyncio.wait_for(cancelled.wait(), 3)
-    await asyncio.sleep(0.05)
+    execution, = executions
+    await asyncio.wait_for(asyncio.shield(execution.retired), 3)
+    await asyncio.wait_for(delegations.confirm_recording(), 5)
     assert starts.empty() and rec.state == "cancelled"
     await assert_no_queued_messages(manager, rec.delegation_id)
 

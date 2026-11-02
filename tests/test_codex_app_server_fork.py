@@ -12,11 +12,20 @@ from server.harness.codex import _cleanup_legacy_fork
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.sessions.forking import ForkingMixin
-from tests import test_codex_app_server_submission as native_tests
-from tests.test_codex_app_server_output import ROOT, child_end, child_start, item
-from tests.test_codex_app_server_questions import inject, terminal, until, wire_frames
-from tests.test_codex_app_server_steering import active_root, wait_until
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests import native_app_server as native_tests
+from tests.native_app_server import (
+    ROOT,
+    active_root,
+    child_end,
+    child_start,
+    inject,
+    item,
+    terminal,
+    until,
+    wait_until,
+    wire_frames,
+)
+from tests.session_runtime import wait_dispatch_idle
 from tests.test_session_fork import _git
 
 native_runtime = native_tests.native_runtime

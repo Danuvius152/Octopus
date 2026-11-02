@@ -279,6 +279,11 @@ def _no_cli_left_behind(request):
 
 
 def pytest_addoption(parser):
+    integration = parser.getgroup("live integration")
+    integration.addoption(
+        "--run-real", action="store_true", default=False,
+        help="Enable explicitly selected real-provider and supervisor tests",
+    )
     performance = parser.getgroup("Wiki performance")
     performance.addoption(
         "--run-wiki-perf", action="store_true", default=False,
@@ -314,6 +319,7 @@ def pytest_addoption(parser):
 def pytest_collection_modifyitems(config, items):
     """Opt in before setup, including the signed-in CLI availability probe."""
     disabled = [marker for marker, option in (
+        ("real", "run_real"),
         ("knowledge_eval", "run_knowledge_evals"),
         ("wiki_perf", "run_wiki_perf"),
     ) if not config.getoption(option)]
@@ -355,12 +361,15 @@ def pytest_runtest_setup(item):
         return
 
     from server.harness.run import _which_with_fallback
-    from tests.cli_gate import claude_cli_works, codex_cli_works
+    from tests.cli_gate import claude_cli_works, codex_app_server_works, codex_cli_works
+
+    native = bool(item.get_closest_marker("native_codex"))
 
     checks = (
         # marker         predicate                                    skip reason
         ("real_claude", claude_cli_works, "claude CLI unavailable or not signed in"),
-        ("real_codex", codex_cli_works, "codex CLI unavailable or not signed in"),
+        ("real_codex", codex_app_server_works if native else codex_cli_works,
+         "selected native Codex unavailable or not signed in" if native else "codex CLI unavailable or not signed in"),
         ("claude_bin", lambda: _which_with_fallback("claude") is not None,
          "claude CLI not installed"),
         ("codex_bin", lambda: _which_with_fallback("codex") is not None,

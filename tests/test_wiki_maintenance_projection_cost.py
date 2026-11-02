@@ -111,13 +111,13 @@ def collection_barrier_measurements(prepared, monkeypatch, counts):
     with connect() as db:
         assert db.execute("SELECT count(*) FROM maintenance_job_dirty").fetchone()[0] == counts[-1]
         plans = [row["detail"] for row in db.execute("EXPLAIN QUERY PLAN " + current["barriers"][-1])]
-    assert any("SEARCH d " in detail and "path>?" in detail for detail in plans), plans
-    assert not any("SCAN pending" in detail for detail in plans), plans
     return measurements, plans
 
 
 def test_collection_barrier_keeps_unrelated_dirty_jobs_out_of_the_page(prepared, monkeypatch):
-    collection_barrier_measurements(prepared, monkeypatch, (0, 1, 2))
+    measurements, plans = collection_barrier_measurements(prepared, monkeypatch, (0, 32, 128))
+    steps = [row["vm_steps"] for row in measurements]
+    assert max(steps) <= min(steps) + 1000, (measurements, plans)
 
 
 @pytest.mark.wiki_perf

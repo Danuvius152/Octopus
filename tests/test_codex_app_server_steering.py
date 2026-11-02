@@ -7,29 +7,11 @@ import pytest
 
 from server.harness import HarnessRun
 from server.sessions.client_submissions import submission_status, submit_client_message
-from tests import test_codex_app_server_submission as native_tests
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests import native_app_server as native_tests
+from tests.native_app_server import active_root, wait_until
+from tests.session_runtime import wait_dispatch_idle
 
 native_runtime = native_tests.native_runtime
-
-
-async def wait_until(predicate):
-    async with asyncio.timeout(3):
-        while not await predicate():
-            await asyncio.sleep(.005)
-
-
-async def active_root(runtime, tmp_path):
-    manager, database, session, mode, starts, events = runtime
-    if mode[0] == "normal":
-        mode[0] = "steer_wait"
-    first = await submit_client_message(manager, session.id, "Wait for the helper", [], "root", wiki_mode=None)
-
-    async def waiting():
-        return any(event.get("type") == "tool_use" for event in events)
-
-    await wait_until(waiting)
-    return first
 
 
 async def test_human_input_steers_the_bound_root_during_native_wait(native_runtime, tmp_path):

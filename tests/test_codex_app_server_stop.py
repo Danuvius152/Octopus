@@ -10,11 +10,18 @@ import pytest
 from server.bg_tasks import BgTaskManager
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
-from tests import test_codex_app_server_submission as native_tests
-from tests.test_codex_app_server_output import ROOT, child_end, child_start, item
-from tests.test_codex_app_server_questions import inject, until
-from tests.test_codex_app_server_steering import active_root, wait_until
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests import native_app_server as native_tests
+from tests.native_app_server import (
+    ROOT,
+    active_root,
+    child_end,
+    child_start,
+    inject,
+    item,
+    until,
+    wait_until,
+)
+from tests.session_runtime import wait_dispatch_idle
 
 native_runtime = native_tests.native_runtime
 
@@ -95,6 +102,11 @@ async def test_service_reentry_preserves_native_input_evidence_without_replay(na
         await submit_client_message(manager, session.id, content, [], client_id, wiki_mode=None)
         async def has_evidence():
             saved = await submission_status(manager, session.id, client_id)
+            # Native "unknown" is committed before the write. Wait until the
+            # original request has actually settled its lost-ACK observation;
+            # ending the root earlier can legitimately requeue an unsent steer.
+            if proof == "steer_unknown" and saved["execution"]["state"] != "unknown":
+                return False
             return bool(saved["execution"]["native_inputs"]) and saved["execution"]["native_inputs"][0]["state"] == (
                 "unknown" if proof == "steer_unknown" else "accepted")
         await wait_until(has_evidence)

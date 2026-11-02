@@ -33,6 +33,7 @@ from server.sessions.submission import ReturnRefused
 from server.users import UserManager
 from tests.accounts import create_account
 from tests.harness_profiles import process_profile
+from tests.session_runtime import wait_dispatch_idle
 
 
 async def session_client(manager, session):
@@ -157,12 +158,6 @@ async def runtime(monkeypatch, tmp_path, short_process_shutdown):
         delegations.shutdown()
         await manager.stop_all_held_processes()
         await database.close()
-
-
-async def wait_dispatch_idle(manager, session_id):
-    async with asyncio.timeout(5):
-        while (snapshot := manager.dispatch_snapshot(session_id))["active_request_id"] is not None or snapshot["items"]:
-            await asyncio.sleep(0.01)
 
 
 @pytest.mark.parametrize("diagnostic,code,preparations", [

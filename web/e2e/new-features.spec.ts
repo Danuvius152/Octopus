@@ -2879,24 +2879,31 @@ test.describe("/model", () => {
     page,
     request,
   }) => {
-    await importSessionApi(request, "Model Session", [
+    const { id } = await importSessionApi(request, "Model Session", [
       { role: "user", type: "text", content: "hello" },
     ]);
     await login(page);
     await page
       .locator(".session-item .session-name", { hasText: "Model Session" })
       .click();
+    await expect(page.locator(".msg", { hasText: "hello" })).toBeVisible();
 
     const box = page.locator(".chat-input-bar textarea");
     await box.click();
 
     // With an argument there is whitespace, so the slash menu is closed and one
     // Enter sends.
+    const changed = page.waitForResponse((response) =>
+      response.url().endsWith(`/api/sessions/${id}`) && response.request().method() === "PATCH"
+    );
     await box.fill("/model opus");
     await box.press("Enter");
+    expect((await changed).status()).toBe(200);
     await expect(
       page.locator(".msg-notice, .msg", { hasText: "Model for this session: opus" })
     ).toBeVisible();
+    const saved = await request.get(`${API}/sessions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect((await saved.json()).model).toBe("opus");
 
     // Bare `/model` opens the picker. Two Enters: the first is captured by the
     // slash-autocomplete (it completes the name into the composer), the second

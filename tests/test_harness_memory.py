@@ -14,8 +14,8 @@ import pytest
 from server.harness import RunConfig, get_harness
 from server.harness.assembly import compose_system_prompt, render_memory_blurb
 from tests.harness_profiles import native_submission
-from tests.test_codex_app_server_questions import wire_frames
-from tests.test_codex_app_server_submission import native_runtime as native_runtime
+from tests.native_app_server import native_runtime as native_runtime
+from tests.native_app_server import wire_frames
 
 
 def _arg_after(argv, flag):

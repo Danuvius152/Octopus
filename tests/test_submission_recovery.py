@@ -297,7 +297,7 @@ async def test_recovery_listing_is_paginated_private_and_dismissible(tmp_path, m
 
 
 from tests.harness_profiles import process_profile
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests.session_runtime import wait_dispatch_idle
 
 
 @pytest.fixture

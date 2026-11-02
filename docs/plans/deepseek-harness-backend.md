@@ -767,10 +767,10 @@ live 的 key 从明确选择的环境/凭据引用注入临时测试账户，不
 .venv/bin/pytest tests/test_harness_deepseek.py -m 'not real and not knowledge_eval and not wiki_perf' -q
 
 # 实施后：DSH 实际 loader/配置回放，不请求远端模型
-.venv/bin/pytest tests/ -m 'real and dsh_bin and not real_deepseek and not knowledge_eval and not wiki_perf' -v
+.venv/bin/pytest tests/ --run-real -m 'real and dsh_bin and not real_deepseek and not knowledge_eval and not wiki_perf' -v
 
 # 实施后：只在显式选择 DeepSeek 验收时运行
-.venv/bin/pytest tests/ -m 'real and real_deepseek and not knowledge_eval and not wiki_perf' -v
+.venv/bin/pytest tests/ --run-real -m 'real and real_deepseek and not knowledge_eval and not wiki_perf' -v
 ```
 
 真实模型至少覆盖：单轮、文件工具实际效果、同 id resume 与模型/effort 更新、

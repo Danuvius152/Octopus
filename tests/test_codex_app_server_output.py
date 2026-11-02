@@ -7,37 +7,20 @@ from pathlib import Path
 import pytest
 
 from server.sessions.client_submissions import submit_client_message
-from tests import test_codex_app_server_submission as native_tests
-from tests.test_codex_app_server_questions import inject, terminal, until
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests import native_app_server as native_tests
+from tests.native_app_server import (
+    ROOT,
+    child_end,
+    child_start,
+    inject,
+    item,
+    start_output,
+    terminal,
+    until,
+)
+from tests.session_runtime import wait_dispatch_idle
 
 native_runtime = native_tests.native_runtime
-
-ROOT = "exact-native-thread"
-
-
-def item(thread, turn, identifier, text):
-    return {"method": "item/completed", "params": {"threadId": thread, "turnId": turn,
-        "item": {"id": identifier, "type": "agentMessage", "text": text, "phase": "final_answer"}}}
-
-
-def child_start(thread="child", turn="child-turn"):
-    return {"method": "turn/started", "params": {"threadId": thread,
-        "turn": {"id": turn, "rootTurnId": "turn-1", "status": "inProgress"}}}
-
-
-def child_end(thread="child", turn="child-turn"):
-    return {"method": "turn/completed", "params": {"threadId": thread,
-        "turn": {"id": turn, "rootTurnId": "turn-1", "status": "completed"}}}
-
-
-async def start_output(runtime):
-    manager, _, session, mode, _, _ = runtime
-    mode[0] = "control_output"
-    receipt = await submit_client_message(manager, session.id, "Native output", [], "output", wiki_mode=None)
-    await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
-    return receipt
-
 
 async def test_root_and_child_same_item_survive_storage_and_ws(native_runtime, tmp_path):
     manager, database, session, _, _, events = native_runtime

@@ -16,7 +16,7 @@ from tests.accounts import create_account
 from tests.cli_gate import codex_cli_works
 from tests.codex_legacy_history import seed_exec_history
 
-pytestmark = [pytest.mark.real, pytest.mark.real_codex]
+pytestmark = [pytest.mark.real, pytest.mark.real_codex, pytest.mark.native_codex]
 
 
 @pytest.fixture
@@ -48,6 +48,56 @@ async def live_run(manager, session, prompt):
         while session._run is None or session._run.backend is None:
             await asyncio.sleep(.01)
     return receipt, session._run.backend
+
+
+async def test_live_steer_reaches_the_original_active_root(live_product, tmp_path):
+    manager, database, session, metrics = live_product
+    ready, release = tmp_path / "steer-ready", tmp_path / "steer-release"
+    receipt, run = await live_run(manager, session,
+        "This is an active-root steering protocol check. Do not spawn helpers. "
+        "First run one shell command in the current working directory that creates steer-ready, "
+        "then waits for steer-release to exist (check every 0.1 seconds, at most 90 seconds). "
+        "Keep that command running until the file appears. The user will send another instruction "
+        "while it waits. After the command exits, follow that instruction and finish.")
+    try:
+        async with asyncio.timeout(60):
+            while not ready.exists():
+                assert not receipt._completion.done(), "Root finished before reaching its steering barrier"
+                await asyncio.sleep(.02)
+        original = run.active_turn
+        assert original is not None and run.steering_open
+        correction = await submit_client_message(manager, session.id,
+            "After the waiting command exits, write exactly STEER_CONTRACT_83 into steered-result.txt "
+            "in the current working directory, then finish. Do not spawn helpers.",
+            [], "live-steer", wiki_mode=None)
+        assert correction["disposition"] == "steered", correction
+        async with asyncio.timeout(20):
+            while True:
+                saved = await submission_status(manager, session.id, "live-steer")
+                if saved["execution"]["native_inputs"]:
+                    evidence, = saved["execution"]["native_inputs"]
+                    if evidence["state"] == "accepted":
+                        break
+                assert not receipt._completion.done(), saved
+                await asyncio.sleep(.02)
+        assert (evidence["thread_id"], evidence["target_turn_id"], evidence["connection_generation"]) == (
+            original.thread_id, original.turn_id, original.connection_generation,
+        )
+        assert evidence["attempt_id"] == original.attempt_id
+        assert saved["execution"]["execution_owner_request_id"] == receipt.request_id
+        assert run.active_turn == original
+    finally:
+        release.touch()
+    completion = await asyncio.wait_for(receipt.wait(), 120)
+    assert completion.outcome.status == "success", completion
+    assert await receipt.execution.wait_resources() == ("proven",)
+    assert (tmp_path / "steered-result.txt").read_text().strip() == "STEER_CONTRACT_83"
+    result = await database.read_session_result(session.id, receipt.request_id)
+    assert result.outcome == completion.outcome
+    assert run.retirement_state == "proven" and run.active_turn is None
+    await metrics.drain()
+    report, = await query.codex_runs(metrics.conn)
+    assert report["root_turns"] == 1, report
 
 
 async def test_live_nested_wait_followup_keeps_one_root_and_collected_rounds(live_product):
@@ -152,8 +202,8 @@ async def test_live_new_thread_reports_usage_without_existing_rollout(tmp_path, 
 
 @pytest.mark.parametrize("first_transport", ["exec", "app-server"])
 async def test_live_native_start_and_precise_resume(tmp_path, monkeypatch, first_transport):
-    if not await asyncio.to_thread(codex_cli_works):
-        pytest.skip("The selected existing Codex login is unavailable")
+    if first_transport == "exec" and not await asyncio.to_thread(codex_cli_works):
+        pytest.skip("The independent exec history seeder requires a usable PATH Codex")
     database = Database(str(tmp_path / "product.db"))
     await database.initialize()
     await create_account(database, extra_roots=[tmp_path])
@@ -221,6 +271,8 @@ async def test_live_native_start_and_precise_resume(tmp_path, monkeypatch, first
 
 @pytest.mark.parametrize("first_transport", ["exec", "app-server"])
 async def test_live_old_and_native_history_fork_continue_independently(tmp_path, monkeypatch, first_transport):
+    if first_transport == "exec" and not await asyncio.to_thread(codex_cli_works):
+        pytest.skip("The independent exec history seeder requires a usable PATH Codex")
     database = Database(str(tmp_path / "fork-product.db"))
     await database.initialize()
     await create_account(database, extra_roots=[tmp_path])

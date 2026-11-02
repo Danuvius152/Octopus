@@ -1,38 +1,98 @@
 """Original product questions and wire responses through the owned native host."""
 
 import asyncio
-import json
 
 import pytest
 
 from server.question_resolution import AnswerSource
 from server.sessions.client_submissions import submit_client_message
-from tests import test_codex_app_server_submission as native_tests
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests import native_app_server as native_tests
+from tests.native_app_server import (
+    inject,
+    item,
+    question_request,
+    start_output,
+    terminal,
+    until,
+    wire_frames,
+)
+from tests.session_runtime import wait_dispatch_idle
 
 native_runtime = native_tests.native_runtime
 
 
-async def until(predicate):
-    async with asyncio.timeout(3):
-        while not predicate():
-            await asyncio.sleep(0)
+async def test_nonblocking_question_does_not_suspend_idle_retirement(native_runtime, tmp_path, monkeypatch):
+    from server.config import settings
+
+    manager, database, session, _, starts, _ = native_runtime
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    monkeypatch.setattr(settings, "turn_max_seconds", 0)
+    receipt = await start_output(native_runtime)
+    run = session._run.backend
+    request = question_request("nonblocking")
+    request["params"]["isBlocking"] = False
+    inject(tmp_path, request)
+    await until(lambda: manager.get_pending_questions(session.id))
+    question, = manager.get_pending_questions(session.id)
+    assert question.request_id == receipt["request_id"]
+    assert question.native_ref.blocking is False
+
+    # Arm the real idle deadline only after the original question is pending.
+    # A fresh content event wakes the Owner; no fixed sleep guesses completion.
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .05)
+    inject(tmp_path, item("exact-native-thread", "turn-1", "partial", "Before idle expiry"))
+    await wait_dispatch_idle(manager, session.id)
+    result = await database.read_session_result(session.id, receipt["request_id"])
+    assert result.outcome.status == "failed" and result.outcome.code == "turn_timeout"
+    assert result.outcome.recovery["idle"] == 0
+    assert result.fragments == ("Before idle expiry",)
+    assert not manager.get_pending_questions(session.id)
+    assert run.retirement_state == "proven" and len(starts) == 1
+    assert not await manager.answer_question(session.id, question.question_id, [{"text": "late"}])
+    assert not [frame for frame in wire_frames(tmp_path) if "result" in frame and "method" not in frame]
+    closed, = [row for row in await database.load_messages(session.id) if row["type"] == "question_closed"]
+    assert closed["tool_use_id"] == question.question_id
 
 
-def wire_frames(root):
-    path = root / "native-frames.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
-
-
-def inject(root, *frames):
-    with (root / "native-injections.jsonl").open("a") as handle:
-        for frame in frames:
-            handle.write(json.dumps(frame) + "\n")
-
-
-def terminal(status="completed"):
-    return {"method": "turn/completed", "params": {"threadId": "exact-native-thread",
-        "turn": {"id": "turn-1", "status": status}}}
+async def test_two_question_answers_keep_native_ids_and_saved_original_request(native_runtime, tmp_path):
+    manager, database, session, _, starts, _ = native_runtime
+    receipt = await start_output(native_runtime)
+    run = session._run.backend
+    request = question_request("two-questions")
+    request["params"]["questions"] = [
+        {"id": "description", "header": "Text", "question": "Describe the change"},
+        {"id": "direction", "header": "Direction", "question": "Choose a direction", "options": [
+            {"label": "North", "description": "First"}, {"label": "South", "description": "Second"},
+        ]},
+    ]
+    inject(tmp_path, request)
+    await until(lambda: manager.get_pending_questions(session.id))
+    question, = manager.get_pending_questions(session.id)
+    ref = question.native_ref
+    assert ref.question_ids == ("description", "direction")
+    assert question.request_id == receipt["request_id"]
+    assert await manager.answer_question(session.id, question.question_id,
+        [{"text": "Use cobalt"}, {"selected": ["South"]}],
+        source=AnswerSource("account", user_id=session.user_id))
+    await until(lambda: any(frame.get("id") == "two-questions" for frame in wire_frames(tmp_path)))
+    reply, = [frame for frame in wire_frames(tmp_path) if "result" in frame and "method" not in frame]
+    assert reply == {"id": ref.server_request_id, "result": {"answers": {
+        "description": {"answers": ["Use cobalt"]}, "direction": {"answers": ["South"]},
+    }}}
+    inject(tmp_path, terminal())
+    await wait_dispatch_idle(manager, session.id)
+    rows = await database.load_messages(session.id)
+    saved_request, = [row for row in rows if row["type"] == "question_request"]
+    saved_answer, = [row for row in rows if row["type"] == "question_answer"]
+    assert saved_request["tool_use_id"] == saved_answer["tool_use_id"] == question.question_id
+    assert saved_request["tool_input"]["native_question"]["server_request_id"] == ref.server_request_id
+    resolution = saved_answer["tool_input"]["question_resolution"]
+    assert resolution["request_id"] == saved_request["tool_input"]["request_id"] == receipt["request_id"]
+    assert resolution["attempt_id"] == saved_request["tool_input"]["attempt_id"] == ref.attempt_id
+    assert resolution["answers"][0]["text"] == "Use cobalt"
+    assert resolution["answers"][1]["selected"] == [{"label": "South", "option_index": 1}]
+    assert (await database.read_session_result(session.id, receipt["request_id"])).outcome.status == "success"
+    assert run.retirement_state == "proven" and len(starts) == 1
 
 
 async def test_original_question_answer_uses_server_namespace_and_saved_source(native_runtime, tmp_path):
@@ -116,7 +176,7 @@ async def test_terminal_is_read_while_input_proof_commit_waits(native_runtime, t
 
 
 async def test_native_question_and_terminal_advance_behind_full_publication(native_runtime, tmp_path):
-    from tests.test_codex_app_server_output import item
+    from tests.native_app_server import item
     manager, database, session, mode, _, _ = native_runtime
     mode[0] = "control_output"
     entered, release = asyncio.Event(), asyncio.Event()
@@ -173,7 +233,7 @@ async def test_native_requests_preserve_permission_policy(native_runtime, tmp_pa
 @pytest.mark.parametrize("child_terminal", ["unfinished", "causes_overflow", "after_overflow"])
 async def test_output_overflow_retires_before_presentation_and_never_reports_success(native_runtime, tmp_path, monkeypatch, child_terminal):
     import server.harness.run as run_module
-    from tests.test_codex_app_server_output import child_end, child_start, item
+    from tests.native_app_server import child_end, child_start, item
     manager, database, session, mode, _, events = native_runtime
     mode[0] = "control_output"
     entered, release = asyncio.Event(), asyncio.Event()
@@ -257,12 +317,6 @@ async def test_resolved_before_start_ack_is_never_reopened(native_runtime):
     assert [row["type"] for row in rows].count("question_closed") == 1
 
 
-def question_request(identifier):
-    return {"id": identifier, "method": "item/tool/requestUserInput", "params": {
-        "threadId": "exact-native-thread", "turnId": "turn-1", "itemId": f"ask-{identifier}", "isBlocking": True,
-        "questions": [{"id": "q", "header": "Choice", "question": "Choose"}]}}
-
-
 async def test_retired_attempt_records_every_accepted_question_prefix(native_runtime, tmp_path, monkeypatch):
     manager, database, session, mode, _, _ = native_runtime
     mode[0] = "control_output"
@@ -314,7 +368,7 @@ async def test_retained_question_budget_cannot_be_bypassed_by_draining_inbox(nat
 
 async def test_rejected_input_commit_does_not_block_root_terminal(native_runtime, tmp_path, monkeypatch):
     from server.harness import codex_app_server
-    from tests.test_codex_app_server_steering import active_root
+    from tests.native_app_server import active_root
     manager, database, session, mode, _, _ = native_runtime
     mode[0] = "steer_reject"
     monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 30)
@@ -467,7 +521,7 @@ async def test_conflicting_stop_cannot_retire_host_while_original_answer_owns_co
 
 
 async def test_mcp_owner_question_also_closes_at_native_terminal_behind_presentation(native_runtime, tmp_path):
-    from tests.test_codex_app_server_output import item
+    from tests.native_app_server import item
     manager, _, session, mode, _, _ = native_runtime
     mode[0] = "control_output"
     entered, release = asyncio.Event(), asyncio.Event()

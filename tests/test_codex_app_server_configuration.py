@@ -6,9 +6,10 @@ import pytest
 
 from server.agent_manager import AgentError, AgentManager
 from server.harness import codex_app_server
+from server.harness.codex_app_server import verify_binary
 from server.sessions.client_submissions import submission_status, submit_client_message
-from tests.test_codex_app_server_submission import native_runtime as native_runtime
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests.native_app_server import native_runtime as native_runtime
+from tests.session_runtime import wait_dispatch_idle
 
 
 async def test_saved_large_chinese_controller_uses_the_selected_transport(native_runtime, tmp_path):
@@ -102,6 +103,24 @@ async def test_oversized_jsonl_controller_is_rejected_before_saving(native_runti
         await AgentManager(database).update_agent(session.agent_id, user_id=session.user_id,
                                                  backend="codex", system_prompt="中" * 50000)
     assert (await database.get_agent(session.agent_id))["system_prompt"] == before["system_prompt"]
+
+
+async def test_unverified_binary_fails_preparation_without_business_send(native_runtime, tmp_path, monkeypatch):
+    manager, database, session, _, starts, _ = native_runtime
+    # Restore the real verifier: the fixture's Python peer is intentionally
+    # not the pinned Codex binary and must be rejected before it is spawned.
+    monkeypatch.setattr(codex_app_server, "verify_binary", verify_binary)
+    await submit_client_message(manager, session.id, "Keep this unsent input", [], "wrong-binary", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    status = await submission_status(manager, session.id, "wrong-binary")
+    assert status["outcome"]["status"] == "failed"
+    assert status["execution"]["state"] == "withdrawn"
+    assert status["input"]["content"] == "Keep this unsent input"
+    assert status["execution"]["recoverable_input"]
+    assert status["execution"]["native_inputs"][0]["state"] == "not_sent"
+    assert len(starts) == 1
+    assert not (tmp_path / "native-frames.jsonl").exists()
+    assert not (tmp_path / "native-business.jsonl").exists()
 
 
 @pytest.mark.parametrize("characters,accepted", [(30000, True), (50000, False)])

@@ -150,8 +150,9 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--strict-markers"
 # `real` covers provider and supervisor integration. The ordinary full suite
-# selects hermetic correctness; optional Wiki performance and answer evaluation
-# require their own opt-in flags in tests/conftest.py. Provider markers say WHICH
+# selects hermetic correctness; --run-real enables the real tier. Optional Wiki
+# performance and answer evaluation require their own flags in tests/conftest.py.
+# Provider markers say WHICH
 # CLI a test needs and how strongly: `*_bin` wants only the binary on
 # PATH (a login test must NOT require being logged in), `real_claude` /
 # `real_codex` want one that is signed in and actually answers.
@@ -161,12 +162,13 @@ addopts = "--strict-markers"
 # import: evaluating them during collection made plain `--collect-only`
 # spawn a real `claude --print` (0.80 s hermetic vs 16.44 s full).
 markers = [
-    "real: real provider or supervisor integration; deselect with -m 'not real'",
+    "real: real provider or supervisor integration; requires --run-real",
     "supervisor: isolated systemd user-unit checks; no provider CLI or production service mutations",
     "knowledge_eval: optional knowledge-answer and maintenance-intent evaluations; requires --run-knowledge-evals",
     "wiki_perf: optional Wiki scale and performance measurements; requires --run-wiki-perf",
     "real_claude: needs a claude CLI that is installed AND signed in",
     "real_codex: needs a codex CLI that is installed AND signed in",
+    "native_codex: real_codex gate uses the configured G0-pinned App Server binary",
     "claude_bin: needs only the claude binary on PATH, not a login",
     "codex_bin: needs only the codex binary on PATH, not a login",
 ]

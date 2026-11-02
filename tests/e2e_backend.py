@@ -5,6 +5,8 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from starlette.routing import Mount
+
 from tests.e2e_boundary import OFFLINE_ARGV, install
 
 if os.environ.get("OCTOPUS_E2E_MODE") != "offline":
@@ -53,7 +55,7 @@ from server.main import app as app
 from tests.e2e_wiki_cards import install as install_wiki_cards
 
 # Keep the test-only API ahead of the product SPA catch-all.
-spa = next((route for route in app.router.routes if route.name == "spa"), None)
+spa = next((route for route in app.router.routes if isinstance(route, Mount) and route.name == "spa"), None)
 if spa is not None:
     app.router.routes.remove(spa)
 install_wiki_cards(app)

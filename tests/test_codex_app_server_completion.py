@@ -14,17 +14,19 @@ from server.service_health import ServiceHealth
 from server.session_results import LiveReply
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submit_client_message
-from tests import test_codex_app_server_submission as native_tests
+from tests import native_app_server as native_tests
 from tests.accounts import create_account
-from tests.test_codex_app_server_output import (
+from tests.native_app_server import (
     ROOT,
     child_end,
     child_start,
+    inject,
     item,
     start_output,
+    terminal,
+    until,
 )
-from tests.test_codex_app_server_questions import inject, terminal, until
-from tests.test_runtime_review_races import wait_dispatch_idle
+from tests.session_runtime import wait_dispatch_idle
 
 native_runtime = native_tests.native_runtime
 

@@ -16,10 +16,10 @@ from server.harness import run as run_module
 from server.mcp_identity import scope_is_live, verify
 from server.scheduler import ScheduleRunner
 from server.wiki.jobs import WikiWorker
-from tests import test_codex_app_server_submission as native_tests
+from tests import native_app_server as native_tests
 from tests import test_wiki_api as wiki_api
-from tests.test_codex_app_server_output import child_start
-from tests.test_codex_app_server_questions import (
+from tests.native_app_server import (
+    child_start,
     inject,
     question_request,
     terminal,

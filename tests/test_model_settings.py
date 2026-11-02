@@ -22,8 +22,8 @@ from server.routers import agents
 from server.session_manager import SessionManager, session_manager
 from server.users import UserManager
 from tests.harness_profiles import native_submission, process_profile
-from tests.test_codex_app_server_questions import wire_frames
-from tests.test_codex_app_server_submission import native_runtime as native_runtime
+from tests.native_app_server import native_runtime as native_runtime
+from tests.native_app_server import wire_frames
 
 
 @pytest.fixture
@@ -105,7 +105,8 @@ async def native_rounds(tmp_path, **options):
     return [frame for frame in wire_frames(tmp_path) if frame.get("method") in {"thread/start", "thread/resume"}]
 
 
-async def test_effort_reaches_new_resumed_native_requests_and_oneshot(catalog_home, native_runtime, tmp_path):
+async def test_effort_reaches_new_resumed_native_requests_and_oneshot(catalog_home, native_runtime, tmp_path, monkeypatch):
+    monkeypatch.setattr("server.harness.run._which_with_fallback", lambda _: "/test/bin/codex")
     harness = get_harness("codex")
     run = harness.create_run(RunConfig(model="model-a", reasoning_effort="high", mcp_servers=[]))
     frames = await native_rounds(tmp_path, model="model-a", reasoning_effort="high")
@@ -123,7 +124,8 @@ async def test_effort_reaches_new_resumed_native_requests_and_oneshot(catalog_ho
 
 
 @pytest.mark.parametrize("tier, rendered", [(None, "default"), ("default", "default"), ("fast", "fast")])
-async def test_speed_reaches_new_resumed_native_requests_and_oneshot(catalog_home, native_runtime, tmp_path, tier, rendered):
+async def test_speed_reaches_new_resumed_native_requests_and_oneshot(catalog_home, native_runtime, tmp_path, tier, rendered, monkeypatch):
+    monkeypatch.setattr("server.harness.run._which_with_fallback", lambda _: "/test/bin/codex")
     harness = get_harness("codex")
     run = harness.create_run(RunConfig(service_tier=tier, mcp_servers=[]))
     frames = await native_rounds(tmp_path, service_tier=tier)
