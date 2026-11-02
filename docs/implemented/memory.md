@@ -1,6 +1,6 @@
-# Agent memory: native files and content ownership
+# Agent 记忆：原生文件与内容归属
 
-> **Status:** implemented — Per-agent durable Markdown, role-specific preferences and a small project entry surface.
+> **Status:** implemented — 每个 Agent 的持久 Markdown、角色专属偏好与少量项目入口。
 
 ## Current content ownership
 
@@ -108,15 +108,19 @@ each harness's config/auth directories; its provisioning does not relocate
 - No system-prompt text: Claude's native memory auto-activates and
   auto-injects `MEMORY.md` from the override dir.
 
-**Codex (`codex.py`):**
+**Ordinary Codex (`codex_app_server.py`):**
 - `CODEX_HOME` is unchanged (per-credential auth dir).
-- A memory blurb is appended to `developer_instructions` naming the absolute
+- A memory blurb is assembled with the controller's developer instructions, naming the absolute
   canonical `memory/` path and the read-at-start / write-durable-facts /
   maintain-`MEMORY.md` protocol, in Claude's format. Codex uses its normal
-  file tools (`--dangerously-bypass-approvals-and-sandbox` grants out-of-cwd
-  access).
-- `features.memories` is **not** enabled (its consolidation doesn't run in
-  short `codex exec` turns — see §1).
+  file tools under the ordinary runtime's configured filesystem authority.
+- Octopus does not enable the native automatic-memory pipeline. Explicitly
+  naming the canonical directory keeps one content owner across supported backends.
+
+The constrained Research exec leaf has `injects_memory_prompt=False`; it is
+not the ordinary conversation path. The tool-free text worker does not gain
+the ordinary file/tool loop through memory wiring. See the
+[three Codex paths](codex-backend.md) for their separate scope and retirement.
 
 ## 4. Plumbing
 

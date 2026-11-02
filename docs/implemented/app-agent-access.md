@@ -1,6 +1,6 @@
-# Applications that can talk to the agents
+# 运行中应用与 Agent 的对话
 
-> **Status:** implemented — The conversations a *running* application holds with an agent, over a per-app scoped token.
+> **Status:** implemented — 按应用令牌授权的 Agent 对话、实时返回与原执行完成。
 
 ## 2. The shape: one API, mounted where the app already lives
 
@@ -118,7 +118,7 @@ rather than letting Octopus absorb the cost:
 
 | cap | value | why |
 |---|---|---|
-| concurrent turns per app | 4 | each one is a CLI process |
+| concurrent turns per app | 4 | bounds admitted executions and their original driver lifetimes; a turn is not always a fresh process |
 | conversations per app | 50 | a thread-per-request bug is otherwise invisible |
 | message | 32k chars | |
 | context | 200k chars | roughly 50k tokens; beyond this, summarize first |
@@ -151,15 +151,16 @@ app's own conversations never appear in the sidebar.
 
 ## 9. What this defers
 
-* **A UI inside Octopus for answering an agent's question asked during an app
-  conversation.** The stream carries the question so the app can render it,
-  and the existing auto-answer timeout still resolves it; a dedicated
-  answer-from-the-app endpoint needs a real app that asks for it.
+* **App question UI and attachments.** The stream carries questions. A deadline
+  resolves one only when that product deadline is enabled; cancellation remains
+  separate, and no unconditional automatic-answer guarantee applies. App reply
+  controls and attachment/material handles are conditional scope in
+  [application evolution](../plans/application-evolution.md).
 * **Per-app agent allow-lists.** An app can address non-archived agents of its own account by
-  name. Scoping that needs a policy UI, and the single-user posture
-  (application-backends.md §10) doesn't force one yet.
-* **Attachments in an app turn.** Text `context` covers the SmartReader case;
-  files would need the app to upload through the attachments API first.
+  name. These are trusted same-account programs under the host user, within a
+  multi-account product. A minimum App→Agent scope/allowlist and its policy UI
+  belong to [the interface plan](../plans/octo-cli.md); Wiki client grants remain
+  a separate permission boundary in [the Wiki plan](../plans/wiki-future-plan.md).
 
 ## Historical evidence
 

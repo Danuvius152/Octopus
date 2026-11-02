@@ -1,6 +1,6 @@
-# Harness credential refresh and re-authorization
+# Harness 凭据刷新与重新授权
 
-> **Status:** implemented — Owned proactive refresh and reactive rejection; reauthorization preserves credential identity.
+> **Status:** implemented — 原 owner 负责主动刷新和拒绝处置，重新授权保留凭据身份。
 
 ## 2. Scope
 
@@ -180,20 +180,14 @@ A brand-new login already creates `status=active`, so no change there.
   the chat error text (as today) AND refetches `/api/credentials` so the
   sidebar badge appears immediately without a reload.
 
-## 7. Test gating (real-CLI suites)
+## 7. Real-CLI verification boundary
 
-Surfacing this bug in the app also exposed it in the test suite: the
-`tests/*_real.py` gates skipped only on a missing binary, so an *expired*
-host login (the `claude` CLI present but logged out) ran them and turned
-them red with the very 401 this feature detects — noise that masquerades
-as a product regression. The gates now call shared helpers in `tests/cli_gate.py`
-(`claude_cli_works()` / `codex_cli_works()`, imported as
-`from tests.cli_gate import …` — `import conftest` isn't reliable under
-pytest collection) that confirm the CLI is present **and** signed in (claude
-via a tiny cached real call; codex via `~/.codex/auth.json`), so a logged-out
-environment SKIPS rather than fails.
-`test_codex_login_real.py` still gates on the binary alone — it tests the
-sign-in flow itself and must run while logged out.
+Real-runtime test selection, signed-in credential checks, isolation and this
+installation's provider scope are owned by [testing.md](../testing.md).
+The original bug showed why binary presence alone is not a signed-in precondition;
+that diagnostic lesson does not authorize probing another provider's live login.
+Hermetic protocol/refresh tests remain distinct from separately selected native
+sign-in or model calls. This document does not keep another gate policy.
 
 ## 8. What this defers
 

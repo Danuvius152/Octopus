@@ -1,6 +1,6 @@
-# Input steering, streaming and held processes
+# 轮内输入、流式交互与宿主复用
 
-> **Status:** implemented — Claude stream-JSON steering and process reuse; ordinary Codex App Server steers its bound active root.
+> **Status:** implemented — Claude stream-JSON 引导及条件复用；普通 Codex 引导绑定的活动根。
 
 ## Current capability and delivery
 
@@ -24,7 +24,7 @@ The original input keeps its unknown delivery fact; a successful root does not
 upgrade that fact. Claude retains its local delivery evidence; App Server adds
 native evidence to the same original submission.
 
-All user input first follows the durable [input contract](../input-reliability.md).
+All user input first follows the durable [input contract](input-reliability.md).
 SessionOwner owns dispatch eligibility and ordering. A supported steer is sent by
 the managed stdin writer, retaining its input/request/execution identity across
 awaits. Echoes are correlated by identity, not matching prompt text. A completed

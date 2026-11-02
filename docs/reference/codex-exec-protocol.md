@@ -2,13 +2,13 @@
 
 Recorded against **codex-cli 0.132.0** (`~/.nvm/versions/node/v22.16.0/bin/codex`),
 confirmed on a **live, logged-in ChatGPT subscription** (2026-05-19, Phase C of
-`plans/codex-backend.md`). Sibling of `cli-protocol-notes.md` (the Claude CLI).
+the historical Codex plan). Sibling of [the Claude capture](claude-cli-protocol.md).
 The normalizer lives in `server/harness/codex.py` (formerly
 `server/backends/codex.py`, before the harness-layer refactor); the fake CLI
 that scripts these shapes is `tests/_fixtures/fake_codex_cli.py`.
 
 These are version-bound exec observations. Ordinary sessions now use the pinned
-[App Server contract](implemented/codex-backend.md); only the independent Research
+[App Server contract](../implemented/codex-backend.md); only the independent Research
 leaf retains exec. The historical spawn/resume example below is not a current
 ordinary-session entry point or a template for that restricted leaf.
 
@@ -91,10 +91,13 @@ what matters — it's identical for any `mcp_servers.<key>` we register today):
 {"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"viewer","tool":"show_file","arguments":{"path":"hello.txt"},"result":{"content":[{"type":"text","text":"Opened hello.txt (text, 14 bytes) in the viewer. The user can see it now."}],"structured_content":{"result":"Opened hello.txt …"}},"error":null,"status":"completed"}}
 ```
 
-## Still open
+## Questions at the time of capture
 
 - **Login UI / flow decision** (`codex-backend.md` §10 #1): host `codex login`
   (option A, works today) vs an in-app `--device-auth` flow (option B). Not
-  built — product decision.
+  built at the time of this capture. Current code provides per-credential
+  in-app device authorization in [`codex_login.py`](../../server/codex_login.py)
+  and [credential routes](../../server/routers/credentials.py); this historical
+  question is closed and is not a new implementation task.
 - The `test_backend_codex_real.py` suite (gated on `codex` + `~/.codex/auth.json`)
   is the standing guard against version drift in the shapes above.

@@ -1,6 +1,10 @@
-# Native research: pipeline, report and return ownership
+# 原生 Research：流水线、报告与返回归属
 
-> **Status:** implemented — Bounded native leaves with distinct research completion, follow-up processing and retirement.
+> **Status:** implemented — 有界原生 leaf，分别记录报告完成、后续处理与资源退休。
+
+阶段检查点、跨 job 来源复用、非文本材料与工作预算的后续范围归
+[Research 工作流计划](../plans/ai-research-workflow.md)。当前可恢复返回观察，
+不代表流水线能从任意中间阶段续跑；未知外部效果不自动重放。
 
 ## 1. Responsibility and rationale
 

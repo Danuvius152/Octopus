@@ -1,6 +1,6 @@
-# Codex performance in Monitor
+# Codex 性能与 Monitor 观测
 
-> **Status:** implemented — Passive response usage/TPS, native root and child scope, Owner clocks and resource-retirement phases.
+> **Status:** implemented — 被动用量与 TPS、原生根及子任务范围、Owner 计时与资源退休阶段。
 
 ## 1. Decision
 

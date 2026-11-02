@@ -1,6 +1,15 @@
 # What lives in the CLI system prompt vs in user/project memory
 
-The `claude` CLI runs a fresh process per turn. It does **not** see
+This is a historical explanation of the VM0 prompt assembly, preserved from
+the `fd7ab9c` source snapshot. The original observation date and CLI version
+were not recorded. Current Claude can conditionally reuse a process; current
+prompt assembly and memory injection are owned by the
+[Harness](../implemented/harness-layer.md),
+[steering](../implemented/inline-steering.md) and
+[memory](../implemented/memory.md) contracts. Editing this reference does not
+change saved agent settings or runtime prompt assembly.
+
+In the historical VM0 shape, the `claude` CLI ran a fresh process per turn. It did **not** see
 user-scoped auto-memory or project `CLAUDE.md` files unless we hand
 them to it explicitly. Three different layers carry guidance into
 the model, with different scopes and reload semantics:
@@ -8,7 +17,7 @@ the model, with different scopes and reload semantics:
 | Layer | How it reaches the model | Scope | When to use |
 |---|---|---|---|
 | `--append-system-prompt` (CLI argv) | Octopus's `harness/claude_code.py` sets it on every spawn (`_OCTOPUS_SYSTEM_PROMPT`) | Every CLI invocation Octopus makes, for every user, every session | Rules about how to use Octopus's *own* tools (`mcp__bg__run`, `mcp__ask__user`, `mcp__ask_agent__ask`); behaviors the agent must follow regardless of which human is driving |
-| Auto-memory | Loaded by the harness as conversation context | Per-agent in Octopus — the CLI's default `~/.claude/projects/<repo>/memory/` is overridden to `<agents_dir>/<id>/memory/` via `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` ([`implemented/memory.md`](implemented/memory.md)) | Things the agent discovered about its setup that it should remember across sessions |
+| Auto-memory | Loaded by the harness as conversation context | Per-agent in Octopus — the CLI's default `~/.claude/projects/<repo>/memory/` is overridden to `<agents_dir>/<id>/memory/` via `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` ([memory contract](../implemented/memory.md)) | Things the agent discovered about its setup that it should remember across sessions |
 | `CLAUDE.md` (in the repo) | Loaded by the harness, checked into git | Per-repo, per-clone | Project conventions: commands, test layout, conventions everyone working on this repo should know |
 
 ## How `--append-system-prompt` is wired

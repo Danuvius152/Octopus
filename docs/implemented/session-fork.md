@@ -1,6 +1,6 @@
-# /fork: full conversation and working-directory copy
+# /fork：完整会话与工作目录复制
 
-> **Status:** implemented — Native history copy or API fork, saved creation uncertainty and explicit replay fallback; original session and files remain unchanged.
+> **Status:** implemented — 原生历史复制或 API fork、创建不确定性与显式重放降级，保留原会话和文件。
 
 ## 1. What & why
 
@@ -122,8 +122,10 @@ cost in the command hint.
   rejects when the parent has an active turn; compensation (copy/cleanup
   failure) leaves no orphans / leaves row+dir for the sweep.
 - harness `prepare_fork_copy` / `_fork_copy` / `_fork_cleanup` per backend:
-  transcript/rollout copy + id/cwd rewrite + fallback + cleanup (unit); the
-  Claude slug pinned to the real-CLI mapping.
+  Claude transcript copy/id/cwd rewrite, Codex native actual-ID fork and their
+  fallback/cleanup. Rollout-copy coverage applies to saved legacy recovery only;
+  it is not the creation strategy for a new Codex branch. The Claude slug is
+  pinned to its real-CLI mapping.
 - gated real-CLI: copy → resume → recall a codeword (both backends; skips on a
   missing CLI or an environmental auth/rate-limit failure).
 - route + /fork command (frontend); e2e: /fork creates a second session,

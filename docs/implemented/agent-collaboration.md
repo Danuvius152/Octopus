@@ -1,6 +1,6 @@
-# Named-agent delegation: conversations and work rounds
+# 命名 Agent 委派：会话与工作轮次
 
-> **Status:** implemented — Asynchronous same-account collaboration with original-receipt completion and exact-work cancellation.
+> **Status:** implemented — 同账户异步协作、原回执完成、独立返回诊断与精确轮次取消。
 
 ## 1. Invocation and identity
 
@@ -65,8 +65,9 @@ A delegation child session keeps the ordinary session retention policy:
 
 Otherwise: same harness, same MCP set, same credentials, same memory
 dir as Vera's other sessions. Memory writes from concurrent
-delegations to the same agent share the agent's memory dir — see 5.8
-on concurrency. The split is reflected in `SessionManager`:
+delegations to the same agent share the agent's memory dir — see
+[concurrency and rationale](#concurrency-rationale-and-verification).
+The split is reflected in `SessionManager`:
 `_AUTO_ARCHIVE_ORIGINS` is only `("schedule",)`, while
 `_AUTO_ARCHIVE_ELIGIBLE` includes `"delegation"` for explicit
 post-terminal archival (`server/session_manager.py:416`).

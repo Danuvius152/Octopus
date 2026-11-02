@@ -1,6 +1,6 @@
-# Agents and their conversations
+# Agent 配置与所属会话
 
-> **Status:** implemented — Account-owned agent configuration, session inheritance and agent lifecycle.
+> **Status:** implemented — 账户所属 Agent 配置、会话继承与归档删除生命周期。
 
 ## Ownership and configuration
 
@@ -40,13 +40,24 @@ does not supply an unrelated owner.
 Archiving preserves configuration, files and history while removing the agent
 from ordinary use. SessionManager coordinates owned sessions and scheduler
 operations with agent lifecycle changes. Restoring checks for a live-name
-conflict and restores the sidebar pin. A protected `is_system` agent, if present,
+conflict and restores the sidebar pin. First-account creation and invitation
+registration create the account's protected Default Agent in the same transaction.
+A protected `is_system` agent, if present,
 cannot be archived, deleted or unpinned; ordinary startup does not recreate an
 installation-era default agent or backfill user configuration.
 
 Hard deletion requires no remaining sessions and removes the private memory
 directory. Archive keeps it. Pinning controls visibility independently of
 archive; see [sidebar behavior](sidebar-pins.md).
+
+Archive and hard deletion do not currently offer identical account enforcement.
+Archive rejects a failed scoped lookup before mutation. The DELETE route has a
+known static gap: a failed scoped lookup can proceed to the manager's unscoped
+delete before its final assertion. Under the existing non-system/no-session
+conditions, that may affect a foreign Agent and its memory when its ID is known.
+The repair and no-side-effect acceptance conditions belong to
+[remaining account work](../plans/multi-tenancy-gaps.md); this documentation
+correction does not implement that repair.
 
 ## Related contracts and verification
 

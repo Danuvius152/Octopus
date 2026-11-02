@@ -1,6 +1,6 @@
-# Accounts, authorization and owned data
+# 账户、授权与资料归属
 
-> **Status:** implemented — Account authentication, scoped business state, per-account keys and managed paths.
+> **Status:** implemented — 账户认证、业务作用域、账户密钥、受管路径与现行隔离边界。
 
 ## Authentication and its limits
 
@@ -46,13 +46,27 @@ Secret rotation, current storage and release preparation follow
 ## 5. Business ownership
 
 Agents, sessions, schedules, installations and applications carry account identity.
-Routes resolve account scope, and operations check referenced objects' ownership
-and current authority at the boundary that uses them. A session owner is derived
+Routes resolve account scope, and referenced ownership/current authority belong
+at each operation's actual effect boundary. A session owner is derived
 from its agent. Connector enablement belongs to the agent; cross-account
 delegation is refused. Broadcasts use the appropriate account/session audience.
 Unscoped internal access is not permission for account-facing routes to read all
 rows. Shared registries and provider definitions are installation-level by design;
 users' instances and secrets are not.
+
+Known limits must remain explicit. Agent archive rejects a foreign scoped
+lookup before mutation; Agent DELETE currently proceeds after that lookup
+returns None to an unscoped manager deletion, with its assertion only afterward.
+Knowing a non-system foreign Agent ID with no sessions is the static impact
+condition; a later 500 does not prove the row or private memory remained intact.
+The [remaining-account plan](../plans/multi-tenancy-gaps.md) owns the fix.
+`schedules_changed` is a global empty invalidation notification; account-scoped
+refetch remains the data boundary, and the event contains no schedule rows.
+
+Host-login fallback applies only when there is no effective explicit credential
+binding. A deleted, foreign, backend-incompatible or otherwise invalid explicit
+binding is refused; it does not silently select the host's login. Captured
+settings still undergo current authorization at spawn/write boundaries.
 
 Per-account turn limits and other admission limits are enforced by the owning
 execution paths. Host-default credential behavior must be read from the current

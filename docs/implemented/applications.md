@@ -1,6 +1,6 @@
-# Applications: hosting, builds and deletion
+# 应用：托管、构建与删除
 
-> **Status:** implemented — Account-owned applications with independent build, backend and deletion lifecycles.
+> **Status:** implemented — 账户所属应用的独立构建、后端运行和分阶段删除。
 
 ## 1. Product and ownership
 

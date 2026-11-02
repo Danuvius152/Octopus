@@ -16,6 +16,9 @@ restoration is a broader operator procedure; the account importer does not
 restore excluded history or arbitrary historical formats. Architecture and
 storage decisions live in [the architecture contract](implemented/architecture-contract.md)
 and [current storage and publication handoff](implemented/current-storage-format.md).
+Installation admission, drain and original handoff receipts are defined in the
+[installation lifecycle](implemented/installation-lifecycle.md); this guide
+owns the ordered operator steps, rather than a second lifecycle contract.
 
 `tests/test_codex_app_server_preservation.py` verifies these boundaries separately
 through transcript HTTP, real account archives and a reopened consistent SQLite

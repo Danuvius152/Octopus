@@ -1,6 +1,6 @@
-# Session rewind: conversation branching and safe file revert
+# 会话回退：分支与安全文件还原
 
-> **Status:** implemented — Rewind before a user message, replay the retained prefix and optionally revert attributable file changes.
+> **Status:** implemented — 在用户消息前分支，重放保留前缀并按选择还原可归属文件改动。
 
 ## 3.1 The harness contract
 
@@ -94,6 +94,13 @@ attributed to the agent. Paths are normalized against cwd and repository root;
 rename source/destination and unusual filenames cannot disappear in parsing.
 Unknown or mixed ownership refuses revert with a reason while keeping the
 conversation fork usable.
+
+This preflight attributes paths, not individual byte edits within a file. If
+a human and the Agent both edited the same recognized path, the path comparison
+alone cannot prove which hunks belong to each. More precise snapshots, preview
+and same-file attribution remain in
+[history and recovery](../plans/session-history-and-recovery.md); known paths
+must not be described as complete per-edit provenance.
 
 Explicit native `fileChange` paths feed this same preflight, including both
 rename endpoints and a complete item with no preceding start. The Harness

@@ -1,6 +1,6 @@
-# Octopus on a phone
+# 手机端 Octopus
 
-> **Status:** implemented — Octopus on a phone — the drawer that puts itself away, 16px fields, touch targets, and safe-area insets.
+> **Status:** implemented — 自动收起抽屉、16px 输入、触摸目标与安全区布局。
 
 ## 1. Why this is not "responsive CSS"
 
@@ -71,9 +71,9 @@ hidden menu.
 
 ## 5. Touch targets and hover-only affordances
 
-Delete buttons and the per-agent "+" are `opacity-0` until hover — invisible on
+Sidebar archive/unpin actions and the per-agent "+" are `opacity-0` until hover — invisible on
 a touchscreen, where there is no hover. The first answer here was "then show
-them always", and it was wrong in a way only a phone reveals: a delete button on
+them always", and it was wrong in a way only a phone reveals: a removal button on
 *every* session and *every* application at once, all of them under the thumb,
 and a sidebar louder than the thing it lists.
 
@@ -84,6 +84,11 @@ under `hover: none` the sidebar's row actions appear on the row already chosen
 (`.session-item.active`, `.application-item.active`, `.agent-item.expanded`) and
 nowhere else. Nothing becomes unreachable: pick the row, then the action — two
 taps for something destructive, which is the right number.
+
+The current session action archives; Agent/App sidebar actions unpin. These
+library actions do not hard-delete, while credential and schedule deletion
+retain their separate semantics. The behavior owner is
+[sidebar pins](sidebar-pins.md#6-the-pages).
 
 Outside those lists the reveal stays unconditional. A credential card, a
 schedule row, a notifier entry has no selection to hang it on, and one delete

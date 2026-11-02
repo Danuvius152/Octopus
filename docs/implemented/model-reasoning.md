@@ -1,6 +1,6 @@
-# Model, reasoning and speed settings
+# 模型、推理强度与速度设置
 
-> **Status:** implemented — Independent model, reasoning and Normal/Fast speed controls with runtime discovery and preserved conversation history.
+> **Status:** implemented — 独立模型、推理强度和 Normal/Fast 控制，保留继承、运行时发现与会话历史。
 
 The chat header opens the same dialog as `/model`. A model override and a
 reasoning-effort override are independent: editing only effort sends only
@@ -119,6 +119,9 @@ configuration is never rewritten. The existing process replacement mechanism
 applies changes on the next turn while preserving the resume id.
 DeepSeek maps low to low, medium/high/xhigh to high, and max to max; Octopus
 passes the selected request level through without provider-specific conversion.
+That provider mapping inside the Claude runtime is not a registered DeepSeek
+Harness backend. The separate backend and capability investigation remain in
+[the DeepSeek plan](../plans/deepseek-harness-backend.md).
 See [Claude effort precedence](https://code.claude.com/docs/en/model-config#adjust-effort-level)
 and [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/).
 

@@ -1,6 +1,6 @@
-# The schedule an agent sets for itself
+# Agent 自设计划工具
 
-> **Status:** implemented — `mcp__schedule__*` over session-scoped routes: an agent sets, lists, re-times and pauses its own schedules.
+> **Status:** implemented — 按会话作用域创建、列出、改期和暂停所属 Agent 的计划。
 
 ## 2. The recurrence is stated, not parsed
 
@@ -75,8 +75,9 @@ everything to it:
 * `PATCH` / `DELETE` on a schedule belonging to another agent return 404,
   not 403: from inside this session it may as well not exist.
 
-`/api/schedules` (the admin surface the UI uses) is unchanged and still
-sees everything.
+`/api/schedules` (the account management surface used by the UI) resolves
+`ScopeUser` and calls `load_schedules(user_id=...)`: it sees the current
+account's schedules, not every account on the host.
 
 **Switching recurrence.** A schedule has exactly one recurrence but three
 columns, so a PATCH that sets one has to clear the other two — otherwise a
@@ -84,9 +85,10 @@ schedule moved from `interval_seconds=600` to `0 9 * * *` keeps its
 interval and fires on whichever the runner reads first. `schedule_updates`
 revalidates the whole recurrence and writes all four columns (including the
 recomputed label); a bare `timezone` re-reads the existing cron in the new
-zone. That applies to the UI's PATCH too — the Schedules page could only
-toggle and delete, and can now be given re-timing without a second code
-path.
+zone. The same PATCH contract is available to authenticated callers. The
+Schedules page currently exposes enable/disable, deletion and Wiki-mode
+controls; a general prompt/recurrence editor remains a
+[management proposal](../plans/schedule-management.md).
 
 ## 5. Where a fire lands
 
@@ -150,10 +152,10 @@ explicitly in their agent configuration.
   arranges its own work. Delegation already exists for asking someone else
   to do something, and "schedule Vera for 9am" raises questions about who
   owns and can cancel it that nothing yet needs answered.
-* **Editing a schedule from the Schedules page.** The PATCH now accepts a
-  new recurrence; the page still only toggles and deletes. Wiring an edit
-  form is UI work with no new backend behind it, and creation still belongs
-  where you know what you want run.
+* **General editing from the Schedules page.** PATCH accepts prompt and
+  recurrence changes, while the page exposes enable/disable, deletion and
+  Wiki-mode controls. Prompt/recurrence editing and its conflict/unknown-result
+  behavior belong to the [management plan](../plans/schedule-management.md).
 
 ## Historical evidence
 

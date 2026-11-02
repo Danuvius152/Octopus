@@ -1,6 +1,6 @@
-# Sidebar pins: visibility, ordering and attention
+# 侧栏置顶：可见性、排序与提醒
 
-> **Status:** implemented — Pins are shortcuts independent of archive; selection updates sessions in place.
+> **Status:** implemented — 置顶独立于归档，选择和详情刷新在原位置更新会话。
 
 ## 1. Two questions, two flags
 
@@ -28,9 +28,11 @@ shortcut. That's why the flag is `pinned` and not `hidden`: the default
 * **Restoring is pinning.** Bringing something back from the archive is
   choosing to use it; if it was pinned when it was archived it returns to its
   old place, otherwise it goes to the bottom.
-* **The Default Agent is always pinned.** It's where a session goes when
-  nothing else is chosen; the API refuses to unpin it (400) and the UI shows
-  no control for it.
+* **An existing protected Default Agent cannot be unpinned.** The API refuses
+  that edit (400) and the UI shows no control. First-account creation and
+  registration create it in the account transaction. Ordinary startup does
+  not recreate one missing from an existing account; default lookup can fail
+  rather than silently altering saved configuration.
 
 ## 3. Order
 
@@ -113,7 +115,8 @@ sidebar section was tried and dropped: it was a second door to the page the
   one), **Edit** and **Archive**; applications: **Open** and **Archive**;
   archived rows: **Restore**.
 
-**Nothing in the UI hard-deletes.** Every removal is an archive — a soft
+**The Agent, Application and session library UI does not hard-delete.** Its
+removals use archive — a soft
 delete that keeps the row, the files and the history, and that Restore
 undoes:
 

@@ -1,6 +1,6 @@
-# Harness transient-error retry
+# Harness 瞬态错误恢复
 
-> **Status:** implemented — Evidence-limited preparation and continuation; missing output never authorizes prompt replay.
+> **Status:** implemented — 仅凭准备或续聊证据有界恢复，缺少输出不授权重放输入。
 
 Transient provider failure, credential rejection and user quota have different recovery actions.
 Idle timeout classification precedes this dispatch; see [turn safety](turn-safety.md).
@@ -124,7 +124,7 @@ no separate original-prompt copy to synchronize after rebuilding history.
 Recovery markers remain persisted and published. Exhaustion or insufficient
 continuation evidence ends the request instead of replaying it. An explicit
 failed outcome stays failed; restart claims and unknown steer retain their
-separate [input reliability](../input-reliability.md) meanings.
+separate [input reliability](input-reliability.md) meanings.
 
 SessionResult, App ask/SSE, application builds and named delegations keep waiting
 through failed attempts and consume only the unique logical-request completion.

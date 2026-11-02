@@ -1,5 +1,7 @@
 # 知识请求与异步工作
 
+> **Status:** implemented — 可信来源要求、维护限制、逐层任务派生与原父任务返回合同。
+
 `server/knowledge.py` 拥有可信请求合同。入口在包装消息前接管原文；来源要求、维护限制和已经取得的证据分别表达。显式 `/wiki` 的开放问题默认采用本地知识库与相关网页，具体问点和用户限制的解释由共享查询指南负责，不按通道或主题枚举策略。
 
 | 操作 | 拥有的规则 |
@@ -20,13 +22,13 @@
 
 旧结果没有合同或版本未知时，保留仍有当前职责的输出、报告和可见交付状态；不据正文补造 read/auto 请求。现有计划定义缺少合同会保留并停用，`invalid_reason=knowledge_contract_missing`；经认证的人类可在计划页面查看原消息，明确选择 Wiki 维护控制（API 的 `wiki_mode`：auto/read/maintain）重新授权，再另行恢复运行。模型不能靠改正文或省略字段恢复权限。已捕获的 fire 使用自己的定义快照，计划后续编辑或删除不会改变该次执行。
 
-新的 API、MCP 与界面控制只接受 `auto`、`read`、`maintain`；携带 `wiki_mode=off` 的新 POST 返回 422，在接管对话、任务或执行前拒绝。旧计划的模式展示列 `wiki_mode=off` 在所属存储升级中归一为 `read`；执行合同不改写，运行消费其中已有的 canonical `read`。缺少或无法验证的计划合同保留并停用，不从正文或旧控制重建权限。
+新的 API、MCP 与界面控制只接受 `auto`、`read`、`maintain`；携带 `wiki_mode=off` 的新 POST 返回 422，在接管对话、任务或执行前拒绝。缺少或无法验证的计划合同保留并停用，不从正文或旧控制重建权限。
 
-主库当前格式为4。完整旧格式0／1／2／3在同一准备事务中完成必要结构演进、旧计划展示列归一及退役请求清退，再写入版本4。旧 `legacy_rejected` 或 human/off 原始记录仅在核验和必要收束阶段受保护；核验完成后删除，不永久保留原 payload、hash 或回执，也不把 `off` 改成 `read` 重算 hash 冒称原请求。明确拒绝或已接纳但未执行的记录须核对真实回执、无执行及实际引用的事实；已执行记录须匹配精确合法终态、确定投递和原 writer 退出证明，confirmed inline 还须核对同 generation 的原执行 owner。未知、矛盾或活跃事实使整个升级拒绝并保留旧版本，交回原 owner 完成实际效果核验及收束后重试；不等待新版 SessionManager 恢复、不跳过旧行后写版本4。
+当前启动只接受现行完整主库格式或真正空库，不执行旧格式0–3升级到4的历史流程。当前格式声明、发布期有限转换与资料保全归[存储合同](current-storage-format.md)。旧 `off` 展示值、旧请求清退及当时的转换取舍查[固定历史版本](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/knowledge-requests.md)；不能把旧转换条件当成当前启动能力。
 
-启动只读检查和写事务内核验复用同一规则。受管启动由既有 InstallationOwner 提供 `previous_writers_retired`；独立打开仅采用原 boot／process-group 的保守退出证明。旧 human 通知责任在冷启动边界随退役协议退出，不声称取得了历史通知 ACK，不新增墓碑、档案或 ACK 账本。当前消息、结果、来源证明及当前后继保留；独立 source 回注仍按自己的身份和合同完成交付，不依赖已清退的 human 原文。
+`previous_writers_retired` 仍由受管安装的原生命周期提供，并参与当前输入和 Wiki 任务恢复：它只证明原代 writer 已退出，不证明模型消费、历史通知 ACK 或未知效果成功。独立来源返回仍按自己的身份和合同完成交付。任务恢复与原引用的使用见[Wiki合同](wiki-development-summary.md#恢复存储与性能)和[安装生命周期](installation-lifecycle.md)。
 
-当前三态受理的原始 payload、payload_sha256 与 client_id 仍保持不变；鉴权 `GET /api/sessions/{session_id}/submissions/{client_id}`、同ID去重、恢复权限上限及唯一后继继续有效。它们不再为已清退的旧请求提供永久确认或恢复；旧身份查询缺失也不能证明从未受理，客户端不得据此自动重发。
+当前三态受理的原始 payload、payload_sha256 与 client_id 保持不变；鉴权 `GET /api/sessions/{session_id}/submissions/{client_id}`、同ID去重、恢复权限上限及唯一后继继续有效。当前缺少旧身份查询结果也不能证明从未受理，客户端不得据此自动重发。详见[输入接纳与恢复](input-reliability.md)。
 
 Research 的报告完成与后续交付分别保存和广播。交付被抑制时，聊天保留去重的材料通知和原因；卡片展示未交付状态，重新加载仍能查到报告位置和原因。
 

@@ -7,8 +7,8 @@
 历史，不再追加到正文。文档中的支持范围不授予代码实施、发布或生产数据清理权限。
 
 公共返回接管已供 BG、Research、委派终态及问题使用，当前合同见
-[公共返回接管](#公共返回接管)。会话读取与安装交接同样由下文维护；后续运行时范围由
-[工程路线](../plans/engineering-runtime-roadmap.md#phase-2)维护。
+[公共返回接管](#公共返回接管)。会话读取与安装交接由下文链接的领域合同维护；后续运行时范围由
+[运行时计划](../plans/runtime-execution-scope.md)维护。
 
 ## 文档职责
 
@@ -19,7 +19,7 @@
 | [current-storage-format.md](current-storage-format.md) | 当前格式声明、存量验证及当次发布交接 |
 | [backup-and-migrate.md](../backup-and-migrate.md) | 完整备份与账户搬迁的范围、命令和恢复操作 |
 | [testing.md](../testing.md)、[local-wsl.md](../local-wsl.md) | 验证门禁、证据复用及本机发布操作 |
-| [Wiki 当前合同](wiki-development-summary.md)、[知识请求](../knowledge-requests.md) | Wiki 领域行为及跨请求工作、返回身份与通知规则 |
+| [Wiki 当前合同](wiki-development-summary.md)、[知识请求](knowledge-requests.md) | Wiki 领域行为及跨请求工作、返回身份与通知规则 |
 
 实现事实以相关源码和行为证据核对；上线状态以实际服务及发布回执核对。
 较新的文件日期、计划状态、旧测试数量都不能替代这两项证据。
@@ -119,41 +119,10 @@ Manager 接管原对象的完成与资源责任。`done` 表示已结算，可�
 <a id="codex-native-input-evidence"></a>
 ### Codex 首输入证据与准备边界
 
-普通 Codex App Server 的首输入和人工 steer 继续使用原 `client_submissions`，不另建投递或结果账本。
-Owner 在标记请求 started、启动异步 claim/附件/凭据/配置准备之前，以短事务记录
-初始 `not_sent` 并保留首 attempt 身份；真正执行沿用该身份。pending 行只允许初始
-未发送证据，不能写发送事实；已证明未接纳的 steer 回队后，原输入可记录后续
-普通执行的新 attempt。准备失败与早期 Stop 由此保留恢复
-入口；driver 的直接 Harness 调用仍自行初始化同类事实。
-
-| 原生证据 | 含义与后续行为 |
-| --- | --- |
-| `not_sent` | 未记录业务帧可能发送；spawn、握手、只读查询不算首输入执行。controller 修改的不确定性独立保留。 |
-| `unknown` | 原 submission 已先提交可能发送边界及 RPC 身份，随后才能写业务帧。写前存储失败不发送，写后 ACK 丢失不自动重放。 |
-| `accepted` | 原 start/steer 响应或匹配的完整 user-message client ID 证明接纳并关联原根 turn；不证明模型消费。 |
-| `rejected` | 锁版协议明确未接纳。当前 Owner 的未接纳 steer 可按原身份和顺序回普通队列；首输入或迟到拒绝按原恢复合同处理。通用内部错误不证明拒绝。 |
-
-产品 input、attempt、RPC、native thread 与 turn 身份分别解释；细化不能覆盖已知
-身份或倒退证据。thread 与输入证据一起提交，后续 writer 在原资源退休后读取
-持久事实，不依赖一次实时事件被消费。driver 报告协议事实，原 Owner 唯一结算。
-steer 另保留 `kind`、连接 generation 与预期 target turn；接受证明的 turn 必须与
-该 target 相同。连接代次与原生身份共同隔离编号复用，原输入不能迁往下一轮。
-写前 marker 与最终 target/lease 校验分别拥有持久不确定性和实际写入资格；原事务
-仅在没有 marker 或证据均为 `not_sent/rejected` 时允许当前 steer 回队。
-
-terminal 事务与查询保留未澄清的 unknown；成功根 terminal 不能替输入确认。
-Stop 后仅允许细化原来已可能发送的输入的接受/拒绝证明，不能登记新 attempt、
-重新发送或改写已提交的 interrupted outcome。已观察的接受/拒绝记录复用现有
-取消保护和数据库总时限，不能因 reader 退休取消而丢失，亦不阻断进程取消启动。
-除当前 Owner 尚未交付的已证明未接纳 steer 按原序回队外，明确未发送/拒绝者
-进入既有恢复列表，用户检查原文和附件后，以带 `recovery_of` 的新身份明确提交。重启按已有
-证据区分未发送与未知；旧行的空证据不回填为原生接纳或模型消费。重复浏览器
-身份仍返回原回执，界面分别说明原生确认未知与准备变更未知。
-原生证据提交只唤醒原 Owner 的合并通知信号；Owner 推进现有 dispatch revision，
-使活动中的 Saved inputs 随接受证明刷新。已接收的 steer 保留原输入与接受证据，
-不单独显示成功提示；独立的执行或送达未知仍保留检查入口，没有自动恢复执行按钮。
-接受证明不提升为模型消费保证。回队后已作为普通请求执行的
-输入不因旧 steer 证据留下错误通知。资格、顺序和容量见[steer 合同](inline-steering.md)。
+首输入和人工 steer 继续使用原 `client_submissions`；原生 `accepted` 证明接纳，
+不证明模型消费。`not_sent`、`unknown`、`accepted`、`rejected` 的持久时序、准备
+边界与恢复规则由[输入合同](input-reliability.md#codex-native-input-evidence)完整维护。
+原 Owner 唯一结算，根成功不能替未确认输入补造送达证明。
 
 ### 共享输入与执行观察
 
@@ -162,7 +131,7 @@ Stop 后仅允许细化原来已可能发送的输入的接受/拒绝证明，�
 `service_not_ready`，不保存、排队或启动输入。所有来源与 steer 共用持久接纳和
 claim，没有无数据库执行分支；待执行队列只持身份与展示/调度投影，正文和附件
 从原持久输入读取。结果记录、通知及资源退休仍分别确认，构造、监听、内存查询
-和空资源关闭不依赖执行就绪。详见[输入接纳与恢复](../input-reliability.md)。
+和空资源关闭不依赖执行就绪。详见[输入接纳与恢复](input-reliability.md)。
 
 每个原 receipt 只有一个 completion Future。Delegation 在读取正文前固定原轮次
 和嵌套分类；广播只上送问题，不独立结算 result/error 或保存第二份回复正文。
@@ -372,13 +341,10 @@ schedule 策略仍有效。可靠跨请求返回走现有独立工作机制；�
 重试。AppMutation.abort 同样依赖应用后端真实停止；正常退出与忽略 SIGTERM 的
 后代分别验证，不能用自动丢弃 done task 的集合代替退休 owner。
 
-BG 在 shell 和输出结束后固定原业务结果，再主动对原进程组执行 TERM、宽限、
-KILL 和活跃成员退出确认；普通完成广播及父会话返回都在退休确认后发生。
-正常收尾不设置取消原因，之后的取消与关停复用原清理而不改写成功结果。
-记录、退休或投递失败均保留原 owner 和结果；退休先于结果持久化，存储失败
-不能遗失 writer。后续取消或关停可重试未完成阶段；通知重试沿用原任务身份，
-不重跑命令，也不重复已确认的记录或完成广播。关停无法排空时明确失败，不能
-提前关闭依赖。覆盖范围限于启动时捕获的进程组，不追踪主动脱离该组的任意后代。
+BG 的原命令结果、输出、时限、进程组退休和父返回分别归
+[后台任务合同](background-tasks.md#结果退休与返回顺序)。其普通完成与父返回在
+捕获的进程组退休确认之后；失败保留原 owner，不重跑命令或据 shell leader 退出
+提前释放资源责任。
 
 应用彻底删除由应用生命周期记录未完成阶段，关闭相关写入，再让原资源 owner
 确认开发执行、BG、确切委派轮次、应用对话及后端进程组/reader 退休。会话归档、
@@ -393,7 +359,7 @@ KILL 和活跃成员退出确认；普通完成广播及父会话返回都在退
 报告；程序错误和 `SubmissionConflict` 保留原异常、诊断及原任务，不进入普通
 重试循环。存储失信仍沿 fail-stop。恢复只观察原回执，详见
 [Research 合同](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)。
-这些局部错误分类不表示三来源统一返回接管设计已经实施。
+BG、Research 与委派共同使用下述公共返回接管，来源继续拥有各自材料、重试与业务结果。
 
 ### 公共返回接管
 
@@ -494,99 +460,20 @@ CAS / child notice 诊断写入及原 completion 观察，只消费公共接管�
 
 ## 辅助任务的读取与事件合并
 
-BG 与委派的 HTTP 响应模型定义公开字段，BG 记录直接按模型过滤，内部知识上下文
-不进入响应。前端从生成契约派生任务类型，保留 WS/历史材料允许缺失的字段；完整
-HTTP 快照与稀疏事件不互相冒充，也不各自维护一份字段和状态枚举。
-
-`hydrateSession.observeSession` 拥有完整读取的账户、目标、服务/连接身份、领域
-基线、结果与有效期。选择、归档查看、重连、归档替换及 fork 跳转复用这项操作，
-页面不再传入 store baseline 或拼 detail 与辅助读取。detail 接受后，导航即可结束；
-并行请求的 BG、Research、委派结果须等 detail 确认本次可信服务身份后才能发布。
-任一辅助失败只影响所属读取，不把成功 detail 改成队列不可用。辅助独立重试
-只读对应接口，取消观察不取消服务器业务。
-
-仅补全列表信息使用 metadata 用途和 `GET /api/sessions/{id}/info`，不下载或应用
-transcript；App 列表与委派事件卡片各自持有读取句柄，在其观察结束时取消。
-同账户的合法旧会话缓存可以继续更新，迟到读取不改变当前选择或侧栏位置。
-`SessionList` 复用原账户/连接/服务身份，并为在途目标保留观察：删除、归档或
-已知成员退出时，尚未进入列表的目标也能失效。读取结束即释放，不积累 tombstone
-或第二份会话集合。成功、失败和辅助结果共同受此有效期约束。
-
-读取顺序裁定错误归属，领域状态裁定成功快照能否采用。较新成功不被旧失败改成
-错误；较旧成功仍可贡献合法完成状态，但不能覆盖较新的同状态阶段或交付诊断。
-BG/Research 每个 id 对应一次执行，终态不因另一份 running/pending 快照回退；新
-任务使用新 id。两个请求共享 running baseline 时，无论返回顺序，另一份快照的
-对象变化都不能遮住合法 completed。
-
-transcript 沿持久 seq、历史窗口与 WS 去重合并；旧详情保留期间的新消息与新问题。
-关闭问题不能复活；被较新成功详情替代的旧读取不再重建问题或 active attempt。
-原生任务以 `tool_call_id` 归属原任务，委派以 `delegation_id + work_id` 归属原轮次。
-同一子会话的下一 work 可以运行，不能按子会话设置全局终态最大值。
-
-Zustand 仍持有唯一任务状态。不可变记录上的弱引用标记只证明 WS/本地权威更新，
-快照写入沿用已有标记而不推进它；在途快照保留期间的真实更新与新增任务。BG 的
-交付诊断继续独立保护，Research 的浏览器收讫、汇报输入接纳与父处理继续分别
-表达。`SnapshotReads` 只为未完成的请求保留排序 token，不保存任务状态或服务版本。
-
-委派专用读取供完整加载和请求卡片轮询共用；卡片仍决定轮询与观察结束，无须加载
-完整聊天。合法列表缺少原轮次时停止轮询并显示不可用，不借下一 work 的状态；
-失效观察不是权威缺失，连接/服务变化后重新观察。网络失败沿原有有界重试。
-真实 hook、卡片、公开加载与辅助重试回归覆盖双成功乱序、真实 WS、新 work、
-旧错误、身份切换、未知目标删除、局部失败及取消，不以纯 merge helper 代替入口。
+前端统一观察原账户、会话、连接和服务身份，区分完整 HTTP 快照与稀疏事件；
+取消观察只结束读取，不取消后台业务。详情与辅助材料、历史分页、同一 work
+的状态和独立交付诊断分别合并，Zustand 继续持有唯一展示数据。完整规则归
+[前端读取合同](frontend-list-reconciliation.md#辅助任务的读取与事件合并)。
 
 ## 安装自然排空与交接收据
 
-各原 owner 的 `drain_blockers()` 即时解释自己的接纳、执行、交付与清理责任。
-安装层显式组合 HTTP/WS、会话、BG、Research、委派、Wiki worker/Registry/通知、
-AppAgent/backend/bridge、各 Harness 的 one-shot、登录、scheduler 与主库事实，
-不读取其私有队列、锁或第三方 executor 字段；不另建活动账本、持久 idle 状态
-或通用关闭事务。
-观察只说明本次阻塞，不能跨 await 当作交接许可，也不启动、取消或重绑业务。
+各领域原 owner 公开自己的接纳、执行、交付与清理阻塞；安装层组合这些事实，
+在同一同步段检查、封口并发布原 `request_id` 的成功收据。收据证明交接资格，
+不代替随后 shutdown 和外部服务 owner 对实际退出的确认。检查到 busy 等待自然
+完成；部分封口失败保持真实关闭状态，不伪装成功或重新开放。
 
-会话包括 Owner 命令、准备与迟到 spawn、输入队列、问题、发布、退休和失败接管，
-以及短锁外仍被原 owner 持有的配置/lifecycle 操作。BG/Research/委派继续保有原
-启动、终态回流和保存责任，已结束但清理未确认的任务仍阻塞。失败 Owner 只有原
-清理成功、原通知退出且没有保留输入时才能解除阻塞。空闲 held 模型宿主及 App
-server 可留到正常 shutdown 退休，不能仅因进程存活永久等待。
-
-one-shot 在首次可能挂起前由原 Harness 登记，公共调用超时或二次取消后仍持有
-迟到 spawn、原进程组和私有配置清理。只有真实退出与清理都确认才解除 blocker；
-task.done() 不能代替退休成功，失败证据继续阻塞。quiesce 同步关闭各 Harness
-准入，shutdown 等待原退休 future；详细责任归[Harness 合同](harness-layer.md)。
-
-Registry 在排出同步线程前登记原操作，覆盖尚未借用 Store 的空隙；取消等待不
-释放仍在运行的线程责任。最终交接以非阻塞短 guard 保护 Registry 与 Store 借用
-准入，无法取得或仍有活操作就拒绝，不在事件循环等线程退出。普通调度/借用封口
-后，原 shutdown 仍拥有最后同步和资源关闭；同步结束后先观察停止意图，再决定
-是否进入下一普通 reconcile 阶段，不能因新准入已关而跳过最终清理。
-
-Wiki 通知从 outbox 读取、主库 receive、会话返回到原 ACK 全程持责。轮询 sleep、
-临时失败或业务已终态不能消除未 ACK 责任；事实直接查询原通知账本，不缓存第二
-份待投递状态。查询采用统一只读存储入口、零锁等待：正常 BUSY/LOCKED 拒绝交接，
-IOERR/损坏等失信存储仍进入统一 fail-stop。无待交付责任的常驻接收循环不阻塞。
-App bridge 的准备、文件效果、保留的失败清理及未确认 journal 同样阻塞；durable
-证据存在不等于清理完成。AppAgent 响应/原执行与 backend 启停由各原 owner 报告。
-
-HTTP 责任直到原 ASGI app 完成，发出 headers 不是完成点；被动 MCP 接收沿既有
-规则处理。WS 只计正在处理输入的区间，空闲连接不阻塞。scheduler 自己观察已排出
-回调及注册操作；DB 自己观察 writer 和已有独占操作，shutdown 收尾仍可使用原库。
-
-管理员 `POST /api/installation/quiesce` 在同一事件循环同步段完成最终事实检查、
-必要 producer 封口和成功收据发布，跨线程准入由上述 guard 保证。封口前 busy
-返回 409，producer 保持开放，等待自然完成；不为发布取消真实工作。第 N 个 gate
-失败时没有成功 marker，已经关闭的 owner 保持真实状态并负责可重复收尾，服务
-不伪装普通 busy 重开。全部封口成功才设置原 `offline_request` 并返回明确的
-`status=stopping` 和原 `request_id`。
-
-同 ID 重试返回同一成功事实；不同 ID 不得冒领。`/ready` 只在成功后带原 marker；
-导出的 `managed_source` 同时检查 HTTP 状态、明确 stopping 和原 ID，缺 status、
-部分失败或错误 ID 都不是成功。丢响应可按原 ID 找回收据；无法确认就保持未知，
-不据此停服务。收据证明安全交接资格，进程及 writer 的实际退出仍由随后正常
-shutdown 与外部服务 owner 证明，不把逐域封口称为全安装原子事务。
-
-隔离安装/HTTP/ready/导出、真实同步线程、持久通知、桥接文件及子进程故障注入
-回归验证拒绝与放行；实际生产服务不作为故障注入对象。未来新增内部资源在原
-owner 纳入事实与退休，新增业务域才扩展安装层的显式组合。
+完整的领域清单、跨线程准入、原代退休证明与 receipt 重入规则归
+[安装生命周期](installation-lifecycle.md#领域事实与封口收据)。
 
 ## 公开接口与账户配置
 
@@ -711,29 +598,16 @@ job item 使用 typed JSON 与精确 ExecutionRef，同一 attempt 的多批不�
 
 ## 账户搬迁的开发约定
 
-`server.portability` 提供一个公共离线导出/导入实现，CLI 是薄入口，各领域维护自己
-的选择、排除和恢复规则。同版空数据目标、当前 home 布局及可变 home 前缀是支持
-边界；用户侧范围和操作步骤只维护在
-[账户导出与导入](../backup-and-migrate.md#account-export-and-import)。
-
-每次按真实账户归属、资源注册和目录收集，不能写死今天的应用名、vault 位置或数量。
-普通内容增长自动纳入。新增持久类型、字段/关系、根或格式时，同次变更更新
-`server/db/portability.py`、`server/portability.py` 或 `server/wiki/portability.py`
-的相关规则，明确排除项并验证往返；不预造迁移插件框架。
-
-源端只导出稳定资料：未决写入交原 owner 收束；稳定副本完成后恢复源端，再压缩。
-导入先核验，再私有暂存、重绑明确的系统路径和本机身份，持久化后启用。不以单库
-一致性冒充跨资源快照，不扫描改写任意正文/第三方代码，不把源执行过程搬到目标。
-
-账户搬迁专项的隔离验收覆盖首次导出、增长后再次导出、源端离线后的独立导入、
-原账户登录、agent 配置/memory/Wiki、应用依赖重装后的数据读写，以及中断拒绝。
-专项用例、夹具和审查副本按用户要求退役；这是保留的历史验收结论，未来语义变更
-仍需当次验证，不免除现行权限、完整性与恢复测试，也不证明生产曾执行搬迁。
+新增持久类型、字段／关系、资源根或格式时，在同次变更更新账户收集、排除、
+路径重绑和往返验证。完整开发约定归[存储合同](current-storage-format.md#账户搬迁的开发约定)，
+用户操作归[账户导出与导入](../backup-and-migrate.md#account-export-and-import)。
 
 ## 暂停范围与恢复条件
 
-当前没有承诺完整原生尾部、跨请求宿主复用或新的输入确认保证。
-原七项执行扩展仍暂停；其身份、依赖、恢复条件及选定运行时路线的关系
+Claude 已有条件跨请求宿主复用；普通 Codex App Server 已有原生接纳证据、
+活动根协作及有限尾部保全。它们不证明模型消费全部输入，也不承诺任意
+post-final 多层递归自动闭合。原七项执行扩展按具体行为重基准；未恢复增量的
+身份、依赖和恢复条件
 统一见[暂停范围](../plans/runtime-execution-scope.md)。
 
 ## Conventions 与验收

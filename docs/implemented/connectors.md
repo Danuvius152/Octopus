@@ -1,6 +1,6 @@
-# Connectors: installations, enablement and token ownership
+# Connector：安装、启用与令牌归属
 
-> **Status:** implemented — Account-owned OAuth installations, agent-scoped enablement and typed MCP tools.
+> **Status:** implemented — 账户所属 OAuth 安装、Agent 启用范围与类型化 MCP 工具。
 
 ## Current contract and design decisions
 
@@ -37,6 +37,17 @@ Archive, delete, ownership and refresh outcomes are checked at their current
 boundaries. The old second-pass audit's proposed provider revocation, host-login
 policy and other mechanisms must not be inferred from this contract; remaining
 proposals are [separately scoped](../plans/multi-tenancy-gaps.md).
+
+OAuth state, expiry and single callback claim do not currently bind the callback
+to the initiating browser's cookie. Disconnect deletes the local installation,
+without promising to revoke the provider grant. Refresh currently catches
+provider/transport exceptions broadly and marks `needs_reconnect`, so a temporary
+timeout/429/5xx can also produce that flag. Browser binding, revocation policy and
+temporary-versus-permanent refresh classification remain in
+[the account plan](../plans/multi-tenancy-gaps.md), rather than being claimed as
+current guarantees. Complete long-result access, sensitive-write authorization,
+health checks and per-tool policy have their own
+[capability plan](../plans/connector-capabilities.md).
 
 ## Navigation and verification
 

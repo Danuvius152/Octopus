@@ -1,12 +1,12 @@
-# Turn safety: watchdogs and process retirement
+# 回合安全：超时与进程退休
 
-> **Status:** implemented — Bounded idle recovery, optional logical-turn deadline and confirmed process-group retirement.
+> **Status:** implemented — 有界 idle 恢复、可选逻辑回合总期限及确认的进程组退休。
 
 ## 2. Process-group reaping (both turns and `run_oneshot`)
 
 - **Own process group:** use `start_new_session=True` in `prepare_spawn`
-  (`run.py`) — the single spawn seam shared by the streaming engine
-  (`run.py:222`) AND `Harness.run_oneshot` (`harness.py:152`). The child
+  ([run engine](../../server/harness/run.py)) — the single spawn seam shared by
+  the streaming engine and `Harness.run_oneshot`. The child
   becomes a session/group leader, so its descendants share its pgid.
 - **Reap the captured group:** the spawned PID is its group ID even after
   the leader exits. `HarnessRun.stop()` closes stdin first, then signals and
@@ -84,15 +84,15 @@ These bounds apply to both backends and delegation children.
   manual interrupt during recovery, and the original disabled-retry behavior.
 - Delivery: a child that recovers emits one final delegation reply, and app
   callers/builds stay running through nonterminal errors and failed results.
-- Full backend + frontend suites.
+- Applicable affected checks and commit/release gates follow
+  [testing.md](../testing.md); this document does not maintain another suite policy.
 
 ## 6. What this defers
 
-- **Heartbeat / "still working (Nm)" UI** — a separate UX nicety (needs a
-  frontend rendering decision). The timeout already removes the indefinite
-  hang; a progress heartbeat is additive and tracked separately so this unit
-  stays focused on correctness. (native-deep-research surfaces its own
-  per-phase progress regardless.)
+- **Actionable phase/progress UI** is conditional scope in
+  [observability and diagnostics](../plans/observability-and-diagnostics.md).
+  Presentation cannot renew the execution watchdog without original valid
+  activity. Research already surfaces its own pipeline progress.
 - Per-tool / per-MCP timeouts (finer-grained than the turn) — not needed for
   the hang; revisit only if a specific tool class warrants it.
 

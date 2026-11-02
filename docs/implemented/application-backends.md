@@ -1,6 +1,6 @@
-# Applications with a backend — the run contract
+# 应用后端：运行与进程监督
 
-> **Status:** implemented — An app declares a backend with an executable `start.sh`; Octopus allocates a port, supervises it, proxies to it and reaps it when idle.
+> **Status:** implemented — 应用脚本、端口、代理与进程组监督，保留代码、数据和依赖的不同归属。
 
 ## 2. The contract: two scripts, not a manifest
 
@@ -66,6 +66,8 @@ Both scripts run with `cwd` = the code directory and this environment:
 | `APP_DIR` | the code directory (= cwd) |
 | `APP_DATA_DIR` | the data directory; create it if you need it |
 | `APP_RUNTIME_DIR` | where to install dependencies |
+| `OCTOPUS_AGENT_API` | this application's scoped `/apps/{id}/agent` endpoint; see [agent access](app-agent-access.md) |
+| `OCTOPUS_APP_TOKEN` | scoped bearer for that endpoint; never the account or installation token |
 | `PORT` | **start.sh only** — the port to bind on 127.0.0.1 |
 
 Plus a minimal inherited environment: `PATH`, `HOME`, `LANG`, and nothing else

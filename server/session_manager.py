@@ -1,7 +1,7 @@
 """Backwards-compatible re-export of the turn engine.
 
 The implementation moved to `server/sessions/` — one file per responsibility
-rather than one 4,017-line class (docs/2026-09-25-polish-pass.md). This
+rather than one 4,017-line class (docs/post-mortems/2026-09-25-polish-pass.md). This
 module stays because 18 modules import `session_manager` from here, and the
 split was meant to make the code readable, not to make every caller churn.
 """

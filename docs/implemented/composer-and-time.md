@@ -1,6 +1,6 @@
-# Message time, composer history and model selection
+# 消息时间、输入历史与模型选择
 
-> **Status:** implemented — Original timestamps, human-only prompt history and session model controls.
+> **Status:** implemented — 原始时间戳、仅人工输入历史和会话模型控制。
 
 ## Message timestamps
 
@@ -30,6 +30,9 @@ injected-turn predicate, also used by rewind selection.
 session override for later turns. Independent inheritance, native model metadata,
 effort and speed are maintained in [model settings](model-reasoning.md).
 The original plan's missing model endpoint/header are already implemented.
+Persistent effective-model/source display and additional input controls remain
+in [the input-control plan](../plans/session-input-controls.md); future display
+must distinguish the currently captured request from next-turn inherited settings.
 
 ## Verification
 

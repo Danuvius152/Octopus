@@ -4,7 +4,7 @@
 unrelated subjects — sessions, agents, schedules, credentials, connectors,
 background tasks, research jobs, applications, notifiers, and its own
 connection lifecycle. It is now one file per subject
-(docs/2026-09-25-polish-pass.md).
+(docs/post-mortems/2026-09-25-polish-pass.md).
 
 **Composition, not decomposition of the interface.** `Database` still presents
 every method as one object, so not a single call site changed — `db.save_session`

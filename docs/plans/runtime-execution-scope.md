@@ -1,65 +1,72 @@
 # 运行时执行扩展：暂停范围与恢复条件
 
-> **Status:** paused — 保留原七项执行扩展的身份、依赖与恢复条件，不自动恢复实施。
+> **Status:** paused — 按已交付 Codex R2 重基准七项执行扩展，保留更强承诺及独立 R06 核验的恢复条件。
 
-当前保证见[执行合同](../implemented/architecture-contract.md)。
+普通 Codex App Server 已交付：每 attempt 宿主与原生根绑定、start/steer 的原生
+接纳证据、活动根内协作、有限尾部保全与有界退休均属当前实现。Claude 已有
+条件进程复用。当前保证见[Codex](../implemented/codex-backend.md)、
+[输入](../implemented/input-reliability.md)与[执行合同](../implemented/architecture-contract.md)。
+不能再把 App Server/HOST 或原七票一概写成“未实施”，也不能据此宣布整包完成。
 
-## 暂停范围与恢复条件
+## 七项旧执行范围按断言重基准
 
-2026-10-30 设计更新：[统一工程与运行时路线](engineering-runtime-roadmap.md#scope)
-已将完整原生尾部列入下一次 Codex 迁移的必要目标，并允许统一重构共同接口。
-BG、Research、命名委派仍按成功接纳顺序逐条派发，Stop 暂停与人工纠偏例外保留；
-不采用自动返回 steer 或合批。Agent 默认配置允许改变，旧会话按实际有效配置
-校验和修正，不一概要求所有旧会话兼容才准保存。本轮仅完成设计文档，以下
-当前未实施范围没有因此变成已交付；实施时按新路线更新受影响的责任与证据。
+票号仅供历史溯源，与已完成的账户搬迁专项无关。暂停的是尚未承诺的增量，
+不会因别的改动交付而自动恢复，也不进入当前常规发布门禁。
 
-原执行票22、23、24、28、31、42、43整票暂停；它们不是普通待办，不因其他改动
-交付或技术依赖满足而自动恢复，也不进入当前发布门禁。这里的票号属于原架构执行
-计划，与已经完成的账户搬迁专项无关。
-
-| 原执行票 | 尚未承诺的完整责任 | 直接依赖 |
+| 原票 | 当前已有部分 | 仍暂停或有条件的增量 |
 | --- | --- | --- |
-| 22 | 本次 CLI 调用、迟到 idle 消息及 held 资源的完整收尾验证 | 已完成的 Owner 基础20 |
-| 23 | 原 held 资源退休后才安装新请求绑定，完整权限切换 | 22、已完成的配置捕获52 |
-| 24 | 每个输入/问题通道的真实送达证据与慢发送期间控制 | 已完成的输入21、23 |
-| 28 | 按送达证据原子结算本轮输入集合与 terminal | 21、24 |
-| 31 | CLI、输入、独立返回与会话保留的组合验收 | 已完成的27/30/25/26、28 |
-| 42 | 指南与模板完整反映本轮真实能力，保全自定义 persona | 23 |
-| 43 | UTF-8 输入预算与最终真实 spawn 边界一致 | 21、23 |
+| 22 调用与资源 | 活动根协作、有界退出采集、结果终态与资源退休分开 | 任意 post-final 多层子树自动闭合，以及超出有限采集的保证。 |
+| 23 先退休再绑定 | Codex 每 attempt 宿主/lease、原身份约束；Claude 条件复用 | 强制每个新 Claude 逻辑请求换进程等更强政策，需单独选择。 |
+| 24 送达与控制 | Codex start/steer 的 not_sent/unknown/accepted/rejected 证据 | 全部 argv/stdin/Answer 通道更强的实际消费证明；accepted 不等于已处理。 |
+| 28 输入与终态 | 普通输入、唯一 terminal 关联及原生输入证据独立保全 | 所有通道已消费输入集合的更强原子结算语义。 |
+| 31 消费者组合 | 接纳、返回、历史、问题、停止与现有消费者回归 | 上述尚暂停承诺对应的组合验收；没有宣布本次已运行旧验收矩阵。 |
+| 42 指南与权限 | 普通/leaf/one-shot 的真实装配、配置捕获与权限边界 | 将来新宿主政策需要的 persona/指导调整。 |
+| 43 外部大小 | RPC、argv/env、Claude frame 等按实际传输区分 | 尚未证明的全通道组合大小保证，不将 RPC 画成旧 exec 的 E2BIG 模型。 |
 
-恢复须用户确定产品范围及维护责任，并先验证 provider 能支持拟承诺的行为。
-不以静默等待、强制 wait 提示词、自动 exec/resume 报告、provider 补丁或旧实验
-替代协议保证。恢复顺序为22→23→24→28→31；42/43在23之后按文件归属安排，
-31不是42的额外依赖。
+原票及历史依赖见[固定旧稿](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/plans/runtime-execution-scope.md)。
+当时的 22→23→24→28→31 顺序只适用于恢复的相关责任；42/43 在所选 23
+政策之后按归属安排，31 不是 42 的额外依赖。已由当前实现吸收的责任不重复开工。
 
-以下保留恢复所需的验收问题，不将目标写成当前已交付能力：
+## 恢复条件与保留反例
 
-- **22：调用与资源。** 分别观察内容项、本轮 result/turn 终态、EOF、receipt 和
-  退休。首个反例是正文已显示而工具尚未收齐，随后 receipt 完成、idle 到达并
-  Stop held 资源。partial、usage、错误与原身份保全；旧 App/委托响应不重开，
-  已知失败不被父 success 掩盖，Codex 不承诺调用结束后的原生尾部。
-- **23：先退役后安装。** R1 已返回但进程 held，R2 入队同时发生旧 idle/Wiki
-  调用/Stop：先撤旧 lease 并 join 原资源，再安装 R2 context/WikiTask；原 grant
-  不延长或转绑。新逻辑请求用新进程/lease 并 resume 历史，同一活动 Claude
-  请求的 steer 保留。额外启动成本和可能中断未到达尾部是明确取舍；退休 CLI
-  不等于取消独立 bg/Research/delegation work。
-- **24/28：送达与结算。** 原 argv、stdin 和 Answer 通道分别给证据，不强行统一。
-  一个主输入及一个已确认 steer、另一个未知 steer 与 Stop 交错，再在提交两侧
-  中断：仅可靠送达集合与唯一 terminal 同事务结算。pipe drain 不冒充 provider
-  确认，未知不自动重发，迟到确认/idle 不扩大已结算集合；控制能接管慢发送。
-- **31：消费者组合。** 原 receipt 返回后，idle、新输入、旧 Stop 与独立返回
-  交错：旧结果/身份不变，后续输入一次接纳，ACK 丢失仍幂等，普通委托可追问且
-  显式归档有效。验证 one-shot、人工优先及最后资源释放；缺口回原负责模块修正，
-  集成层不增第二个状态机或父报告完成门。
-- **42：能力与指令。** 对比普通请求及无 Wiki/MCP leaf 的真实装配，再变化授权：
-  工具承诺匹配实际能力，静态预热不缓存动态 selection/权限，自定义 persona
-  不被覆盖；新进程切换和原生尾部限制明确，必要 helper 结果与跨请求工作按
-  各自真实生命周期处理。先测 prepare/扫描，再删重复工作。
-- **43：外部大小边界。** 等字符数、不同 UTF-8 长度的正文叠加 env/指南，分别
-  触发合法完整传输、接纳前拒绝及接纳后真实 E2BIG。涵盖单参数、完整 argv/env、
-  Claude frame 和 Answer，原输入可核对；不截断正文、不增压缩或 prompt 缓存。
+恢复须用户明确产品范围与维护责任，并取得实际 provider 能支持该强保证的新
+证据。[G0 参考](../reference/codex-app-server-g0.md)分别保存 Recursive 反例和
+Base 有限通过，不能互相替代。静默等待、强制 wait 提示词、自动 exec/resume
+补报告、provider 补丁或旧实验都不代替协议保证。
 
-Codex app-server/HOST、完整跨 turn 原生子树、raw/trace 完成屏障、自动补报告、
-动态 bearer、ACP/宿主池等不随常规修复启动。既有 controller 更新独立使用的短时
-app-server 不按关键词删除。候选设计见
-[app-server 迁移设计](engineering-runtime-roadmap.md#codex-app-server-scope)。
+选择恢复后，先检查最可能推翻设计的完整场景：
+
+- **资源与旧请求：** 正文可见但工具未收齐，原 receipt 终态后又来 idle/子结果，
+  与新输入、Stop、旧 Wiki 调用交错。partial、usage、已知失败与原身份保全，
+  不重开旧 App/委派响应；父 success 不掩盖已知 child 失败。
+- **绑定与权限：** 原资源仍 held 时，新请求需要不同 context/授权。先满足
+  选定退休政策再绑定，旧 grant 不延长/转绑。若选择每请求换进程，明确额外
+  启动成本及丢失未到尾部的取舍；退休 CLI 不取消独立 BG/Research/委派。
+- **输入与结算：** 一个已确认 steer、另一个 unknown 与 Stop/慢发送交错，
+  在提交两侧中断。仅有可靠证据的集合进入所选结算，pipe drain 不冒充 provider
+  确认，迟到证据不扩大已结算集合，unknown 不自动重发。
+- **消费者与指导：** 原 receipt 后旧 Stop、idle、独立返回交错，输入一次接纳，
+  ACK 丢失仍幂等，one-shot 与人工优先保留。普通请求/隔离 leaf 的工具承诺
+  匹配真实装配；动态权限不被预热缓存，自定义 persona 不被覆盖。
+- **大小边界：** 等字符数、不同 UTF-8 字节数的正文叠加 env/指南，分别验证
+  合法完整传输、接纳前拒绝、接纳后真实失败；按 RPC、单 argv、完整 argv/env、
+  Claude frame/Answer 分别取证，原输入可核，不靠截断正文解决。
+
+raw/trace 完成屏障、自动补报告、动态 bearer、ACP/宿主池等不随普通修复启动。
+Codex 自定义角色是[独立 proposed 计划](codex-native-roles.md)，不与完整递归绑成一包。
+
+<a id="paused-model-validation"></a>
+
+## 暂停的模型配置核验：R06
+
+此项从 Wiki 计划移入，保持用户此前暂停决定，且与递归尾部没有先后依赖。
+用户恢复 Claude 范围后，先按当前代码和 provider 可用性核验，不复制旧缺陷结论。
+
+Claude session 从 Codex Agent 继承 reasoning/tier 时，按实际 backend 与字段来源
+处理：不消费的继承值不参加校验；明确向不支持 backend 提交非空值仍拒绝。
+省略保持绑定、null 恢复继承，不清除 Agent 默认或丢 transcript 来绕开。
+完成条件覆盖跨 backend/credential、session override、归档/运行中修改、持久化
+与 preflight 一致性，具体当前规则归[模型合同](../implemented/model-reasoning.md)。
+
+验证选择和成功证据复用归[testing.md](../testing.md)。本次文档重组未恢复这些
+实施、Claude live 或额外性能实验。

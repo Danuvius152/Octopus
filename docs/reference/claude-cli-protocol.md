@@ -1,9 +1,15 @@
 # Claude Code CLI JSONL Protocol Notes
 
-Empirical capture of the `claude` CLI's stream-json protocol, used as
-the source of truth for the Claude profile in
-`server/harness/claude_code.py` (formerly `ClaudeCodeBackend` under
-`server/backends/`, before the harness-layer refactor).
+This page preserves the historical VM0 capture below, including its invocation
+and stdin assumptions. Its original capture date was not recorded; the capture
+version was `claude` v2.1.143, and the revision note refers to commit `5815560`.
+It is protocol evidence, not the current invocation contract.
+
+Current Claude execution uses stream-JSON stdin, partial messages and conditional
+process reuse. See [steering](../implemented/inline-steering.md) and the
+[Harness boundary](../implemented/harness-layer.md); implementation lives in
+[`claude_code.py`](../../server/harness/claude_code.py). The VM0 statements below
+about unused stdin and fresh processes apply only to that historical shape.
 
 **Captured against**: `claude` v2.1.143.
 
@@ -19,7 +25,7 @@ drove a bidirectional control protocol over stdin; that path is gone.
 The refactor and the recovery loop that sits on top of it are
 documented in `docs/post-mortems/2026-05-18-bg-pipeline-hardening.md` §2.
 
-## Invocation
+## Historical VM0 invocation
 
 ```
 claude --print \
@@ -271,9 +277,14 @@ Key functions in the bundled JS:
 
 After OAuth completes in the browser, the redirect lands the user at `MANUAL_REDIRECT_URL` (`console.anthropic.com/oauth/code/callback`) which displays an auth code. The user copies it back to the CLI input prompt. The CLI then POSTs the code to `TOKEN_URL` and gets back an access token.
 
-### Implications for Octopus
+### Historical in-app login proposal
 
-Most pragmatic path for in-app login:
+The following was the capture's proposed path, not the current credential
+contract. Current OAuth start/complete and credential refresh are implemented in
+[credential routes](../../server/routers/credentials.py) and the
+[credential contract](../implemented/harness-credential-reauth.md).
+
+The proposal at the time was:
 1. Spawn `claude setup-token` in a PTY (Ink TUI needs a TTY) with `HOME` pointed at a fresh per-credential dir.
 2. Read stdout, regex-extract the authorize URL (matches `https://claude.ai/oauth/authorize?...` or `https://console.anthropic.com/oauth/authorize?...`).
 3. Surface URL to UI → user opens in browser → completes login → copies code from `oauth/code/callback`.
@@ -282,11 +293,14 @@ Most pragmatic path for in-app login:
 6. Octopus captures the token from stdout, stores it as a credential (the existing encrypted-API-key storage works as-is — the OAuth token IS an API key, just long-lived).
 7. Session spawn unchanged: `ANTHROPIC_API_KEY=<token>` on the subprocess env.
 
-### What's still unverified
+### Questions unverified at the time of capture
 
 - Whether `claude setup-token` will actually accept a piped/PTY non-tty interactive input gracefully (Ink might require a real TTY — Python's `pty` module solves this).
 - Exact regex pattern that reliably extracts the authorize URL from the styled Ink output.
 - Exact format of what stdout looks like when the token is displayed (so we know what to grep for).
 - Whether `setup-token` requires a TTY check that PTY satisfies.
 
-Phase OAuth-7 will close these — that step asks the user to walk through one real login on their machine and we adjust based on what we actually observe.
+The historical plan called this follow-up “OAuth-7”. That stage label is retired;
+these capture questions do not create a new task or authorize another login.
+Current behavior and validation scope come from the credential contract and
+[testing policy](../testing.md).

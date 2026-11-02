@@ -1,6 +1,6 @@
-# Native sub-agents, surfaced
+# 原生子任务：观测、卡片与详情
 
-> **Status:** implemented — Native helper observations, scoped App Server work cards and read-only saved child details, including late events within the original resource lifetime.
+> **Status:** implemented — 原生 helper 观测、App Server 工作卡片与只读已保存详情，含原资源寿命内晚事件。
 
 The implemented scope is observation and presentation, including Claude
 held-process late events and ordinary Codex App Server capture through bounded
@@ -8,7 +8,7 @@ retirement. A card does not prove that the parent consumed a child result or
 that a delegation receives a later parent report. Codex root success may coexist
 with an unfinished helper retired as interrupted. Arbitrary post-final recursive
 continuation remains a separate, unfulfilled capability goal in
-the [runtime roadmap](../plans/engineering-runtime-roadmap.md#codex-native-tail).
+the [paused execution scope](../plans/runtime-execution-scope.md).
 
 ## 1. Observation sources
 
@@ -155,6 +155,8 @@ are not rewritten by startup.
 
 The current Octopus Codex profile does not render these saved custom
 definitions. This describes the integration, not every available native feature.
+The remaining mapping and policy guarantees belong to the
+[custom-role plan](../plans/codex-native-roles.md).
 
 ## 7. Work that outlives its turn
 

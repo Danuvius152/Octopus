@@ -4,7 +4,7 @@
 eight separable responsibilities — driving a turn, forking, session lifecycle,
 credential resolution, the held-process pool, questions, failure
 presentation, and event conversion. It is now one file per responsibility
-(docs/2026-09-25-polish-pass.md).
+(docs/post-mortems/2026-09-25-polish-pass.md).
 
 Composed the same way the database was (§3 A4): every method still hangs off
 one object; requests enter through `session_manager.start_message(...)`.

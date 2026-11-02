@@ -1,6 +1,6 @@
-# Console redesign — the blue workspace UI
+# 控制台：视觉规范与工作区布局
 
-> **Status:** implemented — The blue workspace UI — design tokens, the two-level sidebar, and every manage surface as a page rather than a dialog.
+> **Status:** implemented — 蓝色工作区、设计 token、两层侧栏和页面式管理入口。
 
 ## 2. The token layer is the design
 
@@ -50,7 +50,8 @@ connector is visible from anywhere without opening anything.
 ## 4. Pages, not dialogs
 
 `mainView` in the store is the router (`chat` | `application` |
-`application-create` | `agent-form` | `schedules` | `connectors` | `harness`).
+`application-create` | `agent-form` | `schedules` | `connectors` | `harness` |
+`monitor`). The authoritative union is the store's `MainView` type.
 `setActiveSessionId` resets it to `chat`, so every existing "open this
 session" call site keeps working. ChatView stays mounted but hidden behind
 other views — it owns the composer draft, scroll position and pending
@@ -61,14 +62,12 @@ Every view opens with the same `PageHeader`: breadcrumb left, actions right.
 
 ## 5. Archived, not a market
 
-The design's two "market" screens became **Archived** tabs on the create
-pages: archive an agent or an application and it leaves the sidebar but keeps
-everything (an application keeps its files, so restoring renders it exactly as
-it was), then comes back from that tab. No catalog, no fake install counts —
-your own shelf. This needed real backend work: `POST /api/agents/{id}/unarchive`,
-`applications.archived` + `POST /api/applications/{id}/(un)archive`, and the
-applications name index narrowed to live rows so an archived name frees up
-(matching how agents already behaved).
+The Agent and Application pages use **All · Create/Edit**, with an Archived
+section inside All. Archive preserves the row and files; restore makes the
+item available again. The earlier design's separate Archived tabs are history.
+Pin, unpin, archive, restore and current row actions are owned by
+[sidebar behavior](sidebar-pins.md#6-the-pages), rather than a second navigation
+specification here. There is no market/catalog screen or invented install count.
 
 ## 6. What the design didn't say, and what we did
 
@@ -78,7 +77,9 @@ The design draws a clean sidebar with no hover affordances and a one-click
 - **Session create** keeps a name field (inline in the rail, not a dialog),
   with working dir / engine / credential folded behind a "+ working dir ·
   engine" toggle. Default look matches the design; the overrides survive.
-- **Delete** for sessions and applications is a hover-only action on the row.
+- **Row actions** reveal on hover or the selected touch row: session archive
+  and application unpin have distinct effects, as defined by
+  [sidebar behavior](sidebar-pins.md#6-the-pages).
 - **Archive** for an application sits in its own header, next to reload and
   open-in-tab, because that's where you are when you decide to shelve it.
 - Assistant turns lost their name label; attribution moved onto the identity
@@ -132,9 +133,10 @@ sliver — the whole collapsed block, and the handle, are desktop-only.
 
 Unit: `SidebarApplications`, `SidebarManage`, `ApplicationFormPage`,
 `AgentFormPage`, `SidebarEdgeToggle` (+ the existing chat/card suites). E2E:
-every spec was moved onto the new vocabulary — `.chat-header .crumb-current`
-for the session name, `.btn-manage-*` to reach the manage pages, the inline
-`.session-create` row for creation, `.btn-tab-archived` for the archived tabs.
+representative checks use `.chat-header .crumb-current` for the session name,
+`.btn-manage-*` to reach manage pages and the inline `.session-create` row.
+Library checks use All/Create and its Archived section, rather than the retired
+`.btn-tab-archived` selector.
 The fold has its own pair in `app.spec.ts`, driving the real mouse: the handle
 is invisible and unclickable until the edge is hovered, which is the guarantee
 worth pinning down.

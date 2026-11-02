@@ -49,7 +49,7 @@ def _seize_sse_shutdown_latch() -> None:
     followed by a truncated body. The CLI waits out `MCP_TIMEOUT`, reports every
     namespace unreachable and drops its tools, and the test fails as though the
     model had ignored its instructions. That is the whole of the cross-test
-    failure recorded in docs/2026-09-25-polish-pass.md.
+    failure recorded in docs/post-mortems/2026-09-25-polish-pass.md.
 
     So from here on the latch is set by `CallbackApi.stop()` and by nothing
     else: disabling the automatic drain makes both of sse_starlette's routes
@@ -156,7 +156,7 @@ async def start_callback_api(
         app,
         host="127.0.0.1",
         # An ephemeral port per test. A fixed one was tried while chasing the
-        # cross-test failure recorded in docs/2026-09-25-polish-pass.md and made
+        # cross-test failure recorded in docs/post-mortems/2026-09-25-polish-pass.md and made
         # no difference, so it buys nothing and can only collide.
         port=0,
         # `OCTOPUS_TEST_CALLBACK_LOG=info` turns the access log on, which is how

@@ -397,7 +397,7 @@ def mcp_scope(monkeypatch):
     """Put a tool call in a session's scope, the way a real HTTP request does.
 
     The MCP namespaces are served in-process now rather than spawned per session
-    (docs/2026-09-25-polish-pass.md), so a tool's session no longer arrives
+    (docs/post-mortems/2026-09-25-polish-pass.md), so a tool's session no longer arrives
     as `OCTOPUS_SESSION_ID` in a process environment — one process serves every
     session, and the session comes from the verified scope of the request. Tests
     that used to `monkeypatch.setenv` establish a scope instead.

@@ -1,11 +1,11 @@
-# Scheduled runs: what a fire is, and what stops it stacking
+# 计划触发：执行身份与重叠控制
 
-> **Status:** implemented — What a scheduled fire is: the overlap guard, the `[scheduled:…]` marker, and the link from "last run" to the run.
+> **Status:** implemented — 计划 fire 的独立身份、重叠保护、触发标记与原执行入口。
 
 ## 1. Two modes, unchanged
 
-A fire runs the schedule's prompt in one of two places (agent-refactor.md
-§5.3/§5.6):
+A fire runs the schedule's prompt in one of two places under the
+[Agent lifecycle](agent-refactor.md#creation-names-and-lifecycle):
 
 * **the origin session**, when the schedule came from a `/schedule` chat
   command and that conversation is still live — the result lands where the
@@ -50,7 +50,7 @@ is deleted at that admission point; callback return and model completion do
 not decide whether it was consumed. An overdue, unaccepted one-shot is
 registered on startup. A transient refusal retries the same source identity;
 an already accepted or uncertain execution is never submitted as a new fire.
-See [input reliability](../input-reliability.md) for the shared input contract.
+See [input reliability](input-reliability.md) for the shared input contract.
 
 ## 3. A scheduled turn says it is one
 

@@ -2,7 +2,7 @@
  * The Monitor page.
  *
  * The case it exists for: a connector that fails every day must be visible as
- * data, not only as a log line nobody greps (docs/2026-09-25-polish-pass.md).
+ * data, not only as a log line nobody greps (docs/post-mortems/2026-09-25-polish-pass.md).
  * So the tests that matter are the ones where something IS wrong and the page
  * says so — and the one where nothing has been recorded yet, which must read as
  * "nothing recorded" rather than as a clean bill of health.

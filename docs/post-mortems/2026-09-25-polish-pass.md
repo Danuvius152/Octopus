@@ -1,5 +1,13 @@
 # What changed on 2026-09-25
 
+> Historical report of the 2026-09-25 upstream polish pass. All counts,
+> deployment claims, token rotation and schema observations below belong to
+> that version and installation. They are not evidence for the current fork.
+> Current behavior is maintained in [architecture](../architecture.md),
+> [storage](../implemented/current-storage-format.md) and [testing](../testing.md).
+> Remaining alerting, retention and input goals are tracked in the
+> [roadmap](../roadmap.md).
+
 A polish pass over Octopus: nothing here is a new product capability except
 the monitor. The rest pays down debts that had accumulated under seven months
 of fast feature work — and turned up **eleven live defects** on the way, which

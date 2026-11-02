@@ -219,7 +219,7 @@ _Avoid_: Weber 专属查询、单轮查询开关
 **来源要求（Source Requirement）**:
 一项知识任务对回答所依据来源及其使用范围的要求，与该任务的维护许可、工具是否可用及已经取得的依据是不同事实。
 _Avoid_: 只读模式、工具可用性、来源已使用（仅因提出了要求）
-参见：[知识请求与异步工作](docs/knowledge-requests.md)。
+参见：[知识请求与异步工作](docs/implemented/knowledge-requests.md)。
 
 **维护任务（Wiki Maintenance）**:
 明确要求接收、整理或更新知识内容，并具有具体目标和写入范围的任务。

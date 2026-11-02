@@ -27,6 +27,12 @@ public host, not localhost). Copy it from there.
 
 ## GitHub
 
+Provider-console steps and token/review policies in the GitHub and Gmail
+sections are inherited observations whose original date was not recorded.
+They were not revalidated during the 2026-11-02 documentation reorganization.
+Check the provider's current console and policy before using them; the
+request-derived redirect URI and per-agent enablement above describe Octopus.
+
 In the Set up dialog, follow the steps (link goes to GitHub Developer settings):
 
 1. GitHub → Settings → Developer settings → **OAuth Apps → New OAuth App**.
@@ -34,8 +40,8 @@ In the Set up dialog, follow the steps (link goes to GitHub Developer settings):
 3. Register, then **Generate a new client secret**.
 4. Paste the Client ID + secret into Set up → **Save** → **Connect**.
 
-Scopes (`repo`, `read:org`) are requested at sign-in. Classic OAuth-App tokens
-don't expire, so there's nothing to refresh.
+Octopus requests scopes `repo` and `read:org`. In the recorded GitHub setup,
+classic OAuth-App tokens did not expire and needed no periodic refresh.
 
 ## Gmail (Google Cloud)
 
@@ -52,11 +58,12 @@ Gmail is fussier — three things trip people up, in order:
    credentials → **OAuth client ID → Web application** → add the redirect URI
    under **Authorized redirect URIs**. Paste the Client ID + secret into Set up.
 
-Scope is `gmail.modify` (read, label, draft, send). **Caveat:** while the app
-stays in "Testing", Google expires the refresh token after ~7 days, so Gmail
-will periodically show **needs reconnect** — click reconnect to re-authorize.
-Removing that requires publishing the app and passing Google's verification
-review (heavy; only worth it beyond personal use).
+Octopus requests scope `gmail.modify` (read, label, draft, send). In the recorded
+setup, Google's "Testing" status caused refresh-token expiry after about 7 days;
+publishing and verification affected that policy. Treat those as historical
+observations, not a current expiry or review guarantee. If Octopus shows
+**needs reconnect**, reconnect to re-authorize; transient refresh failures and
+their classification remain in the [account hardening plan](plans/multi-tenancy-gaps.md).
 
 ## Custom connectors (any OAuth2 API)
 
@@ -84,7 +91,12 @@ OCTOPUS_GMAIL_OAUTH_CLIENT_ID=...      OCTOPUS_GMAIL_OAUTH_CLIENT_SECRET=...
 OCTOPUS_PUBLIC_BASE_URL=https://your-stable-host
 ```
 
-Secrets (client secrets and connector tokens) are encrypted at rest with
-Fernet under your account's own key (a master-wrapped per-account data key;
-install-era secrets use `OCTOPUS_AUTH_TOKEN`); tokens are only ever read by the
-connector's in-process MCP namespace at tool-call time.
+OAuth client configuration is installation-wide: its client secret is encrypted
+with the installation master key. An account's installation access/refresh
+tokens are encrypted with that account's DEK, itself wrapped by the master key.
+The setup proof `OCTOPUS_AUTH_TOKEN` is not a current connector-token key; the
+legacy installation-token business path has retired. Tools resolve tokens under
+the calling account and agent scope. The retained legacy diagnostic transport
+does not grant unscoped access to stored installation secrets. See the
+[connector contract](implemented/connectors.md) and
+[account trust boundary](implemented/multi-tenancy.md).

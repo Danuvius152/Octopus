@@ -67,8 +67,8 @@ def markers(folder: str) -> tuple[str, str]:
 
 def render(folder: str, rows: list[tuple[str, str, str, str]]) -> str:
     begin, end = markers(folder)
-    label = "Contract" if folder == "implemented" else "Plan"
-    out = [begin, "", f"| {label} | Status | What |", "|---|---|---|"]
+    label = "当前合同" if folder == "implemented" else "未完成计划"
+    out = [begin, "", f"| {label} | 状态 | 范围 |", "|---|---|---|"]
     for name, title, status, summary in rows:
         out.append(f"| [{title}]({folder}/{name}) | {status} | {summary} |")
     out += ["", end]

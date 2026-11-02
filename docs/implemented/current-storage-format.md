@@ -1,6 +1,6 @@
-# Current storage and publication handoff
+# 当前存储格式与发布交接
 
-> **Status:** implemented — Validation and release handoff are tracked separately from production deployment.
+> **Status:** implemented — 现行完整格式、发布期存量核验与有限转换；验证和生产部署分别取证。
 
 The main database uses format **7**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
@@ -88,7 +88,7 @@ execution authority. A reloaded card derives its body/status from collected
 messages; the live snapshot is only an additional bounded view. Main-chat
 filtering does not delete child rows or change the global high water.
 
-Main format 6 introduced nullable `bg_tasks.delivery_disposition` (`stopped`/`unknown`)
+Current background-task rows retain nullable `bg_tasks.delivery_disposition` (`stopped`/`unknown`)
 and `delivery_error` after `knowledge_context`. Delegation round JSON requires
 an independent nullable `terminal_delivery_error` and validates the finite
 terminal-disposition vocabulary, including `stopped` and `unknown`. These are
@@ -97,7 +97,7 @@ results, duplicate input receipts or prove parent processing. Empty diagnostics
 do not authorize replay. Live question delivery controls stay with the original
 round/question and are not a new persistent queue.
 
-Main format 7 adds `client_submissions.native_inputs`, a checked JSON array with
+The current main declaration includes `client_submissions.native_inputs`, a checked JSON array with
 default `[]`. Each version-1 entry belongs to the original product input and one
 attempt, retaining separate RPC/thread/turn identities, acceptance proof and
 controller uncertainty. Additive version-1 fields distinguish start from steer,
@@ -158,28 +158,6 @@ existing message field. The original JSON body remains the patch payload;
 the Harness decoder checks that producer kind and item identity before exposing
 paths to rewind. Ordinary tool/model text is not promoted to file-effect evidence.
 
-A format-6 installation requires this release's finite publication conversion
-after its original writers retire: append only `native_inputs` as `[]` and commit
-marker 7 in the same SQLite transaction. Ordinary startup never performs it.
-Read-only preflight checks complete declarations, integrity, foreign keys and
-exact `table_xinfo` against the declared baseline and the four verified historical
-column orders. The writer transaction repeats those checks, preserves original
-column metadata and compares every original table's typed row multiset, including
-duplicate counts and NULL/TEXT/BLOB/numeric distinctions. The candidate's complete
-verifier runs before COMMIT. Format-7 reentry verifies and retains already committed
-native evidence; uncertain COMMIT keeps the publisher closed for fresh inspection
-without restoring old data or replaying inputs. This conversion does not admit
-arbitrary historical/intermediate layouts or revive deleted conversations.
-
-The 6→7 boundary was checked on an isolated fresh snapshot of the actual retained
-installation; all twenty original tables preserved their metadata and typed facts.
-Temporary private checks cover populated canonical/historical layouts, malformed
-baseline refusal, process loss before COMMIT, lost COMMIT acknowledgment, current
-reentry and the real preflight entry before consuming a publication permit.
-Current regressions cover native proof validity, terminal/restart preservation,
-fresh creation and mismatch refusal. These are implementation/validation facts;
-the production database has not been converted by this development task.
-
 The nullable, checked `applications.deletion` JSON column records only
 unfinished deletion (`retiring`/`files`,
 `keep_files`, optional error); successful deletion removes the owning app row.
@@ -222,18 +200,10 @@ inspection of committed facts; it does not trust an older success receipt, resto
 old databases or replay model/tool effects. An already running candidate is
 verified without another conversion or restart.
 
-The preceding dispatch-return release started from the observed main 4 / Wiki 16
-installation. Main has no physical format change. The finite Wiki handoff adds
-`dispatch_generation` to the existing job state and subscription uniqueness,
-preserves subscription IDs, snapshots and ACKs, and commits marker 17 with
-notification protocol 4. The observed installation has only completed jobs,
-acknowledged notices and settled automatic return inputs. The bounded handoff
-rechecks these facts, retains historical subscriptions in generation zero and
-initializes the completed jobs' current generation to one without a subscriber.
-This closes consumed return scopes without relabelling their original identities
-or guessing historical dispatchers. A new caller explicitly retrieves the saved
-result; unfinished legacy owners block this handoff and retain their actual
-recovery responsibility. Fresh current jobs start at generation zero.
+### Wiki dispatch generations
+
+Fresh current jobs start at generation zero.
+
 An accepted explicit retry or scope re-admission advances
 the generation and subscribes its actual entry in the same writer transaction.
 Worker claims, automatic recovery, completed-result retrieval, ordinary reuse
@@ -249,17 +219,36 @@ control writer before releasing that gate. Aggregation and operation counts only
 include current subscriptions; the return identity remains stable for the original
 request even when a transferred member leaves the group, preventing a second
 report after a lost ACK. Already accepted return inputs remain original facts.
-The handoff checks the original declarations read-only, compares exact retained
-facts before/after, and verifies the current layout in the conversion transaction.
-The original source and finite private script remain until actual acceptance;
-implementing this code does not itself convert the running installation.
-
 Only an actual structure or semantic change changes a format marker. Developer
 intermediate layouts do not create support obligations. A later format-changing
 release supplies its own bounded conversion and verification, then retires it;
 there is no permanent older-version ladder or promise to open retired backups
-with the newest binary. This work is independent of account portability tickets
-19–22 and does not implement export/import.
+with the newest binary. This storage-format convergence was independent of
+the historical account-portability work. Current offline export/import is
+implemented; its collection and restoration contract is maintained in
+[account portability](../backup-and-migrate.md#account-export-and-import).
+
+## 账户搬迁的开发约定
+
+`server.portability` 提供一个公共离线导出/导入实现，CLI 是薄入口，各领域维护自己
+的选择、排除和恢复规则。同版空数据目标、当前 home 布局及可变 home 前缀是支持
+边界；用户侧范围和操作步骤只维护在
+[账户导出与导入](../backup-and-migrate.md#account-export-and-import)。
+
+每次按真实账户归属、资源注册和目录收集，不能写死今天的应用名、vault 位置或数量。
+普通内容增长自动纳入。新增持久类型、字段/关系、根或格式时，同次变更更新
+`server/db/portability.py`、`server/portability.py` 或 `server/wiki/portability.py`
+的相关规则，明确排除项并验证往返；不预造迁移插件框架。
+
+源端只导出稳定资料：未决写入交原 owner 收束；稳定副本完成后恢复源端，再压缩。
+导入先核验，再私有暂存、重绑明确的系统路径和本机身份，持久化后启用。不以单库
+一致性冒充跨资源快照，不扫描改写任意正文/第三方代码，不把源执行过程搬到目标。
+
+账户搬迁专项的隔离验收覆盖首次导出、增长后再次导出、源端离线后的独立导入、
+原账户登录、agent 配置/memory/Wiki、应用依赖重装后的数据读写，以及中断拒绝。
+专项用例、夹具和审查副本按用户要求退役；这是保留的历史验收结论，未来语义变更
+仍需当次验证，不免除现行权限、完整性与恢复测试，也不证明生产曾执行搬迁。
+
 
 ## Regression coverage and retired assertions
 
@@ -278,6 +267,60 @@ provider scope remain in [AGENTS](../../AGENTS.md#verification); deployment foll
 or startup tests does not establish that production was converted or released.
 
 ## Historical evidence
+
+The following handoff examples are frozen implementation/validation evidence
+recorded by source revision `fd7ab9c9bf312c1366eaa111d887c120cebb5e6f`.
+Statements about an observed installation or unconverted production database
+refer to those original checks; they are not a current deployment inspection.
+The finite converters and temporary fixtures are owned by that release/recovery
+work, not ordinary startup or a permanent migration API.
+
+### Main 6→7 example and retained-fact verification
+
+A format-6 installation requires this release's finite publication conversion
+after its original writers retire: append only `native_inputs` as `[]` and commit
+marker 7 in the same SQLite transaction. Ordinary startup never performs it.
+Read-only preflight checks complete declarations, integrity, foreign keys and
+exact `table_xinfo` against the declared baseline and the four verified historical
+column orders. The writer transaction repeats those checks, preserves original
+column metadata and compares every original table's typed row multiset, including
+duplicate counts and NULL/TEXT/BLOB/numeric distinctions. The candidate's complete
+verifier runs before COMMIT. Format-7 reentry verifies and retains already committed
+native evidence; uncertain COMMIT keeps the publisher closed for fresh inspection
+without restoring old data or replaying inputs. This conversion does not admit
+arbitrary historical/intermediate layouts or revive deleted conversations.
+
+The 6→7 boundary was checked on an isolated fresh snapshot of the actual retained
+installation; all twenty original tables preserved their metadata and typed facts.
+Temporary private checks cover populated canonical/historical layouts, malformed
+baseline refusal, process loss before COMMIT, lost COMMIT acknowledgment, current
+reentry and the real preflight entry before consuming a publication permit.
+Current regressions cover native proof validity, terminal/restart preservation,
+fresh creation and mismatch refusal. These are implementation/validation facts;
+the production database has not been converted by this development task.
+
+### Earlier Wiki 16→17 dispatch-return example
+
+The preceding dispatch-return release started from the observed main 4 / Wiki 16
+installation. Main has no physical format change. The finite Wiki handoff adds
+`dispatch_generation` to the existing job state and subscription uniqueness,
+preserves subscription IDs, snapshots and ACKs, and commits marker 17 with
+notification protocol 4. The observed installation has only completed jobs,
+acknowledged notices and settled automatic return inputs. The bounded handoff
+rechecks these facts, retains historical subscriptions in generation zero and
+initializes the completed jobs' current generation to one without a subscriber.
+This closes consumed return scopes without relabelling their original identities
+or guessing historical dispatchers. A new caller explicitly retrieves the saved
+result; unfinished legacy owners block this handoff and retain their actual
+recovery responsibility.
+
+The handoff checks the original declarations read-only, compares exact retained
+facts before/after, and verifies the current layout in the conversion transaction.
+The original source and finite private script remain until actual acceptance;
+implementing this code does not itself convert the running installation.
+
+### Earlier main 5→6 evidence
+
 
 The 2026-10-31 main 5→6 handoff check used a fresh read-only backup of the actual
 running installation, including nonempty BG records and a persisted delegation

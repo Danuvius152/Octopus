@@ -1,7 +1,7 @@
 """Forking and duplicating a session, and recovering a fork that was interrupted.
 
 One slice of `SessionManager`, which was a single 4,017-line class with 84
-methods (docs/2026-09-25-polish-pass.md). Split by responsibility; the
+methods (docs/post-mortems/2026-09-25-polish-pass.md). Split by responsibility; the
 methods are unchanged and still reached through one `session_manager` object,
 so no call site moved.
 """

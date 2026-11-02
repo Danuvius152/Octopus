@@ -150,6 +150,17 @@ Complete the release checks during validation and reuse valid results. When the
 user says to release, proceed directly with [自动发布](local-wsl.md#自动发布);
 routine release preparation does not open another review or approval round.
 
+### Conditional automation work
+
+The upstream polish plan's remaining offline-E2E automation goal is retained:
+choose its execution frequency, isolated environment and acceptable elapsed cost
+before adding it to an automatic gate. `scripts/check.sh` currently runs browser
+E2E only with `--e2e`; this candidate does not change that default or the release
+requirements above. Adopt automation when a repeatable offline environment and
+measured cost justify it, then verify that failures are visible and no live
+model or production state is used. Source: the
+[fixed upstream polish plan](https://github.com/archeryue/Octopus/blob/fd18c3407a7c61fb19074f475b357871edf1dabb/docs/plans/polish-2026-09.md).
+
 ## Test Coverage
 
 Use `.venv/bin/pytest tests/ --collect-only -q` with the relevant marker/opt-in
@@ -166,94 +177,61 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 | Offline browser E2E | `cd web && bun run test:e2e:fast` | Real browser plus isolated backend: login/accounts, sessions, input recovery, sidebar/pins, attachments, Wiki cards and page readiness. Uses a test-only harness and verifies an offline execution audit; actual provider behavior needs the live tier. |
 | Codex browser E2E | `cd web && bun run test:e2e:llm codex.spec.ts codex-app-server.spec.ts` | Real default Codex creation, complete streamed response, Monitor, original-receipt deduplication and precise native resume after reload/reopen. Needs the pinned, signed-in Codex CLI. |
 
-Both browser files exercise ordinary App Server without a transport opt-in;
-`OCTOPUS_CODEX_APP_SERVER_BINARY` must resolve to the
-[G0-pinned binary](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume).
-App Server live pytest in `tests/test_codex_app_server_real.py` covers exec-origin
-and native-origin cold history. Old exec history is seeded by a test-only external
-CLI, then resumed through the ordinary product path; it does not retain a product
-exec fallback. Separate live cases exercise nested wait/followup, root-early helper
-partial/retirement, fresh-file metering and saved history/fork behavior.
-The native question smoke separately enables G0's
-`features.default_mode_request_user_input` **only inside that test**. G0 leaves
-this capability disabled in Default mode. The smoke observes a real
-`item/tool/requestUserInput`, original connection/thread/turn/attempt, native
-question ID and response, an unpredictable human answer's file effect, SQLite
-association and resource retirement. It proves the explicitly enabled protocol;
-it does not claim ordinary Default-mode turns expose the tool. The existing
-HTTP MCP question test remains a separate guarantee.
-Live logical requests may recover across attempts: the question smoke binds the
-run that actually owns the question, and resource checks require every original
-attempt to retire rather than requiring a single-host tuple.
+### Topic regression entry points
 
-`tests/test_codex_app_server_monitor.py` verifies real secure-reader callbacks
-before delayed typed root/child association, cold snapshot replay, rejected work,
-finite stalled-read closure and disposable capacity loss through the original
-Owner and Monitor query. `tests/test_codex_app_server_preservation.py` checks the
-four distinct save boundaries, including accepted-but-processing-unconfirmed
-steer. `tests/test_codex_cutover.py` checks default profile/capability consistency
-and removal of the ordinary exec entry; `tests/test_fork_native_copy.py` and
-`tests/test_codex_app_server_fork.py` retain legacy and native recovery coverage.
+Select the smallest check that can disprove the changed behavior. The current
+contracts own their detailed counterexamples; the table below connects those
+boundaries to verification without maintaining a second per-file inventory.
 
-Native question/control and output regressions use controlled stdio peers in
-`tests/test_codex_app_server_questions.py` and `tests/test_codex_app_server_output.py`.
-Their function-scoped runtime, frame builders and injection tools live in
-[`tests/native_app_server.py`](../tests/native_app_server.py), which keeps the
-original Manager, SQLite database and cleanup together and imports no case modules.
-[`tests/session_runtime.py`](../tests/session_runtime.py) owns shared dispatcher
-observations. Consumers import these support modules directly and retain their
-separate behavior assertions.
-Short steer-ACK and accepted-input idle budgets start only after their original
-root has been prepared or its acceptance committed. Applying those budgets to
-process startup instead tests a different recovery path. New content explicitly
-wakes the Owner after a test changes a runtime idle budget.
+| Changed boundary | Contract and representative checks |
+| --- | --- |
+| Native start, input evidence, questions, completion and recovery | [Codex](implemented/codex-backend.md), [input reliability](implemented/input-reliability.md), [shared completion](implemented/architecture-contract.md); `test_codex_app_server_*` and `test_codex_native_recovery.py` |
+| Original App/SSE/build/schedule/Wiki/delegation consumers | The same Codex contract plus [applications](implemented/applications.md), [Wiki](implemented/wiki-development-summary.md), [delegation](implemented/agent-collaboration.md); native results/effects tests retain the original receipt and real artifact/publication checks |
+| Output, native items, image paths and child details | [Native children](implemented/native-subagents.md), [Monitor](implemented/codex-performance-monitor.md); output/items/images/details tests and `native-output.spec.ts` / `native-items.spec.ts` |
+| History, creation uncertainty and file attribution | [Fork](implemented/session-fork.md), [rewind](implemented/session-rewind.md), [storage](implemented/current-storage-format.md), [backup](backup-and-migrate.md); fork/preservation tests and the live old/native-history cases |
+| Read/WS/reconnect lifecycle | [Frontend reads](implemented/frontend-list-reconciliation.md); colocated store/transcript/component tests and offline browser fixtures |
+| Wiki HTTP, maintenance and database teardown | [Wiki](implemented/wiki-development-summary.md); `test_wiki_test_runtime.py` and affected API/job tests |
+| Background work and installation drain | [BG](implemented/background-tasks.md), [installation](implemented/installation-lifecycle.md); affected BG/service/handoff tests |
 
-They exercise the original Owner, SQLite and publication path with explicit
-storage, writer, reader and process-group barriers: dual RPC IDs, late answers,
-Stop/conflicting controls, input-proof waits, retained late items, scoped work
-rounds and failure before/after child terminal. Nonblocking questions leave the
-idle deadline active; mixed text/choice answers preserve both native question IDs
-and the saved product question. Wrong binary preparation preserves the unsent
-input without launching the peer. Shared Harness/Owner regressions
-retain both Claude and Codex offline coverage. The selected nested G0 frame
-fixture is protocol replay, not a new live execution.
+A controlled peer or browser fixture proves the boundary it actually exercises.
+It does not establish a new live-provider run, deployment, or arbitrary recursive
+completion. Shortened-clock tests do not establish an actual 300-second wait.
+Keep failed initial runs and passing targeted follow-ups distinct when composing
+evidence under the reuse policy above.
 
-`tests/test_codex_app_server_completion.py` exercises original Owner admission,
-root status, active/retirement budgets, stalled storage with real TERM/KILL,
-Stop selection before recording, finite late items and start-wait failure.
-Missing necessary root items and legal empty replies have separate cases.
-Retirement-failure cases retain the actual process-group cleanup and inject lost
-exit proof; they observe the existing fatal OS-exit boundary without terminating
-pytest. Shared failure probes separately exercise the real service exit.
-`tests/test_codex_app_server_results.py` drives actual App ask/SSE/history and
-named-delegation consumers; session-result tests reject bad references without
-fallback. These controlled peers establish product timing and persistence,
-without claiming a new live-provider run or full R2 cutover. The shared replay
-fixture also checks additive native fields across backend snapshots, WS replay
-and frontend refresh. A lost internal session-start notification remains distinct
-from cancellation of the finite output reader.
+### Shared fixtures and protocol evidence
 
-`cd web && bun e2e/run.ts offline native-output.spec.ts --workers=1` verifies
-native root/child partials with the same item ID, snapshot-card anchoring,
-per-item completion, reconnect and reload in the actual browser. Explicit local
-HTTP/WS fixtures isolate presentation from native protocol and persistence;
-backend process tests supply that separate evidence. Source-adjacent store and
-transcript tests cover stale snapshots and service-generation changes. Retain
-failed logs and combine unchanged full-run evidence with affected-module fixes
-under the reuse policy above; passing browser mocks do not certify R2 cutover.
+- `tests/native_app_server.py` keeps its function-scoped runtime, original Manager,
+  SQLite database and cleanup together. `tests/session_runtime.py` owns shared
+  dispatcher observations. Import support modules directly, not case modules.
+- Short steer-ACK and accepted-input idle budgets begin after original-root
+  preparation or acceptance commit. A test changing runtime idle budgets must
+  wake the Owner; otherwise it probes startup or sleeping dispatch, not the
+  intended deadline. Retirement tests retain real process-group cleanup even
+  when injecting loss of exit proof.
+- `tests/wiki_api.py` owns HTTP account/Manager/database fixtures;
+  `tests/wiki_job_runtime.py` adds authenticated job helpers.
+  `tests/wiki_jobs.py` is a separate store-only fixture and cannot substitute
+  for the HTTP account. Teardown through `db.close()` drains turns, joins Owners
+  and only then closes storage. Frontend WS lifecycle tests reuse
+  [`Socket`](../web/src/test-support/socket.ts) with explicit callback ordering.
+- Ordinary App Server has no transport opt-in. `OCTOPUS_CODEX_APP_SERVER_BINARY`
+  must resolve to the [pinned binary](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume).
+  Live exec-origin history is seeded only by an external test CLI, then resumed
+  through the product path; there is no ordinary product exec fallback.
+- The native question smoke enables `features.default_mode_request_user_input`
+  only inside that test. Its question/answer/file-effect/SQLite/retirement
+  evidence does not imply ordinary Default-mode tool availability. HTTP MCP
+  questions remain a separate guarantee; recovered attempts retain the original
+  question owner and every original attempt must retire.
+- The [0.166 schema fixture](../tests/fixtures/codex-app-server-0.166-contracts.json)
+  comes from the verified binary's `app-server generate-json-schema --experimental`.
+  Schema/frame replay is protocol evidence, not a new model call or permission
+  grant. The pinned local HTTP 503 probe is fault injection, not an upstream
+  outage; capacity or media-generation observations prove only their observed
+  stages. Saved artifact, row and file effects remain independently verifiable.
 
-Wiki HTTP fixtures live in [`tests/wiki_api.py`](../tests/wiki_api.py); their
-function-scoped Manager and database stay together. Teardown uses `db.close()`:
-its registered hooks drain active turns before joining Owners and closing
-storage. [`tests/test_wiki_test_runtime.py`](../tests/test_wiki_test_runtime.py)
-checks that boundary with an original live stand-in process, recorded terminal
-and proven retirement. [`tests/wiki_job_runtime.py`](../tests/wiki_job_runtime.py)
-adds authenticated job fixtures and controlled curator/publication helpers.
-[`tests/wiki_jobs.py`](../tests/wiki_jobs.py) retains the separate store-only
-fixture with a synthetic owner; it cannot substitute for the HTTP account.
-These shared support modules do not import test-case modules. Frontend WS
-lifecycle tests share [`Socket`](../web/src/test-support/socket.ts), retaining
-each scenario's initial state and explicit callback ordering.
+### Math-rendering compatibility
 
 [`MarkdownMath.test.tsx`](../web/src/components/MarkdownMath.test.tsx) exercises
 inline/display math and inherited-trust rejection in both actual chat and file
@@ -267,70 +245,6 @@ support the patched renderer. The
 [`math-rendering` browser smoke](../web/e2e/math-rendering.spec.ts) checks real
 chat/file preview math, layout and locally loaded fonts; only model-based file
 name resolution is mocked.
-
-`tests/test_codex_app_server_completion.py` checks Stop before outcome selection,
-after selection before commit, after commit before notification, and after
-receipt delivery. `tests/test_codex_app_server_stop.py` adds the controlled
-process/SQLite path through question waiting, nested helper observations,
-silent process-group cleanup, independent BG returns, manual correction and
-explicit queue resumption. Service reentry retains initial/steer unknown and
-accepted-without-consumption evidence without another business send. Existing
-recovery and original-resource tests retain unconfirmed-writer refusal.
-`tests/test_native_child_details.py` exercises the authenticated saved-item API,
-delayed child binding, precise pages/ownership, archived and damaged records,
-and reads concurrent with Stop. Native detail component and browser tests
-check late pages, same-service reconnect and saved body after reload, keeping
-chat high water and model execution unchanged.
-
-`tests/test_codex_app_server_effects.py` drives the real build, schedule and Wiki
-worker entrances with original receipts, actual artifacts/publication receipts
-and a real redirected process-group retirement barrier. It covers empty answers,
-helper partials, root failure, Stop/revocation, pending questions and failed
-notification without another execution. `tests/test_codex_app_server_errors.py`
-keeps typed bound-root auth separate from child/tool/stderr and internal retry,
-including error notification before ACK and generic RPC uncertainty. Repeated
-unrelated/ended-child or nonretry diagnostics cannot renew idle. Valid bound
-`willRetry` activity keeps its original attempt alive; a new send requires the
-separate native recovery evidence and original Owner budgets.
-
-`tests/test_codex_native_items.py`, `test_codex_native_capabilities.py` and
-`test_codex_native_images.py` drive pure conversion and original Owner/stdio,
-SQLite and WS boundaries for statuses, complete-only/duplicate/empty records,
-negative requests, Default/config admission and original image paths. The
-[pinned generated-schema fixture](../tests/fixtures/codex-app-server-0.166-contracts.json)
-checks all item/request variants against conversion/policy coverage. It comes
-from the verified binary's `app-server generate-json-schema --experimental`;
-schema generation is protocol evidence, not a model call or permission grant.
-Image tests cover inline/file-ID projection, decoded and metadata budgets,
-prefix preservation, current-file change/disappearance and existing viewer limits.
-`web/e2e/native-items.spec.ts` checks WS, actual browser image decoding, path copy,
-history reload and a later missing file.
-
-`tests/test_codex_native_recovery.py` covers active root/child reconnect activity,
-legacy failure phrases, typed errors and message/additional-detail capacity,
-quota/auth priority, captured controls after preparation refusal, accepted versus
-unknown input, budgets, original retirement and Stop/revocation/deadline.
-The results module includes App/SSE/build/named-delegation recovery consumers.
-Shortened-clock controlled-stdio cases do not establish a real 300-second wait.
-The pinned-CLI local HTTP 503 experiment separately observed native retry/backoff
-and one accepted input; it is fault injection, not an upstream outage. Real media
-generation verifies an actual saved file, while a live capacity occurrence proves
-only the stages actually observed. Keep failed initial checks and successful
-targeted follow-ups distinct when composing evidence.
-
-`tests/test_codex_app_server_fork.py` covers native actual ID, creation unknown,
-saved-strategy cold cleanup, retirement before installation, copied result/detail
-reads after source deletion, product-seq steer rewind and retained input uncertainty.
-Post-ACK unexpected turn/item/request and unreadable-protocol cases retain the
-actual artifact, row and working-directory effects through cold recovery;
-the retirement test checks that ACK alone never opens automatic cleanup.
-Real Git update/rename cases cover root/child and complete-only observations;
-unrelated edits and connector JSON cannot acquire file-revert attribution.
-The selected `test_live_old_and_native_history_fork_continue_independently` cases
-in `tests/test_codex_app_server_real.py` verify real pinned native fork, recalled
-context and independent file effects for exec-origin and native-origin sources.
-Their existing-login/network isolation follows the live policy below; they do not
-establish default cutover or stronger recursive completion.
 
 ### Coverage measurement (opt-in)
 

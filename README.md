@@ -4,18 +4,19 @@
 into durable, always-on AI agents that run on your own machine and work for you
 around the clock — reachable from your phone or any browser.
 
-One install can serve more than one person. Each **account** is a completely
-separate Octopus — its own agents, sessions, applications, credentials, memory,
-and a workspace it cannot see out of — so a household or a few trusted people
-share the machine without sharing anything else. Signup is invite-only, and the
+One install can serve more than one trusted person. Each **account** owns its
+agents, sessions, applications, credentials, memory and workspace. This is
+application-level account scoping on a shared host; native tools execute with
+the server's OS authority. See the [trust boundary](docs/implemented/multi-tenancy.md)
+and [remaining hardening](docs/plans/multi-tenancy-gaps.md). Signup is invite-only, and the
 first account (created with the installation's setup proof) is the admin who mints the
 invites. It stays a *personal* product either way: there is no cross-account
 collaboration, no shared team space — just several private ones side by side.
 
 Each agent keeps its own persistent setup (prompt, model, tools, schedules,
 connectors), keeps work running in the background across turns, and can reach
-real third-party APIs. Octopus drives the `claude` / `codex` CLIs directly via
-their stream protocols, so there's **no extra API cost** — it uses your existing
+real third-party APIs. Octopus uses Claude stream-JSON and Codex App Server for
+ordinary interaction, so there's **no extra API cost** — it uses your existing
 Claude and ChatGPT subscriptions (or an API key you attach).
 
 ## How It Works
@@ -24,7 +25,7 @@ Claude and ChatGPT subscriptions (or an API key you attach).
 Phone / Browser
   → REST + WebSocket → FastAPI (web UI + API on one port)
       → Agent  (durable: prompt · model · credential · tool policy · connectors)
-          → backend:  Claude Code   or   Codex      (local CLI subprocess, stream-json)
+          → backend: Claude stream-JSON or Codex App Server (local subprocess)
           → MCP tools: bg · ask · ask_agent · schedule · research · connectors
                        (served in-process at /mcp/<name>, not spawned per session)
 ```
@@ -44,15 +45,17 @@ Phone / Browser
   tokens encrypted at rest; the OAuth redirect URI is derived from your request
   so it works behind a tunnel. ([setup guide](docs/connectors-setup.md))
 - **Credentials** — Store backend API keys / OAuth logins in-app, encrypted at
-  rest (Fernet, under your account's key), and attach them per agent; falls back
-  to the CLI's own login (`claude login` / `codex login`) when none is attached.
-- **Accounts & isolation** — Multiple people on one install, each fully
-  isolated. Accounts sign in with a username + password (scrypt-hashed);
+  rest (Fernet, under your account's key), and attach them per agent. Only an
+  absent explicit binding can use the CLI's host login; an invalid explicit
+  binding fails instead of silently changing identity.
+- **Accounts & isolation** — Multiple trusted people on one install, with
+  account-scoped business state. Accounts sign in with a username + password (scrypt-hashed);
   signup is **invite-only** (admins mint codes with a use count and TTL). Every
   owned row — sessions, agents, applications, credentials, connectors, schedules
-  — carries a `user_id`, so one account never sees another's data, and each
-  account's secrets are encrypted under a **per-user key** so even the database
-  can't cross the line. A session's working directory is **confined** to the
+  — carries a `user_id`; each account's secrets are encrypted under a
+  **per-user key** wrapped by the installation master key. This does not provide
+  an OS sandbox or protection from the operator. A session's working-directory
+  selection is **confined** to the
   account's own workspace (a relative path means "inside my workspace"; admins
   can grant extra roots), and each account gets its own concurrency quota.
   Admin surface: invites, disable/enable people, operator-only Monitor. An empty
@@ -227,8 +230,8 @@ Setup captures the effective settings, including shell overrides, in the
 private `*.service.env` file beside the installation database (mode 0600).
 The unit and application both read that file; secrets are absent from the unit
 text. Change setup inputs and rerun setup after natural drain to update the
-service configuration. Token rotation updates its active environment file.
-Setup rejects an outdated token instead of replacing the active configuration.
+service configuration. Setup rejects an outdated setup proof instead of
+replacing the active configuration.
 For `--manager=system`, run setup as `--service-user`; sudo is used only to
 install the unit and reload systemd, keeping private data owned by that user.
 
@@ -292,22 +295,14 @@ This WSL installation defaults to Codex. Claude is currently unavailable;
 Claude-only and mixed-provider live tests are not run and must not be reported
 as passed. Offline tests still cover both backends. See the
 [local validation scope](AGENTS.md#backend-validation-scope) before running the
-provider-specific CLI/browser checks below.
+provider-specific CLI/browser checks.
 
-```bash
-./scripts/check.sh                # every gate: ruff · mypy · pytest · eslint · vitest · tsc · contracts · docs index
-
-.venv/bin/pytest -m "not real"    # 1,313 backend tests, hermetic — no CLI, no network, ~34s
-.venv/bin/pytest -m real          # the 34 that drive a live model (needs a signed-in claude / codex)
-cd web && bun run test            # 299 frontend unit tests (vitest)
-cd web && bun run typecheck       # TypeScript check (tsc -b across the project)
-cd web && bun run test:e2e        # 107 Playwright tests in a real browser
-cd web && bun run test:e2e:fast   # ... the 67 that need no model (~40s)
-cd web && bun run test:e2e:llm    # ... the 40 that drive real Claude / Codex turns
-```
-
-The real-CLI tier is selected by marker rather than by filename, so a plain
-`--collect-only` never spawns a model.
+Use [`testing.md`](docs/testing.md#test-coverage) for suite commands, provider
+selection and isolated test state. `./scripts/check.sh` runs the code-commit
+gates. Live pytest requires **`--run-real` and the appropriate marker selection**;
+`-m real` alone excludes those cases. Counts come from current collection, not
+a copied inventory. Documentation-only work checks affected links, both generated
+indexes and `git diff --check`.
 
 ### Pre-commit hooks (optional)
 
@@ -320,7 +315,8 @@ is staged, so a doc-only commit stays fast.
 
 ## Architecture
 
-See [docs/](docs/) for all documentation — start with
+See the [documentation index](docs/README.md) for all documentation and the
+[roadmap](docs/roadmap.md) for upcoming choices and dependencies. Start with
 [docs/architecture.md](docs/architecture.md) for system design, data flow, and
 the WebSocket protocol. [docs/implemented/](docs/implemented/) owns current
 contracts and their reasons; [docs/plans/](docs/plans/) holds unfinished changes.

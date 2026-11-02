@@ -1,6 +1,6 @@
-# Harness: current runtime boundary
+# Harness：当前运行时边界
 
-> **Status:** implemented — One public Harness with runtime profiles, shared execution ownership and explicit capabilities.
+> **Status:** implemented — 统一公共 Harness、运行时 profile、执行资源所有权与显式能力。
 
 ## Responsibility and rationale
 
@@ -27,11 +27,31 @@ avoid a persistence/API migration for a vocabulary-only change.
 
 ## Assembly, execution and retirement
 
+<a id="instruction-assembly"></a>
+### Instruction assembly
+
 `assembly.py` prepares a neutral `TurnContext`: absolute cwd, persona and trusted
 turn instructions, selected MCP entries, credential, memory location and model
 settings. A profile renders that context into its protocol. MCP entries retain
 namespace, transport and identity; changing a namespace changes model-visible
 tool names. Connector and built-in tools share this assembly path.
+
+`compose_system_prompt` combines framework tool guidance, saved Agent persona,
+connector instructions and the profile-selected memory blurb. Framework guidance
+describes Octopus tool/runtime behavior; persona describes the role; project
+AGENTS/CLAUDE files own project rules; canonical memory owns durable preferences
+and pointers. They do not become four copies of the same engineering contract.
+Request-specific trusted knowledge restrictions stay associated with that request.
+
+Claude renders the composed instructions into its native invocation and can
+conditionally retain a compatible host; ordinary Codex applies controller
+instructions at thread start/resume and updates a resumed thread without changing
+saved Agent settings. The constrained exec leaf and tool-free worker keep their
+own narrower assembly. The historical fresh-process observation in
+[prompt notes](../reference/cli-system-prompt-notes.md) does not override current
+reuse, injection or tool authority.
+
+### Execution and resources
 
 SessionOwner owns mutable execution state. Managed preparation, spawn, stdin,
 reader and retirement operations report their original results to it. HarnessRun
@@ -223,8 +243,9 @@ combinations through real subprocess input, API projection and Wiki tool visibil
 
 Ordinary App Server start and precise resume are described in
 [the Codex contract](codex-backend.md#opt-in-app-server-start-and-precise-resume).
-The [runtime roadmap](../plans/engineering-runtime-roadmap.md) retains the separate
-post-final recursive capability goal and unfinished DeepSeek scope.
+The [paused execution scope](../plans/runtime-execution-scope.md) retains the
+stronger post-final capability goal; the
+[DeepSeek plan](../plans/deepseek-harness-backend.md) owns its unimplemented backend.
 The [original implementation](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/harness-layer.md)
 contains old API sketches and rollout evidence; current verification follows
 [testing.md](../testing.md).

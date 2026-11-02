@@ -74,12 +74,14 @@ web/src/                React UI, zustand state, WebSocket handling and unit tes
 web/e2e/                Playwright; test.ts is the shared offline entry
 tests/                  Backend correctness and explicitly selected integration tiers
 scripts/                Checks, generated contracts and documentation index
-docs/                   Current guides, implemented contracts and unfinished plans
+docs/                   Current guides, contracts, unfinished plans and version references
 .scratch/               Existing temporary tasks; new tasks use account workspace
 ```
 
 Read the relevant part of [architecture.md](docs/architecture.md) for component
-relationships. For completion consumers, failure handoff or retirement, read
+relationships. Use [the roadmap](docs/roadmap.md) for future priorities and
+dependencies, and [the documentation index](docs/README.md) to find a topic.
+For completion consumers, failure handoff or retirement, read
 [the execution contract](docs/implemented/architecture-contract.md#输入完成与资源退休):
 business outcome, notification delivery
 and resource retirement have separate authorities.

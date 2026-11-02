@@ -1,6 +1,12 @@
-# Codex: interactive execution and tool-free text calls
+# Codex：普通交互与无工具文本调用
 
-> **Status:** implemented — Ordinary App Server turns with bounded recovery, an independent Research exec leaf and a separate subscription text worker.
+> **Status:** implemented — 普通 App Server 回合、有界恢复、独立 Research exec leaf 与订阅文本 worker。
+
+| 调用路径 | 当前责任 |
+| --- | --- |
+| 普通 App Server | 会话交互、原生输入接纳、活动根引导、问题、原生输出与有界退休 |
+| 独立 exec leaf | 有界 Research web 查询，不接受普通对话或历史 resume，不作隐式 fallback |
+| 无工具 text worker | 调度解析等文本调用，单独拥有认证／配置与资源，不运行模型工具循环 |
 
 ## Interactive execution
 
@@ -23,6 +29,8 @@ Saved custom subagent definitions remain intact across edits and backend changes
 Claude renders those definitions into its native configuration. Codex currently
 uses its built-in helpers; saving a definition does not map its custom role,
 model or tool restrictions into Codex. The agent form states this boundary.
+The remaining mapping is owned by the
+[native-role plan](../plans/codex-native-roles.md).
 
 Native stdout events supply product output; bounded verified rollout observations
 supply passive measurements. Native helper cards describe observation, not proof that

@@ -10,7 +10,7 @@ across the backend, each written as:
         pass
 
 which is right about the cancellation and silent about everything else
-(docs/2026-09-25-polish-pass.md). The `CancelledError` is expected and says
+(docs/post-mortems/2026-09-25-polish-pass.md). The `CancelledError` is expected and says
 nothing; any other exception is the task's last words — a stream decode that
 blew up, a DB write that failed on the way out — and a teardown path is exactly
 where those used to disappear. So: swallow the cancellation, log the rest, and

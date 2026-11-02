@@ -8,6 +8,9 @@ verification and repository actions.
 
 - Current guides describe current behavior. Architecture explains component
   relationships, state ownership, failures and extension points.
+- `README.md` owns document discovery and generated status indexes;
+  [roadmap.md](roadmap.md) owns upcoming choices, priorities, dependencies and
+  start conditions. Detailed designs stay in their topic plans.
 - `implemented/` owns contracts the current code actually follows, by subject:
   behavior, ownership, limits and necessary reasons. Revise the owning contract
   when behavior changes; code/doc disagreement needs investigation, not a move
@@ -18,6 +21,9 @@ verification and repository actions.
   a mixed document must be split before moving it.
 - [testing.md](testing.md) owns verification policy; [local-wsl.md](local-wsl.md)
   owns local operating procedures. Link to their details from other documents.
+- `reference/` holds version-bound protocol observations and experiments. State
+  their version, method, observed result and limits; link current contracts.
+  Historical evidence does not determine today's implementation or deployment.
 - `review/`, repository `.scratch/` and the account workspace are temporary.
   New task materials and isolated worktrees use the account workspace under
   [local task conventions](agents/issue-tracker.md); existing `.scratch/` work
@@ -48,6 +54,11 @@ verification and repository actions.
   boundary; they do not require a rewrite after each patch or review round.
 - Give each explanation one owner. Keep the complete local contract together:
   behavior, timing, ownership, failure and consequences for its consumers.
+- Start with the question the page answers: current behavior, proposed change,
+  next choice or version observation. When implementation completes, update
+  the body as well as its status; retain unfinished scope in its topic plan.
+  Split by reader task and responsibility, preserving necessary local context
+  and reasons rather than enforcing a line-count limit.
 - Preserve conditions, exceptions, negative guarantees and useful rationale
   when shortening. Remove repetition and implementation-session narration.
 - Ordinary fixes update their existing owner when needed; they do not require

@@ -1,7 +1,7 @@
 """Backwards-compatible re-export of the persistence layer.
 
 The implementation moved to `server/db/` — one file per subject rather than
-one 2,600-line class (docs/2026-09-25-polish-pass.md). This module stays
+one 2,600-line class (docs/post-mortems/2026-09-25-polish-pass.md). This module stays
 so that `from .database import Database`, which appears throughout the codebase
 and the tests, keeps working: the split was meant to make the code readable,
 not to make 40 call sites churn.
