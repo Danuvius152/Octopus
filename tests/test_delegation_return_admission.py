@@ -7,9 +7,9 @@ import pytest
 from server.agent_manager import AgentManager
 from server.mcp_identity import close_work
 from server.sessions.runtime_types import SessionOwnerUnavailable
+from tests.session_runtime import fail_destination_owner
 from tests.test_delegation_restart_security import wait_live_scope
 from tests.test_delegation_work import work_runtime as work_runtime
-from tests.test_source_return_owner_failure import fail_destination_owner
 
 
 async def test_terminal_material_preparation_does_not_wake_archived_parent(work_runtime, monkeypatch, tmp_path):

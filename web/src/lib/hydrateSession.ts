@@ -5,7 +5,7 @@ import { applyTranscript } from "./transcript";
 import { readDispatchState } from "./sessionDispatch";
 import { sessions, type SessionObservation } from "./sessionList";
 import { observeDelegations } from "./delegationReads";
-import { SnapshotReads } from "./snapshotReads";
+import { SnapshotReads, TaskSnapshotReads } from "./snapshotReads";
 import type { BgTask, PendingQuestion, ResearchJob, SessionAuxiliaryKind, SubagentRun } from "../stores/sessionStore";
 
 const API = window.location.origin;
@@ -108,13 +108,17 @@ export function observeSession(sessionId: string, purpose: "complete" | "detail"
     }
   })();
   let delegations: ReturnType<typeof observeDelegations> | undefined;
+  const auxiliary: Array<{ cancel: () => void }> = [];
   if (purpose === "complete") {
-    void loadAuxiliarySnapshot(sessionId, "background", start, done, current).catch(() => {});
-    void loadAuxiliarySnapshot(sessionId, "research", start, done, current).catch(() => {});
+    for (const kind of ["background", "research"] as const) {
+      const reading = observeAuxiliarySnapshot(sessionId, kind, start, done, current);
+      void reading.done.catch(() => {});
+      auxiliary.push(reading);
+    }
     delegations = observeDelegations(sessionId, done);
     void delegations.done.catch(() => {});
   }
-  return { done, cancel: () => { active = false; lifetime.finish(); delegations?.cancel(); confirmation?.cancel(); } };
+  return { done, cancel: () => { active = false; lifetime.finish(); delegations?.cancel(); confirmation?.cancel(); auxiliary.forEach((read) => read.cancel()); } };
 }
 
 export async function loadSessionSnapshot(sessionId: string) {
@@ -128,11 +132,7 @@ export async function loadBgTaskSnapshot(sessionId: string): Promise<void> {
 
 /** Cancelling a view's observation never cancels the server's job. */
 export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliaryKind, bgTaskId?: string) {
-  let active = true;
-  return {
-    done: loadAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), undefined, () => active, bgTaskId),
-    cancel: () => { active = false; },
-  };
+  return observeAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), undefined, undefined, bgTaskId);
 }
 
 // Outstanding reads order replaceable fields and errors. Valid older successes
@@ -140,24 +140,29 @@ export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliar
 const auxiliaryReads: Record<SessionAuxiliaryKind, SnapshotReads> = {
   background: new SnapshotReads(), research: new SnapshotReads(),
 };
+const backgroundReads = new TaskSnapshotReads();
 
-async function loadAuxiliarySnapshot(
+function observeAuxiliarySnapshot(
   sessionId: string, kind: SessionAuxiliaryKind, start: SnapshotStart,
   acceptedDetail?: Promise<Record<string, unknown> | null>,
   current = () => true,
   bgTaskId?: string,
-): Promise<void> {
+): { done: Promise<void>; cancel: () => void } {
   const lifetime = sessions.observe(sessionId, start);
   const { observation } = lifetime;
-  if (!start.token || !sessions.current(observation)) { lifetime.finish(); return; }
+  if (!start.token || !sessions.current(observation)) { lifetime.finish(); return { done: Promise.resolve(), cancel: () => {} }; }
   const read = auxiliaryReads[kind].begin(sessionId);
+  const taskRead = kind === "background" ? backgroundReads.begin(sessionId) : undefined;
+  const controller = new AbortController();
+  let active = true;
+  const finish = () => { read.finish(); taskRead?.finish(); lifetime.finish(); };
   useSessionStore.getState().setSessionAuxiliaryError(sessionId, kind, null);
   const label = kind === "background" ? "background task details" : "research updates";
   // Start alongside detail, handling rejection immediately. Only its accepted
   // service generation can authorize this paired read's eventual publication.
   const path = kind === "background" ? `bg-tasks${bgTaskId ? `/${encodeURIComponent(bgTaskId)}` : ""}` : "research";
   const response = fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/${path}`, {
-    headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+    headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS)]),
   }).then(async (res) => {
     if (!res.ok) throw new Error(`Could not refresh ${label} (HTTP ${res.status}).`);
     const data: unknown = await res.json();
@@ -167,12 +172,12 @@ async function loadAuxiliarySnapshot(
     if (!Array.isArray(rows)) throw new Error(`Could not read ${label}.`);
     return rows;
   }).then((rows) => ({ rows }), (error: unknown) => ({ error }));
-  try {
+  const done = (async () => { try {
     const detail = acceptedDetail ? await acceptedDetail.catch(() => null) : undefined;
     if (acceptedDetail && !detail) return;
     const generation = detail ? readDispatchState(detail.dispatch_state)?.generation : undefined;
     const result = await response;
-    if (!current() || !sessions.current(observation, generation)) {
+    if (!active || !current() || !sessions.current(observation, generation)) {
       if ("error" in result) throw result.error;
       return;
     }
@@ -185,14 +190,14 @@ async function loadAuxiliarySnapshot(
       throw result.error;
     }
     if (kind === "background" && bgTaskId) store.upsertBgTask(sessionId, result.rows[0] as BgTask,
-      start.bgTasks[sessionId]?.find((task) => task.id === bgTaskId) ?? null, !ownsError);
-    else if (kind === "background") store.setBgTasks(sessionId, result.rows as BgTask[], start.bgTasks[sessionId] || [], !ownsError);
+      start.bgTasks[sessionId]?.find((task) => task.id === bgTaskId) ?? null, !taskRead!.claim(bgTaskId));
+    else if (kind === "background") store.setBgTasks(sessionId, result.rows as BgTask[], start.bgTasks[sessionId] || [], false, taskRead!.claim);
     else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] || [], !ownsError);
     if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, null);
   } finally {
-    read.finish();
-    lifetime.finish();
-  }
+    finish();
+  } })();
+  return { done, cancel: () => { active = false; controller.abort(); finish(); } };
 }
 
 /** Selection, archived viewing and reconnect retain their original event

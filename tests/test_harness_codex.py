@@ -9,7 +9,10 @@ import json
 import os
 from pathlib import Path
 
-from server.harness import assembly
+import pytest
+
+from server.config import settings
+from server.harness import assembly, available_backends, get_harness
 from server.harness.codex import (
     _OCTOPUS_SYSTEM_PROMPT_CODEX,
     CodexEventParser,
@@ -22,6 +25,7 @@ from server.harness.codex import (
 from server.harness.codex_app_server import build_argv as build_turn_argv
 from server.harness.events import HarnessCredential
 from server.harness.profile import OneShotContext, TurnContext
+from server.harness.run import prepare_spawn
 
 
 def _assemble_ctx(*, prompt, wd, resume, credential, model=None, mcp_servers=None, persona=None, session_id=None, web_research=False):
@@ -34,6 +38,46 @@ def _assemble_ctx(*, prompt, wd, resume, credential, model=None, mcp_servers=Non
         model=model, tool_allow=None, tool_deny=None, mcp_servers=entries,
         credential=credential, web_research=web_research,
     )
+
+
+@pytest.mark.parametrize("selection", ["configured", "missing", "default", "nonexecutable"])
+async def test_discovery_and_ordinary_prepare_select_the_same_configured_executable(tmp_path, monkeypatch, selection):
+    from server.harness import codex_app_server, run
+
+    path_dir = tmp_path / "path"
+    path_dir.mkdir()
+    configured = tmp_path / "configured-codex"
+    generic = path_dir / "codex"
+    if selection != "configured":
+        generic.write_text("#!/bin/sh\nexit 0\n")
+        generic.chmod(0o755)
+    if selection in {"configured", "nonexecutable"}:
+        configured.write_text("#!/bin/sh\nexit 1\n")
+        configured.chmod(0o755 if selection == "configured" else 0o644)
+    chosen = "codex" if selection == "default" else str(configured)
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.setattr(run, "_fallback_path_dirs", lambda: [])
+    monkeypatch.setattr(settings, "codex_app_server_binary", chosen)
+    harness = get_harness("codex")
+    assert ("codex" in available_backends()) is (selection in {"configured", "default"})
+    context = _assemble_ctx(prompt="hello", wd=str(tmp_path), resume=None, credential=None, mcp_servers=[])
+    invocation = harness.create_run()
+    argv, kwargs = invocation.build_argv("hello", str(tmp_path))
+    assert argv[0] == chosen
+    # A later configuration change must not change this captured invocation.
+    monkeypatch.setattr(settings, "codex_app_server_binary", "another-codex")
+    prepared, kwargs = prepare_spawn(argv, kwargs)
+    expected = str(generic) if selection == "default" else str(configured)
+    assert prepared[0] == expected
+    if selection == "missing":
+        with pytest.raises(FileNotFoundError) as failure:
+            await invocation._driver.prepare(invocation, context, prepared, kwargs)
+        assert str(configured) in str(failure.value)
+    else:
+        # Presence does not relax the actual binary's pin or launch a probe.
+        with pytest.raises(ValueError, match="verified 0.166.0 binary"):
+            await invocation._driver.prepare(invocation, context, prepared, kwargs)
+    assert codex_app_server.build_argv(context)[0][0] == "another-codex"
 
 
 def test_turn_argv_web_research_uses_readonly_sandbox_and_web_search(tmp_path):

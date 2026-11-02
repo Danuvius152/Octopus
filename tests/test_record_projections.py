@@ -44,7 +44,7 @@ async def db():
       "session_id": "session", "agent_id": "agent", "user_id": "owner", "updated_at": "app-updated"}),
     ("_BG_TASK_COLS", "get_bg_task", "bg", {"stdout": "output", "stderr": "error", "exit_code": 7, "truncated": True,
       "work_id": "round", "knowledge_context": "bg-context", "idle_timeout_seconds": 20, "timeout_seconds": 40}),
-    ("_RESEARCH_COLS", "get_research_job", "research", {"question": "Question", "knowledge_context": "research-context", "injection_status": "pending"}),
+    ("_RESEARCH_COLS", "get_research_job", "research", {"question": "Question", "knowledge_context": "research-context", "injection_status": "delivered"}),
     ("_CONNECTOR_COLS", "get_connector_installation", "connector", {"label": "Account", "scopes": ["read"], "user_id": "owner", "enable_by_default": True, "token_expires_at": "expires"}),
     ("_CUSTOM_COLS", "get_custom_connector", "custom", {"display_name": "Custom", "pkce": True, "scopes": ["write"], "api_base": "https://example.test"}),
     ("_CREDENTIAL_COLS", "get_credential", "credential", {"backend": "codex", "label": "Login", "secret_encrypted": "encrypted-only", "user_id": "owner", "needs_reconnect": False}),

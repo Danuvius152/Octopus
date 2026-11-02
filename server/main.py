@@ -182,7 +182,7 @@ async def lifespan(app: FastAPI):
         # async tasks; injects the final report back into the session.
         started.add("research")
         research_manager.bind(session_mgr=session_manager, db=db)
-        await research_manager.recover_interrupted()
+        await research_manager.recover_interrupted(previous_writers_retired=installation.profile is not None)
 
         # The MCP tool namespaces are served from this app rather than spawned per
         # session (polish-2026-09.md §4 B1). Each one's session manager has to be

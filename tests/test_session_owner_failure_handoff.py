@@ -15,9 +15,216 @@ from server.sessions.owner import SessionOwnerUnavailable
 from tests import test_session_fork_installation as fork_tests
 from tests import test_session_owner_rewind_retirement as rewind_tests
 from tests.accounts import create_account
+from tests.session_runtime import fail_destination_owner
 
 installation = fork_tests.installation
 held_rewind = rewind_tests.held_rewind
+
+
+@pytest.mark.parametrize("held_rewind", [.4], indirect=True)
+@pytest.mark.parametrize("during_close", [False, True])
+async def test_delete_joins_original_failed_owner_before_removing_its_row(held_rewind, monkeypatch, during_close):
+    env = held_rewind
+    owner = env.manager._session_owners[id(env.parent)]
+    entered, release, closing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    read, call = env.database.has_delivery_notice, owner.call_runtime
+
+    async def fail_original_read(*args):
+        await read(*args)
+        entered.set()
+        await release.wait()
+        raise RuntimeError("Original owner failed during deletion")
+
+    async def observe_close(command):
+        closing.set()
+        return await call(command)
+
+    monkeypatch.setattr(env.database, "has_delivery_notice", fail_original_read)
+    monkeypatch.setattr(owner, "call_runtime", observe_close)
+    failing = asyncio.create_task(env.manager.retain_result_notice(env.parent.id, "fail-for-delete", "No notice"))
+    deleting = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if during_close:
+            deleting = asyncio.create_task(env.manager.delete_session(env.parent.id))
+            await asyncio.wait_for(closing.wait(), 2)
+        release.set()
+        with pytest.raises(SessionOwnerUnavailable):
+            await failing
+        if deleting is None:
+            deleting = asyncio.create_task(env.manager.delete_session(env.parent.id))
+        done, _ = await asyncio.wait({deleting}, timeout=.05)
+        assert not done, "Deleting a row must wait for the original resource, even after Owner failure"
+        assert await env.database.get_session_binding(env.parent.id) is not None
+        assert env.processes[0].returncode is None
+        assert await asyncio.wait_for(deleting, 3)
+        assert env.processes[0].returncode == 0 and not Path(f"/proc/{env.identity['pid']}").exists()
+        assert all(task.done() for task in env.readers | env.stdout)
+        assert await env.database.get_session_binding(env.parent.id) is None
+        assert env.manager._session_owners[id(env.parent)] is owner and owner.failed
+        assert len(env.processes) == 1
+        assert env.source.read_text() == "Keep the original workspace bytes.\n"
+    finally:
+        release.set()
+        await asyncio.gather(failing, *([deleting] if deleting else []), return_exceptions=True)
+
+
+@pytest.mark.parametrize("held_rewind", [.3], indirect=True)
+@pytest.mark.parametrize("consumer", ["application", "agent"])
+async def test_original_close_handoff_reaches_application_delete_and_agent_archive(held_rewind, monkeypatch, consumer):
+    from server.agent_manager import AgentManager
+    from server.applications import ApplicationManager
+
+    env = held_rewind
+    owner = env.manager._session_owners[id(env.parent)]
+    apps = ApplicationManager()
+    apps.bind(env.manager, env.database)
+    agent = await AgentManager(env.database).create_agent(name="Retiring agent", backend="codex", user_id=env.parent.user_id)
+    env.parent.agent_id = agent["id"]
+    await env.database.update_session_field(env.parent.id, agent_id=agent["id"])
+    if consumer == "application":
+        await env.database.save_application(app_id="retiring-app", name="Original app", app_dir=str(env.source.parent),
+            user_id=env.parent.user_id, agent_id=agent["id"], session_id=env.parent.id, created_at="now", updated_at="now")
+    entered, release, closing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    read, call = env.database.has_delivery_notice, owner.call_runtime
+
+    async def fail_original_read(*args):
+        await read(*args)
+        entered.set()
+        await release.wait()
+        raise RuntimeError("Original application/agent writer failed")
+    async def observe_close(command):
+        closing.set()
+        return await call(command)
+    monkeypatch.setattr(env.database, "has_delivery_notice", fail_original_read)
+    monkeypatch.setattr(owner, "call_runtime", observe_close)
+    failing = asyncio.create_task(env.manager.retain_result_notice(env.parent.id, "fail-consumer", "No notice"))
+    retiring = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        retiring = asyncio.create_task(apps.delete_application("retiring-app", keep_files=True, user_id=env.parent.user_id)
+            if consumer == "application" else env.manager.archive_agent(agent["id"]))
+        await asyncio.wait_for(closing.wait(), 2)
+        release.set()
+        with pytest.raises(SessionOwnerUnavailable):
+            await failing
+        assert env.processes[0].returncode is None
+        await asyncio.wait_for(retiring, 3)
+        assert env.processes[0].returncode == 0 and len(env.processes) == 1
+        assert env.manager._session_owners[id(env.parent)] is owner
+        assert env.source.read_text() == "Keep the original workspace bytes.\n"
+        if consumer == "application":
+            assert await env.database.get_application("retiring-app") is None
+        else:
+            assert (await env.database.get_agent(agent["id"]))["archived"]
+            assert env.manager.get_session(env.parent.id) is None
+    finally:
+        release.set()
+        await asyncio.gather(failing, *([retiring] if retiring else []), return_exceptions=True)
+        apps.shutdown()
+
+
+@pytest.mark.parametrize("held_rewind", [.25], indirect=True)
+async def test_failed_owner_delete_inside_publication_does_not_wait_for_its_own_subscriber(held_rewind, monkeypatch):
+
+    env = held_rewind
+    entered, allow_delete, deleted, finish_publication = (asyncio.Event() for _ in range(4))
+    async def subscriber(event):
+        if event.get("type") == "delivery_notice":
+            entered.set()
+            await allow_delete.wait()
+            assert await env.manager.delete_session(env.parent.id)
+            deleted.set()
+            await finish_publication.wait()
+    env.manager.on_broadcast("delete-from-subscriber", subscriber)
+    try:
+        await env.manager.retain_result_notice(env.parent.id, "original-publication", "Original material")
+        await asyncio.wait_for(entered.wait(), 2)
+        owner = await fail_destination_owner(env.manager, env.parent, monkeypatch)
+        allow_delete.set()
+        await asyncio.wait_for(deleted.wait(), 3)
+        assert env.processes[0].returncode == 0
+        assert not owner.cleanup.done(), "External publication still belongs to its original subscriber"
+        assert await env.database.get_session_binding(env.parent.id) is None
+    finally:
+        allow_delete.set()
+        finish_publication.set()
+
+
+@pytest.mark.parametrize("reservation", ["fork", "archive"])
+async def test_failed_owner_deletion_keeps_existing_lifecycle_reservations(tmp_path, monkeypatch, reservation):
+    from server.sessions.base import ForkError
+    from server.sessions.owner import RetainResultNotice
+    from server.sessions.owner_runtime import (
+        CloseExecution,
+        ReleaseArchive,
+        ReserveFork,
+    )
+
+    database = Database(str(tmp_path / "reservation.sqlite3"))
+    await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
+    manager = SessionManager()
+    await manager.initialize(database)
+    session = await manager.create_session((await database.get_system_agent())["id"])
+    owner = manager._session_owner(session)
+    claim = object()
+    try:
+        await owner.call_runtime(ReserveFork(True) if reservation == "fork" else CloseExecution("archived", claim))
+        read = database.has_delivery_notice
+        async def fail_original_read(*args):
+            await read(*args)
+            raise RuntimeError("Original reserved writer failed")
+        with monkeypatch.context() as patch:
+            patch.setattr(database, "has_delivery_notice", fail_original_read)
+            with pytest.raises(SessionOwnerUnavailable):
+                await owner.call(RetainResultNotice("fail-reserved-owner", "No notice"))
+        with pytest.raises(ForkError, match="fork or archive"):
+            await manager.delete_session(session.id)
+        assert await database.get_session_binding(session.id) is not None
+        assert session._forking if reservation == "fork" else session._archive_reservation is claim
+        await manager._release_session_reservation(owner, ReserveFork(False) if reservation == "fork" else ReleaseArchive(claim))
+        assert await manager.delete_session(session.id)
+    finally:
+        await database.close()
+
+
+@pytest.mark.parametrize("failure", ["missing", "failed", "timeout"])
+async def test_delete_keeps_session_when_original_cleanup_cannot_confirm_retirement(tmp_path, monkeypatch, failure):
+    from server.sessions import lifecycle
+
+    database = Database(str(tmp_path / "unconfirmed.sqlite3"))
+    await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
+    manager = SessionManager()
+    await manager.initialize(database)
+    session = await manager.create_session((await database.get_system_agent())["id"])
+    owner = await fail_destination_owner(manager, session, monkeypatch)
+    await owner.cleanup
+    original = owner.resource_cleanup
+    replacement = None
+    async def unconfirmed():
+        if failure == "failed":
+            raise RuntimeError("Original resource exit could not be confirmed")
+        await asyncio.Future()
+    if failure != "missing":
+        replacement = asyncio.create_task(unconfirmed())
+    owner.resource_cleanup = replacement
+    monkeypatch.setattr(lifecycle, "_BACKEND_RETIRE_TIMEOUT", .03)
+    try:
+        with pytest.raises((RuntimeError, TimeoutError)):
+            await manager.delete_session(session.id)
+        assert manager.get_session(session.id) is session
+        assert await database.get_session_binding(session.id) is not None
+        assert manager._session_owners[id(session)] is owner
+        if failure == "timeout":
+            assert not replacement.done(), "A timeout of the deletion waiter must not cancel original cleanup"
+    finally:
+        if replacement is not None:
+            replacement.cancel()
+            await asyncio.gather(replacement, return_exceptions=True)
+        owner.resource_cleanup = original
+        await database.close()
 
 
 @pytest.mark.parametrize("held_rewind", [1.0], indirect=True)

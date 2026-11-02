@@ -47,13 +47,21 @@ class ResearchMixin(DatabaseBase):
             if previous.get("request_id") not in {None, request_id}:
                 raise ValueError("Research delivery belongs to another request")
             terminal = {"processed", "failed", "recording_unconfirmed"}
-            if previous.get("stage") in terminal or previous.get("stage") == stage or (previous.get("stage") == "processing" and stage == "queued"):
-                return previous
-            receipt = {**previous, "request_id": request_id, "stage": stage,
-                       "version": previous.get("version", 0) + 1, "error": error}
-            if stage == "processed":
+            unchanged = (previous.get("stage") in terminal or previous.get("stage") == stage
+                         or previous.get("stage") == "processing" and stage == "queued")
+            receipt = previous if unchanged else {
+                **previous, "request_id": request_id, "stage": stage,
+                "version": previous.get("version", 0) + 1, "error": error,
+            }
+            if not unchanged and stage == "processed":
                 receipt["processed_at"] = datetime.now(UTC).isoformat()
-            await tx.execute("UPDATE research_jobs SET delivery_receipt=? WHERE id=?", (json.dumps(receipt), job_id))
+            # The receipt proves admission even when its stage is unchanged.
+            # Commit both projections together, including legacy split writes.
+            await tx.execute(
+                "UPDATE research_jobs SET delivery_receipt=?, injection_status='delivered', error=NULL, "
+                "injected_at=COALESCE(injected_at, ?) WHERE id=?",
+                (json.dumps(receipt), datetime.now(UTC).isoformat(), job_id),
+            )
             return receipt
 
     async def acknowledge_research_delivery(self, job_id: str, request_id: str, version: int) -> dict[str, Any] | None:
@@ -66,16 +74,24 @@ class ResearchMixin(DatabaseBase):
             await tx.execute("UPDATE research_jobs SET delivery_receipt=? WHERE id=?", (json.dumps(receipt), job_id))
             return receipt
 
-    async def pending_research_deliveries(self) -> list[dict[str, Any]]:
+    async def recoverable_research_deliveries(self) -> list[dict[str, Any]]:
         async with self.transaction(write=False) as tx:
-            cursor = await tx.execute(f"SELECT {self._RESEARCH_COLS} FROM research_jobs WHERE delivery_receipt IS NOT NULL")
-            return [row for raw in await cursor.fetchall() if (row := self._row_to_research_job(raw))["delivery_receipt"]["stage"] in {"queued", "processing", "unknown"}]
-
-    async def unconfirmed_research_admissions(self) -> list[dict[str, Any]]:
-        async with self.transaction(write=False) as tx:
-            rows = await tx.fetch_all(f"SELECT {self._RESEARCH_COLS} FROM research_jobs WHERE status='completed' AND injection_status='unknown'")
+            rows = await tx.fetch_all(
+                f"SELECT {self._RESEARCH_COLS} FROM research_jobs WHERE status='completed' AND "
+                "(injection_status IN ('pending','unknown') OR "
+                "json_extract(delivery_receipt, '$.stage') IN ('queued','processing','unknown'))",
+            )
             return [self._row_to_research_job(row) for row in rows]
 
+    async def reconcile_unaccepted_research(self, job_id: str, *, failed: bool, error: str) -> None:
+        """Boot-only absence classification cannot overwrite later acceptance."""
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE research_jobs SET injection_status=?, error=COALESCE(error, ?) "
+                "WHERE id=? AND status='completed' AND delivery_receipt IS NULL AND "
+                + ("injection_status='pending'" if failed else "injection_status IN ('pending','unknown')"),
+                ("failed" if failed else "unknown", error, job_id),
+            )
 
     async def create_research_job(
         self, job_id: str, session_id: str, question: str, created_at: str,

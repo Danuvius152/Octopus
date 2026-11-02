@@ -16,26 +16,11 @@ from server.sessions.submission import (
     ReturnRefused,
     SubmissionReceipt,
 )
+from tests.session_runtime import fail_destination_owner
 from tests.test_delegation_work import wait_state
 from tests.test_delegation_work import work_runtime as work_runtime
 from tests.test_research_manager import _fake_report
 from tests.test_submission_recovery import runtime as runtime
-
-
-async def fail_destination_owner(manager, session, monkeypatch):
-    read = manager.db.has_delivery_notice
-    owner = manager._session_owners.get(id(session)) or manager._session_owner(session)
-
-    async def fail_after_read(*args):
-        await read(*args)
-        raise RuntimeError("Destination owner failed after a confirmed read")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(manager.db, "has_delivery_notice", fail_after_read)
-        with pytest.raises(SessionOwnerUnavailable):
-            await manager.retain_result_notice(session.id, "fail-original-owner", "Uncommitted notice")
-    assert owner.failed and not manager._admission_closed
-    return owner
 
 
 async def test_research_retains_report_and_reports_failed_delivery_when_its_destination_owner_has_ended(runtime, monkeypatch):

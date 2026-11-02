@@ -393,7 +393,7 @@ interface SessionStore {
   bgTasks: Record<string, BgTask[]>;
   upsertBgTask: (sessionId: string, task: BgTask, baseline?: BgTask | null, advanceOnly?: boolean) => void;
   updateBgTaskDelivery: (sessionId: string, taskId: string, delivery: Pick<BgTask, "delivery_disposition" | "delivery_error">) => void;
-  setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[], advanceOnly?: boolean) => void;
+  setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[], advanceOnly?: boolean, deliveryCurrent?: (id: string) => boolean) => void;
   sessionAuxiliaryErrors: Record<string, Partial<Record<SessionAuxiliaryKind, string>>>;
   setSessionAuxiliaryError: (sessionId: string, kind: SessionAuxiliaryKind, error: string | null) => void;
 
@@ -433,6 +433,8 @@ interface SessionStore {
   // §7). The ResearchCard renders live phase/progress; the final report arrives
   // as a normal injected turn.
   research: Record<string, ResearchJob[]>;
+  initializeResearch: (sessionId: string, job: ResearchJob) => void;
+  confirmResearchSeen: (sessionId: string, jobId: string, receipt: NonNullable<ResearchJob["delivery_receipt"]>) => void;
   upsertResearch: (sessionId: string, job: Partial<ResearchJob> & { id: string }) => void;
   setResearch: (sessionId: string, jobs: ResearchJob[], baseline?: ResearchJob[], advanceOnly?: boolean) => void;
 }
@@ -444,6 +446,8 @@ export interface ResearchJob {
   status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
   phase: string | null;        // scope | search | verify | synthesize | done
   detail?: string;
+  created_at?: string;
+  report_path?: string | null;
   counts?: Record<string, number>;
   sources?: string[];
   verified?: number;
@@ -466,6 +470,34 @@ export type BgTask = Omit<ApiBgTaskResponse,
 > & Partial<Pick<ApiBgTaskResponse,
   "idle_timeout_seconds" | "timeout_seconds" | "stop_reason" | "delivery_disposition" | "delivery_error"
 >>;
+
+/** Execution, complete output and delivery have independent evidence. Both
+ * list and detail responses pass through this same per-task boundary. */
+function mergeBgTask(task: BgTask, previous: BgTask | undefined, baseline: BgTask | null | undefined,
+  advanceOnly: boolean, event = false): BgTask {
+  const updated = { ...previous, ...task };
+  const deliveryUpdate = previous && bgDeliveryUpdates.get(previous);
+  if (previous && baseline !== undefined) {
+    if (advanceOnly || deliveryUpdate !== undefined && deliveryUpdate !== (baseline ? bgDeliveryUpdates.get(baseline) : undefined)) {
+      updated.delivery_disposition = previous.delivery_disposition;
+      updated.delivery_error = previous.delivery_error;
+    }
+    const terminal = previous.status !== "running" && previous.status !== "pending";
+    const changed = bgUpdates.get(previous) !== (baseline ? bgUpdates.get(baseline) : undefined);
+    if (terminal && (advanceOnly || changed || previous.status !== task.status) || previous.status === "running" && task.status === "pending") {
+      for (const field of ["status", "exit_code", "completed_at", "stop_reason", "truncated"] as const) {
+        if (previous[field] !== undefined) Object.assign(updated, { [field]: previous[field] });
+      }
+    }
+    for (const field of ["stdout", "stderr"] as const) {
+      if ((previous[field]?.length ?? 0) > (updated[field]?.length ?? 0)) updated[field] = previous[field];
+    }
+  }
+  if (deliveryUpdate) bgDeliveryUpdates.set(updated, deliveryUpdate);
+  const marker = event ? Symbol() : previous && bgUpdates.get(previous);
+  if (marker) bgUpdates.set(updated, marker);
+  return updated;
+}
 
 // Live record of an agent-to-agent delegation, mirrored from
 // `GET /api/sessions/{parent}/delegations`. Used by the delegation
@@ -1019,36 +1051,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set((s) => {
       const current = s.bgTasks[sessionId] || [];
       const idx = current.findIndex((t) => t.id === task.id);
-      const previous = current[idx];
-      const deliveryUpdate = previous && bgDeliveryUpdates.get(previous);
-      // Old details still supply output; only the current read can replace
-      // HTTP delivery facts, and later WS delivery always retains authority.
-      const incoming = previous && baseline !== undefined && (advanceOnly || deliveryUpdate !== undefined
-        && deliveryUpdate !== (baseline ? bgDeliveryUpdates.get(baseline) : undefined))
-        ? { ...task, delivery_disposition: previous.delivery_disposition, delivery_error: previous.delivery_error }
-        : task;
-      const updated = { ...previous, ...incoming };
-      if (previous && baseline !== undefined) {
-        const terminal = previous.status !== "running" && previous.status !== "pending";
-        const changed = bgUpdates.get(previous) !== (baseline ? bgUpdates.get(baseline) : undefined);
-        if (terminal && (changed || previous.status !== task.status) ||
-            previous.status === "running" && task.status === "pending") {
-          updated.status = previous.status;
-          updated.exit_code = previous.exit_code;
-          updated.completed_at = previous.completed_at;
-          updated.stop_reason = previous.stop_reason;
-          updated.truncated = previous.truncated;
-        }
-        // Execution has one identity per id. A stale running detail cannot
-        // remove final bytes; a fuller detail can fill WS's missing output.
-        for (const field of ["stdout", "stderr"] as const) {
-          if ((previous[field]?.length ?? 0) > (updated[field]?.length ?? 0)) updated[field] = previous[field];
-        }
-      }
-      if (deliveryUpdate) bgDeliveryUpdates.set(updated, deliveryUpdate);
-      const marker = previous && bgUpdates.get(previous);
-      if (baseline === undefined) bgUpdates.set(updated, Symbol());
-      else if (marker) bgUpdates.set(updated, marker);
+      const updated = mergeBgTask(task, current[idx], baseline, advanceOnly, baseline === undefined);
       const next = idx >= 0
         ? [...current.slice(0, idx), updated, ...current.slice(idx + 1)]
         : [...current, updated];
@@ -1066,32 +1069,49 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         ...current.slice(0, idx), updated, ...current.slice(idx + 1),
       ] } };
     }),
-  setBgTasks: (sessionId, tasks, baseline, advanceOnly) =>
+  setBgTasks: (sessionId, tasks, baseline, advanceOnly = false, deliveryCurrent) =>
     set((s) => {
       const current = s.bgTasks[sessionId] || [];
       const previous = new Map(current.map((task) => [task.id, task]));
-      const merged = mergeAuxiliarySnapshot(tasks, current, baseline, bgUpdates, advanceOnly);
-      const rows = merged.map((task) => {
-        const before = previous.get(task.id);
-        // An older list may advance execution, but delivery is independent
-        // and a list must not discard the fuller output supplied by detail.
-        if (before && task !== before && baseline !== undefined) {
-          if (advanceOnly) {
-            task.delivery_disposition = before.delivery_disposition;
-            task.delivery_error = before.delivery_error;
-          }
-          for (const field of ["stdout", "stderr"] as const) {
-            if ((before[field]?.length ?? 0) > (task[field]?.length ?? 0)) task[field] = before[field];
-          }
+      const start = baseline && new Map(baseline.map((task) => [task.id, task]));
+      const rows = tasks.map((task) => mergeBgTask(task, previous.get(task.id), start ? start.get(task.id) ?? null : undefined,
+        advanceOnly || deliveryCurrent !== undefined && !deliveryCurrent(task.id)));
+      if (start) {
+        const incoming = new Set(tasks.map((task) => task.id));
+        for (const task of current) {
+          if (!incoming.has(task.id) && (!start.has(task.id) || advanceOnly ||
+              bgUpdates.get(task) !== bgUpdates.get(start.get(task.id)!) ||
+              start.get(task.id)?.status !== task.status)) rows.push(task);
         }
-        const update = before && bgDeliveryUpdates.get(before);
-        if (update) bgDeliveryUpdates.set(task, update);
-        return task;
-      });
+      }
       return { bgTasks: { ...s.bgTasks, [sessionId]: rows } };
     }),
 
   research: {},
+  initializeResearch: (sessionId, job) => set((s) => {
+    const current = s.research[sessionId] || [];
+    const previous = current.find((item) => item.id === job.id);
+    if (!previous) return { research: { ...s.research, [sessionId]: [...current, job] } };
+    const updated = { ...previous };
+    for (const field of ["question", "session_id", "created_at", "report_path"] as const) {
+      if (updated[field] == null || updated[field] === "") Object.assign(updated, { [field]: job[field] });
+    }
+    const marker = researchUpdates.get(previous);
+    if (marker) researchUpdates.set(updated, marker);
+    return { research: { ...s.research, [sessionId]: current.map((item) => item === previous ? updated : item) } };
+  }),
+  confirmResearchSeen: (sessionId, jobId, receipt) => set((s) => {
+    const current = s.research[sessionId] || [];
+    const previous = current.find((item) => item.id === jobId);
+    const before = previous?.delivery_receipt;
+    if (!previous || !before || before.request_id !== receipt.request_id || before.version !== receipt.version ||
+        receipt.browser_confirmed_version !== before.version) return s;
+    const updated = { ...previous, delivery_receipt: { ...before,
+      browser_confirmed_version: receipt.browser_confirmed_version, browser_confirmed_at: receipt.browser_confirmed_at } };
+    const marker = researchUpdates.get(previous);
+    if (marker) researchUpdates.set(updated, marker);
+    return { research: { ...s.research, [sessionId]: current.map((item) => item === previous ? updated : item) } };
+  }),
   upsertResearch: (sessionId, job) =>
     set((s) => {
       const current = s.research[sessionId] || [];
@@ -1116,10 +1136,21 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       ];
       return { research: { ...s.research, [sessionId]: next } };
     }),
-  setResearch: (sessionId, jobs, baseline, advanceOnly) =>
-    set((s) => ({ research: { ...s.research, [sessionId]: mergeAuxiliarySnapshot(
-      jobs, s.research[sessionId] || [], baseline, researchUpdates, advanceOnly,
-    ) } })),
+  setResearch: (sessionId, jobs, baseline, advanceOnly) => set((s) => {
+    const current = s.research[sessionId] || [];
+    const rows = mergeAuxiliarySnapshot(jobs, current, baseline, researchUpdates, advanceOnly).map((item) => {
+      const before = current.find((row) => row.id === item.id)?.delivery_receipt;
+      const receipt = item.delivery_receipt;
+      if (!receipt || before?.request_id !== receipt.request_id || !before.browser_confirmed_version ||
+          before.browser_confirmed_version > receipt.version || before.browser_confirmed_version <= (receipt.browser_confirmed_version ?? 0)) return item;
+      const updated = { ...item, delivery_receipt: { ...receipt,
+        browser_confirmed_version: before.browser_confirmed_version, browser_confirmed_at: before.browser_confirmed_at } };
+      const marker = researchUpdates.get(item);
+      if (marker) researchUpdates.set(updated, marker);
+      return updated;
+    });
+    return { research: { ...s.research, [sessionId]: rows } };
+  }),
 
   delegations: {},
   setDelegations: (parentSessionId, ds, baseline, advanceOnly) =>

@@ -34,6 +34,17 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+it("shows a failed exact-round cancel while retaining the original running work", async () => {
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) =>
+    init?.method === "POST" ? Response.json({ detail: "Round control unavailable" }, { status: 503 }) : Response.json([delegation()])));
+  render(card());
+  fireEvent.click(screen.getByTitle("Cancel delegation"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Round control unavailable");
+  expect(useSessionStore.getState().delegations.parent[0]).toMatchObject({ state: "running", work_id: "round-current" });
+});
+
 it("shows a running exact round and sends its captured work on cancellation", async () => {
   useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
   useSessionStore.getState().setDelegations("parent", [delegation()]);

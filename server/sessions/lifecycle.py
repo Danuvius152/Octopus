@@ -26,12 +26,13 @@ from ..users import owner_is_available
 from ..workspace import confine
 from .base import (
     _BACKEND_RETIRE_TIMEOUT,
+    ForkError,
     Session,
     SessionManagerBase,
     _session_from_row,
     resolve_working_dir,
 )
-from .owner import SessionOwnerUnavailable
+from .owner import SessionOwner, SessionOwnerUnavailable
 from .owner_runtime import (
     AutoArchive,
     CloseExecution,
@@ -51,6 +52,38 @@ _ARCHIVED_MESSAGE_WINDOW = 200
 
 class LifecycleMixin(SessionManagerBase):
 
+    async def _close_original_execution(self, owner: SessionOwner, command: CloseExecution) -> bool:
+        """Close through the original writer, or join its Manager handoff.
+
+        Failed resource cleanup is separate from publisher drain: a subscriber
+        may itself be waiting for this close. No replacement Owner is installed.
+        """
+        try:
+            if not owner.failed:
+                return await owner.call_runtime(command)
+        except SessionOwnerUnavailable:
+            if not owner.failed:
+                raise
+        async with asyncio.timeout(_BACKEND_RETIRE_TIMEOUT):
+            retirement = await self._failed_owner_retirement(owner)
+            if retirement is None:
+                raise SessionOwnerUnavailable("Original Session resource cleanup is unavailable")
+            session = owner.session
+            if command.reason in {"deleted", "application_deleted"} and (session._forking or session._archive_reservation is not None):
+                raise ForkError("A fork or archive is still using this session; retry deletion when it completes",
+                                reason="session_lifecycle_busy", status_code=409)
+            if not owner.runtime.can_close_request(command.only_request_id):
+                return False
+            if command.reservation is not None:
+                if (session._archive_reservation not in {None, command.reservation}
+                        or session._deletion_task is not None and not session._deletion_task.done()):
+                    raise ValueError(f"Session {session.id} is already being archived or deleted")
+                session._archive_reservation = command.reservation
+            await asyncio.shield(retirement)
+            if self.db:
+                self.db.health.require_healthy()
+        return True
+
     async def retire_application_writers(self, session_ids: list[str]) -> None:
         # Close every original Session before draining sources that may return
         # to another captured Session. Archived histories stay unloaded.
@@ -58,10 +91,7 @@ class LifecycleMixin(SessionManagerBase):
 
         async def close(session: Session) -> None:
             owner = self._session_owners.get(id(session)) or self._session_owner(session)
-            if owner.failed:
-                await self._failed_owner_retirement(owner)
-            else:
-                await owner.call_runtime(CloseExecution("application_deleted"))
+            await self._close_original_execution(owner, CloseExecution("application_deleted"))
 
         results = await asyncio.gather(*(close(session) for session in captured), return_exceptions=True)
         for result in results:
@@ -463,7 +493,7 @@ class LifecycleMixin(SessionManagerBase):
     ) -> bool:
         """Close explicit admission and finish captured work before hiding it."""
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
-        accepted = await owner.call_runtime(CloseExecution("archived", reservation, only_request_id))
+        accepted = await self._close_original_execution(owner, CloseExecution("archived", reservation, only_request_id))
         if not accepted:
             return False
         await self.await_session_execution(session.id, timeout=_BACKEND_RETIRE_TIMEOUT)
@@ -530,23 +560,8 @@ class LifecycleMixin(SessionManagerBase):
             reservation = decision.reservation
         try:
             if not automatic:
-                try:
-                    accepted = not owner.failed and await owner.call_runtime(CloseExecution("archived", reservation, only_request_id))
-                except SessionOwnerUnavailable:
-                    if not owner.failed:
-                        raise
-                    accepted = False
-                if owner.failed:
-                    # Manager now owns the ended writer's original state and
-                    # resources. New admission is already closed; no command
-                    # or successor writer is needed to reserve this archive.
-                    await self._failed_owner_retirement(owner)
-                    if not owner.runtime.can_close_request(only_request_id):
-                        return None
-                    if session._archive_reservation not in {None, reservation}:
-                        raise ValueError(f"Session {session.id} is already being archived")
-                    session._archive_reservation = reservation
-                elif not accepted:
+                accepted = await self._close_original_execution(owner, CloseExecution("archived", reservation, only_request_id))
+                if not accepted:
                     return None
             await self.await_session_execution(session.id, timeout=_BACKEND_RETIRE_TIMEOUT)
             await self._join_session_owner_commands(session)
@@ -690,8 +705,8 @@ class LifecycleMixin(SessionManagerBase):
             for session in sessions:
                 if self.sessions.get(session.id) is session:
                     owner = self._session_owners.get(id(session))
-                    if owner is not None and not owner.failed:
-                        await owner.call_runtime(ReleaseArchive(reservations[session.id]))
+                    if owner is not None:
+                        await self._release_session_reservation(owner, ReleaseArchive(reservations[session.id]))
 
     async def list_archived_sessions(
         self, user_id: str | None = None
@@ -883,7 +898,7 @@ class LifecycleMixin(SessionManagerBase):
         if session.user_id is None:
             raise ValueError("The session has no attachment owner")
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
-        await owner.call_runtime(CloseExecution("deleted"))
+        await self._close_original_execution(owner, CloseExecution("deleted"))
         await self.await_session_execution(session_id, timeout=_BACKEND_RETIRE_TIMEOUT)
         await self._join_session_owner_commands(session)
         await self._retire_application_history(session)

@@ -284,23 +284,23 @@ async def test_shutdown_joins_observer_created_by_original_pipeline_cleanup(rm, 
 
     accepted, release, cleaning, cleaned = (asyncio.Event() for _ in range(4))
     completion = asyncio.get_running_loop().create_future()
-    settle, advance = rm._settle_delivery, db.advance_research_delivery
+    advance = db.advance_research_delivery
     async def pipeline(*args, **kwargs):
         return _fake_report()
     async def accept(*args, **kwargs):
         return SubmissionReceipt("accepted", "late-observer", completion)
-    async def held_settlement(*args, **kwargs):
-        await settle(*args, **kwargs)
-        accepted.set()
-        await release.wait()
     async def held_unknown(job_id, request_id, stage, **kwargs):
+        if stage == "queued":
+            result = await advance(job_id, request_id, stage, **kwargs)
+            accepted.set()
+            await release.wait()
+            return result
         if stage == "unknown":
             cleaning.set()
             await cleaned.wait()
         return await advance(job_id, request_id, stage, **kwargs)
     monkeypatch.setattr(rm_mod, "run_research", pipeline)
     monkeypatch.setattr(mgr, "start_message", accept)
-    monkeypatch.setattr(rm, "_settle_delivery", held_settlement)
     monkeypatch.setattr(db, "advance_research_delivery", held_unknown)
     session = await _session(mgr, db)
     job = await rm.start(session.id, "Admission already committed")
@@ -546,6 +546,107 @@ async def test_recover_interrupted(rm, mgr, db):
     n = await rm.recover_interrupted()
     assert n == 1
     assert (await db.get_research_job("old"))["status"] == "interrupted"
+
+
+@pytest.mark.parametrize("retired,original,valid,expected", [
+    (True, "pending", True, "failed"),
+    (False, "pending", True, "unknown"),
+    (True, "unknown", True, "unknown"),
+    (True, "pending", False, "unknown"),
+])
+async def test_restart_reconciles_saved_report_without_replaying_input(
+    rm, mgr, db, tmp_path, monkeypatch, retired, original, valid, expected,
+):
+    from server.knowledge import capture, derive, encode
+
+    session = await _session(mgr, db)
+    context = encode(derive(capture(session, None, prompt="q"), "q")) if valid else None
+    report = tmp_path / "retained-report.md"
+    report.write_text("# Already completed")
+    await db.create_research_job("crashed-report", session.id, "q", "now", context)
+    await db.confirm_research_outcome("crashed-report", "completed", completed_at="then", report_path=str(report))
+    await db.update_research_job("crashed-report", injection_status=original)
+
+    async def no_new_work(*args, **kwargs):
+        pytest.fail("Restart recovery must only observe the original input")
+
+    monkeypatch.setattr(mgr, "start_message", no_new_work)
+    monkeypatch.setattr(mgr, "admit_return", no_new_work)
+    monkeypatch.setattr(mgr, "retain_result_notice", no_new_work)
+    monkeypatch.setattr(mgr, "_session_owner", no_new_work)
+    for _ in range(2):
+        assert await rm.recover_interrupted(previous_writers_retired=retired) == 0
+        saved = await db.get_research_job("crashed-report")
+        assert saved["status"] == "completed" and saved["injection_status"] == expected
+        assert saved["delivery_receipt"] is None
+        assert Path(saved["report_path"]).read_text() == "# Already completed"
+        assert await db.get_source_submission("research", "research:crashed-report", session_id=session.id) is None
+    assert "not replayed" in saved["error"]
+
+
+@pytest.mark.parametrize("state,stage", [("pending", "failed"), ("running", "unknown"), ("success", "processed"), ("failed", "failed")])
+@pytest.mark.parametrize("linked", [False, True])
+async def test_restart_links_original_persisted_input_and_its_real_completion(
+    rm, mgr, db, tmp_path, monkeypatch, state, stage, linked,
+):
+    session = await _session(mgr, db)
+    report = tmp_path / "saved.md"
+    report.write_text("# Original report")
+    await db.create_research_job("saved", session.id, "q", "now")
+    await db.confirm_research_outcome("saved", "completed", completed_at="then", report_path=str(report))
+    await db.admit_client_submission(session.id, "research:research:saved", "digest", "original-input",
+        payload={"source": "research", "delivery_id": "research:saved", "content": "Original report", "attachment_ids": []},
+        receipt={"accepted": True, "disposition": "accepted"})
+    if state == "running":
+        await db.claim_client_submission(session.id, "original-input", "original-input", "old-service")
+    elif state in {"success", "failed"}:
+        await db.append_message(session.id, 0, "system", "result", {"request_id": "original-input", "status": state},
+                                terminal_request_id="original-input")
+        await db.complete_client_submission(session.id, "original-input", owner="original-input", state="done")
+    if linked:
+        await db.advance_research_delivery("saved", "original-input", "queued")
+        await db.update_research_job("saved", injection_status="pending")  # Prior split-write window.
+    await db.recover_client_submissions()
+    async def no_dispatch(*args, **kwargs):
+        pytest.fail("Observing a committed input cannot submit or wake any session")
+    monkeypatch.setattr(mgr, "admit_return", no_dispatch)
+    monkeypatch.setattr(mgr, "start_message", no_dispatch)
+    monkeypatch.setattr(mgr, "_session_owner", no_dispatch)
+    for _ in range(2):
+        await rm.recover_interrupted(previous_writers_retired=True)
+        row = await db.get_research_job("saved")
+        assert row["status"] == "completed" and row["injection_status"] == "delivered"
+        assert row["delivery_receipt"]["request_id"] == "original-input"
+        assert row["delivery_receipt"]["stage"] == stage
+        assert Path(row["report_path"]).read_text() == "# Original report"
+    async with db.transaction(write=False) as tx:
+        assert await tx.fetch_one("SELECT COUNT(*) FROM client_submissions") == (1,)
+
+
+async def test_restart_repairs_injection_even_when_confirmed_receipt_is_already_terminal(rm, mgr, db):
+    session = await _session(mgr, db)
+    await db.create_research_job("done", session.id, "q", "now")
+    await db.confirm_research_outcome("done", "completed", completed_at="then", report_path="saved.md")
+    receipt = await db.advance_research_delivery("done", "original-input", "processed")
+    confirmed = await db.acknowledge_research_delivery("done", "original-input", receipt["version"])
+    await db.update_research_job("done", injection_status="pending")
+    for _ in range(2):
+        await rm.recover_interrupted(previous_writers_retired=True)
+        row = await db.get_research_job("done")
+        assert row["injection_status"] == "delivered" and row["delivery_receipt"] == confirmed
+
+
+async def test_failed_source_read_cannot_be_used_as_proof_of_no_admission(rm, mgr, db, monkeypatch):
+    from server.knowledge import capture, derive, encode
+    session = await _session(mgr, db)
+    await db.create_research_job("unreadable", session.id, "q", "now", encode(derive(capture(session, None, prompt="q"), "q")))
+    await db.confirm_research_outcome("unreadable", "completed", completed_at="then", report_path="saved.md")
+    async def unavailable(*args, **kwargs):
+        raise TimeoutError("source unavailable")
+    monkeypatch.setattr(db, "get_source_submission", unavailable)
+    await rm.recover_interrupted(previous_writers_retired=True)
+    row = await db.get_research_job("unreadable")
+    assert row["injection_status"] == "unknown" and "source unavailable" in row["error"]
 
 
 @pytest.mark.asyncio

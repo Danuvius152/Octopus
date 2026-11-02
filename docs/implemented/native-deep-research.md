@@ -71,7 +71,7 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   that its process has exited.
 - Persists to a `research_jobs` table, with **completion and delivery tracked
   separately** (Vera): `status`/`phase`/`completed_at` AND `injection_status`/
-  `injected_at`/`delivery_error`/`report_path`. Because the report is delivered
+  `injected_at`/`error`/`report_path` and `delivery_receipt.error`. Because the report is delivered
   through the shared `admit_return` operation (§7), a job can be `completed` while
   its report still sits behind an active user turn — the card/DB must show
   completion separately from admission. `injection_status=delivered` is a
@@ -80,8 +80,9 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   queued, processing, processed, failed, recording_unconfirmed and unknown.
   A browser confirms the exact displayed version through the account-only
   `POST /api/sessions/{sid}/research/{rid}/seen` route; this is separate from
-  model processing and does not assert human reading. Restart reconciles
-  committed outcomes or records unknown, without replaying the request.
+  model processing and does not assert human reading. Receipt and admission
+  status commit together; an unchanged terminal receipt still repairs an older
+  split status without changing its version or browser confirmation.
   Terminal delivery retains its original source identity and admission receipt.
   Completion, cancellation, failure and interruption share one guarded
   `running`-to-terminal transaction. Completion requires the report file and
@@ -89,7 +90,7 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   A winning cancellation interrupts live work; cancellation after completion
   returns the completed job and preserves its delivery. The card consumes this
   response directly through its existing state merge. A boot sweep marks running jobs
-  `interrupted`/`failed`; v1 does NOT resume mid-pipeline.
+  `interrupted`; v1 does NOT resume mid-pipeline.
 
 Before admitting a job, Research captures the session overrides and Agent defaults
 through SessionManager's short configuration boundary, resolving the actual model
@@ -112,14 +113,31 @@ delegations use this same return boundary, including delegated questions.
 Restoration carries dispatch ordering within the current service generation,
 so delayed lifecycle notifications cannot replace a newer list projection.
 
-Report delivery and startup reconciliation use the session-owned
+Normal report delivery uses the session-owned
 [`admit_return` operation](architecture-contract.md#公共返回接管), preserving the
 original `research:{job_id}` identity. Normal preparation reads the source job
-and builds its report body only when a new input is still permitted; startup
-preparation always skips new input. An existing receipt therefore needs neither
+and builds its report body only when a new input is still permitted. An existing receipt needs neither
 the report material nor a functioning destination Owner. Research owns its
 report, delayed retry and processing observer; it does not assemble receipt
 lookup, wake-up or session admission checks itself.
+
+Before startup admission opens, one read-only sweep covers completed reports
+with pending/unknown admission and unsettled receipts, including the historical
+receipt-before-status window. It queries the original source/session/delivery
+identity and reconstructs the persisted input completion: a committed success
+is processed, a committed failure or withdrawn input is failed, and unresolved
+processing remains unknown. It never creates an Owner, restores a session,
+submits an input or reruns research. Existing terminal receipt versions and
+browser confirmations remain unchanged.
+
+An absent source row proves non-admission only for an originally pending report
+with a supported saved caller identity, matching account/session ownership,
+healthy authoritative reads and explicit prior-writer retirement proof from
+managed startup. That report stays completed, with failed delivery and a
+diagnostic explaining that it was not replayed. Standalone startup, missing
+identity or read uncertainty yields unknown; an already unknown admission is
+not upgraded by absence alone. Storage distrust remains fail-stop rather than
+being rewritten as a delivery result.
 
 A typed
 `AdmissionIntegrityError` permanently ends automatic delivery while retaining
@@ -167,6 +185,13 @@ The research tool and `/research` command admit the same account/session-owned
 job. Progress and the report card are projections of that job. Reports and failure
 materials live under the account-owned research job directory; the original
 caller receives a separate follow-up with stable delivery identity.
+The completed card retains a Download report link through
+`GET /api/sessions/{sid}/research/{rid}/report`, independently of admission or
+processing. The route checks the original account/session and an existing file
+under that account's research root, including archived sessions. Missing material
+is a 404; the path does not confer another account's access.
+Creation receipts, snapshots, browser confirmations and control feedback follow
+the [frontend observation contract](frontend-list-reconciliation.md#辅助任务的读取与事件合并).
 
 Source: [manager](../../server/research/manager.py),
 [orchestrator](../../server/research/orchestrator.py),
@@ -177,6 +202,10 @@ Regression entry points: `tests/test_research_orchestrator.py`,
 Agent-default/session-override changes, credential deletion and shutdown while
 configuration capture waits. `tests/test_research_api.py` deletes or archives
 the real session during that wait and verifies HTTP refusal with no job created.
+The same manager/API seams cover restart-before-admission, original persisted
+withdrawal/unknown/terminal completion, split receipt/status repair, repeated
+recovery, report downloads and foreign-account refusal. No recovery test uses
+a new model input as evidence of a recovered receipt.
 
 Research does not resume an interrupted pipeline on startup, add a new search
 provider, or claim that browser display proves human reading. Current authorization

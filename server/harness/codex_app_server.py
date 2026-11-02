@@ -63,10 +63,14 @@ def verify_binary(path: str) -> None:
         raise ValueError("Codex App Server requires the G0-Base verified 0.166.0 binary")
 
 
-def build_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
+def ordinary_binary() -> str:
     from ..config import settings
 
-    argv = [settings.codex_app_server_binary, "app-server"]
+    return settings.codex_app_server_binary
+
+
+def build_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
+    argv = [ordinary_binary(), "app-server"]
     for key, value in _REQUIRED_FEATURES.items():
         argv += ["-c", f"{key}={str(value).lower()}"]
     argv += ["-c", "features.retain_client_developer_messages=true"]
@@ -81,6 +85,7 @@ def profile(base: RuntimeProfile) -> RuntimeProfile:
     from .codex_history import fork_cleanup, fork_copy
 
     return replace(base, new_driver=AppServerDriver, build_turn_argv=build_argv,
+                   turn_binary=ordinary_binary,
                    activity_observer=None, prepare_resume=None, can_steer=True,
                    native_input_evidence=True, tools_prompt=_OCTOPUS_SYSTEM_PROMPT_CODEX,
                    injects_memory_prompt=True, can_fork=True, fork_prepare=_fork_prepare_replay,

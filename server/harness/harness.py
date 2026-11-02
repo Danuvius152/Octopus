@@ -86,8 +86,13 @@ class Harness:
     # ------------------------------------------------------------------ availability
 
     def is_available(self) -> bool:
-        """Whether this harness's CLI is resolvable on this host."""
-        return _which_with_fallback(self.profile.binary) is not None
+        """Whether the ordinary invocation's executable resolves on this host.
+
+        Authentication, protocol pins and independent one-shot/leaf commands
+        are checked by their own invocation boundaries.
+        """
+        binary = self.profile.turn_binary() if self.profile.turn_binary else self.profile.binary
+        return _which_with_fallback(binary) is not None
 
     # ------------------------------------------------------------------ turns
 

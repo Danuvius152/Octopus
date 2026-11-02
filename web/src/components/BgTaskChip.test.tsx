@@ -44,6 +44,15 @@ afterEach(() => {
 });
 
 describe("BgTaskChip", () => {
+  it("shows a cancellation conflict without overwriting execution or delivery", async () => {
+    useSessionStore.getState().setBgTasks("s1", [makeTask({ delivery_disposition: "unknown", delivery_error: "Original return error" })]);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "Task is retiring" }, { status: 409 })));
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    act(() => screen.getByRole("button", { name: /cancel/i }).click());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Task is retiring");
+    expect(useSessionStore.getState().bgTasks.s1[0]).toMatchObject({ status: "running", delivery_error: "Original return error" });
+  });
+
   it.each(["unknown", null] as const)("keeps newer HTTP list delivery (%s) while an old detail fills output", async (disposition) => {
     const old = makeTask({ status: "completed", exit_code: 0,
       delivery_disposition: "stopped", delivery_error: "Old delivery" });

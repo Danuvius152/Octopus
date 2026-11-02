@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useSessionStore, type BgTask, type SubagentRun, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { hydrateSession, loadBgTaskSnapshot, loadResearchSnapshot, loadSessionSnapshots, loadSessionSnapshot, observeSession } from "./hydrateSession";
+import { hydrateSession, loadBgTaskSnapshot, loadResearchSnapshot, loadSessionSnapshots, loadSessionSnapshot, observeSession, observeSessionAuxiliary } from "./hydrateSession";
 import { selectSession } from "./selectSession";
 
 function deferred() {
@@ -21,6 +21,87 @@ beforeEach(() => {
   useSessionStore.setState({ token: "test-bearer" });
 });
 afterEach(() => vi.unstubAllGlobals());
+
+const backgroundTask = (id: string, fields: Partial<BgTask> = {}) => ({ id, session_id: "s", status: "completed", stdout: "",
+  delivery_disposition: "unknown", delivery_error: "Old admission error", ...fields } as BgTask);
+
+it.each([200, 503])("another task's newer HTTP %s cannot prevent this detail from clearing delivery diagnostics", async (status) => {
+  useSessionStore.getState().setBgTasks("s", [backgroundTask("a"), backgroundTask("b")]);
+  const first = deferred(), second = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise));
+  const a = observeSessionAuxiliary("s", "background", "a").done;
+  const b = observeSessionAuxiliary("s", "background", "b").done.catch(() => {});
+  second.resolve(status === 200 ? json(backgroundTask("b")) : new Response("Unavailable", { status }));
+  await b;
+  first.resolve(json(backgroundTask("a", { stdout: "Complete original output", delivery_disposition: null, delivery_error: null })));
+  await a;
+  expect(useSessionStore.getState().bgTasks.s.find((row) => row.id === "a")).toMatchObject({
+    stdout: "Complete original output", delivery_disposition: null, delivery_error: null,
+  });
+  expect(Boolean(useSessionStore.getState().sessionAuxiliaryErrors.s?.background)).toBe(status === 503);
+});
+
+it.each([false, true])("a list fills final output across an execution event while respecting delivery events (%s)", async (delivery) => {
+  useSessionStore.getState().setBgTasks("s", [backgroundTask("a", { status: "running", stdout: "short" })]);
+  const reply = deferred();
+  vi.stubGlobal("fetch", vi.fn(() => reply.promise));
+  const reading = loadBgTaskSnapshot("s");
+  handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "a", status: "completed", exit_code: 0 });
+  if (delivery) handleWsMessage({ type: "bg_delivery", session_id: "s", task_id: "a", delivery_disposition: "unknown", delivery_error: "New live error" });
+  reply.resolve(json([backgroundTask("a", { stdout: "Complete original output", delivery_disposition: null, delivery_error: null })]));
+  await reading;
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ status: "completed", stdout: "Complete original output",
+    delivery_error: delivery ? "New live error" : null, delivery_disposition: delivery ? "unknown" : null });
+});
+
+it.each([true, false])("a finished newer detail or list retains per-task authority until older overlapping reads finish (%s)", async (listFirst) => {
+  const old = deferred(), fresh = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise));
+  const older = observeSessionAuxiliary("s", "background", listFirst ? undefined : "a").done;
+  const newer = observeSessionAuxiliary("s", "background", listFirst ? "a" : undefined).done;
+  const current = backgroundTask("a", { stdout: "New output", delivery_error: null, delivery_disposition: null });
+  fresh.resolve(json(listFirst ? current : [current]));
+  await newer;
+  const previous = backgroundTask("a", { stdout: "Old output with more bytes" });
+  old.resolve(json(listFirst ? [previous] : previous));
+  await older;
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ stdout: "Old output with more bytes", delivery_error: null, delivery_disposition: null });
+});
+
+it.each([true, false])("same-task successes use request order and preserve complete output (newer returns first=%s)", async (newerFirst) => {
+  useSessionStore.getState().setBgTasks("s", [backgroundTask("a")]);
+  const old = deferred(), fresh = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise));
+  const older = observeSessionAuxiliary("s", "background", "a").done;
+  const newer = observeSessionAuxiliary("s", "background", "a").done;
+  const oldData = backgroundTask("a", { stdout: "Complete original output", delivery_error: "Older diagnosis" });
+  const newData = backgroundTask("a", { stdout: "Complete", delivery_error: "New diagnosis" });
+  if (newerFirst) { fresh.resolve(json(newData)); await newer; old.resolve(json(oldData)); await older; }
+  else { old.resolve(json(oldData)); await older; fresh.resolve(json(newData)); await newer; }
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ stdout: "Complete original output", delivery_error: "New diagnosis" });
+});
+
+it("a newer same-task failure owns only the error surface, leaving older successful data useful", async () => {
+  useSessionStore.getState().setBgTasks("s", [backgroundTask("a")]);
+  const old = deferred(), fresh = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise));
+  const older = observeSessionAuxiliary("s", "background", "a").done;
+  const newer = observeSessionAuxiliary("s", "background", "a").done.catch(() => {});
+  fresh.resolve(new Response("Unavailable", { status: 503 })); await newer;
+  old.resolve(json(backgroundTask("a", { stdout: "Saved output", delivery_error: null, delivery_disposition: null }))); await older;
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ stdout: "Saved output", delivery_error: null });
+  expect(useSessionStore.getState().sessionAuxiliaryErrors.s?.background).toBeTruthy();
+});
+
+it("view cancellation releases a read without publishing its late data or poisoning future reads", async () => {
+  const old = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(old.promise).mockResolvedValueOnce(json(backgroundTask("a", { delivery_error: "Current" }))));
+  const cancelled = observeSessionAuxiliary("s", "background", "a");
+  cancelled.cancel();
+  await observeSessionAuxiliary("s", "background", "a").done;
+  old.resolve(json(backgroundTask("a", { delivery_error: "Obsolete" }))); await cancelled.done;
+  expect(useSessionStore.getState().bgTasks.s[0].delivery_error).toBe("Current");
+});
 
 it("keeps the sidebar order when selecting sessions and receiving their details", async () => {
   const rows = ["first", "middle", "last"].map((id) => ({ id, name: id, archived: false, agent_id: "agent" } as SessionInfo));

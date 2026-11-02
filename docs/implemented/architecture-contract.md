@@ -116,6 +116,13 @@ Manager 接管原对象的完成与资源责任。`done` 表示已结算，可�
 | `notification_state` | delivered、failed、unavailable 独立于业务结果；通知失败不抹掉已提交结果 |
 | 原 execution/preparation/reader/retirement 引用 | CloseWork、归档与撤权等待真实资源；外部关闭另行排空 publisher，不能反向等待正在调用自己的 subscriber |
 
+会话删除、应用删除与 Agent 归档共用原 Owner 的执行关闭边界。关闭前或等待命令
+期间原 Owner 失败时，Manager 只接收原回调注册的 resource_cleanup，并在原期限
+内 shield 等待实际退出；获取 handle 本身不构成退休。缺失、失败、超时或存储失信
+均保留会话，不能继续删行或移除归属。fork/archive reservation 的冲突及释放仍沿
+原 Manager 接管。已确认资源退出后，应用历史退休与后代附件物化先于数据库删除；
+发布订阅者可以发起删除，原 publisher 继续由外部排空，不形成自身等待。
+
 <a id="codex-native-input-evidence"></a>
 ### Codex 首输入证据与准备边界
 
@@ -433,7 +440,8 @@ delivery、不重新执行来源；接管未确认也不等于 `RequestCompletio
 #### 来源接入与验证
 
 BG 的 `deliver_bg_result` 转换原身份、材料及辅助说明，manager 保有命令结果、
-诊断与业务重试。Research 正常注入和启动 unknown 观察都使用公共操作，报告、
+诊断与业务重试。Research 正常注入使用公共操作，启动恢复只读原持久接纳与完成，
+不唤醒或重新接纳；恢复分类归[Research 合同](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)。报告、
 queued/processing/processed、浏览器收讫及父处理仍分别由其原 owner 维护。
 委派 `_inject_terminal` / `_inject_question` 保留原轮次和问题的重入保护、round
 CAS / child notice 诊断写入及原 completion 观察，只消费公共接管的三类结果。

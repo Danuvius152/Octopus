@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from server.sessions.runtime_types import SessionOwnerUnavailable
+from tests.session_runtime import fail_destination_owner
 from tests.test_research_session_return import returning_research as returning_research
-from tests.test_source_return_owner_failure import fail_destination_owner
 
 
 async def test_unconfirmed_report_recovers_original_receipt_after_owner_failure_without_reading_material(

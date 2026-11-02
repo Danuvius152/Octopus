@@ -9,16 +9,19 @@ the `/research` slash command and the UI use the same routes. Bearer auth.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..auth import verify_token
-from ..deps import ScopeUser, SessionMgr
+from ..deps import ScopeUser, SessionMgr, ViewerUser
 from ..mcp_identity import verify
 from ..research import ResearchError, research_manager
 from ..sessions import SessionManager
+from ..workspace import paths_for
 
 router = APIRouter(prefix="/api/sessions", tags=["research"])
 
@@ -119,6 +122,24 @@ async def cancel_research(
         return _public_job(await research_manager.cancel(research_id))
     except ResearchError as e:
         raise HTTPException(e.status_code, e.message)
+
+
+@router.get("/{session_id}/research/{research_id}/report")
+async def download_research_report(
+    session_manager: SessionMgr, session_id: str, research_id: str, user_id: ViewerUser = None,
+) -> FileResponse:
+    await _own_session(session_manager, session_id, user_id)
+    database = session_manager.input_database()
+    row = await database.get_research_job(research_id)
+    if row is None or row["session_id"] != session_id or not row.get("report_path"):
+        raise HTTPException(404, "Research report not found")
+    binding = await database.get_session_binding(session_id)
+    if binding is None:
+        raise HTTPException(404, "Session not found")
+    path = Path(row["report_path"]).resolve()
+    if not path.is_relative_to(paths_for(binding["user_id"]).research.resolve()) or not path.is_file():
+        raise HTTPException(404, "Research report not found")
+    return FileResponse(path, media_type="text/markdown", filename=f"research-{research_id}.md")
 
 
 @router.post("/{session_id}/research/{research_id}/seen")

@@ -1,6 +1,7 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
 import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
+import { createResearch } from "../lib/research";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowUp,
@@ -123,6 +124,8 @@ export function ChatView({
   onOpenSchedules,
 }: Props) {
   const [input, setInput] = useState("");
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [restoredInput, setRestoredInput] = useState<{ sessionId: string; clientId: string } | null>(null);
   const [requiredAttachmentCount, setRequiredAttachmentCount] = useState(0);
   const submittedDrafts = useRef(new Map<string, { sessionId: string; text: string; attachments: PendingAttachment[] }>());
@@ -936,40 +939,7 @@ export function ChatView({
       }
       store.addMessage(sid, { role: "user", type: "text", content: trimmed });
       addNotice(`🔎 Starting deep research: “${question}”…`);
-      try {
-        const res = await fetch(
-          `${window.location.origin}/api/sessions/${sid}/research`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${store.token}`,
-            },
-            body: JSON.stringify({ question }),
-          }
-        );
-        if (!res.ok) {
-          let detail = `Couldn't start research (HTTP ${res.status}).`;
-          try {
-            const body = await res.json();
-            if (typeof body?.detail === "string") detail = body.detail;
-          } catch {
-            /* keep generic */
-          }
-          addNotice(detail, true);
-          return;
-        }
-        const job = await res.json();
-        store.upsertResearch(sid, {
-          id: job.id,
-          session_id: sid,
-          question,
-          status: "running",
-          phase: job.phase ?? "scope",
-        });
-      } catch {
-        addNotice("Couldn't start research — network error.", true);
-      }
+      await createResearch(sid, question, () => mounted.current);
       return;
     }
 

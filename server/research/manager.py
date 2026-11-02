@@ -45,12 +45,14 @@ from ..sessions.runtime_types import (
     SessionOwnerUnavailable,
 )
 from ..sessions.submission import (
+    RequestCompletion,
     ReturnBody,
     ReturnRefused,
     ReturnSkipped,
     ReturnTarget,
     ReturnUnconfirmed,
     SubmissionReceipt,
+    receipt_for_input,
 )
 from ..workspace import paths_for
 from .orchestrator import (
@@ -78,6 +80,14 @@ class ResearchError(Exception):
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _delivery_result(completion: RequestCompletion) -> tuple[str, str | None]:
+    successful = (completion.state == "completed" and completion.recording_state == "committed"
+                  and completion.outcome is not None and completion.outcome.status == "success")
+    stage = ("processed" if successful else "unknown" if completion.state == "unavailable" else
+             "recording_unconfirmed" if completion.recording_state in {"failed", "unconfirmed"} else "failed")
+    return stage, None if successful else completion.reason or completion.state
 
 
 def _research_dir(user_id: str | None) -> str:
@@ -140,31 +150,47 @@ class ResearchManager:
         while self._tasks:
             await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._tasks.values())))
 
-    async def recover_interrupted(self) -> int:
-        """Boot sweep — mark prior-process `running` jobs interrupted."""
+    async def recover_interrupted(self, *, previous_writers_retired: bool = False) -> int:
+        """Before admission opens, observe original identities without dispatch.
+
+        Only managed startup supplies proof that an absent prior producer cannot
+        still accept its report. Standalone startup preserves that uncertainty.
+        """
         if self.db is None:
             return 0
         n = await self.db.mark_in_flight_research_jobs_interrupted(_now())
-        if self.session_mgr is not None:
-            async def observe_only() -> ReturnSkipped:
-                return ReturnSkipped("Previously unconfirmed research admission is observation only")
-
-            for row in await self.db.unconfirmed_research_admissions():
+        for row in await self.db.recoverable_research_deliveries():
+            previous = row["delivery_receipt"]
+            if previous and previous["stage"] in {"processed", "failed", "recording_unconfirmed"}:
+                await self.db.advance_research_delivery(row["id"], previous["request_id"], previous["stage"])
+                continue
+            error = "Report admission is unknown after restart; the request was not replayed."
+            try:
+                # Read the same committed source identity used by source_receipt,
+                # reconstructing persisted completion rather than a live waiter.
+                source = await self.db.get_source_submission("research", f"research:{row['id']}", session_id=row["session_id"])
+            except (SessionOwnerUnavailable, TimeoutError, ConnectionError) as cause:
+                self.db.health.require_healthy()
+                source = None
+                observed_absence = False
+                error = f"Report admission could not be read ({cause}); the request was not replayed."
+            else:
+                observed_absence = source is None
+            if source is not None and (receipt := receipt_for_input(source)).accepted:
+                stage, detail = _delivery_result(await receipt.wait())
+                await self.db.advance_research_delivery(row["id"], receipt.request_id, stage, error=detail)
+            elif previous:
+                await self.db.advance_research_delivery(row["id"], previous["request_id"], "unknown", error=error)
+            else:
                 owned = decode_owned(row.get("knowledge_context"))
-                result = await self.session_mgr.admit_return(
-                    ReturnTarget(row["session_id"], "research", f"research:{row['id']}",
-                                 owned.return_binding.work_id if owned else None, owned),
-                    prepare=observe_only,
-                )
-                if isinstance(result, SubmissionReceipt):
-                    await self._advance_delivery(row["id"], row["session_id"], result.request_id, "unknown")
-                    await self._settle_delivery(row["id"], row["session_id"])
-        for row in await self.db.pending_research_deliveries():
-            request_id = row["delivery_receipt"]["request_id"]
-            outcome = await self.db.get_committed_terminal(row["session_id"], request_id)
-            stage = "processed" if outcome and outcome.get("status") == "success" else "failed" if outcome else "unknown"
-            await self.db.advance_research_delivery(row["id"], request_id, stage,
-                                                   error=None if outcome else "Delivery observation was interrupted; the request was not replayed.")
+                binding = await self.db.get_session_binding(row["session_id"])
+                reference = owned.return_binding.reference if owned else None
+                valid = (reference is not None and binding is not None and reference.user_id is not None
+                         and reference.session_id == row["session_id"] and reference.user_id == binding["user_id"])
+                failed = observed_absence and previous_writers_retired and valid and row["injection_status"] == "pending"
+                if failed:
+                    error = "Report was saved but not admitted before restart; the request was not replayed."
+                await self.db.reconcile_unaccepted_research(row["id"], failed=failed, error=error)
         if n:
             logger.info("research: marked %d interrupted job(s) on boot", n)
         return n
@@ -382,6 +408,7 @@ class ResearchManager:
             "verified": sum(getattr(f, "verification", "unverified") == "verified" for f in report.findings),
             "unverified": sum(getattr(f, "verification", "unverified") != "verified" for f in report.findings),
             "injection_status": "pending",
+            "report_path": report_path,
         })
         try:
             await self._inject_report(job_id, session_id, question, report)
@@ -452,7 +479,6 @@ class ResearchManager:
         current = self.session_mgr.get_session(session_id)
         processing = current and current._run.request and current._run.request.request_id == receipt.request_id
         await self._advance_delivery(job_id, session_id, receipt.request_id, "processing" if processing else "queued")
-        await self._settle_delivery(job_id, session_id)
         task = asyncio.create_task(self._observe_delivery(job_id, session_id, receipt), name=f"research-delivery-{job_id}")
         self._register_task(f"delivery:{job_id}", task,
                             on_retired=lambda: self._delivery_jobs.pop(receipt.request_id, None))
@@ -473,22 +499,19 @@ class ResearchManager:
             if self._closing:
                 raise asyncio.CancelledError
             completion = await receipt.wait()
-            successful = (completion.state == "completed" and completion.recording_state == "committed"
-                          and completion.outcome is not None and completion.outcome.status == "success")
-            stage = ("processed" if successful else "unknown" if completion.state == "unavailable" else
-                     "recording_unconfirmed" if completion.recording_state in {"failed", "unconfirmed"} else "failed")
-            await self._advance_delivery(job_id, session_id, receipt.request_id, stage, error=None if successful else completion.reason or completion.state)
+            stage, error = _delivery_result(completion)
+            await self._advance_delivery(job_id, session_id, receipt.request_id, stage, error=error)
         except asyncio.CancelledError:
             await self._advance_delivery(job_id, session_id, receipt.request_id, "unknown", error="Delivery observation stopped; the request was not replayed.")
             raise
 
-    async def _settle_delivery(self, job_id: str, session_id: str, *, error: str | None = None, unknown: bool = False) -> None:
-        """Persist and publish delivery independently of report completion."""
+    async def _settle_delivery(self, job_id: str, session_id: str, *, error: str, unknown: bool = False) -> None:
+        """Persist a refused or uncertain return independently of the report."""
         assert self.db is not None and self.session_mgr is not None
-        status = "unknown" if unknown else "failed" if error else "delivered"
+        status = "unknown" if unknown else "failed"
         await self.db.update_research_job(job_id, injection_status=status, error=error,
-                                          injected_at=None if error else _now())
-        if error and not unknown:
+                                          injected_at=None)
+        if not unknown:
             row = await self.db.get_research_job(job_id)
             location = (row or {}).get("report_path") or "the research job record"
             try:

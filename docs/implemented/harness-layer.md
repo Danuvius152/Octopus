@@ -53,6 +53,14 @@ reuse, injection or tool authority.
 
 ### Execution and resources
 
+Discovery checks the executable selected for ordinary interaction, using the
+same profile selector as invocation construction. Codex reads
+`OCTOPUS_CODEX_APP_SERVER_BINARY` at the operation boundary; an invalid explicit
+path does not fall back to another PATH entry. Preparation still verifies the
+captured binary's pin. Availability proves resolvability/executability, not
+authentication, model access or readiness of the separate Research exec leaf,
+tool-free worker and device-login commands.
+
 SessionOwner owns mutable execution state. Managed preparation, spawn, stdin,
 reader and retirement operations report their original results to it. HarnessRun
 retains native resources and bounded event delivery through confirmed retirement.
@@ -219,6 +227,14 @@ differences. Credential refresh and reauthorization have their own
 The OAuth-specific `complete_oauth` driver entry carries the fixed request and
 narrow credential writer into the original login task, through its database
 commit. Codex's device flow keeps its separate start/status/cancel semantics.
+Its scrape budget ends only when both verification URL and user code are
+available. The wakeup event also signals errors/exit and is not success proof.
+Missing either field times out and joins the original process/drive; a selected
+error or cancellation cannot be replaced by a late successful exit. A complete
+device code retains the separate user-authorization window. Reauthorization
+failure removes only its staging home and preserves the existing credential
+and native history. Controlled CLI regressions in `test_codex_login.py` verify
+partial output, the deadline boundary, late exit and actual retirement.
 
 Transcript import/export and fork are separate capabilities. Claude's transcript
 codec supports handoff/pull; lack of a Codex codec produces an explicit unsupported

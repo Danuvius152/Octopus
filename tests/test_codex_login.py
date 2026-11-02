@@ -55,6 +55,81 @@ async def client():
 # --- manager unit tests ----------------------------------------------------
 
 
+@pytest.mark.parametrize("output,complete", [("", False), ("https://auth.example/device", False), ("TEST-CODE9", False),
+                                           ("https://auth.example/device TEST-CODE9", True)])
+async def test_device_scrape_budget_requires_both_fields_and_confirms_process_exit(tmp_path, monkeypatch, output, complete):
+    script = tmp_path / "partial_login.py"
+    script.write_text(f"import time\nprint({output!r}, flush=True)\ntime.sleep(30)\n")
+    monkeypatch.setattr(codex_login, "build_codex_login_argv", lambda: [sys.executable, str(script)])
+    monkeypatch.setattr(codex_login, "_SCRAPE_TIMEOUT_SECONDS", .15)
+    manager = codex_login.CodexLoginManager()
+    session = await manager.start("Partial device code")
+    try:
+        await asyncio.wait_for(asyncio.shield(session._watchdog), .5)
+        if complete:
+            assert session.state == codex_login.CodexLoginState.pending
+            assert session._proc.returncode is None and not session._task.done()
+            await manager.cancel(session.id)
+        else:
+            assert session.state == codex_login.CodexLoginState.error
+            assert "device code in time" in session.message
+            assert session._proc.returncode is not None and session._task.done()
+        assert manager.drain_blockers() == ()
+    finally:
+        await manager.shutdown()
+
+
+async def test_scrape_deadline_rechecks_complete_fields_instead_of_the_wakeup_event(monkeypatch, tmp_path):
+    monkeypatch.setattr(codex_login, "_SCRAPE_TIMEOUT_SECONDS", 0)
+    manager = codex_login.CodexLoginManager()
+    session = codex_login.CodexLoginSession("boundary", "credential", str(tmp_path), "Complete at deadline",
+        verification_url="https://auth.example/device", user_code="TEST-CODE9")
+    assert not session._scraped.is_set()
+    await manager._scrape_watchdog(session)
+    assert session.state == codex_login.CodexLoginState.pending
+
+
+async def test_late_successful_drive_cannot_replace_scrape_timeout(tmp_path, monkeypatch):
+    script = tmp_path / "late_login.py"
+    script.write_text("import os,pathlib\npathlib.Path(os.environ['CODEX_HOME'],'auth.json').write_text('{\"tokens\":{\"access_token\":\"new\"}}')\nprint('https://auth.example/device',flush=True)\n")
+    monkeypatch.setattr(codex_login, "build_codex_login_argv", lambda: [sys.executable, str(script)])
+    monkeypatch.setattr(codex_login, "_SCRAPE_TIMEOUT_SECONDS", .15)
+    original_spawn = asyncio.create_subprocess_exec
+    drive_waiting, release_drive, release_failure = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    async def spawn(*args, **kwargs):
+        proc = await original_spawn(*args, **kwargs)
+        wait = proc.wait
+        calls = 0
+        async def held_wait():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                drive_waiting.set()
+                await release_drive.wait()
+            else:
+                await release_failure.wait()
+            return await wait()
+        proc.wait = held_wait
+        return proc
+    monkeypatch.setattr(codex_login.asyncio, "create_subprocess_exec", spawn)
+    manager = codex_login.CodexLoginManager()
+    session = await manager.start("Late successful CLI exit")
+    try:
+        await asyncio.wait_for(drive_waiting.wait(), 2)
+        await asyncio.wait_for(session._scraped.wait(), 2)  # Timeout has won, cleanup is still suspended.
+        release_drive.set()
+        await asyncio.wait_for(session._task, 2)
+        assert session.state == codex_login.CodexLoginState.error
+        assert "device code in time" in session.message
+        release_failure.set()
+        await session._watchdog
+        assert session._proc.returncode == 0 and manager.drain_blockers() == ()
+    finally:
+        release_drive.set()
+        release_failure.set()
+        await manager.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_start_scrapes_url_and_code():
     mgr = codex_login.CodexLoginManager()
@@ -308,7 +383,7 @@ async def test_codex_login_cancel_route(client, monkeypatch):
     assert st.json()["state"] == "cancelled"
 
 
-@pytest.mark.parametrize("outcome", ["cancel", "failure", "spawn_failure", "invalid_auth", "success"])
+@pytest.mark.parametrize("outcome", ["cancel", "failure", "spawn_failure", "invalid_auth", "scrape_timeout", "success"])
 async def test_reauthorization_preserves_existing_home_and_only_publishes_valid_auth(tmp_path, monkeypatch, outcome):
     credential_id = "existing"
     home = Path(codex_login.codex_home_for(credential_id))
@@ -333,12 +408,15 @@ async def test_reauthorization_preserves_existing_home_and_only_publishes_valid_
         "(home / 'config.toml').write_text('damaged config')\n"
         "(home / 'sessions').mkdir(exist_ok=True)\n"
         "(home / 'sessions' / 'replacement.jsonl').write_text('wrong record')\n"
-        "print('https://auth.example/device TEST-CODE9', flush=True)\n"
-        + ("time.sleep(30)\n" if outcome == "cancel" else
+        + ("print('https://auth.example/device', flush=True)\n" if outcome == "scrape_timeout" else
+           "print('https://auth.example/device TEST-CODE9', flush=True)\n")
+        + ("time.sleep(30)\n" if outcome in {"cancel", "scrape_timeout"} else
            "sys.exit(1)\n" if outcome == "failure" else
            "(home / 'auth.json').write_text('not-json')\n" if outcome == "invalid_auth" else "")
     )
     monkeypatch.setattr(codex_login, "build_codex_login_argv", lambda: [sys.executable, str(script)])
+    if outcome == "scrape_timeout":
+        monkeypatch.setattr(codex_login, "_SCRAPE_TIMEOUT_SECONDS", .15)
     if outcome == "spawn_failure":
         async def fail_spawn(*args, **kwargs):
             raise OSError("synthetic spawn failure")

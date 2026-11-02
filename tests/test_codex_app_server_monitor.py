@@ -352,7 +352,6 @@ async def test_normal_model_ttft_excludes_anomalous_and_unbound_turns(metrics):
 async def test_native_retirement_cutoff_includes_a_stalled_supplementary_file_read(native_runtime, metrics, tmp_path, monkeypatch, phase):
     from server.harness import codex_activity, codex_app_server
 
-    monkeypatch.setattr(codex_app_server, "_METRICS_CLOSE_GRACE", .05, raising=False)
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     read = os.read
     source = tmp_path / "codex-home" / "sessions" / f"rollout-{ROOT}.jsonl"
@@ -368,9 +367,13 @@ async def test_native_retirement_cutoff_includes_a_stalled_supplementary_file_re
 
     manager, database, session, _, _, _ = native_runtime
     if phase == "preparation":
+        monkeypatch.setattr(codex_app_server, "_METRICS_CLOSE_GRACE", .05)
         monkeypatch.setattr(codex_activity.os, "read", hold_source)
     receipt = await start_output(native_runtime)
     run = session._run.backend
+    # The active case begins after ordinary preparation. Its short retirement
+    # budget must not expire the healthy initial read under suite contention.
+    monkeypatch.setattr(codex_app_server, "_METRICS_CLOSE_GRACE", .05)
     monkeypatch.setattr(codex_activity.os, "read", hold_source)
     waiting = asyncio.create_task(manager.await_session_execution(session.id, timeout=4))
     try:

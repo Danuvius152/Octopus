@@ -473,6 +473,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
         id: data.research_id as string,
         status: "completed",
         phase: "done",
+        ...(typeof data.report_path === "string" ? { report_path: data.report_path } : {}),
         sources: (data.sources as string[]) ?? undefined,
         verified: (data.verified as number) ?? undefined,
         unverified: (data.unverified as number) ?? undefined,

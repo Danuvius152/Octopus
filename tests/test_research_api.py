@@ -86,6 +86,28 @@ async def test_start_get_list_research(client, monkeypatch):
     assert all("knowledge_context" not in job for job in lst.json())
 
 
+async def test_completed_undelivered_report_remains_downloadable_by_its_account(client, db):
+    from server.workspace import paths_for
+
+    session = await _session(client)
+    binding = await db.get_session_binding(session["id"])
+    path = paths_for(binding["user_id"]).research / "saved.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Retained answer\nSaved before restart.")
+    await db.create_research_job("saved", session["id"], "q", "now")
+    await db.confirm_research_outcome("saved", "completed", completed_at="then", report_path=str(path))
+    await research_manager.recover_interrupted(previous_writers_retired=True)
+    url = f"/api/sessions/{session['id']}/research/saved/report"
+    for archived in (False, True):
+        if archived:
+            await session_manager.archive_session(session["id"], replace=False)
+        response = await client.get(url)
+        assert response.status_code == 200 and response.text == "# Retained answer\nSaved before restart."
+    _, foreign = await create_account(db, username="other-report-owner")
+    assert (await client.get(url, headers={"Authorization": f"Bearer {foreign}"})).status_code == 404
+    assert (await client.get(url.replace("saved/report", "absent/report"))).status_code == 404
+
+
 @pytest.mark.parametrize("retirement", ["delete", "archive"])
 async def test_research_waiting_for_configuration_rejects_a_retired_session(client, db, monkeypatch, retirement):
     session = await _session(client)

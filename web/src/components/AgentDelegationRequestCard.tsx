@@ -1,4 +1,3 @@
-import { accountFetch as fetch } from "../lib/accountFetch";
 import { selectSession } from "../lib/selectSession";
 import { observeDelegations } from "../lib/delegationReads";
 /**
@@ -17,7 +16,7 @@ import { observeDelegations } from "../lib/delegationReads";
  * Every association uses the canonical call and its exact round receipt.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import {
   IconCheck,
   IconExclamationCircle,
@@ -30,6 +29,8 @@ import {
 
 import { projectToolCall } from "../lib/toolIdentity";
 import { useSessionStore, type Delegation, type Message } from "../stores/sessionStore";
+import { useTaskControl } from "../hooks/useTaskControl";
+import { TaskControlFeedback } from "./TaskControlFeedback";
 
 const STATUS_LABEL: Record<Delegation["state"], string> = {
   running: "running",
@@ -90,7 +91,7 @@ export function AgentDelegationRequestCard({
   const match = useSessionStore((s) => (s.delegations[sessionId] || []).find((delegation) =>
     Boolean(delegationId && workId) && delegation.delegation_id === delegationId && delegation.work_id === workId
   ));
-  const [cancelling, setCancelling] = useState(false);
+  const control = useTaskControl(sessionId, JSON.stringify([delegationId, workId]));
   const state = match?.state;
   const displayName = match?.target_agent_name || agentName || "agent";
 
@@ -133,22 +134,10 @@ export function AgentDelegationRequestCard({
 
   const cancel = async () => {
     if (!match || state !== "running" || !workId || match.work_id !== workId) return;
-    setCancelling(true);
     const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
       sessionId
     )}/delegations/${encodeURIComponent(match.delegation_id)}/cancel`;
-    try {
-      await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ reason: "cancelled from UI", work_id: match.work_id }),
-      });
-    } finally {
-      setCancelling(false);
-    }
+    await control.cancel(url, { reason: "cancelled from UI", work_id: match.work_id });
   };
 
   const label = state ? STATUS_LABEL[state] : projection.failed ? "failed to start" : receipt ? "status unavailable" : projection.result ? "receipt unavailable" : "awaiting receipt";
@@ -181,6 +170,7 @@ export function AgentDelegationRequestCard({
         <div className="text-muted-foreground truncate" title={request}>
           “{request}”
         </div>
+        <TaskControlFeedback control={control} onRefresh={() => { void control.refresh(() => observeDelegations(sessionId)); }} />
         {returnLabel && (
           <div className="text-muted-foreground">
             <div>{returnLabel}</div>
@@ -208,7 +198,7 @@ export function AgentDelegationRequestCard({
           <button
             type="button"
             onClick={cancel}
-            disabled={cancelling}
+            disabled={control.pending}
             className="btn-cancel inline-flex items-center justify-center h-6 px-1.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 disabled:opacity-50"
             title="Cancel delegation"
           >

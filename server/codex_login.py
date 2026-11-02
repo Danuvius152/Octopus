@@ -73,6 +73,10 @@ class CodexLoginSession:
     _scraped: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _created_at: float = field(default=0.0, repr=False)
 
+    @property
+    def device_code_ready(self) -> bool:
+        return bool(self.verification_url and self.user_code)
+
 
 def build_codex_login_argv() -> list[str] | None:
     """`[<codex>, "login", "--device-auth"]`, or None if codex isn't on PATH.
@@ -177,7 +181,7 @@ class CodexLoginManager:
                 return
             finally:
                 spawned.set()
-            if session.state == CodexLoginState.cancelled:
+            if session.state != CodexLoginState.pending:
                 _kill_process_group(session._proc)
             await self._drive(session)
 
@@ -203,7 +207,7 @@ class CodexLoginManager:
         try:
             await asyncio.wait_for(session._scraped.wait(), _SCRAPE_TIMEOUT_SECONDS)
         except TimeoutError:
-            if session.state == CodexLoginState.pending and not session.verification_url:
+            if session.state == CodexLoginState.pending and not session.device_code_ready:
                 await self._fail(
                     session,
                     "Codex didn't return a device code in time — check the "
@@ -226,7 +230,7 @@ class CodexLoginManager:
             logger.debug("Codex login %s: stdout read error", session.id, exc_info=True)
 
         rc = await proc.wait()
-        if session.state == CodexLoginState.cancelled:
+        if session.state != CodexLoginState.pending:
             shutil.rmtree(session._login_home or session.codex_home, ignore_errors=True)
             session._scraped.set()
             return
@@ -272,7 +276,7 @@ class CodexLoginManager:
             m = _CODE_RE.search(buf)
             if m:
                 session.user_code = m.group(0)
-        if session.verification_url and session.user_code:
+        if session.device_code_ready:
             session._scraped.set()
 
     async def _reap(self, session: CodexLoginSession) -> None:
@@ -289,8 +293,11 @@ class CodexLoginManager:
             session._task.result()
 
     async def _fail(self, session: CodexLoginSession, message: str) -> None:
+        if session.state != CodexLoginState.pending:
+            return
         session.state = CodexLoginState.error
         session.message = message
+        session._scraped.set()
         _kill_process_group(session._proc)
         if session._proc is not None:
             await session._proc.wait()

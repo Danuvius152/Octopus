@@ -1,4 +1,3 @@
-import { accountFetch as fetch } from "../lib/accountFetch";
 /**
  * Live status chip for a cross-turn background task.
  *
@@ -29,6 +28,8 @@ import {
 import { useSessionStore, type BgTask } from "../stores/sessionStore";
 import { cn } from "../lib/utils";
 import { observeSessionAuxiliary } from "../lib/hydrateSession";
+import { useTaskControl } from "../hooks/useTaskControl";
+import { TaskControlFeedback } from "./TaskControlFeedback";
 
 interface Props {
   sessionId: string;
@@ -89,7 +90,7 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
     (s.bgTasks[sessionId] || []).find((t) => t.id === taskId)
   );
   const [expanded, setExpanded] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
+  const control = useTaskControl(sessionId, taskId);
 
   // The read owns its observation until this view ends it. A WS insert while
   // it waits must not cancel a valid response that can still supply full output.
@@ -111,22 +112,7 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
 
   const isRunning = task.status === "running" || task.status === "pending";
 
-  const cancel = async () => {
-    if (cancelling) return;
-    setCancelling(true);
-    try {
-      await fetch(
-        `${window.location.origin}/api/sessions/${encodeURIComponent(
-          sessionId
-        )}/bg-tasks/${encodeURIComponent(taskId)}/cancel`,
-        { method: "POST", headers: { Authorization: `Bearer ${token}` } }
-      );
-    } catch {
-      // best effort
-    } finally {
-      setCancelling(false);
-    }
-  };
+  const cancel = () => control.cancel(`${window.location.origin}/api/sessions/${encodeURIComponent(sessionId)}/bg-tasks/${encodeURIComponent(taskId)}/cancel`);
 
   const headerStyle: Record<BgTask["status"], string> = {
     pending: "border-border bg-muted/40",
@@ -186,7 +172,7 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
           <button
             type="button"
             onClick={cancel}
-            disabled={cancelling}
+            disabled={control.pending}
             className="shrink-0 inline-flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:border-destructive/50 transition-colors disabled:opacity-50"
             title="Cancel this background task"
           >
@@ -195,6 +181,7 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
           </button>
         )}
       </div>
+      <TaskControlFeedback control={control} onRefresh={() => { void control.refresh(() => observeSessionAuxiliary(sessionId, "background", taskId)); }} />
       {stopReason && (
         <div className="border-t border-border/60 px-3 py-1 text-[11px] text-muted-foreground">
           {stopReason}

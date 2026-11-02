@@ -19,3 +19,27 @@ export class SnapshotReads {
     };
   }
 }
+
+/** Successful list/detail observations order each task independently. A finished
+ * success remains relevant only while an older overlapping read can return. */
+export class TaskSnapshotReads {
+  private groups = new Map<string, { next: number; pending: Set<number>; successes: Map<string, number> }>();
+
+  begin(key: string) {
+    const group = this.groups.get(key) ?? { next: 0, pending: new Set<number>(), successes: new Map<string, number>() };
+    this.groups.set(key, group);
+    const order = ++group.next;
+    group.pending.add(order);
+    return {
+      claim: (id: string) => {
+        if (!group.pending.has(order) || (group.successes.get(id) ?? 0) > order) return false;
+        group.successes.set(id, order);
+        return true;
+      },
+      finish: () => {
+        group.pending.delete(order);
+        if (!group.pending.size && this.groups.get(key) === group) this.groups.delete(key);
+      },
+    };
+  }
+}

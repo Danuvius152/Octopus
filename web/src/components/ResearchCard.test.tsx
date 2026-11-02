@@ -36,6 +36,15 @@ afterEach(() => {
 });
 
 describe("ResearchCard", () => {
+  it("shows a rejected cancellation without changing the research outcome", async () => {
+    fetchMock.mockResolvedValue(Response.json({ detail: "Research control unavailable" }, { status: 503 }));
+    useSessionStore.setState({ research: { s1: [job()] } });
+    render(<ResearchCard sessionId="s1" />);
+    fireEvent.click(screen.getByTitle("Cancel research"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Research control unavailable");
+    expect(useSessionStore.getState().research.s1[0].status).toBe("running");
+  });
+
   it("renders nothing with no jobs", () => {
     const { container } = render(<ResearchCard sessionId="s1" />);
     expect(container.firstChild).toBeNull();
@@ -88,6 +97,14 @@ describe("ResearchCard", () => {
     expect(screen.queryByText(/Report delivered below/)).toBeNull();
     expect(screen.getByText(/Report retained as material/)).toBeTruthy();
     expect(screen.getByText(/Original work is closed/)).toBeTruthy();
+  });
+
+  it("keeps access to a saved report when delivery failed or remains unknown", () => {
+    useSessionStore.getState().setResearch("s1", [job({ status: "completed", injection_status: "unknown", report_path: "/owned/research/saved.md" })]);
+    render(<ResearchCard sessionId="s1" />);
+    expect(screen.getByRole("link", { name: "Download report" }).getAttribute("href"))
+      .toContain("/api/sessions/s1/research/r1/report?token=tok");
+    expect(screen.getByText(/admission is unconfirmed/)).toBeTruthy();
   });
 
   it("shows the error on failure", () => {

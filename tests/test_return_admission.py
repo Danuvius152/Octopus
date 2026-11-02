@@ -17,7 +17,7 @@ from server.sessions.submission import (
     SubmissionReceipt,
 )
 from server.submission_models import SubmissionConflict
-from tests.test_source_return_owner_failure import fail_destination_owner
+from tests.session_runtime import fail_destination_owner
 from tests.test_submission_recovery import runtime as runtime
 
 

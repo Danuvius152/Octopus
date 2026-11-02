@@ -5,6 +5,9 @@ import { selectSession } from "./selectSession";
 import { loadResearchSnapshot } from "./hydrateSession";
 import { handleWsMessage, useWebSocket } from "../hooks/useWebSocket";
 import { ResearchCard } from "../components/ResearchCard";
+import { ChatView } from "../components/ChatView";
+import { mockChatViewport } from "../components/chatViewport.test-support";
+import { VirtuosoMockContext } from "react-virtuoso";
 import { ArchivedSessionsDialog } from "../components/ArchivedSessionsDialog";
 import { useSessionStore, type SessionInfo, type ResearchJob } from "../stores/sessionStore";
 
@@ -21,7 +24,99 @@ beforeEach(() => {
   useSessionStore.setState({ token: "tok" });
   Socket.reset(0);
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+function submitResearch() {
+  mockChatViewport();
+  useSessionStore.setState({ activeSessionId: "s1", sessions: [{ ...session, status: "idle", backend: "codex" }], dispatchGeneration: "service" });
+  const view = render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
+    <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()} connected
+      onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
+  </VirtuosoMockContext.Provider>);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "/research Existing research" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  return view;
+}
+
+it.each(["progress", "completed", "failed", "cancelled"])("a late creation receipt preserves earlier %s facts through ChatView", async (kind) => {
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
+    String(url).endsWith("/research") && init?.method === "POST" ? response.promise : Promise.resolve(Response.json([]))));
+  submitResearch();
+  act(() => {
+    handleWsMessage({ type: "research_started", session_id: "s1", research_id: "r1", question: job.question });
+    handleWsMessage(kind === "progress"
+      ? { type: "research_progress", session_id: "s1", research_id: "r1", phase: "verify" }
+      : kind === "completed" ? { type: "research_completed", session_id: "s1", research_id: "r1", verified: 3 }
+      : { type: "research_failed", session_id: "s1", research_id: "r1", status: kind, error: "Original terminal" });
+  });
+  await act(async () => { response.resolve(Response.json(job)); });
+  const saved = useSessionStore.getState().research.s1[0];
+  expect(saved.status).toBe(kind === "progress" ? "running" : kind);
+  expect(saved.phase).toBe(kind === "progress" ? "verify" : kind === "completed" ? "done" : "scope");
+  if (kind === "completed") expect(saved.verified).toBe(3);
+});
+
+it("initializes the actual creation state and retains valid results after viewing another session", async () => {
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
+    String(url).endsWith("/research") && init?.method === "POST" ? response.promise : Promise.resolve(Response.json([]))));
+  submitResearch();
+  act(() => useSessionStore.setState({ activeSessionId: "s2" }));
+  await act(async () => response.resolve(Response.json({ ...job, status: "failed", error: "Creation already settled" })));
+  expect(useSessionStore.getState().research.s1[0]).toMatchObject({ status: "failed", error: "Creation already settled" });
+});
+
+it.each(["account", "service", "unmount"])("drops old creation data and errors after %s changes", async (change) => {
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
+    String(url).endsWith("/research") && init?.method === "POST" ? response.promise : Promise.resolve(Response.json([]))));
+  const view = submitResearch();
+  act(() => {
+    if (change === "account") useSessionStore.setState({ accountGeneration: useSessionStore.getState().accountGeneration + 1 });
+    if (change === "service") useSessionStore.setState({ dispatchGeneration: "another-service" });
+    if (change === "unmount") view.unmount();
+  });
+  await act(async () => response.resolve(new Response("Old creation failure", { status: 503 })));
+  expect(useSessionStore.getState().research.s1).toBeUndefined();
+  expect(useSessionStore.getState().messages.s1?.some((message) => message.is_error)).toBeFalsy();
+});
+
+it.each([true, false])("a missed-started snapshot remains authoritative across creation (read first=%s)", async (readFirst) => {
+  const post = deferred(), read = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
+    if (String(url).endsWith("/research")) return init?.method === "POST" ? post.promise : read.promise;
+    return Promise.resolve(Response.json([]));
+  }));
+  submitResearch();
+  act(() => handleWsMessage({ type: "research_progress", session_id: "s1", research_id: "r1", phase: "verify" }));
+  const loaded = { ...job, status: "completed", phase: "done", injection_status: "failed", error: "Saved but not delivered" };
+  await act(async () => {
+    if (readFirst) read.resolve(Response.json([loaded]));
+    else post.resolve(Response.json(job));
+  });
+  await act(async () => {
+    if (readFirst) post.resolve(Response.json(job));
+    else read.resolve(Response.json([loaded]));
+  });
+  expect(useSessionStore.getState().research.s1[0]).toMatchObject(loaded);
+});
+
+it.each([1, 2])("a browser confirmation preserves a concurrent authoritative delivery snapshot v%s", async (version) => {
+  const receipt = { request_id: "original", version: 1, stage: "queued" as const };
+  useSessionStore.setState({ dispatchGeneration: "service", research: { s1: [{ ...job, status: "completed", delivery_receipt: receipt }] } });
+  const snapshot = deferred(), confirmation = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
+    init?.method === "POST" ? confirmation.promise : String(url).endsWith("/research") ? snapshot.promise : Promise.resolve(Response.json([]))));
+  const reading = loadResearchSnapshot("s1");
+  render(<ResearchCard sessionId="s1" />);
+  await act(async () => confirmation.resolve(Response.json({ delivery_receipt: { ...receipt, browser_confirmed_version: 1, browser_confirmed_at: "seen" } })));
+  const incoming = { ...receipt, version, stage: version === 2 ? "processed" : "queued" };
+  await act(async () => { snapshot.resolve(Response.json([{ ...job, status: "completed", delivery_receipt: incoming }])); await reading; });
+  expect(useSessionStore.getState().research.s1[0].delivery_receipt).toMatchObject({
+    ...incoming, browser_confirmed_version: 1, browser_confirmed_at: "seen",
+  });
+});
 
 it("loads existing research when selecting after WS connects, then accepts progress and cancel", async () => {
   vi.stubGlobal("WebSocket", Socket);
