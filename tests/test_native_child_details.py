@@ -82,7 +82,7 @@ async def test_detail_pages_keep_tool_call_and_result_and_reject_other_work_curs
     await start_output(native_runtime)
     def command(phase):
         return {"method": f"item/{phase}", "params": {"threadId": "child", "turnId": "child-turn", "item": {
-            "id": "command", "type": "commandExecution", "command": "true", "aggregatedOutput": "Saved output", "exitCode": 0}}}
+            "id": "command", "type": "commandExecution", "command": "true", "status": "completed", "aggregatedOutput": "Saved output", "exitCode": 0}}}
     inject(tmp_path, child_start(), command("started"), command("completed"),
            item("child", "child-turn", "answer", "Saved partial"),
            child_start("other", "other-turn"), item("other", "other-turn", "answer", "Private other work"), terminal())

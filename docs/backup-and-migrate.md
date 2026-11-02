@@ -69,6 +69,15 @@ message JSON. A complete backup keeps original seqs and their referenced rows;
 account archives exclude them with the chat. No new collection root is added,
 and an unavailable reference is not recovered from another session's history.
 
+Native item status/failure, hook source and generated-image metadata in
+`tool_input.native_item` follow that same chat exclusion. Inline image bytes are
+not stored; a file ID or size/hash cannot restore the image. `savedPath` remains
+the original path, with no historical snapshot guarantee. Ordinary files inside
+included account roots retain their existing collection rules; this adds no
+provider/media root to account transfer. A complete backup that needs those
+images must also preserve their actual referenced files and verify access after
+restoration. See the [native image contract](implemented/codex-backend.md#native-generated-images).
+
 App Server input evidence belongs to `client_submissions` in the main database,
 with no new filesystem root. Account archives exclude it with the owning chat;
 import does not restore a native writer or pending execution. A complete backup

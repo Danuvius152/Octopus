@@ -82,6 +82,10 @@ class NativeOutput:
     def contains_turn(self, thread: str, turn: str) -> bool:
         return (thread, turn) == (self.thread_id, self.turn_id) or (thread, turn) in self._work
 
+    def active_turn(self, thread: str, turn: str) -> bool:
+        work = self._work.get((thread, turn))
+        return (thread, turn) == (self.thread_id, self.turn_id) or work is not None and work.update.status == "running"
+
     @property
     def child_turn_count(self) -> int:
         return len(self._work)

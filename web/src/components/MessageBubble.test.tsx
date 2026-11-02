@@ -7,13 +7,54 @@
  * table row). The completed block that replaces it renders normally.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 
 import { MessageBubble } from "./MessageBubble";
 import { useSessionStore } from "../stores/sessionStore";
 
 afterEach(cleanup);
+
+it("offers a native image's original path through live WS and saved history", async () => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const savedPath = "/original/native-image.png";
+  const metadata = { request_id: "r", attempt_id: "a", native: { thread_id: "root", turn_id: "turn",
+    root_thread_id: "root", root_turn_id: "turn", item_id: "image" } };
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "tool_result", session_id: "image-session", seq: 1, tool_use_id: "image",
+    output: `Generated image saved at: ${savedPath}`, is_error: false, runtime_metadata: metadata,
+    tool_input: { native_item: { id: "image", type: "imageGeneration", status: "completed", savedPath } } });
+  const message = useSessionStore.getState().messages["image-session"][0];
+  expect(message.tool_input?.native_item).toMatchObject({ savedPath });
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  try {
+    const rendered = render(<MessageBubble sessionId="image-session" message={message} />);
+    fireEvent.click(rendered.getByRole("button", { name: "Copy path" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(savedPath));
+    fireEvent.click(rendered.getByRole("button", { name: "Open in viewer" }));
+    expect(useSessionStore.getState().viewer).toEqual({ sessionId: "image-session", path: savedPath });
+    rendered.unmount();
+    const restored = render(<MessageBubble sessionId="image-session" message={JSON.parse(JSON.stringify(message))} />);
+    expect(restored.getByRole("button", { name: "Copy path" })).toBeVisible();
+  } finally {
+    if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);
+    else Reflect.deleteProperty(navigator, "clipboard");
+  }
+});
+
+it("shows hook provenance as a collapsed tool observation", () => {
+  const { getByRole, queryByText, getByText } = render(<MessageBubble sessionId="hook" message={{
+    role: "tool", type: "tool_result", content: "Hook context from hook-1", tool_input: {
+      native_item: { type: "hookPrompt", fragments: [{ text: "Hook context", hookRunId: "hook-1" }] },
+    }, runtime_metadata: { request_id: "r", attempt_id: "a", native: {
+      thread_id: "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn" } },
+  }} />);
+  expect(queryByText("You")).toBeNull();
+  fireEvent.click(getByRole("button", { name: /Hook prompt/ }));
+  expect(getByText("Hook context from hook-1")).toBeVisible();
+});
 
 it.each(["old-tool", undefined])("keeps historical tool approvals readable without actions (id: %s)", (toolUseId) => {
   const { getByText, queryByRole } = render(<MessageBubble sessionId="approval-history" message={{

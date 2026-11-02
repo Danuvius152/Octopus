@@ -171,6 +171,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
         role: "assistant",
         type: "text",
         content: data.content as string,
+        tool_input: data.tool_input as Message["tool_input"],
       });
       break;
 
@@ -224,6 +225,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
         role: "tool",
         type: "tool_result",
         content: data.output as string,
+        tool_input: data.tool_input as Message["tool_input"],
         tool_use_id: data.tool_use_id as string,
         is_error: data.is_error as boolean,
       });

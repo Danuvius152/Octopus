@@ -314,6 +314,9 @@ async def test_native_wait_and_duplicate_notifications_cannot_renew_idle_or_drop
     manager, database, session, mode, starts, _ = native_runtime
     mode[0] = "control_stop_tail"
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    # This test owns activity/late collection, not continuation eligibility.
+    # Native recovery has separate accepted-input and budget regressions.
+    monkeypatch.setattr(settings, "turn_idle_max_retries", 0)
     monkeypatch.setattr(settings, "turn_max_seconds", 3)
     receipt = await manager.start_message(session.id, "Wait within the original budget", source="human")
     await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
@@ -425,6 +428,7 @@ async def test_start_wait_failure_keeps_the_same_finite_late_output_prefix(nativ
 @pytest.mark.parametrize("early_close", ["native", "stop", "start_wait_failure"])
 async def test_provider_failure_remains_readable_across_business_outcome_selection(native_runtime, tmp_path, monkeypatch, early_close):
     manager, database, session, mode, starts, events = native_runtime
+    monkeypatch.setattr(manager, "_MAX_TRANSIENT_RETRIES", 0)
     mode[0] = "control_stop_tail"
     entered, release = asyncio.Event(), asyncio.Event()
     record = database.record_native_input
@@ -465,7 +469,7 @@ async def test_provider_failure_remains_readable_across_business_outcome_selecti
                 if message.type == "recovery" and message.content.get("message") == provider_error["message"]]
     assert len(failures) == 1
     diagnostic = failures[0]
-    assert diagnostic.content["phase"] == "diagnostic" and diagnostic.content["code"] == "native_turn_failed"
+    assert diagnostic.content["phase"] == "diagnostic" and diagnostic.content["code"] == "native_provider_transient"
     assert diagnostic.tool_input["provider_error"] == provider_error
     assert diagnostic.runtime_metadata.request_id == receipt.request_id
     assert diagnostic.runtime_metadata.native.thread_id == ROOT and diagnostic.runtime_metadata.native.turn_id == "turn-1"

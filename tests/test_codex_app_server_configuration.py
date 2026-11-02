@@ -12,6 +12,40 @@ from tests.native_app_server import native_runtime as native_runtime
 from tests.session_runtime import wait_dispatch_idle
 
 
+@pytest.mark.parametrize("collaboration", [{"mode": "plan", "settings": {}}, {"mode": "future", "settings": {}}, None])
+async def test_incompatible_resume_is_refused_before_business_input(native_runtime, tmp_path, collaboration):
+    manager, database, session, _, starts, _ = native_runtime
+    await submit_client_message(manager, session.id, "Establish history", [], "first", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    (tmp_path / "native-collaboration.json").write_text(json.dumps(collaboration))
+    await submit_client_message(manager, session.id, "Do not convert this history", [], "second", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    result = await submission_status(manager, session.id, "second")
+    assert result["outcome"]["status"] == "failed"
+    assert "collaboration mode" in result["outcome"]["message"].lower()
+    assert result["execution"]["native_inputs"][0]["state"] == "not_sent"
+    frames = [json.loads(line) for line in (tmp_path / "native-frames.jsonl").read_text().splitlines()]
+    assert len([frame for frame in frames if frame.get("method") == "turn/start"]) == 1
+    assert len([frame for frame in frames if frame.get("method") == "thread/start"]) == 1
+    assert len(starts) == 2
+
+
+@pytest.mark.parametrize("enabled,source,accepted", [(True, "external", False), (False, "external", True),
+                                                    (None, "external", True), (True, "system", True)])
+async def test_effective_external_clock_requires_a_supported_client(native_runtime, tmp_path, enabled, source, accepted):
+    manager, _, session, _, _, _ = native_runtime
+    (tmp_path / "native-config.json").write_text(json.dumps({"features": {
+        "fast_mode": True, "wake_on_agent_messages": False, "goals": False, "sleep_tool": False,
+        "multi_agent": True, "multi_agent_v2": {"enabled": True, "wait_agent_enabled": True},
+        "current_time_reminder": {"enabled": enabled, "clock_source": source},
+    }}))
+    await submit_client_message(manager, session.id, "Run with effective time configuration", [], "clock", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    status = await submission_status(manager, session.id, "clock")
+    assert status["outcome"]["status"] == ("success" if accepted else "failed")
+    assert (tmp_path / "native-business.jsonl").exists() == accepted
+
+
 async def test_saved_large_chinese_controller_uses_the_selected_transport(native_runtime, tmp_path):
     manager, database, session, mode, starts, events = native_runtime
     persona = "中文配置必须完整保留。" * 16000

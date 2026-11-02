@@ -62,6 +62,24 @@ existing request message's `tool_input.native_question`; the original resolution
 keeps structured answers and provenance. These are additive JSON facts: no DDL,
 format-marker increment, startup conversion or additional collection root.
 
+Native item observations use the existing message `tool_input.native_item` JSON
+for original status, failure and item-specific fields. Text bodies keep their
+existing content field and native source/phase. Complete empty items stay valid.
+Generated images retain the native file ID, or an `inlineImage` byte count and
+SHA-256 after bounded wire decoding; inline base64 is not stored. `savedPath`
+remains the original absolute path. Image-view actions retain a path without a
+snapshot; hook fragments retain hook-run source; dynamic-tool rejection remains
+an observation rather than a second execution or input record.
+
+These facts are additive inside existing JSON and require no schema change or
+backfill. History, fork, transcript export and consistent complete backup retain
+the original JSON; account archives still exclude chats and their native facts.
+No new media root enters collection or restoration: current file access still
+depends on the original file and viewer policy. A saved path does not promise
+that file exists after restoration. Existing workspace/attachment backup scope
+is unchanged; see
+[account portability](../backup-and-migrate.md#account-export-and-import).
+
 Legacy metadata remains readable without inventing native ancestry. History,
 fork/message copying and a complete backup preserve the original JSON, seq and
 associations; a stripped text projection cannot reconstruct them. Runtime

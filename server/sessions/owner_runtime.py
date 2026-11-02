@@ -1468,6 +1468,8 @@ class OwnerRuntime:
         if captured.user_id is None:
             raise ValueError("The session has no file owner")
         backend = self.owner.manager._make_run(captured, prepared.agent, prepared.connectors)
+        if isinstance(backend, HarnessRun) and isinstance(prepared.backend, HarnessRun):
+            backend.continue_configuration(prepared.backend)
         if not isinstance(backend, HarnessRun) or not backend.profile.inline_large_inputs:
             prompt = await asyncio.to_thread(spill_if_large, captured.id, prompt, user_id=captured.user_id)
         if captured.agent_id:

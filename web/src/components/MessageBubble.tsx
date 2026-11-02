@@ -282,7 +282,7 @@ export function MessageBubble({
       return <ToolUseBlock message={message} sessionId={sessionId} />;
 
     case "tool_result":
-      return <ToolResultBlock message={message} />;
+      return <ToolResultBlock message={message} sessionId={sessionId} />;
 
     case "tool_approval_request":
       return (
@@ -515,12 +515,18 @@ function BgTaskResultMessage({
   );
 }
 
-function ToolResultBlock({ message }: { message: Message }) {
+function ToolResultBlock({ message, sessionId }: { message: Message; sessionId: string }) {
   const [expanded, setExpanded] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("Copy path");
   const content = message.content || "";
   const previewStr =
     typeof content === "string" ? content.slice(0, 120) : String(content);
   const errored = !!message.is_error;
+  const nativeItem = message.runtime_metadata?.native && message.tool_input?.native_item;
+  const native = nativeItem && typeof nativeItem === "object" ? nativeItem as Record<string, unknown> : undefined;
+  const savedPath = native?.type === "imageGeneration" && native.status === "completed" && !errored
+    && typeof native.savedPath === "string" ? native.savedPath : undefined;
+  const label = native?.type === "hookPrompt" ? "Hook prompt" : errored ? "Error" : "Result";
 
   return (
     <div
@@ -544,14 +550,28 @@ function ToolResultBlock({ message }: { message: Message }) {
             errored ? "text-destructive" : "text-green-700"
           }`}
         >
-          {errored ? "Error" : "Result"}
+          {label}
         </span>
+        {typeof native?.status === "string" && <span className="text-xs text-muted-foreground">{native.status}</span>}
         {!expanded && (
           <code className="tool-preview truncate text-xs text-muted-foreground font-mono">
             {previewStr}
           </code>
         )}
       </button>
+      {savedPath && <div className="px-3 pb-2 space-y-1 text-xs">
+        <code className="block select-text break-all">{savedPath}</code>
+        <div className="flex gap-3">
+          <button type="button" className="underline" onClick={() => {
+            if (!navigator.clipboard) { setCopyStatus("Copy unavailable"); return; }
+            navigator.clipboard.writeText(savedPath).then(() => setCopyStatus("Copied"), () => setCopyStatus("Copy failed"));
+          }}>{copyStatus}</button>
+          <button type="button" className="underline" onClick={() => useSessionStore.getState().openViewer(sessionId, savedPath)}>
+            Open in viewer
+          </button>
+        </div>
+        <p className="text-muted-foreground">If the viewer cannot open this path, open it on the host. The original file may change or disappear.</p>
+      </div>}
       {expanded && (
         <pre
           className={`tool-detail border-t px-4 py-2.5 text-xs font-mono whitespace-pre-wrap break-words max-h-80 overflow-y-auto ${

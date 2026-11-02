@@ -1,4 +1,4 @@
-"""Native errors keep their original source and never authorize another send."""
+"""Native diagnostics, quota and input uncertainty retain their own boundaries."""
 
 import asyncio
 
@@ -69,7 +69,7 @@ async def test_native_retry_and_child_errors_are_diagnostics_even_if_root_later_
     child_error = {"method": "error", "params": {"threadId": "child", "turnId": "child-turn", "willRetry": False,
         "error": {"message": "Child error 401 Unauthorized", "codexErrorInfo": "unauthorized"}}}
     inject(tmp_path, retry, child_start(), child_error, item(ROOT, "turn-1", "final", "Root answer"),
-           terminal() if last_status == "completed" else failed("other", "Service unavailable"))
+           terminal() if last_status == "completed" else failed("other", "Unclassified provider refusal"))
     completion = await asyncio.wait_for(receipt.wait(), 4)
     assert completion.outcome.status == ("success" if last_status == "completed" else "failed")
     assert completion.outcome.code != "auth_expired"
@@ -84,10 +84,11 @@ async def test_native_retry_and_child_errors_are_diagnostics_even_if_root_later_
     assert retry_row["runtime_metadata"]["request_id"] == receipt.request_id
 
 
-async def test_native_idle_timeout_never_continues_an_accepted_input(native_runtime, tmp_path, monkeypatch):
+@pytest.mark.parametrize("budget", [0, 2])
+async def test_native_idle_continuation_uses_the_configured_logical_budget(native_runtime, tmp_path, monkeypatch, budget):
     manager, database, session, mode, starts, _ = native_runtime
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
-    monkeypatch.setattr(settings, "turn_idle_max_retries", 2)
+    monkeypatch.setattr(settings, "turn_idle_max_retries", budget)
     mode[0] = "control_output"
     receipt = await manager.start_message(session.id, "One execution")
 
@@ -99,25 +100,27 @@ async def test_native_idle_timeout_never_continues_an_accepted_input(native_runt
     assert session._run.backend.active_turn is not None
     # Apply the short budget to accepted execution, not process startup or
     # initialization. Real content wakes the Owner after the budget changes.
-    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .08)
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .2)
     inject(tmp_path, item(ROOT, "turn-1", "progress", "Accepted before idle"))
     completion = await asyncio.wait_for(receipt.wait(), 4)
     assert completion.outcome.status == "failed" and completion.outcome.code == "turn_timeout"
-    assert len(starts) == 1 and not any(completion.outcome.recovery.values())
-    assert len((tmp_path / "native-business.jsonl").read_text().splitlines()) == 1
-    assert await receipt.execution.wait_resources() == ("proven",)
+    assert len(starts) == 1 + budget and completion.outcome.recovery["idle"] == budget
+    assert len((tmp_path / "native-business.jsonl").read_text().splitlines()) == 1 + budget
+    assert await receipt.execution.wait_resources() == ("proven",) * (1 + budget)
 
 
-@pytest.mark.parametrize("noise", ["root_retry", "child_error", "child_terminal"])
+@pytest.mark.parametrize("noise", ["root_nonretry", "child_error", "child_terminal", "ended_child_retry"])
 async def test_repeated_native_errors_cannot_extend_idle_budget(native_runtime, tmp_path, monkeypatch, noise):
     manager, database, session, mode, starts, _ = native_runtime
     mode[0] = "control_output"
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
-    monkeypatch.setattr(settings, "turn_idle_max_retries", 2)
+    monkeypatch.setattr(settings, "turn_idle_max_retries", 0)
     monkeypatch.setattr(settings, "turn_max_seconds", 3)
     receipt = await manager.start_message(session.id, "Keep the original idle deadline")
     await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
     inject(tmp_path, child_start())
+    if noise == "ended_child_retry":
+        inject(tmp_path, child_end())
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .2)
     error = {"message": "Still retrying without progress", "codexErrorInfo": "serverOverloaded"}
     if noise == "child_terminal":
@@ -125,9 +128,9 @@ async def test_repeated_native_errors_cannot_extend_idle_budget(native_runtime, 
         repeated["params"]["turn"]["status"] = "failed"
         repeated["params"]["turn"]["error"] = error
     else:
-        repeated = {"method": "error", "params": {"error": error, "willRetry": noise == "root_retry",
-            "threadId": ROOT if noise == "root_retry" else "child",
-            "turnId": "turn-1" if noise == "root_retry" else "child-turn"}}
+        repeated = {"method": "error", "params": {"error": error, "willRetry": noise == "ended_child_retry",
+            "threadId": ROOT if noise == "root_nonretry" else "child",
+            "turnId": "turn-1" if noise == "root_nonretry" else "child-turn"}}
     for _ in range(12):
         inject(tmp_path, repeated)
         await asyncio.sleep(.04)
@@ -142,9 +145,8 @@ async def test_repeated_native_errors_cannot_extend_idle_budget(native_runtime, 
 
 
 @pytest.mark.parametrize("info,code", [("usageLimitExceeded", "usage_limit_exceeded"),
-                                     ("rateLimitExceeded", "rate_limit_exceeded"),
-                                     ("serverOverloaded", "server_overloaded")])
-async def test_quota_and_exhausted_provider_retry_keep_one_attempt(native_runtime, tmp_path, info, code):
+                                     ("rateLimitExceeded", "rate_limit_exceeded")])
+async def test_quota_and_unqualified_rate_limit_keep_one_attempt(native_runtime, tmp_path, info, code):
     manager, database, session, mode, starts, events = native_runtime
     mode[0] = "control_output"
     receipt = await manager.start_message(session.id, "One request")

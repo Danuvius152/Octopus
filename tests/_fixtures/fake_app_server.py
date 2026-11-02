@@ -60,7 +60,8 @@ def send(frame):
 def frames():
     global gated_steer
     buffered = b""
-    injected = 0
+    offset = root / "native-injection-offset"
+    injected = int(offset.read_text()) if offset.exists() and (root / "native-injections.jsonl").exists() else 0
     while True:
         injections = root / "native-injections.jsonl"
         if injections.exists():
@@ -68,6 +69,7 @@ def frames():
             for value in values[injected:]:
                 send(json.loads(value))
             injected = len(values)
+            offset.write_text(str(injected))
         if gated_steer is not None and (root / "native-release-ack").exists():
             identifier, target = gated_steer
             gated_steer = None
@@ -132,6 +134,8 @@ for line in frames():
         result = {"config": {"model": defaults["model"], "model_reasoning_effort": defaults["effort"],
             "features": {"fast_mode": mode != "bad_fast_config", "wake_on_agent_messages": mode == "bad_config", "goals": False,
             "sleep_tool": False, "multi_agent": True, "multi_agent_v2": {"enabled": True, "wait_agent_enabled": True}}}}
+        if (root / "native-config.json").exists():
+            result["config"].update(json.loads((root / "native-config.json").read_text()))
     if method == "thread/fork":
         identifier = "actual-native-fork"
         copied = root / f"{identifier}.jsonl"
@@ -167,6 +171,12 @@ for line in frames():
             path.unlink()
             result = {}
     if method in {"thread/start", "thread/resume"}:
+        preparation_error = root / "native-preparation-error.json"
+        if preparation_error.exists():
+            error = json.loads(preparation_error.read_text())
+            preparation_error.unlink()
+            send({"id": frame["id"], "error": error})
+            continue
         if method == "thread/resume" and (root / f"{params['threadId']}.jsonl").exists():
             thread_id = params["threadId"]
             history = root / f"{thread_id}.jsonl"
@@ -194,6 +204,10 @@ for line in frames():
             "serviceTier": "default" if mode == "wrong_effective_tier" else "priority" if tier == "fast" else tier,
             "cwd": params.get("cwd"),
             "approvalPolicy": "never", "sandbox": {"type": "dangerFullAccess"}}
+        result["collaborationMode"] = json.loads((root / "native-collaboration.json").read_text()) \
+            if (root / "native-collaboration.json").exists() else {
+                "mode": "default", "settings": {"model": selected["model"], "reasoning_effort": selected["effort"],
+                                                "developer_instructions": None}}
     if method == "thread/inject_items":
         with history.open("a") as handle:
             for item in params["items"]:
@@ -201,6 +215,10 @@ for line in frames():
         if mode == "controller_lost":
             continue
     if method == "turn/start":
+        if params.get("collaborationMode"):
+            controls = params["collaborationMode"]["settings"]
+            selected = {"model": controls["model"], "effort": controls["reasoning_effort"]}
+            selected_path.write_text(json.dumps(selected))
         with business.open("a") as handle:
             handle.write(json.dumps(params) + "\n")
         turn_id = "turn-" + str(len(business.read_text().splitlines()))

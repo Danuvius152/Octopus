@@ -1,12 +1,13 @@
 # Codex: interactive execution and tool-free text calls
 
-> **Status:** implemented — Ordinary single-root App Server turns, an independent Research exec leaf and a separate subscription text worker.
+> **Status:** implemented — Ordinary App Server turns with bounded recovery, an independent Research exec leaf and a separate subscription text worker.
 
 ## Interactive execution
 
 The ordinary Codex profile uses the pinned native App Server through the common
 Harness. Each request attempt owns one stdio host and one accepted root turn;
-HarnessRun owns its process group and retirement. Human steering targets that
+HarnessRun owns its process group and retirement. A logical request can span
+bounded attempts after a recoverable failure. Human steering targets that
 active root. Later ordinary requests resume the captured native thread after
 the preceding writer retires. Native questions, scoped root/child output,
 completion consumers, native fork and passive accounting use the contracts below.
@@ -63,8 +64,10 @@ accepted root. Notifications preceding proof are buffered within finite bounds.
 Conflicting/missing identities, unsupported complete items and unexpected root
 turns fail visibly, preserve the valid accepted prefix and retire the original
 host. One bound root may contain multiple model samples and tools. Its terminal
-starts retirement immediately; the client never starts a second root to summarize
-or continue it. SessionOwner remains the product settlement authority. Thread
+starts retirement immediately; that attempt cannot start another root. An
+eligible failure can let the original Owner prepare a later attempt after
+retirement, under the [recovery contract](#error-source-and-recovery).
+SessionOwner remains the product settlement authority. Thread
 association commits with input evidence, so losing a `session_started` observation
 cannot make the next writer open a new history. The next writer reads the
 committed identity after its predecessor retires.
@@ -76,8 +79,8 @@ late proof and manual recovery rules belong to
 [current storage](current-storage-format.md#publication-boundary) owns the format
 and finite publication handoff. Acceptance does not prove model consumption.
 
-This path supports human steering of its bound active root; process reuse and
-automatic continuation remain unsupported. Ineligible later input queues for
+This path supports human steering of its bound active root and evidence-qualified
+continuation. Hosts are not reused. Ineligible later input queues for
 an ordinary request. Native user questions use the existing product question
 owner; unsupported approval/dynamic requests receive explicit method-specific
 negative responses. Root and child output retain their original identities, and
@@ -182,6 +185,22 @@ returns MethodNotFound and fails the original stream. It cannot hang forever or
 silently approve. `isBlocking` controls native waiting evidence, not the product
 question deadline.
 
+Native item conversion is a pure boundary in `codex_items.py`; it does not rename
+fields into the legacy exec parser or own execution. Complete items retain their
+native fields and source. MCP `failed` remains failure even with a nonempty result
+and null error; command status and exit evidence, declined file changes and
+interrupted collaboration remain distinct. Complete empty text/reasoning is valid.
+The original submission owns user input, so native confirmation does not add a
+second user message. Final text and its phase remain separate from tool results.
+
+`imageView` records the action and path without a snapshot. `hookPrompt` retains
+fragments and hook-run provenance in a folded tool record. An unregistered dynamic
+call is refused, while its native started/completed items retain status, success
+and content. These observations do not independently fail a successful root.
+Plan, host function-call output, sleep and native Review mode remain unsupported;
+unexpected complete items fail explicitly. There is no external token hosting,
+attestation or external-clock service.
+
 Typed request/attempt/native provenance survives complete messages, tools,
 deltas, WS, history and snapshot cards. Root resume identity remains unchanged
 by child work. Main chat projects root output; child cards show collected text
@@ -190,6 +209,26 @@ not a completed child turn. Root success can coexist with residual helper
 interruption after proven retirement. The
 [native output contract](native-subagents.md) owns work identities, display
 windows, bounded caches and late-item semantics.
+
+### Native generated images
+
+Generated image records distinguish in-progress, completed and failed, retaining
+failure, revised prompt, generation identity, input-image metadata and native
+references. `savedPath` is the original absolute path, not a copied asset.
+Completed without a path explicitly means the local file is unavailable. Chat
+offers path copy and the existing viewer; its working-directory and size policy
+still applies. Other files can be opened locally using the path. Later changes,
+deletion and viewer refusal never turn the record into a historical snapshot.
+
+The pinned native image extension's decoded budget is 32 MiB. Its stdout reader
+allows the corresponding base64 length plus 4 MiB of metadata. At the wire
+boundary, a native file ID takes precedence over inline result data. Otherwise
+inline bytes are validated and reduced to byte count and SHA-256 before correlation
+buffers, raw events, persistence and WS. Projected non-media frames still have a
+4 MiB budget; correlation/event queue limits do not grow. A real overrun fails
+explicitly and preserves the valid prefix. There is no media root, automatic
+copy, remote download or regeneration path. Persistent shape and portability
+remain with [current storage](current-storage-format.md).
 
 ### Effective configuration and request isolation
 
@@ -209,8 +248,21 @@ The driver resolves native defaults through
 It explicitly supplies the resolved model to prevent resume metadata from
 restoring the old model and effort. A null prepared effort can represent the
 model's native default; it is distinct from an explicitly requested effort.
-Before sending input, the driver checks the prepared model, effort, cwd,
+After selection and capability checks, the driver captures resolved model,
+effort (including null) and tier before the thread RPC. A preparation refusal
+therefore cannot make recovery reread different native defaults. Each later
+attempt inherits that selection; a new logical request resolves defaults anew.
+Before sending input, the driver checks the prepared model, explicit effort, cwd,
 approval policy, sandbox and service tier against the request.
+
+Every `turn/start` explicitly supplies Default collaboration mode and the selected
+model/effort. A resumed thread must already report Default; Plan or unknown mode
+is refused before business input, without converting it or creating replacement
+history. The mode setting does not replace the composed developer controller.
+Enabled current-time reminders with `clock_source=external` also fail preparation,
+because `currentTime/read` is not implemented. A disabled reminder does not enable
+that requirement. Ordinary scheduling keeps its existing creation, queue and
+execution path and is subject to the same effective-config checks.
 
 Fast requires the native Fast feature and the selected model's advertised
 `priority` tier, including paginated catalogs. It fails preparation when that
@@ -223,7 +275,7 @@ are acknowledged before business input. An uncertain injection blocks sending.
 
 Each outbound frame is encoded and checked before a possible-send or controller
 mutation is recorded. Its UTF-8 budget is 4 MiB minus 4096 bytes, reserving native
-echo metadata below the run's 4 MiB stdout line limit. Static saves check known
+echo metadata below the ordinary 4 MiB non-media frame budget. Static saves check known
 text; actual preparation and writes check the composed payload and complete
 envelope. Oversized input fails explicitly and retains the original draft.
 Unbound native observations have a separate 8 MiB UTF-8 / 256-frame correlation
@@ -295,17 +347,35 @@ reauth flow keeps its binding and login entry available.
 Native error notifications retain original request/attempt/thread/turn and
 connection identity, including before ACK after correlation. `willRetry` and
 child diagnostics never become root failure evidence; the root terminal selects
-its own status and provider code. Pure error diagnostics do not refresh idle.
-A newly observed child terminal remains progress; repeating its error does not
-renew the deadline. Quota, exhausted provider retry, disconnect and
-protocol failure remain distinct. The Owner uses the actual run profile:
-App Server supplies no automatic continuation or outer transient matching, so
-accepted/unknown inputs are not resent after transient or idle failure. Generic
-start RPC failure remains unknown; the pinned protocol's explicit InvalidRequest
-or InvalidParams rejection can prove nonacceptance. No fallback transport or
-summary turn repairs uncertainty. The shared policies remain in
+its own status and provider code. A `willRetry:true` notification on the original
+connection, bound to its active root or associated running child, refreshes idle
+activity without new text or input. Repeated identical reconnect wording can be
+a new notification. Replay of a saved diagnostic, unrelated/ended child errors,
+nonretry errors, passive usage and post-closure collection cannot renew it.
+One notice does not suspend the watchdog; Stop, root terminal and the logical
+deadline retain their original authority.
+
+Failed-root classification reads that root's message, additional details and
+typed provider code. Preparation RPC refusal retains its own error facts; even
+typed 401 there is scoped `permission_denied`, not proof that the main login is
+invalid. Typed root authentication and explicit personal-quota facts veto retry.
+Capacity, known 5xx/connection/timeout variants and the legacy reliability phrases
+qualify; a bare 429/rate-limit message does not. Tool, child and unbound stderr
+text cannot supply root recovery or credential-rejection evidence.
+
+App Server supports bounded outer continuation only with this attempt's accepted
+root, matching attempt/thread captured by the logical turn, proven original-run
+retirement and no protocol issues. Success never reopens. A pre-submission
+transient refusal can prepare its unchanged pending input again; possible-send
+without acceptance proof remains unknown. Generic start RPC failure remains
+unknown; the pinned explicit InvalidRequest/InvalidParams rejection can prove
+nonacceptance. Neither old session identity alone nor missing output authorizes
+prompt replay, a new history or a fallback transport. The Owner retains budgets,
+backoff, deadline, authorization and the unique final result under
+[transient recovery](harness-transient-retry.md#4-recovery-evidence-in-the-original-owner).
+The other shared policies remain in
 [credential reauth](harness-credential-reauth.md) and
-[transient recovery](harness-transient-retry.md).
+[turn safety](turn-safety.md).
 
 <a id="single-call-text-contract"></a>
 ## Single-call text contract

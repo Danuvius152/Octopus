@@ -27,6 +27,7 @@ async def test_nonblocking_question_does_not_suspend_idle_retirement(native_runt
     manager, database, session, _, starts, _ = native_runtime
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
     monkeypatch.setattr(settings, "turn_max_seconds", 0)
+    monkeypatch.setattr(settings, "turn_idle_max_retries", 0)
     receipt = await start_output(native_runtime)
     run = session._run.backend
     request = question_request("nonblocking")

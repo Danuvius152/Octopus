@@ -65,7 +65,7 @@ leave the README unchanged.
 | [Applications with a backend — the run contract](implemented/application-backends.md) | implemented | An app declares a backend with an executable `start.sh`; Octopus allocates a port, supervises it, proxies to it and reaps it when idle. |
 | [Applications: hosting, builds and deletion](implemented/applications.md) | implemented | Account-owned applications with independent build, backend and deletion lifecycles. |
 | [Codex performance in Monitor](implemented/codex-performance-monitor.md) | implemented | Passive response usage/TPS, native root and child scope, Owner clocks and resource-retirement phases. |
-| [Codex: interactive execution and tool-free text calls](implemented/codex-backend.md) | implemented | Ordinary single-root App Server turns, an independent Research exec leaf and a separate subscription text worker. |
+| [Codex: interactive execution and tool-free text calls](implemented/codex-backend.md) | implemented | Ordinary App Server turns with bounded recovery, an independent Research exec leaf and a separate subscription text worker. |
 | [Connectors: installations, enablement and token ownership](implemented/connectors.md) | implemented | Account-owned OAuth installations, agent-scoped enablement and typed MCP tools. |
 | [Console redesign — the blue workspace UI](implemented/console-redesign.md) | implemented | The blue workspace UI — design tokens, the two-level sidebar, and every manage surface as a page rather than a dialog. |
 | [Current storage and publication handoff](implemented/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |

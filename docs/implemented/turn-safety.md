@@ -24,6 +24,13 @@ OwnerRuntime tracks validated activity and the logical turn's start. Each
 attempt's captured deadline wakes its original Owner; managed reader/start
 operations and retirement retain their original identities.
 
+For native Codex, a valid `willRetry:true` notification from this connection and
+attempt counts as activity only for its bound active root or associated running
+child. Repeated reconnect wording can be a new notification; persistence, WS or
+history replay cannot refresh the clock. Nonretry/ended-child diagnostics,
+passive usage and post-closure observations do not renew activity. One retry
+notice does not disable the watchdog, and no activity resets the overall start.
+
 - Idle expiry compares the last validated activity with
   `turn_idle_timeout_seconds`; the overall deadline compares the logical turn
   start with `turn_max_seconds`. The Owner records the cause, closes steering
@@ -34,12 +41,14 @@ operations and retirement retain their original identities.
   replay. Continuation tells the model to inspect existing effects and retain
   existing jobs/delegations; it does not guarantee exactly-once effects.
 - Persist and broadcast `code:"turn_timeout_retry"` for each recovery. Failed
-  attempt results are held until classification, then tagged `retrying:true`
-  along with recovery markers. Delegations, app conversations, and application
-  builds keep waiting through these events; only a final failure ends them.
+  attempt results are held for classification and retained as nonterminal
+  recovery observations. Delegations, app conversations and application builds
+  keep waiting through these events; only the unique final outcome ends them.
 - Exhausted/unsafe idle recovery or the overall cap surfaces a durable
   `code:"turn_timeout"` error. Timeout classification still runs before the
-  auth/transient/premature-exit dispatch and uses its own retry budget.
+  auth/transient/premature-exit dispatch and uses its own retry budget. Known
+  native nonrecoverable facts, including auth/quota received during idle-close
+  collection, veto retry without erasing an earlier timeout cause.
 
 Config (settings, 0 = disabled): `turn_idle_timeout_seconds` (default 300 —
 generous: a single web sub-turn can legitimately take tens of seconds) and
@@ -59,6 +68,9 @@ These bounds apply to both backends and delegation children.
   a later silent failure cannot restore the original prompt over earlier work.
 - A manual interrupt cancels the logical turn, including recovery. It does not
   trigger another automatic attempt and still reaps the process group.
+- A retry cannot start until the original writer is proven retired. Stop or
+  authorization revocation during backoff/retirement prevents another execution;
+  independent background work keeps its own owner and queue rules.
 - `start_new_session=True` matches what `codex_login` and bg-tasks already do;
   no behavior change for healthy turns beyond detaching into a pgroup.
 

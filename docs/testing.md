@@ -182,6 +182,9 @@ question ID and response, an unpredictable human answer's file effect, SQLite
 association and resource retirement. It proves the explicitly enabled protocol;
 it does not claim ordinary Default-mode turns expose the tool. The existing
 HTTP MCP question test remains a separate guarantee.
+Live logical requests may recover across attempts: the question smoke binds the
+run that actually owns the question, and resource checks require every original
+attempt to retire rather than requiring a single-host tuple.
 
 `tests/test_codex_app_server_monitor.py` verifies real secure-reader callbacks
 before delayed typed root/child association, cold snapshot replay, rejected work,
@@ -286,7 +289,34 @@ helper partials, root failure, Stop/revocation, pending questions and failed
 notification without another execution. `tests/test_codex_app_server_errors.py`
 keeps typed bound-root auth separate from child/tool/stderr and internal retry,
 including error notification before ACK and generic RPC uncertainty. Repeated
-retry/child error diagnostics cannot renew idle or cause a second send.
+unrelated/ended-child or nonretry diagnostics cannot renew idle. Valid bound
+`willRetry` activity keeps its original attempt alive; a new send requires the
+separate native recovery evidence and original Owner budgets.
+
+`tests/test_codex_native_items.py`, `test_codex_native_capabilities.py` and
+`test_codex_native_images.py` drive pure conversion and original Owner/stdio,
+SQLite and WS boundaries for statuses, complete-only/duplicate/empty records,
+negative requests, Default/config admission and original image paths. The
+[pinned generated-schema fixture](../tests/fixtures/codex-app-server-0.166-contracts.json)
+checks all item/request variants against conversion/policy coverage. It comes
+from the verified binary's `app-server generate-json-schema --experimental`;
+schema generation is protocol evidence, not a model call or permission grant.
+Image tests cover inline/file-ID projection, decoded and metadata budgets,
+prefix preservation, current-file change/disappearance and existing viewer limits.
+`web/e2e/native-items.spec.ts` checks WS, actual browser image decoding, path copy,
+history reload and a later missing file.
+
+`tests/test_codex_native_recovery.py` covers active root/child reconnect activity,
+legacy failure phrases, typed errors and message/additional-detail capacity,
+quota/auth priority, captured controls after preparation refusal, accepted versus
+unknown input, budgets, original retirement and Stop/revocation/deadline.
+The results module includes App/SSE/build/named-delegation recovery consumers.
+Shortened-clock controlled-stdio cases do not establish a real 300-second wait.
+The pinned-CLI local HTTP 503 experiment separately observed native retry/backoff
+and one accepted input; it is fault injection, not an upstream outage. Real media
+generation verifies an actual saved file, while a live capacity occurrence proves
+only the stages actually observed. Keep failed initial checks and successful
+targeted follow-ups distinct when composing evidence.
 
 `tests/test_codex_app_server_fork.py` covers native actual ID, creation unknown,
 saved-strategy cold cleanup, retirement before installation, copied result/detail

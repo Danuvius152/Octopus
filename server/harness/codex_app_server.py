@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..submission_models import NativeInputEvidence
 from .codex import (
+    _CODEX_TRANSIENT_ERROR_PATTERNS,
     _OCTOPUS_SYSTEM_PROMPT_CODEX,
     _apply_home_dir,
     _apply_mcp_bearers,
@@ -27,6 +28,12 @@ from .codex import (
 )
 from .codex_activity import CodexActivityObserver
 from .codex_control import _latest_checkpoint, controller_message, turn_message
+from .codex_items import (
+    NATIVE_LINE_BYTES,
+    diagnostic_frame,
+    item_events,
+    observation_frame,
+)
 from .driver import ActiveTurnRef, RunDriver, SteerNotAccepted
 from .events import HarnessEvent, HarnessPreparationError, NativeQuestionRef
 from .native_output import NativeOutput
@@ -78,13 +85,23 @@ def profile(base: RuntimeProfile) -> RuntimeProfile:
                    activity_observer=None, prepare_resume=None, can_steer=True,
                    native_input_evidence=True, tools_prompt=_OCTOPUS_SYSTEM_PROMPT_CODEX,
                    injects_memory_prompt=True, can_fork=True, fork_prepare=_fork_prepare_replay,
-                   reusable=False, can_continue=False, stale_session_patterns=(),
-                   auth_error_patterns=(), transient_error_patterns=(), transient_error_codes=(), inline_large_inputs=True,
+                   reusable=False, can_continue=True, stale_session_patterns=(),
+                   auth_error_patterns=(), transient_error_patterns=_CODEX_TRANSIENT_ERROR_PATTERNS,
+                   transient_error_codes=("server_overloaded", "native_provider_transient"), inline_large_inputs=True,
                    fork_copy=fork_copy, fork_cleanup=fork_cleanup)
 
 
 class NativeProtocolError(RuntimeError):
     pass
+
+
+class NativeRpcError(NativeProtocolError):
+    """A refusal on this connection's original RPC, with its provider facts."""
+
+    def __init__(self, error: dict[str, Any]) -> None:
+        details = error.get("data")
+        self.provider_error = {**(details if isinstance(details, dict) else {}), "message": error.get("message")}
+        super().__init__(json.dumps(error))
 
 
 def _provider_error_code(error: dict[str, Any]) -> str:
@@ -98,6 +115,29 @@ def _provider_error_code(error: dict[str, Any]) -> str:
                      "responseStreamDisconnected", "responseTooManyFailedAttempts")
     ):
         return "unauthorized"
+    if info == "usageLimitExceeded":
+        return "usage_limit_exceeded"
+    # Explicit personal quota evidence wins over coincident capacity words.
+    message = "\n".join(str(error.get(field) or "") for field in ("message", "additionalDetails")).lower()
+    if any(phrase in message for phrase in (
+        "insufficient_quota", "insufficient quota", "insufficient credits", "out of credits",
+        "exceeded your current quota", "usage limit exceeded", "usage limit reached",
+        "you have hit your usage limit", "you've hit your usage limit",
+    )):
+        return "usage_limit_exceeded"
+    if info == "internalServerError":
+        return "native_provider_transient"
+    if isinstance(info, dict):
+        for kind in ("httpConnectionFailed", "responseStreamConnectionFailed",
+                     "responseStreamDisconnected", "responseTooManyFailedAttempts"):
+            details = info.get(kind)
+            if not isinstance(details, dict):
+                continue
+            status = details.get("httpStatusCode")
+            if status == 429:
+                return "rate_limit_exceeded"
+            if status is None or isinstance(status, int) and (500 <= status < 600 or status == 408):
+                return "native_provider_transient"
     return {"usageLimitExceeded": "usage_limit_exceeded", "rateLimitExceeded": "rate_limit_exceeded",
             "serverOverloaded": "server_overloaded"}.get(info if isinstance(info, str) else "", "native_turn_failed")
 
@@ -112,6 +152,7 @@ def _encode_frame(identifier: str, method: str, params: dict[str, Any]) -> bytes
 class AppServerDriver(RunDriver):
     input_in_argv = False
     multiplexed = True
+    stdout_line_limit_bytes = NATIVE_LINE_BYTES
 
     def __init__(self, profile: RuntimeProfile) -> None:
         super().__init__(profile)
@@ -145,6 +186,12 @@ class AppServerDriver(RunDriver):
         self._pending_measurements: list[tuple[HarnessEvent, int]] = []
         self._pending_measurement_bytes = 0
         self._preparation_mode = "not_started"
+        self._controls: tuple[str, str | None, str] | None = None
+
+    def continue_configuration(self, previous: RunDriver) -> None:
+        if not isinstance(previous, AppServerDriver):
+            raise ValueError("Native recovery cannot change its transport")
+        self._controls = previous._controls
 
     def _save_proof(self, evidence: NativeInputEvidence, completed: Any) -> None:
         assert self._io is not None
@@ -522,6 +569,10 @@ class AppServerDriver(RunDriver):
                 actual = actual.get(part) if isinstance(actual, dict) else None
             if actual is not expected:
                 raise NativeProtocolError(f"Codex required configuration mismatch: {key}")
+        reminder = (config.get("features") or {}).get("current_time_reminder")
+        if (isinstance(reminder, dict) and reminder.get("enabled") is True
+                and reminder.get("clock_source") == "external"):
+            raise NativeProtocolError("Codex external current-time reminders require currentTime/read, which is not supported")
         return config
 
     async def start_input(self, io: HarnessRun, context: TurnContext) -> None:
@@ -532,19 +583,26 @@ class AppServerDriver(RunDriver):
             controller = controller_message(context.system_prompt)
             # Null product overrides select this invocation's native defaults,
             # rather than the settings persisted in the resumed history.
-            model = context.model or config.get("model")
             metadata = None
-            if not model:
-                metadata = await self._model_metadata(None)
-                model = metadata.get("model")
+            model: str | None
+            if self._controls is not None:
+                model, effort, tier = self._controls
+            else:
+                model = context.model or config.get("model")
+                if not model:
+                    metadata = await self._model_metadata(None)
+                    model = metadata.get("model")
+                effort = context.reasoning_effort or config.get("model_reasoning_effort")
+                tier = context.service_tier or "default"
             if not isinstance(model, str) or not model:
                 raise NativeProtocolError("Codex current model could not be resolved")
-            tier = context.service_tier or "default"
             if tier == "fast":
                 metadata = metadata or await self._model_metadata(model)
                 if not any(item.get("id") == "priority" for item in metadata.get("serviceTiers", [])):
                     raise NativeProtocolError("Codex current model does not advertise Fast service")
-            effort = context.reasoning_effort or config.get("model_reasoning_effort")
+            # A thread preparation refusal must not let the next attempt
+            # resolve a different native default for this logical request.
+            self._controls = model, effort, tier
             overrides: dict[str, Any] = {**_REQUIRED_FEATURES, "service_tier": tier}
             if effort:
                 overrides["model_reasoning_effort"] = effort
@@ -558,11 +616,13 @@ class AppServerDriver(RunDriver):
             thread_id = thread["id"]
             if not isinstance(thread_id, str) or not thread_id or context.resume_id and thread_id != context.resume_id:
                 raise NativeProtocolError("Codex returned a different native history")
+            if context.resume_id and (prepared.get("collaborationMode") or {}).get("mode") != "default":
+                raise NativeProtocolError("Codex collaboration mode must be Default; incompatible or unknown history cannot run")
             if prepared.get("approvalPolicy") != "never" or prepared.get("sandbox", {}).get("type") != "dangerFullAccess":
                 raise NativeProtocolError("Codex effective thread permissions differ from the request")
             if prepared.get("model") != model:
                 raise NativeProtocolError("Codex effective model differs from the request")
-            if prepared.get("reasoningEffort") != effort:
+            if effort is not None and prepared.get("reasoningEffort") != effort:
                 raise NativeProtocolError("Codex effective reasoning effort differs from the request")
             if prepared.get("cwd") != context.working_dir:
                 raise NativeProtocolError("Codex effective working directory differs from the request")
@@ -592,10 +652,19 @@ class AppServerDriver(RunDriver):
                 await self._record(controller="confirmed")
         except Exception as error:
             io.retire()
-            raise HarnessPreparationError(str(error), error_code="native_preparation_failed") from error
+            code = _provider_error_code(error.provider_error) if isinstance(error, NativeRpcError) else "native_turn_failed"
+            if code == "unauthorized":
+                # A preparation RPC can refuse this request, but has no bound
+                # root provider evidence that could revoke the main login.
+                code = "permission_denied"
+            raise HarnessPreparationError(str(error), error_code=
+                "native_preparation_failed" if code == "native_turn_failed" else code) from error
         self._prepared_at = time.monotonic()
         await self._request("turn/start", {"threadId": thread_id,
-            "input": [{"type": "text", "text": context.prompt}], "clientUserMessageId": request_id}, business=True)
+            "input": [{"type": "text", "text": context.prompt}], "clientUserMessageId": request_id,
+            "collaborationMode": {"mode": "default", "settings": {
+                "model": model, "reasoning_effort": effort, "developer_instructions": None,
+            }}}, business=True)
 
     def _bind(self, turn_id: Any, source: str) -> ParseOutput:
         assert self._input is not None
@@ -644,6 +713,7 @@ class AppServerDriver(RunDriver):
 
     def receive(self, obj: dict[str, Any]) -> ParseOutput:
         try:
+            obj = observation_frame(obj)
             params = obj.get("params") or {}
             if (self._input is not None and obj.get("method") == "turn/started"
                     and isinstance(params.get("threadId"), str)):
@@ -656,7 +726,7 @@ class AppServerDriver(RunDriver):
                     observer.start_live()
             return self._receive(obj)
         except Exception as error:
-            return self._protocol_failure(obj, error)
+            return self._protocol_failure(diagnostic_frame(obj), error)
 
     def _protocol_failure(self, obj: dict[str, Any], error: Exception) -> ParseOutput:
         detail = f"{error}; native frame: {json.dumps(obj)}"
@@ -718,7 +788,7 @@ class AppServerDriver(RunDriver):
 
                     self._save_proof(self._input, rejected_start)
                 elif future is not None and not future.done():
-                    future.set_exception(NativeProtocolError(json.dumps(obj["error"])))
+                    future.set_exception(NativeRpcError(obj["error"]))
             else:
                 result = obj.get("result")
                 if not isinstance(result, dict):
@@ -910,7 +980,9 @@ class AppServerDriver(RunDriver):
             return ParseOutput(events=[HarnessEvent(type="error", content=error.get("message"),
                 error_code="native_provider_retry" if params["willRetry"] else "native_provider_error" if root else "native_child_error",
                 error_details={**error, "willRetry": params["willRetry"], "connection_generation": self._generation}, raw=obj)],
-                activity=False)
+                activity=bool(params["willRetry"] and not self._terminal and self._output
+                    and self._output.active_turn(params["threadId"], turn_id)
+                    and self._io and self._io.question_admission_open))
         if method == "turn/completed":
             if not root:
                 error = (params.get("turn") or {}).get("error")
@@ -940,42 +1012,7 @@ class AppServerDriver(RunDriver):
             return ParseOutput(events=[HarnessEvent(type="text_delta", content=params.get("delta", ""), raw=obj)],
                                activity=bool(params.get("delta")))
         if method in {"item/started", "item/completed"}:
-            item = params.get("item") or {}
-            kind = item.get("type")
-            if kind == "userMessage":
-                return ParseOutput()  # The original submission retains this input.
-            if kind == "agentMessage":
-                if method == "item/started":
-                    return ParseOutput(activity=False)
-                text = item.get("text")
-                if not isinstance(text, str):
-                    raise NativeProtocolError("Complete native message has no text")
-                return ParseOutput(events=[HarnessEvent(type="text", content=text, raw=obj)])
-            if not isinstance(item.get("id"), str) or not item["id"]:
-                raise NativeProtocolError("Native item has no identity")
-            if kind in {"collabAgentToolCall", "subAgentActivity", "webSearch", "fileChange", "contextCompaction"}:
-                # Preserve root observations as tool records. Child cards and
-                # descendant resource settlement have separate owning tickets.
-                if method == "item/started":
-                    event = HarnessEvent(type="tool_use", tool_use_id=item["id"],
-                        tool_name=item.get("tool") or kind, tool_input=params, raw=obj)
-                else:
-                    event = HarnessEvent(type="tool_result", tool_use_id=item["id"],
-                        tool_name=kind if kind == "fileChange" else None,
-                        content=json.dumps(params, ensure_ascii=False),
-                        is_error=item.get("status") in {"failed", "errored"}, raw=obj)
-                return ParseOutput(events=[event])
-            mapped = {"commandExecution": "command_execution",
-                      "mcpToolCall": "mcp_tool_call", "reasoning": "reasoning"}.get(kind)
-            if mapped is None:
-                raise NativeProtocolError(f"Unsupported complete native item: {kind}")
-            normalized = {**item, "type": mapped}
-            for source, target in (("aggregatedOutput", "output"), ("exitCode", "exit_code")):
-                if source in item:
-                    normalized[target] = item[source]
-            if kind == "reasoning":
-                normalized["text"] = "\n".join(item.get("summary", []) + item.get("content", []))
-            output = self.parser.parse({"type": method.replace("/", "."), "item": normalized})
+            output = item_events(method, params)
             for event in output.events:
                 event.raw = obj
             return output

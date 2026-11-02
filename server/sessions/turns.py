@@ -949,6 +949,14 @@ class TurnsMixin(SessionManagerBase):
         getattr: a real HarnessRun exposes stderr_text; lightweight test and
         backend stand-ins may not.
         """
+        if getattr(attempt.backend, "captures_retirement_output", False):
+            # Native retry classification consumes only the original root's
+            # provider failure (or preparation refusal), never stderr, tools
+            # or child diagnostics. A native notification alone is not failure.
+            if attempt.result is None:
+                return attempt.error_text
+            detail = (attempt.result.error_details or {}).get("additionalDetails")
+            return (attempt.result.content or "") + ("\n" + detail if isinstance(detail, str) else "")
         stderr_text = getattr(attempt.backend, "stderr_text", "") or ""
         return attempt.error_text + "\n" + stderr_text
 
@@ -987,16 +995,29 @@ class TurnsMixin(SessionManagerBase):
             )
         )
 
-    @staticmethod
-    def _recovery_prompt(turn: _Turn, attempt: _Attempt, *, idle: bool = False) -> str | None:
+    @classmethod
+    def _recovery_prompt(cls, turn: _Turn, attempt: _Attempt, *, idle: bool = False) -> str | None:
         """No output is never evidence of no effect.
 
         A preparation refusal proves no input submission. Otherwise only a
         captured conversation and the adapter's continuation contract permit
         another input, with no exactly-once claim for external operations.
         """
+        native = getattr(attempt.backend, "captures_retirement_output", False)
+        if native and (attempt.preparation_failed or attempt.backend.native_terminal_status == "failed"):
+            failure = cls._failure_blob(attempt)
+            if not turn.harness.is_transient_error(failure, code=attempt.failure_code):
+                # Known nonrecoverable facts veto every recovery path, including
+                # a preparation refusal whose close crossed the idle deadline.
+                return None
         if attempt.preparation_failed or getattr(attempt.backend, "input_may_have_run", True) is False:
             return attempt.prompt
+        if native:
+            root = attempt.backend.observed_root
+            if (root is None or root.attempt_id != attempt.attempt_id or root.thread_id != turn.continuation_id
+                    or attempt.backend.retirement_state != "proven" or attempt.backend.native_terminal_status == "completed"
+                    or attempt.backend.protocol_issues):
+                return None
         if not (turn.harness.profile.can_continue and turn.continuation_id):
             return None
         prefix = "The previous attempt stopped after a period without backend activity. " if idle else ""
@@ -1173,7 +1194,10 @@ class TurnsMixin(SessionManagerBase):
         just stopped" is only knowable once nothing else claimed the failure.
         """
         if getattr(attempt.backend, "protocol_issues", {}).get("fatal_protocol_error"):
-            return _Decision.stop({"code": "protocol_failed", "message": "Backend protocol ownership could not be established; execution stopped."})
+            detail = safe_diagnostic(attempt.error_text)
+            return _Decision.stop({"code": "protocol_failed", "message":
+                "Backend protocol ownership could not be established; execution stopped."
+                + (f" {detail}" if detail else "")})
         ended_at = (attempt.backend.admission_closed_at
                     if getattr(attempt.backend, "captures_retirement_output", False) else None)
         if self._remaining_turn_time(turn, at=ended_at) == 0 and attempt.timeout is None:

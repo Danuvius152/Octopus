@@ -87,7 +87,7 @@ class Harness:
         if code in {"unauthorized", "auth_error"}:
             return True
         if code in self.profile.transient_error_codes or code in {
-            "usage_limit_reached", "usage_limit_exceeded", "quota_exceeded",
+            "usage_limit_reached", "usage_limit_exceeded", "quota_exceeded", "permission_denied",
         }:
             return False
         if not text or not self.profile.auth_error_patterns:
@@ -107,15 +107,14 @@ class Harness:
         return any(p in low for p in self.profile.stale_session_patterns)
 
     def is_transient_error(self, text: str, *, code: str | None = None) -> bool:
-        """Whether `text` (a failed turn's combined error output + stderr) looks
-        like a TRANSIENT provider-reliability failure — a 5xx / overloaded /
-        dropped-connection / timeout that a bounded retry can ride out
-        (harness-transient-retry.md §3). Case-insensitive substring match over
-        the profile's `transient_error_patterns`; pure. Mutually exclusive with
-        `is_auth_error`, and excludes quota/credit (never retried). Callers gate
-        on the attempt having failed; resuming partial work also requires a
-        captured conversation id."""
-        if code in {"usage_limit_reached", "usage_limit_exceeded", "quota_exceeded", "unauthorized", "auth_error"}:
+        """Classify owned provider failure facts under the selected profile.
+
+        Typed auth/quota/permission refusals veto reliability codes and phrases.
+        Callers supply source-qualified text and gate on an actual failed attempt;
+        native stderr/tool/child text is not root failure evidence. Continuation
+        also requires the Owner's captured identity and retirement evidence.
+        """
+        if code in {"usage_limit_reached", "usage_limit_exceeded", "quota_exceeded", "unauthorized", "auth_error", "permission_denied"}:
             return False
         if code and code in self.profile.transient_error_codes:
             return True

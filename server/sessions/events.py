@@ -28,6 +28,7 @@ class EventsMixin(SessionManagerBase):
                 return None
             return MessageContent(
                 role=MessageRole.assistant, type="text", content=event.content,
+                tool_input=event.tool_input,
                 runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata) if event.runtime_metadata else None,
             )
         if event.type == "thinking":
@@ -37,6 +38,7 @@ class EventsMixin(SessionManagerBase):
                 role=MessageRole.assistant,
                 type="thinking",
                 content=event.content,
+                tool_input=event.tool_input,
                 runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata) if event.runtime_metadata else None,
             )
         if event.type == "subagent" and event.subagent is not None and event.subagent.card_id:
@@ -62,6 +64,7 @@ class EventsMixin(SessionManagerBase):
                 type="tool_result",
                 content=event.content,
                 tool_name=event.tool_name,
+                tool_input=event.tool_input,
                 tool_use_id=event.tool_use_id,
                 runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata) if event.runtime_metadata else None,
                 is_error=event.is_error,
@@ -143,6 +146,7 @@ class EventsMixin(SessionManagerBase):
                 "type": "assistant_text",
                 "session_id": session_id,
                 "content": event.content,
+                **({"tool_input": event.tool_input} if event.tool_input else {}),
                 **({"runtime_metadata": event.runtime_metadata} if event.runtime_metadata else {}),
             }
         if event.type == "thinking":
@@ -164,6 +168,7 @@ class EventsMixin(SessionManagerBase):
                 "tool_use_id": event.tool_use_id,
                 "output": event.content,
                 "is_error": event.is_error,
+                **({"tool_input": event.tool_input} if event.tool_input else {}),
             }
         if event.type == "subagent" and event.subagent is not None:
             u = event.subagent

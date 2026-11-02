@@ -61,10 +61,14 @@ this permits a new continuation input, not replay or exactly-once effects.
 `new_driver` selects protocol operations instead of a shared stdin enum. Owner dispatch, API
 capabilities and `HarnessRun.steer()` consume the explicit steering declaration;
 held-process policy consumes reuse. Tool allow/deny support remains independent.
-The ordinary Codex App Server profile declares steering true and reuse/continuation false:
-it only steers its captured active root, does not retain
-a host between requests or recover by automatically sending a continuation.
-Explicit subsequent requests can still resume the same native history.
+The ordinary Codex App Server profile declares steering/continuation true and
+reuse false: it steers its captured active root and creates a fresh host for
+an evidence-qualified later attempt after the original writer retires. The Owner
+retains recovery budgets and settlement; continuation does not replay unknown
+input or reopen success. Driver-resolved controls carry across attempts within
+the original request's configuration. Explicit subsequent requests can still
+resume the same native history under the
+[native recovery contract](codex-backend.md#error-source-and-recovery).
 The independent Research exec leaf declares steering, reuse and continuation
 false. It has no ordinary conversation or resume entry. Runtime profiles also
 declare `native_input_evidence`: Owner uses that actual driver contract for

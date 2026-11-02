@@ -379,6 +379,7 @@ async def test_native_patch_never_authorizes_reverting_unrelated_user_edits(nati
                 {"path": str(file), "kind": {"type": "update", "move_path": None}, "diff": "+native patch"}]}}},
         {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
             "id": "connector", "type": "mcpToolCall", "server": "external", "tool": "inspect",
+            "status": "completed",
             "result": {"content": [{"type": "text", "text": json.dumps(fake)}]}}}}, terminal())
     assert (await asyncio.wait_for(receipt.wait(), 4)).outcome.status == "success"
     user_file.write_text("user private edit\n")

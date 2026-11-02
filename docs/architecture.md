@@ -227,13 +227,14 @@ The harness is the **only** place that talks to a model runtime. There is one
 |---|---|
 | `harness.py` | The `Harness` front door (one per backend kind). |
 | `profile.py` | `RuntimeProfile` — the per-backend data record + small collaborators (argv builder, event parser, capability flags). Capabilities (e.g. native memory, premature-exit recovery) are derived from the profile. |
-| `run.py` | `HarnessRun` — universal subprocess + JSONL stream engine (4 MiB line limit, graceful shutdown, PATH discovery incl. nvm). |
+| `run.py` | `HarnessRun` — universal subprocess + JSONL stream engine, graceful shutdown and PATH discovery incl. nvm. Ordinary lines remain bounded at 4 MiB; the native image reader has a separate [bounded media allowance](implemented/codex-backend.md#native-generated-images). |
 | `driver.py` | Per-run protocol operations: argv rendering, preparation, input encoding and parsing. `ArgvDriver` handles initial EOF; `ClaudeDriver` lives in `claude_code.py`. The profile owns capabilities; HarnessRun retains processes, leases, readers and retirement. |
 | `assembly.py` | Shared per-turn assembly: MCP server selection, system-prompt composition (in-app tools blurb, connectors blurb, memory blurb), working-dir absolutization. |
 | `events.py` | Backend-neutral `HarnessEvent` DTOs (`text`, `thinking`, `tool_use`, `tool_result`, `question_request`, `result`, `error`, `session_started`). |
 | `claude_code.py` | Claude profile — `claude --print --output-format=stream-json` argv, event normalization, JSONL transcript codec, `run_oneshot`. |
 | `codex.py` | Codex assembly helpers, explicit independent Research exec leaf, legacy event parser and `run_oneshot` text-worker entry. The registered ordinary profile is App Server; no exec resume/fallback entry remains. |
 | `codex_app_server.py` | Ordinary G0-pinned stdio RPC driver: preparation, exact native resume, input/root correlation, bidirectional questions, native output and passive scoped measurement. Original submissions, OwnerQuestions and Owner retain input, answer and settlement authority; [scope and limits](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume). |
+| `codex_items.py` | Pure native item conversion and bounded inline-image projection before event queues/storage/WS. Preserves native status and fields without borrowing exec semantics; owns no execution, recovery or persistence. |
 | `native_output.py` | Bounded projection of original native child/work facts. Carries typed source and reconciles final observations after resource retirement, independently of the UI card cache; no scheduler or parent-consumption oracle. |
 | `codex_text.py` | Codex one-shot model-only worker: native authentication/configuration, subscription text HTTP with no tool dispatcher, completed-text result. The common Harness owns admission and process-group retirement; [capability contract](implemented/codex-backend.md#source-and-verification). |
 | `registry.py` | `get_harness(backend)` / `available_backends()` (a kind appears only when its CLI resolves on PATH; `claude-code` is always listed). |

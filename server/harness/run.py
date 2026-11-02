@@ -413,7 +413,7 @@ class HarnessRun:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    limit=_STDOUT_LINE_LIMIT_BYTES,
+                    limit=self._driver.stdout_line_limit_bytes or _STDOUT_LINE_LIMIT_BYTES,
                     **kwargs,
                 )
             except BaseException:
@@ -648,6 +648,9 @@ class HarnessRun:
     @property
     def observed_root(self) -> ActiveTurnRef | None:
         return self._driver.observed_root
+
+    def continue_configuration(self, previous: HarnessRun) -> None:
+        self._driver.continue_configuration(previous._driver)
 
     @property
     def native_terminal_status(self) -> str | None:

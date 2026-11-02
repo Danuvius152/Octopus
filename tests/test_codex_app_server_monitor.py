@@ -291,6 +291,7 @@ async def test_usage_notifications_and_rollout_polls_cannot_extend_idle(native_r
     manager, _, session, mode, starts, _ = native_runtime
     mode[0] = "control_output"
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    monkeypatch.setattr(settings, "turn_idle_max_retries", 0)
     receipt = await manager.start_message(session.id, "Keep the original idle clock")
     await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .15)

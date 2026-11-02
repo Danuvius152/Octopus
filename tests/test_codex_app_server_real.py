@@ -53,6 +53,36 @@ async def live_run(manager, session, prompt):
     return receipt, session._run.backend
 
 
+async def assert_retired(receipt):
+    states = await receipt.execution.wait_resources()
+    assert states and all(state == "proven" for state in states), states
+
+
+async def test_live_native_image_generation_preserves_the_original_local_path(live_product):
+    manager, database, session, _ = live_product
+    receipt, run = await live_run(manager, session,
+        "This is a native image-generation protocol check. Use the native image generation tool exactly once "
+        "to generate a small simple blue circle on a white background, without text. "
+        "Do not use shell, MCP, helpers, downloads, or copy the generated file. "
+        "After generation finishes, reply NATIVE_IMAGE_COMPLETE.")
+    completion = await asyncio.wait_for(receipt.wait(), 240)
+    assert completion.outcome.status == "success", completion
+    await assert_retired(receipt)
+    rows = await database.load_messages(session.id)
+    images = [row for row in rows if row["type"] == "tool_result"
+              and (row.get("tool_input") or {}).get("native_item", {}).get("type") == "imageGeneration"]
+    assert len(images) == 1, rows
+    image = images[0]["tool_input"]["native_item"]
+    assert image["status"] == "completed" and not images[0]["is_error"], image
+    path = Path(image["savedPath"])
+    assert path.is_file() and 0 < path.stat().st_size <= 32 * 1024 * 1024
+    assert str(path) in images[0]["content"] and "result" not in image
+    assert image.get("fileId") or image.get("inlineImage", {}).get("bytes", 0) > 0
+    assert run.retirement_state == "proven"
+    result = await database.read_session_result(session.id, receipt.request_id)
+    assert "NATIVE_IMAGE_COMPLETE" in result.reply_text()
+
+
 async def test_live_native_question_replies_on_original_connection(live_product, tmp_path, monkeypatch):
     from server.harness import codex_app_server
     from server.harness.codex_app_server import AppServerDriver
@@ -78,7 +108,7 @@ async def test_live_native_question_replies_on_original_connection(live_product,
     # replacing transport, tool availability, Owner or persistence.
     monkeypatch.setattr(AppServerDriver, "_question", observe_request)
     monkeypatch.setattr(HarnessRun, "write_question", observe_reply)
-    receipt, run = await live_run(manager, session,
+    receipt, _ = await live_run(manager, session,
         "This is a native user-input protocol check. Call the native request_user_input tool now "
         "with one question (id=banner) asking the human for a release banner. Offer Blue and Green. "
         "Wait for the answer. Then write the exact human answer to human-answer.txt in the current "
@@ -89,6 +119,9 @@ async def test_live_native_question_replies_on_original_connection(live_product,
                 result = await database.read_session_result(session.id, receipt.request_id)
                 pytest.fail(f"Root finished without a native question: {result}")
             await asyncio.sleep(.02)
+    # A capacity retry can retire the first run before this question is asked.
+    run = session._run.backend
+    assert run is not None
     question, = manager.get_pending_questions(session.id)
     ref, target = question.native_ref, run.active_turn
     assert ref is not None and target is not None
@@ -105,7 +138,7 @@ async def test_live_native_question_replies_on_original_connection(live_product,
         source=AnswerSource("account", user_id=session.user_id))
     completion = await asyncio.wait_for(receipt.wait(), 120)
     assert completion.outcome.status == "success", completion
-    assert await receipt.execution.wait_resources() == ("proven",)
+    await assert_retired(receipt)
     assert len(replies) == 1, replies
     original_run, original_ref, reply = replies[0]
     assert original_run is run and original_ref == ref
@@ -164,7 +197,7 @@ async def test_live_steer_reaches_the_original_active_root(live_product, tmp_pat
         release.touch()
     completion = await asyncio.wait_for(receipt.wait(), 120)
     assert completion.outcome.status == "success", completion
-    assert await receipt.execution.wait_resources() == ("proven",)
+    await assert_retired(receipt)
     assert (tmp_path / "steered-result.txt").read_text().strip() == "STEER_CONTRACT_83"
     result = await database.read_session_result(session.id, receipt.request_id)
     assert result.outcome == completion.outcome
@@ -187,7 +220,7 @@ async def test_live_nested_wait_followup_keeps_one_root_and_collected_rounds(liv
         "Use inherited model and effort; do not create any other helpers or use files.")
     completion = await asyncio.wait_for(receipt.wait(), 180)
     assert completion.outcome.status == "success", completion
-    assert await receipt.execution.wait_resources() == ("proven",)
+    await assert_retired(receipt)
     result = await database.read_session_result(session.id, receipt.request_id)
     assert "NATIVE_ROOT=899" in result.reply_text(), result
     assert all(row["runtime_metadata"]["native"]["thread_id"] == session.claude_session_id
@@ -222,7 +255,7 @@ async def test_live_root_final_freezes_input_and_retires_optional_helper(live_pr
     completion = await asyncio.wait_for(receipt.wait(), 150)
     assert completion.outcome.status == "success", completion
     assert not run.steering_open and run.active_turn is None
-    assert await receipt.execution.wait_resources() == ("proven",)
+    await assert_retired(receipt)
     result = await database.read_session_result(session.id, receipt.request_id)
     assert "NATIVE_ROOT_EARLY_73" in result.reply_text()
     rows = await database.load_messages(session.id)
@@ -259,7 +292,7 @@ async def test_live_new_thread_reports_usage_without_existing_rollout(tmp_path, 
         receipt = await manager.start_message(session.id, "Reply exactly: INITIAL_USAGE_17. Do not use tools or helpers.")
         completion = await asyncio.wait_for(receipt.wait(), 120)
         assert completion.outcome.status == "success", completion
-        assert await receipt.execution.wait_resources() == ("proven",)
+        await assert_retired(receipt)
         await metrics.drain()
         responses = await query.codex_turns(metrics.conn)
         assert any(row["request_id"] == receipt.request_id and row["output_tokens"] > 0 for row in responses), responses

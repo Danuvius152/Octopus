@@ -39,6 +39,7 @@ class RunDriver(ABC):
 
     input_in_argv: bool
     multiplexed = False
+    stdout_line_limit_bytes: int | None = None
 
     def __init__(self, profile: RuntimeProfile) -> None:
         self.profile = profile
@@ -46,6 +47,15 @@ class RunDriver(ABC):
 
     def build_argv(self, context: TurnContext) -> tuple[list[str], dict[str, Any]]:
         return self.profile.build_turn_argv(context)
+
+    def continue_configuration(self, previous: RunDriver) -> None:
+        """Carry native-resolved defaults across an Owner-authorized recovery.
+
+        Argv protocols already receive the request's captured configuration.
+        Native protocols may resolve additional defaults during preparation.
+        This operation grants no input or retry authority.
+        """
+        return None
 
     async def begin_input(self, io: HarnessRun, resume_id: str | None) -> None:
         """Register original input facts before fallible command preparation."""

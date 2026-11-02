@@ -105,7 +105,7 @@ async def test_same_raw_tool_id_keeps_separate_root_child_provenance(native_runt
     await start_output(native_runtime)
     def tool(thread, turn, phase):
         return {"method": "item/" + phase, "params": {"threadId": thread, "turnId": turn, "item": {
-            "id": "same", "type": "commandExecution", "command": "true", "aggregatedOutput": thread, "exitCode": 0}}}
+            "id": "same", "type": "commandExecution", "command": "true", "status": "completed", "aggregatedOutput": thread, "exitCode": 0}}}
     inject(tmp_path, child_start(), tool(ROOT, "turn-1", "started"), tool("child", "child-turn", "started"),
         tool(ROOT, "turn-1", "completed"), tool("child", "child-turn", "completed"), terminal())
     await wait_dispatch_idle(manager, session.id)

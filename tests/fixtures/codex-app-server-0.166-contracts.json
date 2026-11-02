@@ -1,0 +1,128 @@
+{
+  "source_revision": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+  "binary_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
+  "thread_items": {
+    "userMessage": [
+      "content",
+      "id",
+      "type"
+    ],
+    "hookPrompt": [
+      "fragments",
+      "id",
+      "type"
+    ],
+    "agentMessage": [
+      "id",
+      "text",
+      "type"
+    ],
+    "functionCallOutput": [
+      "id",
+      "name",
+      "output",
+      "type"
+    ],
+    "plan": [
+      "id",
+      "text",
+      "type"
+    ],
+    "reasoning": [
+      "id",
+      "type"
+    ],
+    "commandExecution": [
+      "command",
+      "commandActions",
+      "cwd",
+      "id",
+      "status",
+      "type"
+    ],
+    "fileChange": [
+      "changes",
+      "id",
+      "status",
+      "type"
+    ],
+    "mcpToolCall": [
+      "arguments",
+      "id",
+      "server",
+      "status",
+      "tool",
+      "type"
+    ],
+    "dynamicToolCall": [
+      "arguments",
+      "id",
+      "status",
+      "tool",
+      "type"
+    ],
+    "collabAgentToolCall": [
+      "agentsStates",
+      "id",
+      "receiverThreadIds",
+      "senderThreadId",
+      "status",
+      "tool",
+      "type"
+    ],
+    "subAgentActivity": [
+      "agentPath",
+      "agentThreadId",
+      "id",
+      "kind",
+      "type"
+    ],
+    "webSearch": [
+      "id",
+      "query",
+      "type"
+    ],
+    "imageView": [
+      "id",
+      "path",
+      "type"
+    ],
+    "sleep": [
+      "durationMs",
+      "id",
+      "type"
+    ],
+    "imageGeneration": [
+      "id",
+      "status",
+      "type"
+    ],
+    "enteredReviewMode": [
+      "id",
+      "review",
+      "type"
+    ],
+    "exitedReviewMode": [
+      "id",
+      "review",
+      "type"
+    ],
+    "contextCompaction": [
+      "id",
+      "type"
+    ]
+  },
+  "server_requests": [
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request",
+    "item/permissions/requestApproval",
+    "item/tool/call",
+    "account/chatgptAuthTokens/refresh",
+    "attestation/generate",
+    "currentTime/read",
+    "applyPatchApproval",
+    "execCommandApproval"
+  ]
+}
