@@ -13,11 +13,11 @@ from server.wiki import job_execution
 from server.wiki.jobs import JobOwner, WikiWorker
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.test_wiki_job_events import enqueue
-from tests.test_wiki_jobs import Curator, process
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import Curator, process
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 @pytest.fixture

@@ -14,7 +14,7 @@ from server.wiki.jobs import WikiJobs
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 
 client = wiki_api.client
 
@@ -399,7 +399,7 @@ async def test_framework_material_is_an_existing_document_grant_not_a_publish_gr
 async def test_worker_executes_each_finite_output_and_does_not_skip_material_ingest(client, tmp_path, material):
     from server.mcp_identity import verify
     from tests.submission import receipt_from_events
-    from tests.test_wiki_jobs import Curator, process
+    from tests.wiki_job_runtime import Curator, process
 
     root = tmp_path / "vault"
     (root / "Library").mkdir(parents=True)

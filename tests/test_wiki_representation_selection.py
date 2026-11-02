@@ -11,8 +11,8 @@ from server.wiki import extract, search_index
 from server.wiki.schema import VERSION as DURABLE_SCHEMA_VERSION
 from server.wiki.search_index import VERSION as SEARCH_SCHEMA_VERSION
 from server.wiki.store import WikiError, WikiStore
-from tests import test_wiki_api as api
 from tests import test_wiki_identity as identity_tests
+from tests import wiki_api as api
 
 client = api.client
 history = identity_tests.history

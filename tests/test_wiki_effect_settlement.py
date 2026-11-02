@@ -6,9 +6,9 @@ from server.mcp_identity import mint
 from server.wiki.history import WikiHistory
 from server.wiki.tasks import tasks
 from tests.test_wiki_grant_v2 import assigned, publish
-from tests.test_wiki_jobs import Curator, process
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import Curator, process
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 async def test_applied_output_with_failed_terminal_stays_attention_on_reentry(jobs):

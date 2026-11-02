@@ -9,7 +9,7 @@ import pytest
 
 from server.wiki.history import WikiHistory
 from server.wiki.store import WikiError
-from tests import test_wiki_api as api
+from tests import wiki_api as api
 from tests.test_wiki_grant_v2 import assigned
 from tests.test_wiki_maintenance_state import prepare
 

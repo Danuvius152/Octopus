@@ -8,7 +8,7 @@ import pytest
 from server.harness import HarnessEvent, get_harness
 from server.knowledge import admit, decode_context, encode
 from server.sessions.client_submissions import input_digest
-from tests import test_wiki_api as api
+from tests import wiki_api as api
 from tests.fake_run import FakeRunBase
 from tests.test_ws_delivery import connection, frame, hold_model_runs, receipt_frame
 from tests.test_ws_delivery import runtime as runtime

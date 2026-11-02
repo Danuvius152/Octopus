@@ -9,7 +9,7 @@ from mcp.types import CallToolResult
 from server.mcp_servers import wiki as wiki_tools
 from server.wiki import read_response
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_tests
+from tests import wiki_api as wiki_tests
 from tests.test_wiki_write_gates import active_worker
 
 client = wiki_tests.client

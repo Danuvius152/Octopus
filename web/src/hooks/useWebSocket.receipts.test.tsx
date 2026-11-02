@@ -1,26 +1,14 @@
+import { Socket } from "../test-support/socket";
 import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { CommandNotices } from "../components/CommandNotices";
 import { useSessionStore } from "../stores/sessionStore";
 import { useWebSocket } from "./useWebSocket";
 
-class Socket {
-  static OPEN = 1;
-  static CONNECTING = 0;
-  static instances: Socket[] = [];
-  readyState = 1;
-  send = vi.fn();
-  onopen: (() => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  onerror: (() => void) | null = null;
-  constructor() { Socket.instances.push(this); }
-  close() { this.readyState = 3; }
-}
 
 beforeEach(() => {
   vi.useFakeTimers();
-  Socket.instances = [];
+  Socket.reset(1);
   vi.stubGlobal("WebSocket", Socket);
   useSessionStore.getState().setToken("receipt-test");
   useSessionStore.setState({ controlCommands: {}, activeAttempts: { s: { request_id: "r", attempt_id: "a" } },

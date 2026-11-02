@@ -14,7 +14,7 @@ from server.wiki import registry
 from server.wiki.jobs import WikiJobs
 from server.wiki.tasks import command_prompt, tasks
 from tests import test_tenant_isolation as tenants
-from tests import test_wiki_api as api
+from tests import wiki_api as api
 
 client = api.client
 two_accounts = tenants.two_accounts

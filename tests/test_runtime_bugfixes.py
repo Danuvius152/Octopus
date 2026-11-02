@@ -30,7 +30,8 @@ from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs, WikiWorker
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
-from tests import test_service_shutdown, test_session_manager, test_wiki_jobs
+from tests import test_service_shutdown, test_session_manager
+from tests import wiki_job_runtime as test_wiki_jobs
 from tests.fake_run import FakeRunBase
 
 service = test_service_shutdown.service

@@ -15,7 +15,7 @@ from server import bg_tasks, process_groups
 from server.main import app
 from server.session_manager import session_manager
 from tests import test_tenant_isolation as tenants
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.test_runtime_review_races import background as background
 from tests.test_runtime_review_races import (
     gate_background_spawn,

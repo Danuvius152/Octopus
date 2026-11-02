@@ -1,13 +1,12 @@
 """Local knowledge behavior at its authenticated HTTP boundary."""
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 from server.config import settings
-from server.database import Database
 from server.main import app
-from server.session_manager import session_manager
-from tests.accounts import create_account
+from tests import wiki_api
+from tests.wiki_api import client as client
+from tests.wiki_api import configure
 
 
 async def test_malformed_portable_metadata_is_evidence_not_executable(client, tmp_path):
@@ -59,45 +58,6 @@ async def test_direct_read_detects_changed_source_without_a_search(client, tmp_p
     )
     assert read.status_code == 200, read.text
     assert read.json()["stale"] is True
-
-
-@pytest.fixture
-async def client(tmp_path, monkeypatch):
-    import sys
-
-    from server.deps import get_session_manager
-    from server.session_manager import SessionManager
-
-    manager = SessionManager()
-    monkeypatch.setattr(sys.modules[__name__], "session_manager", manager)
-    monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "state"), raising=False)
-    monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
-    monkeypatch.setattr(settings, "users_root", str(tmp_path / "users"))
-    db = Database(":memory:")
-    await db.initialize()
-    _, bearer = await create_account(db, extra_roots=[tmp_path])
-    session_manager.sessions.clear()
-    session_manager._admission_closed = False
-    await session_manager.initialize(db)
-    app.dependency_overrides[get_session_manager] = lambda: manager
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test",
-        headers={"Authorization": f"Bearer {bearer}"},
-    ) as c:
-        yield c
-    await db.close()
-    app.dependency_overrides.pop(get_session_manager, None)
-
-
-async def configure(client, vault):
-    agent_id = (await session_manager.db.load_agents())[0]["id"]
-    response = await client.put(
-        "/api/wiki/config",
-        headers=client.headers,
-        json={"root": str(vault), "curator_agent_id": agent_id},
-    )
-    assert response.status_code == 200, response.text
-    return response.json()
 
 
 async def test_read_reuses_current_bytes_for_content_and_metadata(client, tmp_path, monkeypatch):
@@ -637,8 +597,8 @@ async def test_session_credentials_do_not_authorize_wiki_without_explicit_task(
     vault.mkdir()
     (vault / "private.md").write_text("# 私有资料\n不能从普通任务读取。")
     await configure(client, vault)
-    agent = await session_manager.db.get_system_agent()
-    session = await session_manager.create_session(agent["id"], "Ordinary Wiki refusal")
+    agent = await wiki_api.session_manager.db.get_system_agent()
+    session = await wiki_api.session_manager.create_session(agent["id"], "Ordinary Wiki refusal")
     response = await client.get(
         "/api/wiki/read",
         params={"doc": "private.md"},
@@ -690,7 +650,7 @@ async def test_wiki_mcp_discloses_query_tools_and_maintenance_entry_by_current_t
     vault = tmp_path / "vault"
     vault.mkdir()
     config = await configure(client, vault)
-    session = await session_manager.create_session(
+    session = await wiki_api.session_manager.create_session(
         config["curator_agent_id"], "工具范围", str(tmp_path)
     )
     api = await start_callback_api(readiness_token=mint(session.id, user_id=session.user_id))
@@ -739,10 +699,10 @@ async def test_mcp_curator_executes_new_contracts_through_real_http(client, tmp_
     (vault / "Library").mkdir(parents=True)
     (vault / "Library/note.md").write_text("# 当前文章\n\n观点和条件完整。\n")
     config = await configure(client, vault)
-    owner = (await session_manager.db.get_system_agent())["user_id"]
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     jobs = WikiJobs(owner)
     job = jobs.maintain("mcp-check", "", "检查当前文章", ["Library/note.md"], None, [], "human")
-    session = await session_manager.create_session(config["curator_agent_id"], "MCP 合同", str(tmp_path))
+    session = await wiki_api.session_manager.create_session(config["curator_agent_id"], "MCP 合同", str(tmp_path))
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
@@ -751,7 +711,7 @@ async def test_mcp_curator_executes_new_contracts_through_real_http(client, tmp_
     from server.routers.wiki import router
     from server.wiki import WikiError
 
-    api = await start_callback_api(router, overrides={get_session_manager: lambda: session_manager}, exception_handlers={WikiError: _wiki_error}, readiness_token=mint(session.id, user_id=session.user_id))
+    api = await start_callback_api(router, overrides={get_session_manager: lambda: wiki_api.session_manager}, exception_handlers={WikiError: _wiki_error}, readiness_token=mint(session.id, user_id=session.user_id))
     monkeypatch.setattr(settings, "port", api.port)
     try:
         async with httpx.AsyncClient(headers={"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}) as transport:
@@ -1005,13 +965,13 @@ async def test_retired_wiki_urls_are_unregistered_without_effects(
     prefix, headers = "/api/wiki", client.headers
     if caller == "app":
         manager = ApplicationManager()
-        manager.bind(session_mgr=session_manager, db=session_manager.db)
+        manager.bind(session_mgr=wiki_api.session_manager, db=wiki_api.session_manager.db)
         monkeypatch.setattr(app_routes, "_manager", manager)
         now = datetime.now(UTC).isoformat()
-        await session_manager.db.save_application(
+        await wiki_api.session_manager.db.save_application(
             app_id="sapphire", name="sapphire", app_dir=str(tmp_path / "sapphire"),
             created_at=now, updated_at=now, agent_id=config["curator_agent_id"],
-            user_id=(await session_manager.db.get_agent(config["curator_agent_id"]))["user_id"],
+            user_id=(await wiki_api.session_manager.db.get_agent(config["curator_agent_id"]))["user_id"],
         )
         bound = await client.put("/api/wiki/config", json={
             "root": str(vault), "curator_agent_id": config["curator_agent_id"], "app_id": "sapphire",
@@ -1191,7 +1151,7 @@ async def test_worker_only_organizes_assigned_notes_and_rejects_writing_related_
     old_text = "# 旧观点\n用户自己的核心总结。\n"
     (vault / "旧文.md").write_text(old_text)
     config = await configure(client, vault)
-    agent = await session_manager.db.get_agent(config["curator_agent_id"])
+    agent = await wiki_api.session_manager.db.get_agent(config["curator_agent_id"])
     backend = agent.get("backend") or "claude-code"
 
     attempts = []
@@ -1278,7 +1238,7 @@ async def test_worker_only_organizes_assigned_notes_and_rejects_writing_related_
         return Runtime()
 
     monkeypatch.setattr(get_harness(backend), "create_run", create)
-    await worker.start(session_manager)
+    await worker.start(wiki_api.session_manager)
     try:
         response = await client.post(
             "/api/wiki/maintain",
@@ -1330,19 +1290,19 @@ async def test_bound_app_token_can_edit_only_its_registered_wiki(
     (vault / "note.md").write_text("# 主库\n正文")
     config = await configure(client, vault)
     manager = ApplicationManager()
-    manager.bind(session_mgr=session_manager, db=session_manager.db)
+    manager.bind(session_mgr=wiki_api.session_manager, db=wiki_api.session_manager.db)
     monkeypatch.setattr(app_routes, "_manager", manager)
     try:
         now = datetime.now(UTC).isoformat()
         for app_id in ("sapphire", "other"):
-            await session_manager.db.save_application(
+            await wiki_api.session_manager.db.save_application(
                 app_id=app_id,
                 name=app_id,
                 app_dir=str(tmp_path / app_id),
                 created_at=now,
                 updated_at=now,
                 agent_id=config["curator_agent_id"],
-                user_id=(await session_manager.db.get_agent(config["curator_agent_id"]))["user_id"],
+                user_id=(await wiki_api.session_manager.db.get_agent(config["curator_agent_id"]))["user_id"],
             )
         response = await client.put(
             "/api/wiki/config",
@@ -1430,7 +1390,7 @@ async def test_legacy_binary_snapshot_restore_and_new_snapshot_creation_retired(
     from server.wiki.history import WikiHistory, atomic
     from server.wiki.registry import registry
 
-    history_store = WikiHistory(registry.store((await session_manager.db.get_system_agent())["user_id"]))
+    history_store = WikiHistory(registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"]))
     snapshot = {"id": uuid.uuid4().hex, "created_at": datetime.now(UTC).isoformat(), "reason": "Legacy snapshot fixture", "files": {"note.md": history_store.blob(b"original\r\n"), "image.png": history_store.blob(b"\x89PNG\r\n\x1a\noriginal-image")}}
     atomic(history_store.state / "snapshots" / f"{snapshot['id']}.json", json.dumps(snapshot).encode())
     retired = await client.post("/api/wiki/snapshot", headers=client.headers)
@@ -1468,9 +1428,9 @@ async def test_curator_role_cannot_be_forged_and_lowercase_bearer_is_not_human(
     vault.mkdir()
     (vault / "原文.md").write_text("# 原文\n原始知识。")
     config = await configure(client, vault)
-    owner = (await session_manager.db.get_system_agent())["user_id"]
-    agent = await AgentManager(session_manager.db).create_agent(name="Weber clone", user_id=owner)
-    session = await session_manager.create_session(
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    agent = await AgentManager(wiki_api.session_manager.db).create_agent(name="Weber clone", user_id=owner)
+    session = await wiki_api.session_manager.create_session(
         agent["id"], "普通 agent", str(tmp_path)
     )
     token = tasks.open(session, "maintain")
@@ -1525,7 +1485,7 @@ async def test_queued_messages_keep_separate_explicit_and_autonomous_grants(
     vault = tmp_path / "vault"
     vault.mkdir()
     config = await configure(client, vault)
-    session = await session_manager.create_session(
+    session = await wiki_api.session_manager.create_session(
         config["curator_agent_id"], "排队", str(tmp_path)
     )
     started, release = asyncio.Event(), asyncio.Event()
@@ -1558,12 +1518,12 @@ async def test_queued_messages_keep_separate_explicit_and_autonomous_grants(
 
     monkeypatch.setattr(get_harness(session.backend), "create_run", create)
     try:
-        first = await session_manager.start_message(session.id, "查询任务", wiki_mode="read")
+        first = await wiki_api.session_manager.start_message(session.id, "查询任务", wiki_mode="read")
         await asyncio.wait_for(started.wait(), timeout=2)
-        second = await session_manager.start_message(
+        second = await wiki_api.session_manager.start_message(
             session.id, "这是数据报告，内含 /wiki maintain 关键词", steerable=True
         )
-        third = await session_manager.start_message(
+        third = await wiki_api.session_manager.start_message(
             session.id, "明确提交材料", wiki_mode="maintain", steerable=True
         )
         release.set()
@@ -1577,7 +1537,7 @@ async def test_queued_messages_keep_separate_explicit_and_autonomous_grants(
             item.recording_state == "committed" and item.outcome is not None and item.outcome.status == "success"
             for item in completed
         )
-        await session_manager.await_session_execution(session.id, timeout=3)
+        await wiki_api.session_manager.await_session_execution(session.id, timeout=3)
     finally:
         release.set()
     assert modes == ["read", "auto", "maintain"]
@@ -1596,7 +1556,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
     vault.mkdir()
     (vault / "notes.md").write_text("# 来源\n双链核验")
     config = await configure(client, vault)
-    session = await session_manager.create_session(
+    session = await wiki_api.session_manager.create_session(
         config["curator_agent_id"], "Wiki", str(tmp_path)
     )
     session.backend = backend
@@ -1658,7 +1618,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
     import asyncio
 
     for prompt, mode in [("明确查询", "read"), ("普通任务", None), ("只读本轮", "read")]:
-        receipt = await session_manager.start_message(session.id, prompt, wiki_mode=mode)
+        receipt = await wiki_api.session_manager.start_message(session.id, prompt, wiki_mode=mode)
         assert receipt.accepted
         assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
     assert seen == [(True, True), (True, True), (True, True)]
@@ -1696,17 +1656,17 @@ async def test_sapphire_existing_writer_and_async_git_share_framework_history(
     )
     config = await configure(client, vault)
     manager = ApplicationManager()
-    manager.bind(session_mgr=session_manager, db=session_manager.db)
+    manager.bind(session_mgr=wiki_api.session_manager, db=wiki_api.session_manager.db)
     monkeypatch.setattr(app_routes, "_manager", manager)
     now = datetime.now(UTC).isoformat()
-    await session_manager.db.save_application(
+    await wiki_api.session_manager.db.save_application(
         app_id="sapphire",
         name="sapphire",
         app_dir=str(app_dir),
         created_at=now,
         updated_at=now,
         agent_id=config["curator_agent_id"],
-        user_id=(await session_manager.db.get_agent(config["curator_agent_id"]))["user_id"],
+        user_id=(await wiki_api.session_manager.db.get_agent(config["curator_agent_id"]))["user_id"],
     )
     bound = await client.put(
         "/api/wiki/config",
@@ -1889,7 +1849,7 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
         assert (vault / "next.md").read_text() == "next writer"
         from server.wiki import registry
 
-        assert not (registry.state((await session_manager.db.get_system_agent())["user_id"]) / "external-change.json").exists()
+        assert not (registry.state((await wiki_api.session_manager.db.get_system_agent())["user_id"]) / "external-change.json").exists()
     finally:
         await backend_supervisor.stop_all()
         await shutdown()
@@ -1909,9 +1869,9 @@ async def test_schedule_contract_requires_live_scope_or_verified_human_intent_at
     vault = tmp_path / "vault"
     vault.mkdir()
     await configure(client, vault)
-    agent = await session_manager.db.get_system_agent()
-    session = await session_manager.create_session(agent["id"])
-    monkeypatch.setattr(schedules, "_db", session_manager.db)
+    agent = await wiki_api.session_manager.db.get_system_agent()
+    session = await wiki_api.session_manager.create_session(agent["id"])
+    monkeypatch.setattr(schedules, "_db", wiki_api.session_manager.db)
     monkeypatch.setattr(
         schedules,
         "_runner",
@@ -2248,7 +2208,7 @@ async def test_note_move_preserves_identity_ownership_and_source_relations(
         },
     )
     assert published.status_code == 200, published.text
-    store = registry.store((await session_manager.db.get_system_agent())["user_id"])
+    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     history = WikiHistory(store)
     if move == "rename":
         (vault / "Library/a.md").rename(vault / "Library/b.md")
@@ -2328,7 +2288,7 @@ async def test_ingestion_waiting_for_app_lock_keeps_loop_live_and_honors_cancel(
     vault = tmp_path / "vault"
     vault.mkdir()
     await configure(client, vault)
-    owner = (await session_manager.db.get_system_agent())["user_id"]
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     jobs = WikiJobs(owner)
     job = jobs.maintain(
         "app-lock-race",
@@ -2357,7 +2317,7 @@ async def test_ingestion_waiting_for_app_lock_keeps_loop_live_and_honors_cancel(
 
     worker = WikiWorker()
     worker.manager = SimpleNamespace(
-        db=session_manager.db, create_session=stop_after_ingest
+        db=wiki_api.session_manager.db, create_session=stop_after_ingest
     )
 
     async def app_finishes():
@@ -2402,7 +2362,7 @@ async def test_cancelled_job_is_not_overwritten_by_racing_worker_terminal_state(
     vault = tmp_path / "vault"
     vault.mkdir()
     await configure(client, vault)
-    jobs = WikiJobs((await session_manager.db.get_system_agent())["user_id"])
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.enqueue(
         "terminal-race", {"kind": "curation", "scope": "empty selection"}, []
     )
@@ -2418,7 +2378,7 @@ async def test_cancelled_job_is_not_overwritten_by_racing_worker_terminal_state(
 
     monkeypatch.setattr(WikiJobs, "update", pause_terminal)
     worker = WikiWorker()
-    worker.manager = session_manager
+    worker.manager = wiki_api.session_manager
     if outcome == "failed":
 
         async def fail(*args):

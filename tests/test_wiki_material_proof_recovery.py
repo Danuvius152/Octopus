@@ -12,8 +12,8 @@ from server.wiki.history import WikiHistory
 from server.wiki.retention import collect
 from server.wiki.store import WikiError, revision
 from server.wiki.tasks import tasks
-from tests import test_wiki_jobs as job_tests
 from tests import test_wiki_material_proof as map_tests
+from tests import wiki_job_runtime as job_tests
 from tests.wiki_jobs import assigned_worker
 from tests.wiki_jobs import jobs as jobs
 

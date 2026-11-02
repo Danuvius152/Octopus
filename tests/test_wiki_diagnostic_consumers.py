@@ -17,7 +17,7 @@ from server.routers.wiki import router
 from server.wiki import WikiError
 from server.wiki.registry import registry
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.callback_api import start_callback_api
 
 client = wiki_api.client

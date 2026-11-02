@@ -8,10 +8,10 @@ import pytest
 from server.wiki import job_returns, registry
 from server.wiki.job_returns import dispatch_gate
 from server.wiki.jobs import WikiJobs
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.test_wiki_job_events import enqueue
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 @pytest.mark.parametrize("action", ["retry", "readmit"])

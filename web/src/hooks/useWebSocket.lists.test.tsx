@@ -1,3 +1,4 @@
+import { Socket } from "../test-support/socket";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useSessionStore } from "../stores/sessionStore";
@@ -5,18 +6,6 @@ import type { SessionInfo } from "../stores/sessionStore";
 import { applications } from "../lib/applicationList";
 import { useWebSocket } from "./useWebSocket";
 
-class Socket {
-  static OPEN = 1;
-  static CONNECTING = 0;
-  static instances: Socket[] = [];
-  readyState = 0;
-  onopen: (() => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  onerror: (() => void) | null = null;
-  constructor() { Socket.instances.push(this); }
-  close() { this.readyState = 3; }
-}
 
 afterEach(() => {
   useSessionStore.getState().setToken("");
@@ -24,7 +13,7 @@ afterEach(() => {
 });
 
 it("reconnects both domain lists and loaded archives without another change notification", async () => {
-  vi.useFakeTimers(); Socket.instances = [];
+  vi.useFakeTimers(); Socket.reset(0);
   vi.stubGlobal("WebSocket", Socket);
   useSessionStore.setState({ token: "list-bearer", accountGeneration: useSessionStore.getState().accountGeneration + 1,
     activeSessionId: null, dispatchGeneration: "service", connected: false });
@@ -53,7 +42,7 @@ it("reconnects both domain lists and loaded archives without another change noti
 });
 
 it("keeps a newer idle observation when the reconnect's running snapshot arrives late", async () => {
-  Socket.instances = [];
+  Socket.reset(0);
   vi.stubGlobal("WebSocket", Socket);
   const running = { id: "s", name: "Session", status: "running", archived: false } as SessionInfo;
   useSessionStore.setState({ token: "session-bearer", accountGeneration: useSessionStore.getState().accountGeneration + 1,

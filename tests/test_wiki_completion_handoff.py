@@ -15,10 +15,10 @@ from server.mcp_identity import verify
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiWorker
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.harness_profiles import process_profile
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 @pytest.fixture

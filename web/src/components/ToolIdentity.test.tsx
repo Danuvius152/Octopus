@@ -83,8 +83,8 @@ it.each(["live", "snapshot"])("keeps native helpers separate under repeated prov
   } else useSessionStore.getState().setSubagents("parent", runs);
   const { container } = render(<><MessageBubble sessionId="parent" message={old} /><MessageBubble sessionId="parent" message={fresh} /></>);
   const cards = container.querySelectorAll<HTMLElement>(".subagent-card");
-  expect(cards[0]).toHaveClass("subagent-completed");
+  expect(within(cards[0]).getByText("done")).toBeVisible();
   expect(within(cards[0]).getByText("First answer")).toBeTruthy();
-  expect(cards[1]).toHaveClass("subagent-running");
+  expect(within(cards[1]).queryByText("done")).toBeNull();
   expect(within(cards[1]).getByText("Second work")).toBeTruthy();
 });

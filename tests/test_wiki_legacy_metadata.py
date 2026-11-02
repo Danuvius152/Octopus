@@ -12,7 +12,7 @@ from server.wiki.jobs import WikiJobs
 from server.wiki.registry import registry
 from server.wiki.sections import original_text
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 
 client = wiki_api.client
 NOTE = "Library/note.md"

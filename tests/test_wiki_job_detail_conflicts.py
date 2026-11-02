@@ -1,8 +1,8 @@
 """A stale attempt conflicts; only an absent task is missing."""
 
 from tests.test_wiki_job_events import enqueue
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 async def test_queued_card_attempt_conflicts_after_the_original_task_starts(jobs, client):

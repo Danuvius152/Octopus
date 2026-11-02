@@ -85,15 +85,27 @@ async def test_native_retry_and_child_errors_are_diagnostics_even_if_root_later_
 
 
 async def test_native_idle_timeout_never_continues_an_accepted_input(native_runtime, tmp_path, monkeypatch):
-    manager, _, session, mode, starts, _ = native_runtime
-    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .08)
+    manager, database, session, mode, starts, _ = native_runtime
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
     monkeypatch.setattr(settings, "turn_idle_max_retries", 2)
     mode[0] = "control_output"
     receipt = await manager.start_message(session.id, "One execution")
+
+    async def accepted():
+        saved = await database.get_submission_for_request(session.id, receipt.request_id)
+        return bool(saved and saved["native_inputs"] and saved["native_inputs"][0]["state"] == "accepted")
+
+    await native_tests.wait_until(accepted)
+    assert session._run.backend.active_turn is not None
+    # Apply the short budget to accepted execution, not process startup or
+    # initialization. Real content wakes the Owner after the budget changes.
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .08)
+    inject(tmp_path, item(ROOT, "turn-1", "progress", "Accepted before idle"))
     completion = await asyncio.wait_for(receipt.wait(), 4)
-    assert completion.outcome.status != "success"
+    assert completion.outcome.status == "failed" and completion.outcome.code == "turn_timeout"
     assert len(starts) == 1 and not any(completion.outcome.recovery.values())
     assert len((tmp_path / "native-business.jsonl").read_text().splitlines()) == 1
+    assert await receipt.execution.wait_resources() == ("proven",)
 
 
 @pytest.mark.parametrize("noise", ["root_retry", "child_error", "child_terminal"])

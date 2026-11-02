@@ -7,7 +7,7 @@ import pytest
 from server.wiki import job_execution, job_items
 from server.wiki.history import WikiHistory
 from server.wiki.store import WikiError
-from tests.test_wiki_jobs import client as client
+from tests.wiki_job_runtime import client as client
 from tests.wiki_jobs import jobs as jobs
 
 

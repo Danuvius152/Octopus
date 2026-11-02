@@ -1,3 +1,4 @@
+import { Socket } from "../test-support/socket";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
@@ -47,19 +48,7 @@ it("tracks report completion separately from follow-up delivery", () => {
 it.each(["native", "without-randomUUID", "without-crypto"])("handles input admission in %s browsers", async (mode) => {
   if (mode === "without-randomUUID") vi.stubGlobal("crypto", { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
   if (mode === "without-crypto") vi.stubGlobal("crypto", undefined);
-  class Socket {
-    static OPEN = 1;
-    static CONNECTING = 0;
-    static instances: Socket[] = [];
-    readyState = 1;
-    send = vi.fn();
-    onopen: (() => void) | null = null;
-    onclose: ((event: { code: number }) => void) | null = null;
-    onerror: (() => void) | null = null;
-    onmessage: ((event: { data: string }) => void) | null = null;
-    constructor() { Socket.instances.push(this); }
-    close() { this.readyState = 3; }
-  }
+  Socket.reset(1);
   vi.stubGlobal("WebSocket", Socket);
   useSessionStore.getState().setToken("submission-token");
   const hook = renderHook(useWebSocket);
@@ -169,18 +158,7 @@ it("loads the replacement session's actual queue after an archive broadcast", as
 });
 
 it("ignores a superseded socket's close and open after a new bearer connects", () => {
-  class Socket {
-    static OPEN = 1;
-    static CONNECTING = 0;
-    static instances: Socket[] = [];
-    readyState = 0;
-    onopen: (() => void) | null = null;
-    onclose: ((event: { code: number }) => void) | null = null;
-    onerror: (() => void) | null = null;
-    onmessage: ((event: { data: string }) => void) | null = null;
-    constructor() { Socket.instances.push(this); }
-    close() { this.readyState = 3; }
-  }
+  Socket.reset(0);
   vi.stubGlobal("WebSocket", Socket);
   vi.stubGlobal("fetch", vi.fn(async () => new Response("[]")));
   useSessionStore.setState({ token: "first-bearer", activeSessionId: null, connected: false });

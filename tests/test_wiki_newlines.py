@@ -5,8 +5,8 @@ import hashlib
 import pytest
 
 from server.wiki import read_response
-from tests.test_wiki_api import client as client
-from tests.test_wiki_api import configure
+from tests.wiki_api import client as client
+from tests.wiki_api import configure
 
 
 @pytest.mark.parametrize("newlines", [("\n",) * 5, ("\r\n",) * 5, ("\r",) * 5, ("\r", "\r\n", "\n", "\r", "\r\n")])

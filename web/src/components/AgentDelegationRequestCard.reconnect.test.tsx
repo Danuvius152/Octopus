@@ -1,27 +1,16 @@
+import { Socket } from "../test-support/socket";
 import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useSessionStore, type Delegation, type Message, type SessionInfo } from "../stores/sessionStore";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
 
-class Socket {
-  static OPEN = 1;
-  static CONNECTING = 0;
-  static instances: Socket[] = [];
-  readyState = 1;
-  onopen: (() => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
-  onmessage = null;
-  onerror = null;
-  constructor() { Socket.instances.push(this); }
-  close() { this.readyState = 3; }
-}
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 it("resumes exact-round polling after a real reconnect invalidates its in-flight read", async () => {
   vi.useFakeTimers();
   vi.stubGlobal("WebSocket", Socket);
-  Socket.instances = [];
+  Socket.reset(1);
   const metadata = { request_id: "request", attempt_id: "attempt", tool_call_id: "call" };
   const tool = { role: "assistant", type: "tool_use", seq: 0, tool_name: "mcp__ask_agent__ask", tool_use_id: "provider", runtime_metadata: metadata } as Message;
   const result = { role: "tool", type: "tool_result", seq: 1, tool_use_id: "provider", runtime_metadata: { ...metadata,

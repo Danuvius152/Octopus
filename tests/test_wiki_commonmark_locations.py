@@ -10,7 +10,7 @@ from server.wiki.jobs import WikiJobs
 from server.wiki.links import source_span
 from server.wiki.store import WikiError, WikiStore
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 
 client = wiki_api.client
 

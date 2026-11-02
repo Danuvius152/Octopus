@@ -4,7 +4,7 @@ import pytest
 
 from server.wiki.tasks import tasks
 from server.wiki.workflow import view
-from tests import test_wiki_api as api
+from tests import wiki_api as api
 from tests.test_wiki_grant_v2 import assigned
 from tests.test_wiki_supporting_navigation import addition, setup_notes
 

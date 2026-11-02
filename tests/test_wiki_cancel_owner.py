@@ -8,8 +8,8 @@ import pytest
 from server.wiki import job_execution
 from server.wiki.jobs import WikiJobs, WikiWorker
 from tests.test_wiki_job_events import enqueue
-from tests.test_wiki_jobs import Curator
-from tests.test_wiki_jobs import client as client
+from tests.wiki_job_runtime import Curator
+from tests.wiki_job_runtime import client as client
 from tests.wiki_jobs import jobs as jobs
 
 

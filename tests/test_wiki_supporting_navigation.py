@@ -5,7 +5,7 @@ import json
 import pytest
 
 from server.wiki.jobs import WikiJobs
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.test_wiki_grant_v2 import assigned
 
 client = wiki_api.client
@@ -408,7 +408,7 @@ async def test_only_navigation_output_does_not_complete_primary_or_unstarted_cre
     from server.mcp_identity import mint
     from server.wiki.tasks import tasks
     from tests.submission import receipt_from_events
-    from tests.test_wiki_jobs import Curator, process
+    from tests.wiki_job_runtime import Curator, process
 
     root, jobs, _, config, _ = await setup_notes(client, tmp_path)
     job = jobs.maintain("navigation-only-worker", "", "Maintain A and create the requested finite output",

@@ -1,6 +1,8 @@
 """Live product gates for the G0-pinned ordinary Codex transport."""
 
 import asyncio
+import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from server import monitor
 from server.attachments import save_upload
 from server.database import Database
 from server.monitor import MetricsStore, query
+from server.question_resolution import AnswerSource
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.sessions.forking import ForkingMixin
@@ -48,6 +51,77 @@ async def live_run(manager, session, prompt):
         while session._run is None or session._run.backend is None:
             await asyncio.sleep(.01)
     return receipt, session._run.backend
+
+
+async def test_live_native_question_replies_on_original_connection(live_product, tmp_path, monkeypatch):
+    from server.harness import codex_app_server
+    from server.harness.codex_app_server import AppServerDriver
+    from server.harness.run import HarnessRun
+
+    manager, database, session, _ = live_product
+    # G0 does not offer this native tool in Default mode unless explicitly
+    # enabled. Scope the capability to this process; do not change product
+    # defaults or claim that ordinary Default-mode turns expose the tool.
+    monkeypatch.setitem(codex_app_server._REQUIRED_FEATURES, "features.default_mode_request_user_input", True)
+    requests, replies = [], []
+    receive, write = AppServerDriver._question, HarnessRun.write_question
+
+    def observe_request(driver, frame):
+        requests.append(frame)
+        return receive(driver, frame)
+
+    async def observe_reply(run, data, ref):
+        await write(run, data, ref)
+        replies.append((run, ref, json.loads(data)))
+
+    # Observe actual decoded server requests and reply calls, without
+    # replacing transport, tool availability, Owner or persistence.
+    monkeypatch.setattr(AppServerDriver, "_question", observe_request)
+    monkeypatch.setattr(HarnessRun, "write_question", observe_reply)
+    receipt, run = await live_run(manager, session,
+        "This is a native user-input protocol check. Call the native request_user_input tool now "
+        "with one question (id=banner) asking the human for a release banner. Offer Blue and Green. "
+        "Wait for the answer. Then write the exact human answer to human-answer.txt in the current "
+        "working directory and finish. Do not use MCP ask, helpers, or choose an answer yourself.")
+    async with asyncio.timeout(60):
+        while not manager.get_pending_questions(session.id):
+            if receipt._completion.done():
+                result = await database.read_session_result(session.id, receipt.request_id)
+                pytest.fail(f"Root finished without a native question: {result}")
+            await asyncio.sleep(.02)
+    question, = manager.get_pending_questions(session.id)
+    ref, target = question.native_ref, run.active_turn
+    assert ref is not None and target is not None
+    assert (ref.thread_id, ref.turn_id, ref.connection_generation, ref.attempt_id) == (
+        target.thread_id, target.turn_id, target.connection_generation, target.attempt_id,
+    )
+    assert ref.request_id == question.request_id == receipt.request_id
+    assert ref.question_ids == ("banner",)
+    request, = requests
+    assert request["method"] == "item/tool/requestUserInput" and request["id"] == ref.server_request_id
+    # The model only learns this unpredictable value from the native reply.
+    answer = f"HUMAN-{uuid.uuid4().hex}"
+    assert await manager.answer_question(session.id, question.question_id, [{"text": answer}],
+        source=AnswerSource("account", user_id=session.user_id))
+    completion = await asyncio.wait_for(receipt.wait(), 120)
+    assert completion.outcome.status == "success", completion
+    assert await receipt.execution.wait_resources() == ("proven",)
+    assert len(replies) == 1, replies
+    original_run, original_ref, reply = replies[0]
+    assert original_run is run and original_ref == ref
+    assert reply == {"id": request["id"], "result": {"answers": {"banner": {"answers": [answer]}}}}
+    assert (tmp_path / "human-answer.txt").read_text().strip() == answer
+    assert not manager.get_pending_questions(session.id)
+    assert not await manager.answer_question(session.id, question.question_id, [{"text": "late"}])
+    rows = await database.load_messages(session.id)
+    saved_question, = [row for row in rows if row["type"] == "question_request"]
+    saved_answer, = [row for row in rows if row["type"] == "question_answer"]
+    assert saved_question["tool_use_id"] == saved_answer["tool_use_id"] == question.question_id
+    assert saved_question["tool_input"]["native_question"]["server_request_id"] == request["id"]
+    resolution = saved_answer["tool_input"]["question_resolution"]
+    assert (resolution["request_id"], resolution["attempt_id"]) == (receipt.request_id, ref.attempt_id)
+    assert resolution["answers"][0]["text"] == answer
+    assert run.retirement_state == "proven" and run.active_turn is None
 
 
 async def test_live_steer_reaches_the_original_active_root(live_product, tmp_path):

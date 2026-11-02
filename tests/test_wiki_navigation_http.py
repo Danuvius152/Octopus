@@ -4,7 +4,7 @@ import httpx
 
 from server.mcp_servers import wiki as mcp_wiki
 from server.wiki.registry import registry
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 
 client = wiki_api.client
 

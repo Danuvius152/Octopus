@@ -3,9 +3,9 @@
 import json
 
 from server.wiki.history import WikiHistory
-from tests.test_wiki_jobs import Curator, process
 from tests.test_wiki_maintenance_state import client as client
 from tests.test_wiki_maintenance_state import prepare, state
+from tests.wiki_job_runtime import Curator, process
 
 
 def target(prompt, doc):

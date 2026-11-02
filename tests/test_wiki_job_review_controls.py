@@ -15,9 +15,9 @@ from tests.test_wiki_job_execution import disk_manager as disk_manager
 from tests.test_wiki_job_execution import prepare, record_terminal
 from tests.test_wiki_job_notifications import pending, session, subscribe
 from tests.test_wiki_job_notifications import receiver as receiver
-from tests.test_wiki_jobs import Curator, process, sapphire_delete
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import Curator, process, sapphire_delete
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 async def test_navigation_receipt_does_not_become_an_unstarted_creation_effect(jobs, client, disk_manager):

@@ -12,9 +12,9 @@ from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs
 from server.wiki.registry import registry
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
 from tests import test_wiki_curation as wiki_tests
-from tests.test_wiki_jobs import sapphire_delete
+from tests import wiki_api as wiki_api
+from tests.wiki_job_runtime import sapphire_delete
 
 client = wiki_tests.client
 notes = wiki_tests.notes

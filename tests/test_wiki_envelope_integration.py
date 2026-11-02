@@ -17,7 +17,7 @@ from server.wiki.jobs import WikiJobs
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as api
+from tests import wiki_api as api
 from tests.test_wiki_write_gates import active_worker
 
 client = api.client

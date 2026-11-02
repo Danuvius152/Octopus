@@ -17,7 +17,7 @@ from server.mcp_identity import scope_is_live, verify
 from server.scheduler import ScheduleRunner
 from server.wiki.jobs import WikiWorker
 from tests import native_app_server as native_tests
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.native_app_server import (
     child_start,
     inject,
@@ -27,8 +27,8 @@ from tests.native_app_server import (
 )
 from tests.test_scheduler import save_schedule
 from tests.test_wiki_completion_handoff import original_job
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 native_runtime = native_tests.native_runtime
 

@@ -11,7 +11,7 @@ from server.mcp_servers.wiki import mcp
 from server.wiki import workflow
 from server.wiki.jobs import WikiJobs
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 
 client = wiki_api.client
 

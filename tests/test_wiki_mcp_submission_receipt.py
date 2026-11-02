@@ -6,7 +6,7 @@ import json
 import pytest
 
 from server.mcp_servers import wiki
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 
 client = wiki_api.client
 

@@ -15,8 +15,10 @@ from server.wiki.store import WikiError, WikiStore, revision
 from tests import (
     test_session_retirement,
     test_tenant_isolation,
-    test_wiki_api,
     test_wiki_legacy_metadata,
+)
+from tests import (
+    wiki_api as test_wiki_api,
 )
 from tests.test_wiki_legacy_metadata import initially_organize, organize, read
 

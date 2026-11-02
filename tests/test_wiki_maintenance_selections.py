@@ -236,7 +236,7 @@ async def test_bound_app_selection_and_human_selection_keep_distinct_actor_scope
 
     from server.applications import ApplicationManager, app_scope_token
     from server.routers import applications as app_routes
-    from tests import test_wiki_api as api
+    from tests import wiki_api as api
 
     root, config, jobs = await prepare(client, tmp_path, FILES)
     before_rebind = await select(client, limit=1)

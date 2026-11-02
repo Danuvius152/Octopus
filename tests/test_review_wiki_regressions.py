@@ -11,10 +11,10 @@ from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
 from server.wiki.references import local_references
 from server.wiki.store import WikiError
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
 from tests.test_wiki_reference_writers import note
 from tests.test_wiki_reference_writers import store as store
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 def related_note(store):

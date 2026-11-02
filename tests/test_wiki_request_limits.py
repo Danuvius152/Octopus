@@ -12,7 +12,7 @@ from server.wiki.maintenance_contract import actor_for
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
 from server.wiki.workflow import view
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 
 client = wiki_api.client
 

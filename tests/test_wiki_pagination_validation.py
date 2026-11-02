@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from tests.test_wiki_api import client as client
-from tests.test_wiki_api import configure
+from tests.wiki_api import client as client
+from tests.wiki_api import configure
 
 
 def _encode(value):

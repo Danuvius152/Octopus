@@ -36,8 +36,8 @@ test.afterAll(async ({ request }) => {
     // Live and archived: the UI archives rather than deletes, so a finished
     // run leaves its app in the archive.
     const lists = await Promise.all(
-      [{}, { archived: "true" }].map((params) =>
-        request.get(`${API}/applications`, { headers, params, timeout: 5_000 })
+      [false, true].map((archived) =>
+        request.get(`${API}/applications`, { headers, params: { archived }, timeout: 5_000 })
       )
     );
     for (const res of lists) {

@@ -136,7 +136,7 @@ async function importSessionApi(
 // Scheduled Tasks UI
 // ---------------------------------------------------------------------------
 
-test.describe("Scheduled Tasks UI @llm", () => {
+test.describe("Scheduled Tasks UI", () => {
   test("the Schedules section opens the all-agents overview", async ({
     page,
   }) => {
@@ -152,7 +152,7 @@ test.describe("Scheduled Tasks UI @llm", () => {
     );
   });
 
-  test("/schedule command creates a schedule shown in the overview; toggle + delete", async ({
+  test("/schedule command creates a schedule shown in the overview; toggle + delete @llm", async ({
     page,
     request,
   }) => {
@@ -212,7 +212,7 @@ test.describe("Scheduled Tasks UI @llm", () => {
     ).toHaveCount(0);
   });
 
-  test("an agent sets a schedule for itself and the sidebar updates live", async ({
+  test("an agent sets a schedule for itself and the sidebar updates live @llm", async ({
     page,
     request,
   }) => {
@@ -372,15 +372,15 @@ test.describe("Streaming assistant text @llm", () => {
     // the completed `assistant_text` block. Watching the DOM for a partial
     // paint would be timing-dependent on how fast the model writes.
     const deltas: number[] = [];
-    let finalAt: number | null = null;
+    const final: { at: number | null } = { at: null };
     const t0 = Date.now();
     page.on("websocket", (ws) =>
       ws.on("framereceived", (f) => {
         try {
           const d = JSON.parse(f.payload.toString()) as Record<string, unknown>;
           if (d.type === "assistant_delta") deltas.push(Date.now() - t0);
-          if (d.type === "assistant_text" && finalAt === null) {
-            finalAt = Date.now() - t0;
+          if (d.type === "assistant_text" && final.at === null) {
+            final.at = Date.now() - t0;
           }
         } catch {
           /* non-JSON frame */
@@ -409,9 +409,10 @@ test.describe("Streaming assistant text @llm", () => {
     );
 
     expect(deltas.length).toBeGreaterThan(0);
-    expect(finalAt).not.toBeNull();
+    expect(final.at).not.toBeNull();
+    if (final.at === null) throw new Error("No completed assistant text arrived");
     // The whole point: something was on screen before the block completed.
-    expect(deltas[0]).toBeLessThan(finalAt as number);
+    expect(deltas[0]).toBeLessThan(final.at);
 
     // The buffer is transient — it must not survive the completed block, or
     // the answer would render twice.
@@ -974,7 +975,7 @@ test.describe("Session credential picker", () => {
   });
 });
 
-test.describe("AskUserQuestion rendering @llm", () => {
+test.describe("AskUserQuestion rendering", () => {
   test("imported question_request renders the asked-question summary", async ({
     page,
     request,
@@ -1454,7 +1455,7 @@ test.describe("/reset slash command", () => {
 // Assistant messages are labeled with the owning agent's name (not "Claude")
 // ---------------------------------------------------------------------------
 
-test.describe("agent-name message labels @llm", () => {
+test.describe("agent-name message labels", () => {
   test("assistant turns are attributed to the owning agent", async ({
     page,
     request,
@@ -1602,7 +1603,7 @@ test.describe("Settings dialog", () => {
 // /archive command — fresh empty session under the same sidebar entry
 // ---------------------------------------------------------------------------
 
-test.describe("/archive command @llm", () => {
+test.describe("/archive command", () => {
   test("clears history client-side, keeps the same sidebar name", async ({
     page,
     request,
@@ -1757,7 +1758,7 @@ async function clearAllNotifiers(request: APIRequestContext): Promise<void> {
   }
 }
 
-test.describe("Notifier framework @llm", () => {
+test.describe("Notifier framework", () => {
   // The session-goes-idle webhook test depends on a real Claude turn
   // landing the result event. Under full-suite load haiku occasionally
   // hangs / produces a different shape, identical pattern to the
@@ -1781,7 +1782,7 @@ test.describe("Notifier framework @llm", () => {
     await page.locator(".btn-account").click();
     await page.locator(".menu-settings").click();
     await page.locator('[role="tab"]', { hasText: "Notifications" }).click();
-    await page.waitForTimeout(200);
+    await expect(page.locator(".btn-notifier-add")).toBeVisible();
 
     await page.locator(".btn-notifier-add").click();
     await page.locator("#notifier-label").fill("CRUD probe");
@@ -1819,7 +1820,7 @@ test.describe("Notifier framework @llm", () => {
     expect(after.find((n) => n.label === "CRUD probe")).toBeUndefined();
   });
 
-  test("webhook fires when a real session goes idle (real-CLI)", async ({
+  test("webhook fires when a real session goes idle (real-CLI) @llm", async ({
     page,
     request,
   }) => {

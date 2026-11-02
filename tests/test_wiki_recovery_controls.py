@@ -12,7 +12,7 @@ import pytest
 
 from server.wiki import origins, recovery_state, registry
 from server.wiki.store import WikiStore
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.test_wiki_owner_recovery import apply, approve, finish, plan, sql
 from tests.test_wiki_owner_recovery import client as client
 from tests.test_wiki_owner_recovery import uncertain as uncertain

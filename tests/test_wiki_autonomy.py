@@ -12,7 +12,7 @@ import pytest
 from server.harness import HarnessEvent, get_harness
 from server.harness.assembly import select_mcp_servers
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.fake_run import FakeRunBase
 
 client = wiki_api.client

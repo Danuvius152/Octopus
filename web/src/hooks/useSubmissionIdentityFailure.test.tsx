@@ -1,21 +1,13 @@
+import { Socket } from "../test-support/socket";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useSessionStore } from "../stores/sessionStore";
 import { useDraftAttachments } from "./useDraftAttachments";
 import { useWebSocket } from "./useWebSocket";
 
-class Socket {
-  static OPEN = 1;
-  static CONNECTING = 0;
-  static instances: Socket[] = [];
-  readyState = 1;
-  send = vi.fn();
-  close() { this.readyState = 3; }
-  constructor() { Socket.instances.push(this); }
-}
 
 beforeEach(() => {
-  Socket.instances = [];
+  Socket.reset(1);
   vi.stubGlobal("WebSocket", Socket);
   useSessionStore.getState().setToken("identity-test");
   useSessionStore.setState({ controlCommands: {}, pendingQuestions: {} });

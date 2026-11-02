@@ -1,3 +1,4 @@
+import { Socket } from "../test-support/socket";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { selectSession } from "./selectSession";
@@ -10,16 +11,6 @@ import { useSessionStore, type SessionInfo, type ResearchJob } from "../stores/s
 const dispatch = (generation = "service") => ({ generation, revision: 1, paused: false, items: [], active_request_id: null });
 const job: ResearchJob = { id: "r1", session_id: "s1", question: "Existing research", status: "running", phase: "search" };
 const session = { id: "s1", name: "Saved conversation", archived: false, agent_id: "ag1" } as SessionInfo;
-class Socket {
-  static OPEN = 1;
-  static CONNECTING = 0;
-  static instances: Socket[] = [];
-  readyState = 0;
-  onopen: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  close() { this.readyState = 3; }
-  constructor() { Socket.instances.push(this); }
-}
 function deferred() {
   let resolve!: (response: Response) => void;
   const promise = new Promise<Response>((yes) => { resolve = yes; });
@@ -28,7 +19,7 @@ function deferred() {
 beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);
   useSessionStore.setState({ token: "tok" });
-  Socket.instances = [];
+  Socket.reset(0);
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 

@@ -9,7 +9,7 @@ from server.sessions.base import BackendRetirement, QueuedPrompt, Session
 from server.wiki.jobs import WikiJobs, worker
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.fake_run import FakeRunBase
 from tests.test_wiki_grant_v2 import proposed
 

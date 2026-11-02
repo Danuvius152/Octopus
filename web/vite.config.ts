@@ -38,5 +38,12 @@ export default defineConfig({
     globals: true,
     setupFiles: './src/test-setup.ts',
     exclude: ['e2e/**', 'node_modules/**'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: ['src/**/*.test.{ts,tsx}', 'src/**/*.fixture.ts', 'src/test-setup.ts', 'src/test-support/**',
+        'src/components/chatViewport.test-support.ts', 'src/api/contracts.ts'],
+      reporter: ['text', 'json', 'json-summary', 'html'],
+    },
   },
 })

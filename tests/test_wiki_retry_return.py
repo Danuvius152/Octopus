@@ -11,9 +11,9 @@ from server.wiki.tasks import tasks
 from tests.test_wiki_completion_return import complete, finish_original, submitted
 from tests.test_wiki_completion_return import returning as returning
 from tests.test_wiki_job_events import enqueue
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
 from tests.test_wiki_return_boundaries import live_task, return_inputs, wait_return
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 @pytest.mark.parametrize("prior_status", ["completed", "completed_with_attention", "interrupted"])

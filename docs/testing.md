@@ -103,6 +103,12 @@ Offline browser specs import `test` from `web/e2e/test.ts`. Their HTTP requests
 stay on loopback servers or explicit local mocks; remote fonts, images, scripts
 and other incidental assets are blocked. Bundle application assets locally.
 Provider/network integration uses the explicit live tier and its focused cases.
+Tag the model-dependent case, rather than a mixed UI/model suite, with `@llm`.
+[`web/tests/e2eSelection.test.ts`](../web/tests/e2eSelection.test.ts) collects the
+actual Playwright specs in both modes without starting servers: UI-only cases
+remain offline, while Chat, schedule and native-provider cases keep their live
+selection. All E2E files are checked by `tsconfig.e2e.json` through the ordinary
+`bun run typecheck` and build commands.
 
 Keep this feedback loop focused while editing. The hermetic selection over all
 of `tests/` is the full backend suite. Fast checks establish local correctness;
@@ -168,6 +174,14 @@ and native-origin cold history. Old exec history is seeded by a test-only extern
 CLI, then resumed through the ordinary product path; it does not retain a product
 exec fallback. Separate live cases exercise nested wait/followup, root-early helper
 partial/retirement, fresh-file metering and saved history/fork behavior.
+The native question smoke separately enables G0's
+`features.default_mode_request_user_input` **only inside that test**. G0 leaves
+this capability disabled in Default mode. The smoke observes a real
+`item/tool/requestUserInput`, original connection/thread/turn/attempt, native
+question ID and response, an unpredictable human answer's file effect, SQLite
+association and resource retirement. It proves the explicitly enabled protocol;
+it does not claim ordinary Default-mode turns expose the tool. The existing
+HTTP MCP question test remains a separate guarantee.
 
 `tests/test_codex_app_server_monitor.py` verifies real secure-reader callbacks
 before delayed typed root/child association, cold snapshot replay, rejected work,
@@ -186,6 +200,11 @@ original Manager, SQLite database and cleanup together and imports no case modul
 [`tests/session_runtime.py`](../tests/session_runtime.py) owns shared dispatcher
 observations. Consumers import these support modules directly and retain their
 separate behavior assertions.
+Short steer-ACK and accepted-input idle budgets start only after their original
+root has been prepared or its acceptance committed. Applying those budgets to
+process startup instead tests a different recovery path. New content explicitly
+wakes the Owner after a test changes a runtime idle budget.
+
 They exercise the original Owner, SQLite and publication path with explicit
 storage, writer, reader and process-group barriers: dual RPC IDs, late answers,
 Stop/conflicting controls, input-proof waits, retained late items, scoped work
@@ -219,6 +238,32 @@ backend process tests supply that separate evidence. Source-adjacent store and
 transcript tests cover stale snapshots and service-generation changes. Retain
 failed logs and combine unchanged full-run evidence with affected-module fixes
 under the reuse policy above; passing browser mocks do not certify R2 cutover.
+
+Wiki HTTP fixtures live in [`tests/wiki_api.py`](../tests/wiki_api.py); their
+function-scoped Manager and database stay together. Teardown uses `db.close()`:
+its registered hooks drain active turns before joining Owners and closing
+storage. [`tests/test_wiki_test_runtime.py`](../tests/test_wiki_test_runtime.py)
+checks that boundary with an original live stand-in process, recorded terminal
+and proven retirement. [`tests/wiki_job_runtime.py`](../tests/wiki_job_runtime.py)
+adds authenticated job fixtures and controlled curator/publication helpers.
+[`tests/wiki_jobs.py`](../tests/wiki_jobs.py) retains the separate store-only
+fixture with a synthetic owner; it cannot substitute for the HTTP account.
+These shared support modules do not import test-case modules. Frontend WS
+lifecycle tests share [`Socket`](../web/src/test-support/socket.ts), retaining
+each scenario's initial state and explicit callback ordering.
+
+[`MarkdownMath.test.tsx`](../web/src/components/MarkdownMath.test.tsx) exercises
+inline/display math and inherited-trust rejection in both actual chat and file
+preview pipelines, as well as renderer options with an inherited `trust` value.
+KaTeX is fixed at 0.18.2 for
+[GHSA-238p-pmpm-9mq7](https://github.com/KaTeX/KaTeX/security/advisories/GHSA-238p-pmpm-9mq7).
+The package override also upgrades `rehype-katex` and `micromark-extension-math`'s
+0.16.x requirements: upgrading only the direct CSS dependency leaves a vulnerable
+renderer in those consumers. Keep the override until their declared ranges
+support the patched renderer. The
+[`math-rendering` browser smoke](../web/e2e/math-rendering.spec.ts) checks real
+chat/file preview math, layout and locally loaded fonts; only model-based file
+name resolution is mocked.
 
 `tests/test_codex_app_server_completion.py` checks Stop before outcome selection,
 after selection before commit, after commit before notification, and after
@@ -256,6 +301,44 @@ in `tests/test_codex_app_server_real.py` verify real pinned native fork, recalle
 context and independent file effects for exec-origin and native-origin sources.
 Their existing-login/network isolation follows the live policy below; they do not
 establish default cutover or stronger recursive completion.
+
+### Coverage measurement (opt-in)
+
+Coverage is diagnostic and has no percentage threshold. Install the backend
+test extra and the locked frontend dev dependencies first. The Python command
+below measures `server/`, including unexecuted modules, xdist workers and Python
+service subprocesses; `pyproject.toml` enables branch measurement and coverage's
+subprocess patch only when coverage is requested. Vitest and its V8 provider
+are pinned together. Frontend coverage includes unexecuted `src/` TS/TSX files
+and excludes tests, setup, test support/fixtures and generated API contracts.
+Browser execution is outside this unit-test coverage denominator.
+
+```bash
+octopus_test_base="$HOME/.cache/octopus-tests"
+mkdir -p "$octopus_test_base"
+octopus_coverage_root=$(mktemp -d "$octopus_test_base/coverage.XXXXXX")
+mkdir "$octopus_coverage_root/tmp"
+export TMPDIR="$octopus_coverage_root/tmp"
+export COVERAGE_FILE="$octopus_coverage_root/.coverage"
+.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" \
+  -n 4 --dist=loadfile --max-worker-restart=0 -q --cov=server --cov-branch \
+  --cov-report=term --cov-report=json:"$octopus_coverage_root/backend.json" \
+  --cov-report=html:"$octopus_coverage_root/backend"
+(cd web && bun run test:coverage --coverage.reportsDirectory="$octopus_coverage_root/frontend")
+```
+
+The 2026-11-02 follow-up established the following baseline on Python 3.14.4,
+pytest-cov 7.1.0 / coverage 7.17.0 and Vitest/V8 4.0.18. Backend observations
+combine the full initial offline run and affected-module reruns with unchanged
+production sources; first failures remain recorded. Frontend results use the
+successful full unit run after the KaTeX upgrade, with test-only fixtures
+excluded at measurement time. These are observations, not a release threshold
+or a claim about live-provider coverage.
+
+| Scope | Executable lines | Branches |
+| --- | --- | --- |
+| Backend offline | 34,287 / 37,527 — **91.37%** | 10,733 / 13,072 — **82.11%** |
+| Frontend unit | 4,144 / 4,981 — **83.19%** | 4,333 / 5,668 — **76.44%** |
 
 ### Markers, providers and isolation
 

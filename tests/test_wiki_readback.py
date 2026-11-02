@@ -3,8 +3,8 @@
 import json
 
 from server.wiki import material_proof, readback
-from tests import test_wiki_api as wiki_api
 from tests import test_wiki_legacy_metadata as legacy
+from tests import wiki_api as wiki_api
 from tests.test_wiki_grant_v2 import assigned
 from tests.test_wiki_supporting_navigation import setup_notes
 from tests.test_wiki_write_gates import active_worker

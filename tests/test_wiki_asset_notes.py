@@ -14,10 +14,10 @@ from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs, WikiWorker
 from server.wiki.store import WikiError, revision
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
 from tests import test_wiki_history as wiki_history
+from tests import wiki_api as wiki_api
 from tests.submission import receipt_from_events
-from tests.test_wiki_jobs import sapphire_delete
+from tests.wiki_job_runtime import sapphire_delete
 
 client = wiki_api.client
 sapphire = wiki_history.sapphire

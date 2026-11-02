@@ -20,3 +20,7 @@ octopus-dev.db*
 
 # Intermediate file from `bun run generate:contracts`
 web/.openapi.json
+# Optional coverage reports are local verification artifacts.
+.coverage*
+htmlcov/
+coverage/

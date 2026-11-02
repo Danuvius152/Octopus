@@ -57,16 +57,19 @@ test("App Server preserves native history and original submissions across reload
     }, { timeout: 75_000 }).toBe("done");
     const final = await (await request.get(url, { headers })).json() as Submission;
     expect(final.outcome?.status).toBe("success");
-    expect(final.execution.native_inputs).toHaveLength(1);
-    expect(final.execution.native_inputs[0]).toMatchObject({
+    const nativeInputs = final.execution.native_inputs;
+    expect(nativeInputs).toHaveLength(1);
+    if (!nativeInputs || nativeInputs.length !== 1) throw new Error("Missing original native input evidence");
+    const nativeInput = nativeInputs[0];
+    expect(nativeInput).toMatchObject({
       transport: "codex-app-server", state: "accepted",
     });
-    return { body, final };
+    return { body, final, nativeInput };
   }
 
   const first = await send(`Remember the phrase ${phrase}. Reply with that exact phrase. Do not use any tools or helpers.`);
   await expect(page.locator(".msg-assistant .msg-content").last()).toContainText(phrase);
-  const firstNative = first.final.execution.native_inputs[0];
+  const firstNative = first.nativeInput;
 
   async function reloadOriginalSession() {
     await page.reload();
@@ -83,12 +86,14 @@ test("App Server preserves native history and original submissions across reload
   const repeated = await retry.json() as Submission;
   expect(repeated.request_id).toBe(first.final.request_id);
   // POST omits nulls; the typed GET materializes the optional start target.
+  expect(repeated.execution.native_inputs).toHaveLength(1);
+  if (!repeated.execution.native_inputs) throw new Error("Retry lost original native input evidence");
   expect(repeated.execution.native_inputs.map((input) => ({
     ...input, target_turn_id: input.target_turn_id ?? null,
   }))).toEqual(first.final.execution.native_inputs);
 
   const second = await send("Reply only with the phrase I asked you to remember. Do not use any tools or helpers.");
-  const secondNative = second.final.execution.native_inputs[0];
+  const secondNative = second.nativeInput;
   expect(secondNative.thread_id).toBeTruthy();
   expect(secondNative.thread_id).toBe(firstNative.thread_id);
   expect(secondNative.turn_id).not.toBe(firstNative.turn_id);

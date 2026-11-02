@@ -1,3 +1,4 @@
+import { Socket } from "../test-support/socket";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { VirtuosoMockContext } from "react-virtuoso";
@@ -128,18 +129,7 @@ it("closes a form when history records its resolution before the pending snapsho
 });
 
 it("keeps a newer WebSocket question answerable when the earlier HTTP refetch completes", async () => {
-  class Socket {
-    static OPEN = 1;
-    static CONNECTING = 0;
-    static instances: Socket[] = [];
-    readyState = 0;
-    onopen: (() => void) | null = null;
-    onclose: ((event: { code: number }) => void) | null = null;
-    onerror: (() => void) | null = null;
-    onmessage: ((event: { data: string }) => void) | null = null;
-    constructor() { Socket.instances.push(this); }
-    close() { this.readyState = 3; }
-  }
+  Socket.reset(0);
   let resolveDetail!: (response: Response) => void;
   const detail = new Promise<Response>((resolve) => { resolveDetail = resolve; });
   vi.stubGlobal("WebSocket", Socket);

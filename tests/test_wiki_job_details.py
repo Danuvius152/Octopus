@@ -5,9 +5,9 @@ import pytest
 from server.wiki import job_execution
 from server.wiki.history import WikiHistory
 from tests.test_wiki_grant_v2 import assigned
-from tests.test_wiki_jobs import Curator, process
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import Curator, process
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 @pytest.mark.parametrize("stage", ["prepared", "before_prepare", "ingest"])

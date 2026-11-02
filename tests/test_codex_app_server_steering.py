@@ -437,9 +437,10 @@ async def test_changed_connector_selection_queues_new_human_input(native_runtime
 @pytest.mark.parametrize("late", [False, True])
 async def test_ack_updates_saved_input_notices_while_root_remains_active(native_runtime, tmp_path, monkeypatch, late):
     manager, database, session, mode, starts, events = native_runtime
-    monkeypatch.setattr(native_tests.codex_app_server, "_RPC_TIMEOUT", .05 if late else 5)
     mode[0] = "steer_gate"
     await active_root(native_runtime, tmp_path)
+    # Only the steer ACK is late; native initialization has already finished.
+    monkeypatch.setattr(native_tests.codex_app_server, "_RPC_TIMEOUT", .05 if late else 5)
     anchor = [("a" * 40, False)]
 
     async def capture_anchor(_working_dir):

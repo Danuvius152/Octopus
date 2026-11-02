@@ -3,11 +3,11 @@
 import pytest
 
 from server.wiki.store import revision
-from tests.test_wiki_jobs import Curator, process
 from tests.test_wiki_maintenance_selections import FILES, select
 from tests.test_wiki_maintenance_selections import submission as selected_submission
 from tests.test_wiki_maintenance_state import client as client
 from tests.test_wiki_maintenance_state import prepare, state, submission
+from tests.wiki_job_runtime import Curator, process
 
 
 async def test_unchanged_read_and_refresh_preserve_cursor_but_changed_content_expires_it(client, tmp_path):

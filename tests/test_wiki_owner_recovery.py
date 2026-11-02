@@ -14,7 +14,7 @@ from server.mcp_identity import mint
 from server.wiki.registry import WikiRegistry, registry
 from server.wiki.store import WikiError, WikiStore
 from server.wiki.tasks import tasks
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 
 client = wiki_api.client
 

@@ -7,9 +7,9 @@ from server.mcp_identity import mint
 from server.wiki.tasks import tasks
 from tests import test_wiki_maintenance_state as maintenance
 from tests.test_wiki_initial_review import target
-from tests.test_wiki_jobs import Curator, process
 from tests.test_wiki_maintenance_selections import select
 from tests.test_wiki_source_confirmation import confirm
+from tests.wiki_job_runtime import Curator, process
 
 client = maintenance.client
 

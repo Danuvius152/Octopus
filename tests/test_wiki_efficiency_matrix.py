@@ -18,7 +18,7 @@ from server.wiki.jobs import WikiJobs
 from server.wiki.maintenance_state import status
 from server.wiki.registry import registry
 from server.wiki.store import WikiStore, revision
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.test_wiki_write_gates import active_worker
 
 pytestmark = pytest.mark.wiki_perf

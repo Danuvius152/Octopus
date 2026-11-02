@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from server.wiki.jobs import WikiJobs
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.accounts import create_account
 from tests.test_service_runtime import installation_settings
 from tests.test_wiki_grant_v2 import assigned, proposed, publish

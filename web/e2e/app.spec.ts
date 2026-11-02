@@ -142,11 +142,11 @@ test.describe("Session Management", () => {
   });
 });
 
-test.describe("Chat @llm", () => {
+test.describe("Chat", () => {
   // Claude SDK initialization can take >60s; the global 30s timeout is too short.
   test.describe.configure({ timeout: 120_000 });
 
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, request }) => {
     await page.goto("/");
     await enterAccountCredentials(page);
     await expect(page.locator(".agent-list-header")).toBeVisible();
@@ -156,10 +156,13 @@ test.describe("Chat @llm", () => {
     await page
       .locator('.session-create input[placeholder="Session name"]')
       .fill("Chat Test");
-    // Working dir is an override now — unfold the create row's extras first.
-    await page.locator(".btn-session-advanced").click();
-    await page.locator(".session-working-dir").fill("/tmp");
+    // The account owns its default workspace; /tmp is outside that boundary.
+    const agentId = await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` });
+    const createUrl = new URL(`/api/agents/${agentId}/sessions`, page.url()).href;
+    const created = page.waitForResponse((response) =>
+      response.url() === createUrl && response.request().method() === "POST");
     await page.locator("button.btn-create").click();
+    expect((await created).status()).toBe(201);
     await expect(page.locator(".chat-header .crumb-current")).toHaveText("Chat Test");
   });
 
@@ -167,7 +170,7 @@ test.describe("Chat @llm", () => {
     await expect(page.locator(".conn-status")).toBeVisible();
   });
 
-  test("sends a message and receives response", async ({ page }) => {
+  test("sends a message and receives response @llm", async ({ page }) => {
     // Type and send a simple message
     const input = page.locator(".chat-input-bar textarea");
     await input.fill("What is 2+2? Reply with just the number.");
@@ -194,7 +197,7 @@ test.describe("Chat @llm", () => {
     await expect(page.locator(".result-badge")).toBeVisible({ timeout: 30_000 });
   });
 
-  test("send with Enter key", async ({ page }) => {
+  test("send with Enter key @llm", async ({ page }) => {
     const input = page.locator(".chat-input-bar textarea");
     await input.fill("Say hello");
     await input.press("Enter");
@@ -208,7 +211,7 @@ test.describe("Chat @llm", () => {
     await expect(page.locator(".result-badge")).toBeVisible({ timeout: 30_000 });
   });
 
-  test("disables input while running", async ({ page }) => {
+  test("disables input while running @llm", async ({ page }) => {
     const input = page.locator(".chat-input-bar textarea");
     await input.fill("What is 1+1? Reply with just the number.");
     await page.locator("button.btn-send").click();

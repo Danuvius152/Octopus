@@ -12,10 +12,10 @@ from server.harness.driver import ArgvDriver
 from server.wiki import job_events, job_notifications
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiWorker
-from tests import test_wiki_api as wiki_api
+from tests import wiki_api as wiki_api
 from tests.harness_profiles import process_profile
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 @pytest.fixture

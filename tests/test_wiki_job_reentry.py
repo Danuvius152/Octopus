@@ -7,8 +7,8 @@ from server.wiki.store import WikiError
 from tests.test_wiki_job_events import enqueue
 from tests.test_wiki_job_execution import disk_manager as disk_manager
 from tests.test_wiki_job_execution import prepare, record_terminal
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 def test_retry_response_loss_reuses_original_control_after_worker_claim(jobs):
@@ -62,7 +62,7 @@ async def test_explicit_verify_uses_original_terminal_and_never_creates_model_wo
 async def test_verify_keeps_completed_item_from_prior_attempt_while_verifying_new_work(jobs, disk_manager):
     from server.wiki.history import WikiHistory
     from server.wiki.tasks import tasks
-    from tests.test_wiki_jobs import Curator
+    from tests.wiki_job_runtime import Curator
 
     WikiHistory(jobs.store).write("Library/note.md", b"# Note\nKeep the original.\n", None, "human", "create")
     WikiHistory(jobs.store).write("Library/other.md", b"# Other\nKeep the original.\n", None, "human", "create")

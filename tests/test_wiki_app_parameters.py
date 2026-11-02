@@ -7,7 +7,7 @@ import pytest
 from server.applications import ApplicationManager, app_scope_token
 from server.routers import applications as app_routes
 from server.wiki.jobs import WikiJobs
-from tests import test_wiki_api as api
+from tests import wiki_api as api
 from tests.test_wiki_maintenance_state import client as client
 from tests.test_wiki_maintenance_state import prepare
 

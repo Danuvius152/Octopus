@@ -2,11 +2,11 @@
 
 import json
 
-from tests import test_wiki_api as api
+from tests import wiki_api as api
 from tests.test_wiki_job_events import enqueue
 from tests.test_wiki_job_notifications import pending, subscribe
-from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_job_runtime import client as client
+from tests.wiki_job_runtime import jobs as jobs
 
 
 async def test_exact_card_query_reaches_old_vault_and_job_beyond_first_page(jobs, client, tmp_path):
