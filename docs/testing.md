@@ -255,6 +255,14 @@ the web roots. Vitest and its V8 provider keep the same exact locked version whe
 applying security updates; the older coverage baseline below retains its original
 measurement versions.
 
+After a transitive security update, audit every locked copy. A patched hoisted
+package can coexist with an older copy retained by a parent's exact pin. Prefer
+a compatible parent update that adopts the fix, and preserve distinct dependency
+branches rather than forcing them onto one major version. Validate contract
+generation when updating its dependency chain, as well as frontend tests and the
+production build. Report advisories that remain outside the callers' declared
+ranges separately from fixes verified in the current tree.
+
 ### Coverage measurement (opt-in)
 
 Coverage is diagnostic and has no percentage threshold. Install the backend
