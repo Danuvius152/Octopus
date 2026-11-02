@@ -322,6 +322,12 @@ async def test_cancelled_waiter_keeps_late_failure_diagnostics_with_the_run(
         monkeypatch.setattr(asyncio, "create_subprocess_exec", refused)
     else:
         class ClosingObserver:
+            def set_event_handler(self, handler):
+                pass
+
+            async def drain_observations(self):
+                pass
+
             def observe_stdout(self, obj):
                 pass
 
@@ -334,7 +340,7 @@ async def test_cancelled_waiter_keeps_late_failure_diagnostics_with_the_run(
             def invalidate(self):
                 pass
 
-            async def close(self):
+            async def close(self, *, deadline=None):
                 entered.set()
                 await release.wait()
                 raise failure

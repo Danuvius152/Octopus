@@ -168,6 +168,7 @@ class CredentialsMixin(SessionManagerBase):
         refresh: bool,
     ) -> HarnessCredential | None:
         """Refresh once, conditionally commit, then resolve the current authority."""
+        assert self.db is not None  # Owned refreshes drain before this binding closes.
         try:
             bundle = json.loads(bundle_json)
         except json.JSONDecodeError:

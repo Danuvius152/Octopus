@@ -61,7 +61,7 @@ def _inline_reference_inputs(children: list[Token]) -> list[tuple[str, str]]:
         flush()
         if child.type in {"link_open", "image"}:
             resource = child.attrGet("href" if child.type == "link_open" else "src")
-            if resource:
+            if isinstance(resource, str) and resource:
                 references.append(("markdown_link", resource))
     flush()
     return references
@@ -160,7 +160,7 @@ class DocumentFormat:
         if "type" in result:
             result["doc_role"] = _ROLES.get(result["type"].casefold(), "unknown")
         else:
-            result["doc_role"] = {"source": "source", "concept": "concept", "topic": "navigation"}.get(legacy.get("kind"), "unknown")
+            result["doc_role"] = {"source": "source", "concept": "concept", "topic": "navigation"}.get(legacy.get("kind", ""), "unknown")
         if self.error:
             result["frontmatter_error"] = self.error
         return result
@@ -199,7 +199,8 @@ class _HTMLContext:
 class _HTMLAnchors(HTMLParser):
     """Track namespace/text boundaries for comments and anchors, not a DOM."""
 
-    CDATA_CONTENT_ELEMENTS = ("script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes")
+    # HTMLParser reads this subclass override at runtime; typeshed marks it Final.
+    CDATA_CONTENT_ELEMENTS = ("script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes")  # type: ignore[misc]
     _VOID = frozenset("area base basefont bgsound br col embed frame hr img input keygen link meta param source track wbr".split())
     _MATH_TEXT = frozenset({"mi", "mo", "mn", "ms", "mtext"})
     _FOREIGN_BREAKOUT = frozenset((

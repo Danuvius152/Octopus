@@ -308,7 +308,8 @@ class AppServerDriver(RunDriver):
         if self._input.turn_id is not None:
             if thread == self._input.thread_id:
                 return "root" if turn == self._input.turn_id else "anomalous_root"
-            if self._output is not None and self._output.contains_turn(thread, turn):
+            if (self._output is not None and isinstance(thread, str) and isinstance(turn, str)
+                    and self._output.contains_turn(thread, turn)):
                 return "child"
         return None
 
@@ -710,6 +711,8 @@ class AppServerDriver(RunDriver):
         assert self._input is not None
         identifier = obj.get("id")
         if "method" not in obj:
+            if not isinstance(identifier, str):
+                return ParseOutput()  # This connection issues only string RPC ids.
             waiting = self._rpc.waiting(identifier)
             steer = self._steers.get(identifier)
             if steer is not None:
@@ -845,7 +848,8 @@ class AppServerDriver(RunDriver):
         self._buffer.append(obj)
 
     def _resolve_question(self, params: dict[str, Any]) -> None:
-        ref = self._questions.get(params.get("requestId"))
+        identifier = params.get("requestId")
+        ref = self._questions.get(identifier) if isinstance(identifier, (str, int)) else None
         if ref is not None and params.get("threadId") == ref.thread_id:
             self.question_sent(ref)
             if self._io is not None:
@@ -941,7 +945,7 @@ class AppServerDriver(RunDriver):
                 error_code="native_provider_retry" if params["willRetry"] else "native_provider_error" if root else "native_child_error",
                 error_details={**error, "willRetry": params["willRetry"], "connection_generation": self._rpc.generation}, raw=obj)],
                 activity=bool(params["willRetry"] and not self._terminal and self._output
-                    and self._output.active_turn(params["threadId"], turn_id)
+                    and isinstance(turn_id, str) and self._output.active_turn(params["threadId"], turn_id)
                     and self._io and self._io.question_admission_open))
         if method == "turn/completed":
             if not root:

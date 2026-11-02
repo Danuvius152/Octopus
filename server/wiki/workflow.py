@@ -91,13 +91,13 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
             config = registry.config(task.user_id)
         except WikiError:
             pass
-    grant = tasks.current_grant(task, include_selection=True) if live and mode == "maintain" and task.job_id else None
+    grant = tasks.current_grant(task, include_selection=True) if live and mode == "maintain" and task is not None and task.job_id else None
     if grant and (not config or (grant["vault_id"], grant["registration_generation"])
                   != (config["vault_id"], config["registration_generation"])):
         grant = None
     worker = grant is not None
     submitter = bool(live and tasks.may_submit(task))
-    if submitter and task.knowledge is not None:
+    if submitter and task is not None and task.knowledge is not None:
         try:
             if config is None:
                 raise WikiError("The Wiki registration is unavailable", 403)
@@ -109,6 +109,7 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
     if worker or submitter:
         names |= {"cancel_job", "retry_job"}
     if grant is not None:
+        assert task is not None
         names |= {"organize", "blocks", "restructure", "revise"}
         if grant["allow_new_pages"]:
             names.add("publish")
@@ -156,8 +157,9 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
         remaining = _paths(card, "writable_files", [item["current_path"] for item in grant["selected_documents"] if item["current_path"]], PATHS_MAX_BYTES)
         _paths(card, "allowed_new_paths", grant["allowed_new_paths"], remaining)
         if card["writable_files_truncated"] or card["allowed_new_paths_truncated"]:
+            assert task is not None
             card["scope_details"] = {"tool": "jobs", "job_id": task.job_id, "view": "full", "export": True}
-    elif submitter and mode == "maintain":
+    elif submitter and task is not None and mode == "maintain":
         from .tasks import daily_command
 
         if daily_command(task.request):
@@ -169,7 +171,7 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
 
 def instructions(mode: str, task_id: str | None = None) -> str:
     """Route this turn by the existing policy; guides and authority remain live."""
-    current = view(tasks.active.get(task_id), mode=mode)
+    current = view(tasks.active.get(task_id) if task_id is not None else None, mode=mode)
     role = current.card["actor_role"]
     route = {
         "worker": "当前角色 worker：框架已分派维护，先加载 worker 指南。",
@@ -181,4 +183,4 @@ def instructions(mode: str, task_id: str | None = None) -> str:
 
 
 def load_guide(module: GuideModule, task_id: str | None) -> str:
-    return view(tasks.active.get(task_id)).load(module)
+    return view(tasks.active.get(task_id) if task_id is not None else None).load(module)

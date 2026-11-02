@@ -587,6 +587,7 @@ class ApplicationManager:
 
         async def admit() -> None:
             try:
+                assert self.session_mgr is not None
                 receipt = await self.session_mgr.start_message(session.id, body, source="application")
             except ValueError as exc:
                 await restore()
@@ -925,7 +926,7 @@ class ApplicationManager:
                 session = self.session_mgr.get_session(sid) if self.session_mgr is not None else None
                 # Progress can outlive its writer and completion. Read the
                 # current execution projection instead of replaying running.
-                if (session is None or session.status is not SessionStatus.running
+                if (session is None or self.session_mgr is None or session.status is not SessionStatus.running
                         or self.session_mgr.dispatch_snapshot(sid)["paused"]):
                     continue
                 if row["status"] != STATUS_BUILDING:

@@ -65,6 +65,10 @@ gate_contracts() { "$ROOT/scripts/check-contracts.sh"; }
 # so a new contract or plan cannot be added without appearing in the index.
 gate_docs_index() { "$ROOT/.venv/bin/python" "$ROOT/scripts/gen-docs-index.py" --check; }
 
+gate_python_environment() {
+  "$ROOT/.venv/bin/python" "$ROOT/scripts/python_environment.py" check --extra test --extra dev >/dev/null
+}
+
 gate_ruff() { "$ROOT/.venv/bin/ruff" check .; }
 
 gate_mypy() { "$ROOT/.venv/bin/mypy"; }
@@ -73,6 +77,7 @@ gate_eslint() { cd "$ROOT/web" && bun run lint; }
 
 gate_e2e() { cd "$ROOT/web" && bun run test:e2e; }
 
+run_gate "Python dependency pins"              gate_python_environment
 run_gate "backend lint (ruff)"                 gate_ruff
 run_gate "backend types (mypy)"                gate_mypy
 run_gate "backend unit (hermetic release selection)" gate_pytest

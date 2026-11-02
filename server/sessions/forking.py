@@ -23,7 +23,7 @@ from .. import fork_helpers
 from ..attachments import AttachmentError
 from ..attachments import get_path as get_attachment_path
 from ..harness import BackendForkNotSupported, HarnessRun, get_harness
-from ..harness.fork import ForkHooks
+from ..harness.fork import ForkCheckpoint, ForkHooks, read_fork_checkpoint
 from ..models import MessageContent
 from .base import (
     ForkError,
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 class ForkingMixin(SessionManagerBase):
 
     def _fork_hooks(self, owner: SessionOwner, fork: Session, metadata: dict[str, Any]) -> ForkHooks:
-        async def checkpoint(artifact: dict[str, Any]) -> None:
+        async def checkpoint(artifact: ForkCheckpoint) -> None:
             assert self.db is not None
             metadata["native_fork"] = dict(artifact)
             serialized = json.dumps(metadata)
@@ -130,19 +130,18 @@ class ForkingMixin(SessionManagerBase):
                         user_id=row.get("user_id"),
                     )
                     metadata = json.loads(row["fork_metadata"]) if row.get("fork_metadata") else {}
-                    artifact = metadata.get("native_fork")
-                    extra = {}
+                    artifact = None
+                    hooks = None
                     if "native_fork" in metadata:
-                        if not isinstance(artifact, dict) or artifact.get("transport") != "app-server":
-                            raise ValueError("Malformed native fork checkpoint; retain recovery material")
+                        artifact = read_fork_checkpoint(metadata["native_fork"])
                         recovery = Session(id=fork_id, name="Incomplete fork cleanup", working_dir=row["working_dir"],
                             backend=row["backend"], user_id=row["user_id"], agent_id=row["agent_id"],
                             origin="fork", fork_status="initializing")
                         recovery_owner = self._session_owner(recovery)
-                        extra = {"artifact": artifact, "hooks": self._fork_hooks(recovery_owner, recovery, metadata)}
+                        hooks = self._fork_hooks(recovery_owner, recovery, metadata)
                     await harness.cleanup_incomplete_fork_artifacts(
                         row["working_dir"], row["resume_id"], fork_id,
-                        credential=cred, **extra,
+                        credential=cred, artifact=artifact, hooks=hooks,
                     )
                 except Exception:
                     logger.exception(
@@ -316,6 +315,7 @@ class ForkingMixin(SessionManagerBase):
             summary = await fork_helpers.classify_side_effects(self.db, parent_id, M)
 
             # 5. DB-only transaction: insert fork row + copied messages.
+            assert self.db is not None  # Fork reservation and compensation retain the binding.
             now = datetime.now(UTC).isoformat()
             # A fork is a rewind, not a sibling branch: it inherits the
             # parent's exact name so it slots into the sidebar as the original
@@ -610,6 +610,7 @@ class ForkingMixin(SessionManagerBase):
             #    or the duplicate would continue with no copied context). The UI
             #    distinguishes a full copy from a rewind via fork_metadata's
             #    `full_copy` flag, not by nulling fork_after_seq (Vera review).
+            assert self.db is not None  # Original saga drains before DB close.
             try:
                 await self.db.create_fork_session(
                     fork_id=fork_id, name=fork_name, working_dir=dest,
@@ -663,7 +664,8 @@ class ForkingMixin(SessionManagerBase):
                 try:
                     await harness.cleanup_incomplete_fork_artifacts(
                         dest, fork.claude_session_id, fork_id, credential=parent_cred,
-                        artifact=fork_meta_dict.get("native_fork"),
+                        artifact=(read_fork_checkpoint(fork_meta_dict["native_fork"])
+                                  if "native_fork" in fork_meta_dict else None),
                         hooks=self._fork_hooks(owner, fork, fork_meta_dict),
                     )
                 except Exception:

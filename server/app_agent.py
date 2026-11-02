@@ -270,6 +270,7 @@ class AppAgentManager:
         mgr = self.session_mgr
         if mgr is None:
             return 0
+        assert mgr.db is not None
         async with self._admission_locks.setdefault(app_id, asyncio.Lock()):
             if self._closing:
                 raise AppAgentError("Application agent admission is closed", status_code=503)
@@ -403,6 +404,7 @@ class AppAgentManager:
         # One app's creation and registration form one admission boundary.
         # Other apps remain independent; cancellation releases the lock.
         async with self._admission_locks.setdefault(app_id, asyncio.Lock()):
+            assert mgr.db is not None
             current = await mgr.db.get_application(app_id)
             if current is None or current.get("deletion") is not None:
                 raise AppAgentError("Application is unavailable or deletion is unfinished", status_code=409)

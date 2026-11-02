@@ -4,7 +4,9 @@ import { SidebarAgents } from "./SidebarAgents";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
 
-const agent = (id: string, name: string): Agent => ({ id, name, backend: "codex", pinned: true, archived: false, is_system: false } as Agent);
+const agent = (id: string, name: string): Agent => ({ id, name, backend: "codex", pinned: true, archived: false, is_system: false,
+  description: "", system_prompt: "", mcp_servers: [], tool_allow: "", tool_deny: "", subagents: [],
+  created_at: "now", updated_at: "now", active_session_count: 0 });
 beforeEach(() => useSessionStore.setState({ ...useSessionStore.getInitialState(), token: "synthetic-token", accountGeneration: 1, dispatchGeneration: "service-a", agents: [agent("a", "Old A"), agent("b", "Old B")] }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 

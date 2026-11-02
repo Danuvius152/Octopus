@@ -148,6 +148,7 @@ async def acknowledge_research(session_manager: SessionMgr, session_id: str, res
     await _own_session(session_manager, session_id, user_id)
     if verify(_) is not None:
         raise HTTPException(403, "A model cannot confirm browser receipt")
+    assert session_manager.db is not None
     row = await session_manager.db.get_research_job(research_id)
     if row is None or row["session_id"] != session_id:
         raise HTTPException(404, "research job not found")

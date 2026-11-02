@@ -113,7 +113,7 @@ export interface QuestionItem {
   question: string;
   header?: string;
   multiSelect?: boolean;
-  options: QuestionOption[];
+  options?: QuestionOption[] | null;
 }
 
 export interface PendingQuestion {

@@ -678,6 +678,7 @@ class DelegationManager:
         previous_relay = caller_rec._awaiting_sub_relay if caller_rec else False
 
         async def abandon_setup() -> None:
+            assert self.session_mgr is not None
             if rec.state != "running" or self.session_mgr.has_pending_or_active_work(child.id, rec.work_id):
                 return
             close_work(rec.work_id)
@@ -891,6 +892,7 @@ class DelegationManager:
 
         async def rollback_setup() -> None:
             nonlocal restored_previous
+            assert self.session_mgr is not None
             # Only a confirmed business refusal before admission rolls back.
             # Neither a lost waiter nor an unknown storage error takes this path.
             if self.session_mgr.has_pending_or_active_work(delegation_id, rec.work_id):
@@ -1305,6 +1307,7 @@ class DelegationManager:
                 return
 
             async def prepare() -> ReturnBody | ReturnSkipped:
+                assert self.session_mgr is not None
                 if delivery.disposition is not None:
                     return ReturnSkipped("Previously unconfirmed question admission is observation only")
                 if (rec.state != "running" or self._records.get(rec.delegation_id) is not rec
@@ -1487,6 +1490,7 @@ class DelegationManager:
         if answers is None:
             if len(questions) != 1 or not (choice or "").strip():
                 raise DelegationError("Provide answers for every question; choice supports a single question only", status_code=400)
+            assert choice is not None
             answers = [{"selected": [choice.strip()]}]
         elif choice is not None:
             raise DelegationError("Provide either choice or answers", status_code=400)

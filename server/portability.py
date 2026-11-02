@@ -320,7 +320,8 @@ def _read_manifest(package: zipfile.ZipFile) -> dict:
             if info.file_size != entry["size"]:
                 raise ValueError("Archive file size mismatch")
             with package.open(info) as stream:
-                if hashlib.file_digest(stream, "sha256").hexdigest() != entry["sha256"]:
+                # ZipFile.open is typed IO[bytes]; its real ZipExtFile supports readinto.
+                if hashlib.file_digest(stream, "sha256").hexdigest() != entry["sha256"]:  # type: ignore[arg-type]
                     raise ValueError("Archive file integrity mismatch")
         elif entry["kind"] == "symlink":
             target = str(_safe_relative(entry["target"]))

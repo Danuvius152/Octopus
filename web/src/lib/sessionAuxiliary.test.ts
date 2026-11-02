@@ -59,8 +59,8 @@ it("keeps real BG completion and a new task while both old lists finish", async 
   const a = deferred(), b = deferred();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
   const first = loadBgTaskSnapshot("s"), second = loadBgTaskSnapshot("s");
-  handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "task", status: "completed", exit_code: 0 });
-  handleWsMessage({ type: "bg_started", session_id: "s", task_id: "new", command: "pwd" });
+  handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "task", status: "completed", exit_code: 0, completed_at: "now" });
+  handleWsMessage({ type: "bg_started", session_id: "s", task_id: "new", command: "pwd", started_at: "now" });
   b.resolve(Response.json([bg])); await second;
   a.resolve(Response.json([bg])); await first;
   expect(useSessionStore.getState().bgTasks.s).toEqual([

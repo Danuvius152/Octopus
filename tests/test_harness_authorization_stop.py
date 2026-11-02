@@ -59,8 +59,15 @@ class _Observer:
     def invalidate(self) -> None:
         self.invalidated.set()
 
-    async def close(self) -> None:
+    def set_event_handler(self, handler) -> None:
+        pass
+
+    async def drain_observations(self) -> None:
+        pass
+
+    async def close(self, *, deadline: float | None = None) -> bool:
         self.closed = True
+        return True
 
 
 def _profile(model: Path, marker: Path, observer: _Observer) -> RuntimeProfile:

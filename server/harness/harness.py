@@ -21,8 +21,10 @@ from typing import Any
 
 from ..config import settings
 from ..diagnostics import diagnostic_text, exception_diagnostic
+from ..models import MessageContent
 from .assembly import assemble_turn
 from .events import HarnessCredential, HarnessOneshotError
+from .fork import ForkArtifact, ForkCheckpoint, ForkHooks
 from .launch_limits import LaunchConfigurationError, validate_launch
 from .login import LoginDriver
 from .model_settings import ModelOption, ModelSettings
@@ -197,17 +199,17 @@ class Harness:
 
     async def prepare_fork(
         self,
-        messages: list,
+        messages: list[MessageContent],
         working_dir: str,
         resume_id_hint: str | None,
         fork_id: str,
-    ):
+    ) -> ForkArtifact:
         """Prepare backend-specific state so a new fork session can spawn at the
         branch point (session-rewind.md §3.1). Returns a `ForkArtifact`.
 
-        NATIVE_TRANSCRIPT (Claude) synthesizes a resumable transcript on disk
-        named by `resume_id_hint`; HISTORY_REPLAY (Codex) returns
-        `needs_replay=True` and does no on-disk work. Raises
+        Both supported rewind adapters return `needs_replay=True` without
+        creating native history. Full-copy preparation has its own collaborator.
+        Raises
         `BackendForkNotSupported` only when the backend has no strategy."""
         from .fork import BackendForkNotSupported
 
@@ -222,11 +224,11 @@ class Harness:
         *,
         parent_working_dir: str,
         parent_resume_id: str | None,
-        parent_credential=None,
+        parent_credential: HarnessCredential | None = None,
         dest_working_dir: str,
         new_resume_id: str,
-        hooks=None,
-    ):
+        hooks: ForkHooks | None = None,
+    ) -> ForkArtifact:
         """Prepare an independent native history without executing a turn.
 
         File-copy adapters use `new_resume_id`; an API adapter returns its
@@ -234,7 +236,7 @@ class Harness:
         and host ownership. Returns a `ForkArtifact`. Falls back to
         `needs_replay=True` when the backend has no native-copy strategy or the
         parent has no transcript yet (e.g. it never ran a turn)."""
-        from .fork import BackendForkNotSupported, ForkArtifact
+        from .fork import BackendForkNotSupported
 
         if not self.profile.can_fork:
             raise BackendForkNotSupported(self.backend)
@@ -256,9 +258,9 @@ class Harness:
         resume_id_hint: str | None,
         fork_id: str,
         *,
-        credential=None,
-        artifact=None,
-        hooks=None,
+        credential: HarnessCredential | None = None,
+        artifact: ForkCheckpoint | None = None,
+        hooks: ForkHooks | None = None,
     ) -> None:
         """Sweep any backend-specific files a fork strategy may have left when a
         saga didn't complete (session-rewind.md §3.1, session-fork.md).
@@ -269,10 +271,8 @@ class Harness:
         profile = self.runtime_profile(RunConfig(transport=artifact["transport"])) if artifact is not None else self.profile
         if profile.fork_cleanup is None:
             return
-        kwargs = {"credential": credential}
-        if artifact is not None:
-            kwargs.update(artifact=artifact, hooks=hooks)
-        await profile.fork_cleanup(working_dir, resume_id_hint, fork_id, **kwargs)
+        await profile.fork_cleanup(working_dir, resume_id_hint, fork_id,
+                                   credential=credential, artifact=artifact, hooks=hooks)
 
     # ------------------------------------------------------------------ one-shot
 

@@ -94,7 +94,7 @@ describe("application list observations", () => {
     expect(rows()).toHaveLength(1); expect(useSessionStore.getState().archivedApplications).toEqual([]);
   });
 
-  it.each(["application_archived", "application_deleted"])("%s cannot be undone by a read and clears selection and failures", async (type) => {
+  it.each(["application_archived", "application_deleted"] as const)("%s cannot be undone by a read and clears selection and failures", async (type) => {
     useSessionStore.setState({ applications: [row()], activeApplicationId: "a", mainView: "application", unseenFailedApplications: ["a"] });
     const old = list.refresh();
     list.receive({ type, application_id: "a" });

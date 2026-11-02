@@ -248,7 +248,10 @@ class ResearchManager:
             name=f"research-{job_id}",
         )
         self._contexts[job_id] = owned
-        self._register_task(job_id, task, on_retired=lambda: self._contexts.pop(job_id, None))
+        def forget_context() -> None:
+            self._contexts.pop(job_id, None)
+
+        self._register_task(job_id, task, on_retired=forget_context)
 
         def finished(done: asyncio.Task) -> None:
             error = None if done.cancelled() else done.exception()
@@ -324,6 +327,7 @@ class ResearchManager:
                     raise asyncio.CancelledError("original research work is closed")
 
                 async def on_progress(p: ResearchProgress) -> None:
+                    assert self.db is not None
                     await self.db.update_research_job(job_id, phase=p.phase)
                     await self._broadcast({
                         "type": "research_progress",
@@ -433,6 +437,7 @@ class ResearchManager:
         assert self.db is not None and self.session_mgr is not None
 
         async def prepare() -> ReturnBody | ReturnSkipped:
+            assert self.db is not None
             current = await self.db.get_research_job(job_id)
             if (self._closing or current is None or current["session_id"] != session_id
                     or current["status"] != "completed" or current["injection_status"] != "pending"):
@@ -480,8 +485,10 @@ class ResearchManager:
         processing = current and current._run.request and current._run.request.request_id == receipt.request_id
         await self._advance_delivery(job_id, session_id, receipt.request_id, "processing" if processing else "queued")
         task = asyncio.create_task(self._observe_delivery(job_id, session_id, receipt), name=f"research-delivery-{job_id}")
-        self._register_task(f"delivery:{job_id}", task,
-                            on_retired=lambda: self._delivery_jobs.pop(receipt.request_id, None))
+        def forget_delivery() -> None:
+            self._delivery_jobs.pop(receipt.request_id, None)
+
+        self._register_task(f"delivery:{job_id}", task, on_retired=forget_delivery)
 
     async def _advance_delivery(self, job_id, session_id, request_id, stage, *, error=None):
         receipt = await self.db.advance_research_delivery(job_id, request_id, stage, error=error)

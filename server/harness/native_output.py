@@ -122,7 +122,7 @@ class NativeOutput:
                 captured = self._waits.pop(observation, {})
                 for observed_child, work in captured.items():
                     state = (item.get("agentsStates") or {}).get(observed_child) or {}
-                    status = {"completed": "completed", "errored": "failed", "interrupted": "interrupted"}.get(state.get("status"))
+                    status = {"completed": "completed", "errored": "failed", "interrupted": "interrupted"}.get(state.get("status", ""))
                     if status is not None and work.update.status == "running":
                         work.update = replace(work.update, status=status)
                         events.append(self._event(work))
@@ -176,18 +176,18 @@ class NativeOutput:
             key = thread, identifier
             work = self._work.get(key)
             if work is None:
-                pending = self._pending.pop(thread, None)
+                prior_pending = self._pending.pop(thread, None)
                 source = self.source(thread, identifier)
                 update = SubagentUpdate(task_id=thread, card_id=json.dumps([self.request_id, self.attempt_id, thread, identifier]),
                     native_thread_id=thread, native_turn_id=identifier, parent_thread_id=self.parents.get(thread),
                     name=self.names.get(thread, ""))
-                if pending is not None:
-                    update = replace(pending.update, native_turn_id=identifier,
-                        status="running" if pending.update.status in {"running", "unknown"} else pending.update.status)
+                if prior_pending is not None:
+                    update = replace(prior_pending.update, native_turn_id=identifier,
+                        status="running" if prior_pending.update.status in {"running", "unknown"} else prior_pending.update.status)
                 work = self._work[key] = _Work(update, source)
                 self._current[thread] = identifier
             if method == "turn/completed":
-                status = {"completed": "completed", "failed": "failed", "interrupted": "interrupted"}.get(turn.get("status"))
+                status = {"completed": "completed", "failed": "failed", "interrupted": "interrupted"}.get(turn.get("status", ""))
                 if status is None:
                     raise ValueError("Unknown native child terminal status")
                 if work.update.status == status:

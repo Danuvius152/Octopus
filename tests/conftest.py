@@ -289,6 +289,8 @@ def _no_cli_left_behind(request):
 
 
 def pytest_addoption(parser):
+    parser.addoption("--update-ws-fixtures", action="store_true", default=False,
+                     help="Explicitly regenerate the shared Python/TypeScript WS producer samples")
     integration = parser.getgroup("live integration")
     integration.addoption(
         "--run-real", action="store_true", default=False,

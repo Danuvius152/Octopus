@@ -125,6 +125,7 @@ class ToolIdentityTracker:
             if observed_call.result_seen:
                 observed_call.observed_children.pop(update.task_id)
                 if not observed_call.observed_children:
+                    assert isinstance(raw_id, str)
                     self._calls.pop(raw_id, None)
             current = self._children.get(update.task_id)
             if observed_identity is None or current is None or current.identity != observed_identity:
@@ -170,7 +171,7 @@ class ToolIdentityTracker:
                 continue
             if event.type == "tool_use":
                 child_id = (event.tool_input or {}).get("native_thread_id")
-                known = self._children.get(child_id)
+                known = self._children.get(child_id) if isinstance(child_id, str) else None
                 if tool == "spawn_agent" and known is not None:
                     if known.identity.attempt_id == attempt_id:
                         aliases[event.tool_use_id or ""] = known.identity

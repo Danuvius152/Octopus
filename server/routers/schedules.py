@@ -325,6 +325,7 @@ async def create_schedule(
     context = derive(edit, req.prompt, selected=req.wiki_mode).execution
 
     agent_id = req.agent_id
+    assert session_manager.db is not None
     if await session_manager.db.get_agent(agent_id, user_id) is None:
         raise HTTPException(status_code=404, detail="Agent not found")
 

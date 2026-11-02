@@ -123,7 +123,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
             elif msg_type == "resume_dispatch":
                 session_id = data.get("session_id")
                 session = session_manager.get_session(session_id) if session_id else None
-                if session is not None and session.user_id == user_id:
+                if session is not None and session.user_id == user_id and isinstance(session_id, str):
                     try:
                         await session_manager.resume_dispatch(session_id)
                     except QuotaExceeded as exc:

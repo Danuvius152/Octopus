@@ -19,7 +19,7 @@ async def resolve_schedule_target(
     db: Database, agent_id: str | None, origin_session_id: str | None,
     *, allow_missing_origin: bool = False,
 ) -> dict:
-    agent = await db.get_agent(agent_id)
+    agent = await db.get_agent(agent_id) if agent_id is not None else None
     if agent is None:
         raise ScheduleTargetError("agent_not_found", "Agent not found", 404)
     if agent["archived"]:

@@ -134,7 +134,7 @@ class DatabaseBase:
         self._write_owner: asyncio.Task[Any] | None = None
         # Work that has to unwind before the connection goes away; see
         # `add_close_hook`.
-        self._close_hooks: list[Callable[[], Awaitable[None]]] = []
+        self._close_hooks: list[Callable[[], Awaitable[object]]] = []
         self._session_delete_hooks: list[Callable[[str], None]] = []
 
     def drain_blockers(self) -> tuple[str, ...]:
@@ -282,7 +282,7 @@ class DatabaseBase:
             raise asyncio.CancelledError("Database is closed")
         assert self._conn is not None, "Database not initialized"
 
-    def add_close_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
+    def add_close_hook(self, hook: Callable[[], Awaitable[object]]) -> None:
         """Register work to unwind *before* this connection goes away.
 
         The database is the resource; whoever holds long-running work against

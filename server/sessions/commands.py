@@ -12,6 +12,7 @@ from .owner_questions import AnswerQuestion
 
 if TYPE_CHECKING:
     from . import SessionManager
+    from .base import Session
 
 
 @dataclass(frozen=True)
@@ -54,15 +55,16 @@ def current_interrupt(manager: SessionManager, session: Any, data: dict[str, Any
             and (request_id is not None or data.get("revision") == snapshot["revision"]))
 
 
-async def _process_owned_command(manager: SessionManager, session: Any, data: dict[str, Any], user_id: str | None,
+async def _process_owned_command(manager: SessionManager, session: Session, data: dict[str, Any], user_id: str | None,
                                  source: AnswerSource = UNKNOWN_SOURCE) -> dict[str, Any]:
     command_id, sid, operation = data.get("client_command_id"), data.get("session_id"), data.get("type")
     response = {"type": "command_receipt", "client_command_id": command_id, "session_id": sid, "operation": operation, "accepted": False}
     if not isinstance(command_id, str) or not command_id or len(command_id) > 128 or not isinstance(sid, str):
         return {**response, "code": "invalid_command", "message": "Invalid command identity"}
-    session = manager.get_session(sid)
-    if session is None or session.user_id != user_id:
+    current = manager.get_session(sid)
+    if current is None or current.user_id != user_id:
         return {**response, "code": "not_found", "message": "Session not found"}
+    session = current
     digest = command_digest(data)
     previous = session._command_receipts.get(command_id)
     if previous:
@@ -82,7 +84,8 @@ async def _process_owned_command(manager: SessionManager, session: Any, data: di
             await manager.interrupt(sid)
             result = {**response, "accepted": True}
     else:
-        pending = session._questions.get(data.get("question_id")) if isinstance(data.get("question_id"), str) else None
+        question_id = data.get("question_id")
+        pending = session._questions.get(question_id) if isinstance(question_id, str) else None
         if pending is not None and pending.state != "pending":
             pending = None
         answers = data.get("answers")

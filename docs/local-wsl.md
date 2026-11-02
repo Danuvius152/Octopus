@@ -101,8 +101,9 @@ Ubuntu 的标准虚拟环境需要 `python3-venv` 软件包，本机已经安装
 
 ```bash
 cd ~/Octopus
-python3 -m venv .venv
-.venv/bin/pip install -c constraints-wiki.txt -e '.[test]'
+python3.14 -m venv .venv
+PIP_CONSTRAINT="$PWD/constraints-python.txt" .venv/bin/pip install \
+  -c constraints-python.txt -c constraints-wiki.txt -e '.[test,dev]'
 
 cd web
 bun install --frozen-lockfile
@@ -111,14 +112,36 @@ bun run build
 
 Python 依赖及兼容边界统一在 `pyproject.toml` 声明，当前 FastMCP 接口使用
 `mcp>=1.30,<2`。[constraints-wiki.txt](../constraints-wiki.txt) 固定 Wiki 解析链：
-markdown-it-py 4.2.0、mdurl 0.1.2、PyYAML 6.0.3、jieba 0.42.1；它只拥有解析
-基线，其他依赖仍遵循项目兼容范围。本机这组基线使用 Python 3.14.4、SQLite
-3.46.1、Codex CLI 0.166.0。`pip --dry-run --no-index -r constraints-wiki.txt` 与
-`pip check` 已核对现有环境；这不表示执行过一次全新联网重装。改变解析依赖须
-重新核验原文/换行/坐标、检索等价和受影响基线。接口迁移或更新依赖时，
-在独立虚拟环境验证安装、`pip check`、服务导入、MCP 命名空间和账户隔离；
-不要在运行服务共享的虚拟环境中试装。账户隔离结构检查同时支持直接路由和
-新版 FastAPI 的 included-router context，检查嵌套前缀和继承的实际权限依赖。
+markdown-it-py 4.2.0、mdurl 0.1.2、PyYAML 6.0.3、jieba 0.42.1；它仍是解析输入。
+[constraints-python.txt](../constraints-python.txt) 是从干净安装生成的完整声明依赖
+闭包，含运行、test/dev 及构建工具版本。本轮在 CPython 3.14.4 / Linux x86_64
+完成全新验证安装和 runtime-only 安装，分别核对 `pip check`、服务导入及实际闭包；
+验证环境另通过 mypy 和账户/路由/WS 定向检查。运行环境不需要 pytest、mypy、ruff
+或 `packaging`。这是该 Python/平台下的解析版本组合，不承诺跨平台相同 wheel 或
+位级相同构建；其他组合须独立生成并验证。SQLite 和 Codex binary 仍按各自合同核对。
+
+上面的验证安装用于新环境；运行安装把 `.[test,dev]` 换为 `.`，仍使用同一约束。
+`PIP_CONSTRAINT` 使用绝对路径，使 pip 的隔离构建也消费该快照。不要在运行服务
+共享的虚拟环境中试装；需先在独立环境重建，当前共享环境有差异时拒绝候选准备。
+`scripts/python_environment.py check` 是只读核验，检查项目声明及所选 extra 的递归
+依赖、marker、Python 要求和精确版本；无关宿主包只记入 `unselected_packages` 诊断。
+
+更新依赖时，在独立全新 venv 中先按 `pyproject.toml` 和 Wiki 输入解析安装；安装
+`.[test,dev]`，并安装约束生成所需的构建后端 `setuptools` 和 `pip`。用该验证环境
+解释器执行：
+
+```bash
+python scripts/python_environment.py lock --project "$PWD" --python /path/to/verify/bin/python \
+  --extra test --extra dev --build
+```
+
+然后用新约束分别重建第二个验证环境和 runtime-only 环境，执行 `pip check`、
+服务导入及适用门禁；从验证环境运行 `check --extra test --extra dev --build`
+检查验证安装，运行 `check --python /path/to/runtime/bin/python` 检查运行安装。
+目标解释器只做 stdlib metadata 查询；要求解析工具属于调用者验证环境。保留完整
+解析比较和候选实际消费证据。改变 Wiki 解析依赖还须重新核验原文/换行/坐标、检索
+等价和受影响基线。接口迁移同时核对 MCP 命名空间和账户隔离；账户结构检查支持
+直接路由及 FastAPI included-router context 的嵌套前缀与继承权限依赖。
 
 本机使用 Windows 的 `http://127.0.0.1:7890` HTTP 代理。HTTP/HTTPS 的
 大写和小写代理变量均已持久写入 `~/.bashrc`，新终端不依赖上一终端的环境。
@@ -528,8 +551,13 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
 
 1. 为已验证提交创建 `releases/main-<commit>` 的独立工作树，连接本机配置和
    共享依赖，先在候选快照执行 `cd web && bun run build`，再运行
-   `.venv/bin/python scripts/validate-release.py <候选快照>` 核验入口及其引用的
-   JS / CSS。候选缺少资源时不能切换；保留当前快照及其兼容性诊断依据。
+   `/path/to/verify/bin/python scripts/validate-release.py <候选快照> --python /home/jack/Octopus/.venv/bin/python`
+   核验入口引用的 JS / CSS 与实际共享 ExecStart 解释器的运行依赖闭包。不能猜用
+   候选目录里的 `.venv`；以当轮 unit 的实际解释器为准。prepare 由验证环境运行，
+   将该验证解释器写入准备回执；publisher 在切换前、上线后及前向恢复共用同一
+   验证入口，以 `--python` 指定服务目标。准备保存实际 Python 回执及摘要，发布
+   比较资产与必要 Python 事实，无关包诊断不参与门禁。漂移时保留当前服务，不在
+   准备阶段给共享环境安装依赖。
 2. 用不依赖当前模型回合继续存活的独立发布进程等待自然排空，包括主控会话、
    队列、CLI 和待交付的后台/委托回报。已有发布进程运行时只观察，不叠加切换
    或重启。切换前再确认目标和准入条件仍有效。
@@ -544,7 +572,7 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
    `/ready` 为 ready。候选中已构建并验证的前端产物随同一次切换生效。
 4. 验证存活与就绪接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
    本次提交；在服务快照运行
-   `.venv/bin/python scripts/validate-release.py <服务快照> --base-url http://127.0.0.1:8000`
+   `/path/to/verify/bin/python scripts/validate-release.py <服务快照> --python /home/jack/Octopus/.venv/bin/python --base-url http://127.0.0.1:8000`
    比对实际 HTML / JS / CSS 的 SHA-256。发布进程还须使用本次捕获的受管
    Settings/provider 环境清理账户模式下未使用的旧目录空壳，并运行
    `scripts/check-storage-layout.py` 确认不再出现；独立维护时用 `--prune`

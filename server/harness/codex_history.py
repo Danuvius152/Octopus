@@ -27,7 +27,7 @@ from .codex_items import NATIVE_LINE_BYTES, diagnostic_frame
 from .codex_rpc import NativeProtocolError, NativeRpcError, RpcConnection
 from .driver import RunDriver
 from .events import HarnessCredential, HarnessEvent
-from .fork import ForkArtifact, ForkHooks
+from .fork import ForkArtifact, ForkCheckpoint, ForkHooks
 from .profile import ParseOutput, RuntimeProfile, TurnContext
 from .registry import get_harness
 from .run import HarnessRun, RunConfig
@@ -96,7 +96,7 @@ class _HistoryDriver(RunDriver):
 
 async def _operate(working_dir: str, credential: HarnessCredential | None, hooks: ForkHooks,
                    operation: Callable[[_HistoryDriver], Awaitable[dict[str, Any]]],
-                   artifact: dict[str, Any]) -> dict[str, Any]:
+                   artifact: ForkCheckpoint) -> dict[str, Any]:
     selected = profile(get_harness("codex").profile)
     driver = _HistoryDriver(selected, operation)
     run = HarnessRun(replace(selected, new_driver=lambda _: driver), RunConfig(
@@ -136,12 +136,13 @@ async def fork_copy(*, parent_working_dir: str, parent_resume_id: str | None, pa
     if hooks is None:
         raise ValueError("Native fork requires its original saga and resource owner")
     home = str(_codex_sessions_dir(parent_credential).parent.resolve())
-    state: dict[str, Any] = {"transport": "app-server", "phase": "unknown", "cleanup_allowed": False, "home": home,
+    state: ForkCheckpoint = {"transport": "app-server", "phase": "unknown", "cleanup_allowed": False, "home": home,
                              "source_thread_id": parent_resume_id}
 
     async def create(driver: _HistoryDriver) -> dict[str, Any]:
         async def before_write(rpc_id: str) -> None:
-            state.update(rpc_id=rpc_id, connection_generation=driver.connection_generation)
+            state["rpc_id"] = rpc_id
+            state["connection_generation"] = driver.connection_generation
             await hooks.checkpoint(state)
 
         result = await driver.request("thread/fork", {"threadId": parent_resume_id,
@@ -153,7 +154,9 @@ async def fork_copy(*, parent_working_dir: str, parent_resume_id: str | None, pa
             raise NativeProtocolError("Native fork returned no independent history identity")
         # Save the returned identity before subsequent validation or shutdown.
         # A failure after creation must never send cleanup to the old hint.
-        state.update(phase="created", thread_id=identity, path=thread.get("path"))
+        state["phase"] = "created"
+        state["thread_id"] = identity
+        state["path"] = thread.get("path")
         await hooks.checkpoint(state)
         path = thread.get("path")
         if (not isinstance(path, str) or not Path(path).resolve().is_relative_to(home)
@@ -166,7 +169,7 @@ async def fork_copy(*, parent_working_dir: str, parent_resume_id: str | None, pa
 
 
 async def fork_cleanup(working_dir: str, resume_id_hint: str | None, fork_id: str, *, credential: HarnessCredential | None = None,
-                       artifact: dict[str, Any] | None = None, hooks: ForkHooks | None = None) -> None:
+                       artifact: ForkCheckpoint | None = None, hooks: ForkHooks | None = None) -> None:
     if artifact is None:
         # Existing format-6 forks predate the native saga checkpoint. Only
         # retire their original, saved copy hint; no new fork uses file copy.

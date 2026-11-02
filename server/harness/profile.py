@@ -16,11 +16,12 @@ servers, composed system prompt) into a `TurnContext`; the profile's
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .events import HarnessCredential, HarnessEvent
+from .fork import ForkCleanup, ForkCopy, ForkPrepare
 from .login import LoginDriver
 from .model_settings import ModelSettings
 
@@ -147,7 +148,14 @@ class ActivityObserver(Protocol):
     def consume_stderr(self, line: str) -> bool: ...
     async def start(self) -> None: ...
     def invalidate(self) -> None: ...
-    async def close(self) -> None: ...
+    def set_event_handler(self, handler: Callable[[list[HarnessEvent]], Awaitable[None] | None]) -> None: ...
+    async def drain_observations(self) -> None: ...
+    async def close(self, *, deadline: float | None = None) -> bool: ...
+
+
+class ActivityObserverFactory(Protocol):
+    def __call__(self, env: Mapping[str, str], notify: Callable[[float], None], *,
+                 resume_id: str | None = None) -> ActivityObserver: ...
 
 
 class EventParser(ABC):
@@ -284,7 +292,7 @@ class RuntimeProfile:
     # call or auth refresh, and no credentials/config contents in the result.
     model_settings: Callable[[HarnessCredential | None], ModelSettings] | None = None
     # Collaborators (optional features):
-    activity_observer: Callable[..., ActivityObserver] | None = None
+    activity_observer: ActivityObserverFactory | None = None
     # Deliver current controller instructions before resuming a runtime whose
     # native history otherwise retains its initial developer message.
     prepare_resume: Callable[[TurnContext, list[str], dict[str, Any]], Coroutine[Any, Any, None]] | None = None
@@ -294,9 +302,9 @@ class RuntimeProfile:
     # synthesizes backend-specific resume state and returns a `ForkArtifact`;
     # `fork_cleanup` sweeps any partial artifacts left by an incomplete saga.
     # Both async. None on a backend with no fork strategy (can_fork stays
-    # False). Typed as Any to avoid importing the fork DTOs into this module.
-    fork_prepare: Callable[..., Any] | None = None
-    fork_cleanup: Callable[..., Any] | None = None
+    # False).
+    fork_prepare: ForkPrepare | None = None
+    fork_cleanup: ForkCleanup | None = None
     # Full-copy fork (session-fork.md): prepare independent native history by
     # file copy or the backend's API, without running a model turn. The actual
     # returned id, not the caller's hint, is authoritative. The duplicate continues
@@ -304,5 +312,5 @@ class RuntimeProfile:
     # instead of replaying the whole history into the first prompt. Returns a
     # `ForkArtifact`; falls back to `needs_replay=True` when the parent has no
     # native transcript yet. None on a backend with no native-copy strategy
-    # (callers then fall back to replay). Async; Any to avoid importing DTOs.
-    fork_copy: Callable[..., Any] | None = None
+    # (callers then fall back to replay).
+    fork_copy: ForkCopy | None = None

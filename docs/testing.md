@@ -117,12 +117,30 @@ complete the full checks at the commit boundary.
 ### Full checks before code commits
 
 At the code commit boundary, complete the check set in `./scripts/check.sh`:
-the full hermetic backend suite, backend/frontend lint and types, frontend unit
+the Python dependency-pins check, full hermetic backend suite,
+backend/frontend lint and types, frontend unit
 tests, generated contracts and the docs index check. Use the script for a
 combined run, or use the pre-commit hook for its gates and run the remaining
 checks separately. Give each check one executor. The backend
 selection includes Wiki correctness and excludes live integration and both
 optional tiers; see Test Coverage for individual commands.
+
+The pins gate checks the declared runtime + `test` + `dev` dependency closure
+against `constraints-python.txt`, including the recorded Python/platform.
+Install verification tools with `.[test,dev]`; a runtime-only installation uses
+`.` and need not contain Ruff, mypy, pytest or the verifier's `packaging` parser.
+Run the verifier from the verification environment and pass the actual service
+interpreter with `--python`. Rebuild and constraint-update commands belong to
+[the local environment guide](local-wsl.md#环境重建).
+
+Mypy enables `arg-type`, `union-attr` and `misc`: argument compatibility,
+attribute access across union members, and the remaining miscellaneous checks.
+There is no global suppression of those codes. The two local exceptions explain
+the HTMLParser subclass's Final override and ZipExtFile's incomplete IO stub.
+Optional database bindings retain their lifecycle-specific skip, domain error
+or initialization invariant; cold recovery and shutdown are not all input-ready
+operations. This gate retains the configured unchecked untyped bodies and
+missing-import policy; success does not claim whole-repository strict typing.
 
 The full backend gate uses four pytest-xdist workers grouped by file, with worker
 restart disabled. Focused development checks and live-provider checks stay serial;

@@ -412,7 +412,7 @@ class TurnsMixin(SessionManagerBase):
             prompt, list(attachment_ids or []), wiki_mode=wiki_mode, source=source,
             delivery_id=delivery_id, work_id=work_id, question_session_id=question_session_id,
             question_id=question_id, trusted_request=trusted_request, knowledge_context=knowledge_context,
-            **({"request_id": request_id} if request_id else {}),
+            request_id=request_id or uuid.uuid4().hex,
         )
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
         return await owner.call_runtime(Submit(queued, steerable, client_request_id, tuple(files), recovery_of_client_id, schedule))
@@ -519,7 +519,8 @@ class TurnsMixin(SessionManagerBase):
         existing = await self.source_receipt("schedule", delivery_id)
         if existing is not None:
             return existing
-        origin = self.sessions.get(schedule.get("origin_session_id"))
+        origin_id = schedule.get("origin_session_id")
+        origin = self.sessions.get(origin_id) if isinstance(origin_id, str) else None
         if origin is not None:
             receipt = await self.start_message(origin.id, prompt, source="schedule", delivery_id=delivery_id,
                                                knowledge_context=context, schedule=schedule)
@@ -813,7 +814,7 @@ class TurnsMixin(SessionManagerBase):
             # The verified native adapter emits metadata only. Keep these
             # observations out of transcripts, activity signals and WS frames.
             if session.backend == "codex" and session._run.backend is attempt.backend:
-                detail = dict(event.raw)
+                detail = dict(event.raw or {})
                 kind = detail.pop("kind", None)
                 completed = detail.pop("completed_at", None)
                 if kind in {"codex_response", "codex_turn_latency"} and isinstance(completed, (int, float)):

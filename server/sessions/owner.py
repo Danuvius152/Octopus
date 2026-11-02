@@ -369,13 +369,13 @@ class SessionOwner:
             self._idle.set()
             self._commands_drained.set()
             self._control_space.set()
-            error = SessionOwnerUnavailable("Session owner ended before confirming this command")
-            self.runtime.end_reports(error)
+            unavailable = SessionOwnerUnavailable("Session owner ended before confirming this command")
+            self.runtime.end_reports(unavailable)
             remaining = (([self._current] if self._current is not None else [])
                          + list(self._controls) + list(self._commands))
             for command in remaining:
                 if not command.reply.done():
-                    command.reply.set_exception(error)
+                    command.reply.set_exception(unavailable)
             self._commands.clear()
             self._controls.clear()
             self._command_bytes = 0

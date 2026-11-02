@@ -230,7 +230,7 @@ async def lifespan(app: FastAPI):
     finally:
         service_health.begin_shutdown()
         cancelled_mcp_startup = mcp_owner is not None and not ready.done()
-        if cancelled_mcp_startup:
+        if cancelled_mcp_startup and mcp_owner is not None:
             mcp_owner.cancel("service-startup-aborted")
         try:
             await complete_cleanup(_shutdown_service(db, started, schedule_runner, metrics, sampler_task, tunnel))

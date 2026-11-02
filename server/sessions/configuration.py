@@ -100,6 +100,7 @@ class ConfigurationMixin(SessionManagerBase):
         """Propagate only a committed deletion; captured runs remain revocable."""
         assert self.db is not None
         async def remove() -> dict[str, Any] | None:
+            assert self.db is not None
             async with self.configuration_lock:
                 row = await self.db.get_credential(credential_id, user_id)
                 if row is None or not await self.db.delete_credential(credential_id):

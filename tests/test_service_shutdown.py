@@ -431,6 +431,12 @@ async def test_lifespan_joins_retirement_already_started_by_held_reaper(
     entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class CapturedObserver:
+        def set_event_handler(self, handler):
+            pass
+
+        async def drain_observations(self):
+            pass
+
         def observe_stdout(self, obj):
             pass
 
@@ -443,10 +449,11 @@ async def test_lifespan_joins_retirement_already_started_by_held_reaper(
         def invalidate(self):
             pass
 
-        async def close(self):
+        async def close(self, *, deadline=None):
             entered.set()
             await release.wait()
             finished.set()
+            return True
 
     starts = []
     synthetic_cli(monkeypatch, starts, (

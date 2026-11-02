@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Validate a candidate's frontend before switching, and its served assets afterwards."""
+"""Validate candidate assets and its actual Python runtime before switching."""
 
 import argparse
 import hashlib
 import json
+import subprocess
+import sys
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
@@ -63,8 +65,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
     parser.add_argument("--base-url")
+    parser.add_argument("--python", default=sys.executable, help="Actual candidate service interpreter (may be shared)")
     args = parser.parse_args()
     manifest = validate_dist(args.root)
+    manifest["python_environment"] = json.loads(subprocess.check_output([
+        sys.executable, str(Path(__file__).with_name("python_environment.py")), "check",
+        "--project", str(args.root), "--python", args.python,
+    ], text=True))
     if args.base_url:
         validate_served(manifest, args.base_url)
     print(json.dumps(manifest, sort_keys=True))

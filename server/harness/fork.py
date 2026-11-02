@@ -1,18 +1,10 @@
-"""Fork contract DTOs for the harness layer (session-rewind.md §3).
+"""History collaborators for rewind replay and independent full-copy forks.
 
-A fork makes a parent session re-spawnable from a chosen branch point. The
-*one* backend-specific concern is "synthesize a resumable transcript in this
-backend's native format". Each profile picks a strategy:
-
-  • NATIVE_TRANSCRIPT — synthesize a resumable transcript on disk at the
-    backend's location using the caller-minted ``resume_id_hint`` as the
-    artifact id; spawn resumes natively. (Claude.)
-  • HISTORY_REPLAY — no on-disk work; return ``needs_replay=True`` so the
-    first fork turn's user prompt is wrapped with the truncated history.
-    (Codex.)
-
-The harness owns both; callers above it (SessionManager, routers, frontend)
-never branch on backend.
+Both supported rewind adapters return replay of the retained product messages.
+Full copy uses Claude's native transcript file or Codex's non-executing history
+API. ForkArtifact carries the actual continuation identity; ForkCheckpoint
+retains creation evidence even before path validation or cleanup permission.
+The original saga owns that evidence and its resource/compensation ordering.
 """
 
 from __future__ import annotations
@@ -20,9 +12,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
 
 if TYPE_CHECKING:
+    from ..models import MessageContent
+    from .events import HarnessCredential
     from .run import HarnessRun
 
 # Strategy tokens — used only inside the harness layer for clarity.
@@ -47,10 +41,68 @@ class ForkArtifact:
 class ForkHooks:
     """The existing saga commits identity and owns the short native host."""
 
-    checkpoint: Callable[[dict[str, Any]], Awaitable[None]]
+    checkpoint: Callable[[ForkCheckpoint], Awaitable[None]]
     manage: Callable[[HarnessRun], AbstractAsyncContextManager[None]]
     session_id: str
     user_id: str | None
+
+
+class ForkCheckpoint(TypedDict):
+    """Saved creation evidence, not proof that compensation is permitted.
+
+    A returned path is deliberately untrusted until the adapter verifies it;
+    the original identity must be saved even when that verification fails.
+    """
+
+    transport: Literal["app-server"]
+    phase: Literal["unknown", "created"]
+    cleanup_allowed: bool
+    home: str
+    source_thread_id: str
+    rpc_id: NotRequired[str]
+    connection_generation: NotRequired[str]
+    thread_id: NotRequired[str]
+    path: NotRequired[object]
+
+
+def read_fork_checkpoint(value: object) -> ForkCheckpoint:
+    """Read saved evidence without treating a malformed checkpoint as legacy."""
+    if not isinstance(value, dict):
+        raise ValueError("Malformed native fork checkpoint; retain recovery material")
+    transport, phase = value.get("transport"), value.get("phase")
+    allowed, home, source = value.get("cleanup_allowed"), value.get("home"), value.get("source_thread_id")
+    if (transport != "app-server" or phase not in ("unknown", "created")
+            or not isinstance(allowed, bool) or not isinstance(home, str) or not isinstance(source, str)):
+        raise ValueError("Malformed native fork checkpoint; retain recovery material")
+    result: ForkCheckpoint = {"transport": "app-server", "phase": "created" if phase == "created" else "unknown",
+                              "cleanup_allowed": allowed, "home": home, "source_thread_id": source}
+    for key in ("rpc_id", "connection_generation", "thread_id"):
+        if key in value and not isinstance(value[key], str):
+            raise ValueError("Malformed native fork identity; retain recovery material")
+    if "rpc_id" in value:
+        result["rpc_id"] = value["rpc_id"]
+    if "connection_generation" in value:
+        result["connection_generation"] = value["connection_generation"]
+    if "thread_id" in value:
+        result["thread_id"] = value["thread_id"]
+    if "path" in value:
+        result["path"] = value["path"]
+    return result
+
+
+ForkPrepare = Callable[[list["MessageContent"], str, str | None, str], Awaitable[ForkArtifact]]
+
+
+class ForkCopy(Protocol):
+    def __call__(self, *, parent_working_dir: str, parent_resume_id: str | None,
+                 parent_credential: HarnessCredential | None = None, dest_working_dir: str,
+                 new_resume_id: str, hooks: ForkHooks | None = None) -> Awaitable[ForkArtifact]: ...
+
+
+class ForkCleanup(Protocol):
+    def __call__(self, working_dir: str, resume_id_hint: str | None, fork_id: str, *,
+                 credential: HarnessCredential | None = None, artifact: ForkCheckpoint | None = None,
+                 hooks: ForkHooks | None = None) -> Awaitable[None]: ...
 
 
 class BackendForkNotSupported(Exception):

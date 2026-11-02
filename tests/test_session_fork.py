@@ -347,7 +347,7 @@ async def test_prepare_fork_failure_compensates(manager, monkeypatch):
     async def boom(*a, **k):
         raise RuntimeError("synthesis failed")
 
-    async def fake_cleanup(working_dir, resume_id_hint, fork_id):
+    async def fake_cleanup(working_dir, resume_id_hint, fork_id, *, credential=None, artifact=None, hooks=None):
         cleaned["called"] = (working_dir, resume_id_hint, fork_id)
 
     monkeypatch.setattr(harness, "prepare_fork", boom)
@@ -404,7 +404,7 @@ async def test_recover_purges_initializing(manager, monkeypatch):
     harness = get_harness("claude-code")
     seen = {}
 
-    async def fake_cleanup(working_dir, resume_id_hint, fork_id, *, credential=None):
+    async def fake_cleanup(working_dir, resume_id_hint, fork_id, *, credential=None, artifact=None, hooks=None):
         seen["args"] = (working_dir, resume_id_hint, fork_id)
 
     monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", fake_cleanup)

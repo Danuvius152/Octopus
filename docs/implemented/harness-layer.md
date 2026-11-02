@@ -177,6 +177,18 @@ Optional observation drain and close share one finite deadline, and their errors
 cannot replace process-exit proof with a retirement failure. See the
 [Monitor contract](codex-performance-monitor.md) for source and coverage limits.
 
+The optional `ActivityObserverFactory` accepts captured environment, activity
+notification and optional resume identity, and returns the existing complete
+`ActivityObserver` protocol. HarnessRun owns creation, handler attachment, start,
+generation invalidation and retirement; consumers call declared methods rather
+than discovering extensions with `getattr`. `close(*, deadline=None) -> bool`
+reports whether observation completed within the shared deadline. A false result
+keeps metrics incomplete; it is not evidence of process retirement. App Server's
+native metrics can confirm a thread before a turn exists and remain separate
+from exec's turn-based initialization. Startup failure/cancellation, old
+generations, observations after close and native lazy-turn regressions retain
+these lifecycle boundaries.
+
 Drivers normalize structured provider failures as `HarnessEvent.error_details`.
 The existing recovery-message path retains that payload and original runtime
 source, including after business status selection. A late failure therefore
@@ -241,6 +253,11 @@ codec supports handoff/pull; lack of a Codex codec produces an explicit unsuppor
 result. Both backends support rewind replay and full native-copy fork through
 their respective profile functions; see [rewind](session-rewind.md) and
 [full copy](session-fork.md). Fork support does not imply a public export codec.
+`ForkPrepare`, `ForkCopy` and `ForkCleanup` express the exact profile signatures,
+using the existing `ForkArtifact`, `ForkHooks`, message and credential types.
+Adapters reject unsupported native artifacts explicitly. The original session
+saga still owns reservation, saved identity and compensation ordering; moving it
+into another manager would not reduce a caller's responsibility.
 
 ## Source and verification
 

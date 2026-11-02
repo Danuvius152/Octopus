@@ -34,6 +34,11 @@ throwaway copy of the project without disturbing the original.
     initializing forks without a `native_fork` key retain their original file
     cleanup strategy. A present but malformed native checkpoint preserves the
     recovery row and files; it cannot select legacy deletion by omission.
+    `ForkCheckpoint` describes saved creation evidence, not a validated artifact
+    or cleanup permission. Its returned `path` remains untrusted until the
+    adapter checks path/cwd; the actual returned identity is saved first so that
+    a later validation failure cannot lose it. Claude's typed cleanup adapter
+    explicitly rejects a native checkpoint rather than silently ignoring it.
   - **Fallback**: if the parent has no native transcript yet (never ran a turn),
     `prepare_fork_copy` returns `needs_replay=True` and we use the old replay
     path — history is tiny/empty then, so no transcript-dump problem.
@@ -92,6 +97,8 @@ throwaway copy of the project without disturbing the original.
      starting. Unexpected turn/item/server execution or protocol corruption
      leaves actual identity, row and cwd for inspection, including after restart.
      A missing qualification never falls back to hint-based deletion.
+     The profile's precise prepare/copy/cleanup protocols replace dynamic keyword
+     assembly without moving this saga or changing its retirement sequence.
   6. keep `fork_after_seq` (= replay cutoff for the fallback path + the DB
      message-copy bound); set `fork_metadata.full_copy = True` + status='ready'.
      A native management host must have confirmed retirement first.

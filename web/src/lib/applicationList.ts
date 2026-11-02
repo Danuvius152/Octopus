@@ -3,6 +3,7 @@ import { useSessionStore, type Application } from "../stores/sessionStore";
 import { observeSession } from "./hydrateSession";
 import { pinnedInOrder } from "./sidebarPins";
 import { ListWriteError, unreadList, type ListReadState, type RefreshResult } from "./listState";
+import type { ApplicationEvent } from "./wsEvents";
 
 type View = "live" | "archived";
 export interface ListEventSource { socket: object; accountGeneration: number }
@@ -259,12 +260,12 @@ export class ApplicationList {
     this.change++;
   }
 
-  receive(event: Record<string, unknown>, source?: ListEventSource): void {
+  receive(event: ApplicationEvent, source?: ListEventSource): void {
     if (this.closed || (source && (source.socket !== this.socket || source.accountGeneration !== this.scope().account))) return;
     this.engaged = true;
     const type = event.type;
     if (type === "application_created" || type === "application_updated") {
-      const row = event.application as Application | undefined;
+      const row = event.application;
       if (row?.id) {
         const before = useSessionStore.getState();
         const wasFailed = before.applications.find((item) => item.id === row.id)?.status === "failed";
@@ -281,8 +282,8 @@ export class ApplicationList {
       }
     } else if (type === "application_archived" || type === "application_deleted") {
       const state = useSessionStore.getState();
-      const row = event.application as Application | undefined;
-      const id = event.application_id as string | undefined ?? row?.id;
+      const row = event.type === "application_archived" ? event.application : undefined;
+      const id = event.application_id ?? row?.id;
       if (row && type === "application_archived") this.row({ ...row, archived: true });
       else if (id) this.commit(state.applications.filter((item) => item.id !== id),
         type === "application_deleted" ? state.archivedApplications.filter((item) => item.id !== id) : state.archivedApplications, id);

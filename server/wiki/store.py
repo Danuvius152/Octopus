@@ -775,7 +775,7 @@ class WikiStore:
             projection["doc_role"] = metadata.get("doc_role", "unknown")
         metadata |= projection
         if kind == "original":
-            kind = {"source": "source", "reference": "source", "concept": "concept", "navigation": "topic", "synthesis": "topic"}.get(metadata.get("doc_role"), kind)
+            kind = {"source": "source", "reference": "source", "concept": "concept", "navigation": "topic", "synthesis": "topic"}.get(metadata.get("doc_role", ""), kind)
         uids.observe(db, doc_id, metadata)
         title = metadata.get("title") or parsed.title(path.stem)
         db.execute(

@@ -181,7 +181,7 @@ class HarnessEvent:
     error_code: str | None = None
     cost: float | None = None
     session_id: str | None = None  # backend's resume id (carried on `result`)
-    duration_ms: int | None = None
+    duration_ms: float | None = None
     num_turns: int | None = None
     # Set only on `subagent` events.
     subagent: SubagentUpdate | None = None

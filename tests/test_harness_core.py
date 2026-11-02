@@ -986,6 +986,12 @@ async def test_native_reader_drain_does_not_keep_cli_alive(tmp_path, short_proce
     allow_close = asyncio.Event()
 
     class WaitingObserver:
+        def set_event_handler(self, handler):
+            pass
+
+        async def drain_observations(self):
+            pass
+
         def observe_stdout(self, obj):
             pass
 
@@ -998,9 +1004,10 @@ async def test_native_reader_drain_does_not_keep_cli_alive(tmp_path, short_proce
         def invalidate(self):
             pass
 
-        async def close(self):
+        async def close(self, *, deadline=None):
             close_entered.set()
             await allow_close.wait()
+            return True
 
     profile = replace(_mode_profile("sleep-then", "60"),
                       activity_observer=lambda *args, **kwargs: WaitingObserver())

@@ -3,9 +3,11 @@
 import importlib.util
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -47,3 +49,21 @@ asyncio.run(probe())'''
     observed = json.loads(result.stdout)
     assert Path(observed["module"]).is_relative_to(tmp_path)
     assert observed["assets"] == manifest["assets"]
+
+
+def test_candidate_preparation_rejects_the_actual_interpreters_dependency_drift(tmp_path):
+    dist = tmp_path / "web/dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text('<script src="/main.js"></script>')
+    (dist / "main.js").write_text("window.candidate = true;")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname="octopus"\nrequires-python=">=3.12"\ndependencies=["packaging>=24"]\n')
+    environment = {"implementation_name": sys.implementation.name, "python_full_version": platform.python_version(),
+                   "python_version": ".".join(platform.python_version_tuple()[:2]), "sys_platform": sys.platform,
+                   "platform_machine": platform.machine()}
+    pins = sorted(f"{dist.metadata['Name']}=={dist.version}" for dist in metadata.distributions()
+                  if dist.metadata["Name"].lower() not in {"octopus", "packaging"})
+    (tmp_path / "constraints-python.txt").write_text("# environment: " + json.dumps(environment) + "\n" + "\n".join(pins) + "\npackaging==0\n")
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/validate-release.py"), str(tmp_path)],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode != 0, "assets alone must not approve an incompatible runtime"
+    assert "packaging" in result.stderr

@@ -25,10 +25,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..models import MessageContent
 from .codex_activity import CodexActivityObserver, diagnostic_environment
 from .codex_control import controller_message, turn_message
 from .driver import ArgvDriver
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
+from .fork import ForkArtifact
 from .harness import Harness
 from .login import LoginMethod, OAuthCompletion, OAuthCredentialWriter
 from .model_settings import ModelOption, ModelSettings
@@ -587,6 +589,7 @@ class CodexEventParser(EventParser):
             )
 
         # Which card each child thread belongs to.
+        targets: list[tuple[str | None, str]]
         if spawning:
             for tid in receivers:
                 self._collab_owner[tid] = item_id
@@ -799,28 +802,26 @@ def parse_oneshot_stdout(stdout: str) -> str:
 
 
 async def _fork_prepare_replay(
-    messages: list[Any],
+    messages: list[MessageContent],
     working_dir: str,
     resume_id_hint: str | None,
     fork_id: str,
-) -> Any:
+) -> ForkArtifact:
     """Rewind uses product seq, which can split one native turn at a steer.
     The retained history therefore travels in the first explicit USER input,
     without approximating it as a native turn count. No creation or model
     execution occurs here; the hint is unused."""
-    from .fork import ForkArtifact
-
     return ForkArtifact(resume_id=None, needs_replay=True)
 
 
-def _codex_sessions_dir(credential: Any) -> Path:
+def _codex_sessions_dir(credential: HarnessCredential | None) -> Path:
     """CODEX_HOME/sessions — codex's rollout store (date-partitioned files named
     ``rollout-<ts>-<id>.jsonl``). The id is cwd-independent, so a copy resumes
     from anywhere. Uses the credential's CODEX_HOME, else the host default
     ~/.codex."""
     home = (
         credential.home_dir
-        if credential is not None and getattr(credential, "home_dir", None)
+        if credential is not None and credential.home_dir
         else os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
     )
     return Path(home) / "sessions"
@@ -831,7 +832,7 @@ async def _cleanup_legacy_fork(
     resume_id_hint: str | None,
     fork_id: str,
     *,
-    credential: Any = None,
+    credential: HarnessCredential | None = None,
 ) -> None:
     """Remove a copied rollout left by an incomplete full-copy saga. Rollouts
     live under CODEX_HOME (not the working dir), so this needs the credential to

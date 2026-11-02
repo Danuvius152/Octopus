@@ -6,28 +6,14 @@ import {
   hydrateSession,
   loadResearchSnapshot,
 } from "../lib/hydrateSession";
-import { readRuntimeMetadata } from "../lib/toolIdentity";
-import { readDispatchState } from "../lib/sessionDispatch";
+import { decodeWsEvent, type WsEvent } from "../lib/wsEvents";
 import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList } from "../lib/sessionList";
 import { refreshAgents } from "../lib/refreshAgents";
 import { applications, type ListEventSource } from "../lib/applicationList";
 import { refreshWikiJobs } from "../lib/wikiJobs";
 import type { WikiMessageMode } from "../lib/wikiComposer";
-import {
-  useSessionStore,
-  type Agent,
-  type BgTask,
-  type Delegation,
-  type Message,
-  type PendingQuestion,
-  type ResearchJob,
-  type SessionInfo,
-  type SessionStatus,
-  type SubagentRun,
-} from "../stores/sessionStore";
-
-type BgTaskStatus = BgTask["status"];
+import { useSessionStore } from "../stores/sessionStore";
 
 const WS_PROTOCOL = window.location.protocol === "https:" ? "wss:" : "ws:";
 const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws`;
@@ -60,7 +46,18 @@ export function shouldApplyWsEvent(
 /** Exported for tests: the whole switch is a side-effecting reducer over the
  * store, and the token cases are ones a regression would silently sign
  * everyone out (or fail to). */
-export function handleWsMessage(data: Record<string, unknown>, source?: ListEventSource) {
+export function handleWsMessage(value: unknown, source?: ListEventSource) {
+  const data = readWsEvent(value);
+  if (data) applyWsEvent(data, source);
+}
+
+function readWsEvent(value: unknown): WsEvent | undefined {
+  const decoded = decodeWsEvent(value);
+  if (decoded.kind === "event") return decoded.event;
+  if (decoded.kind === "invalid") console.warn("Ignored invalid WebSocket event", { type: decoded.type });
+}
+
+function applyWsEvent(data: WsEvent, source?: ListEventSource) {
   if (!sessionList.accepts(source)) return;
   const {
     addMessage: addMessageRaw,
@@ -73,11 +70,11 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     clearStreamingText,
     upsertSubagent,
   } = getState();
-  const sessionId = data.session_id as string;
-  const type = data.type as string;
+  const sessionId = data.session_id ?? "";
+  const type = data.type;
   if (type === "session_archived" || type === "session_unarchived") {
-    const id = type === "session_archived" ? data.old_session_id as string : sessionId;
-    const snapshot = readDispatchState(data.dispatch_state);
+    const id = data.type === "session_archived" ? data.old_session_id : sessionId;
+    const snapshot = data.dispatch_state;
     if (snapshot) {
       getState().applyDispatchState(id, snapshot);
       const state = getState();
@@ -94,11 +91,11 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
   const store = getState();
   if (["research_progress", "research_completed", "research_failed", "research_delivery"].includes(type) &&
       sessionId === store.activeSessionId &&
-      !store.research[sessionId]?.some((job) => job.id === data.research_id)) {
+      "research_id" in data && !store.research[sessionId]?.some((job) => job.id === data.research_id)) {
     void loadResearchSnapshot(sessionId).catch(() => {});
   }
 
-  const seq = typeof data.seq === "number" ? (data.seq as number) : null;
+  const seq = data.seq ?? null;
   // The time the server stamped on the row this event is (`_tag_persisted`).
   // Injected once here rather than spelled out in each `addMessage` call below:
   // every event that represents a stored message carries it, and a shape that
@@ -106,13 +103,9 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
   const addMessage: typeof addMessageRaw = (sid, msg) =>
     addMessageRaw(sid, {
       ...msg,
-      runtime_metadata: msg.runtime_metadata ?? readRuntimeMetadata(data.runtime_metadata),
+      runtime_metadata: msg.runtime_metadata ?? data.runtime_metadata,
       seq: msg.seq ?? seq ?? undefined,
-      created_at:
-        msg.created_at ??
-        (typeof data.created_at === "string"
-          ? (data.created_at as string)
-          : undefined),
+      created_at: msg.created_at ?? data.created_at ?? undefined,
     });
   if (seq !== null && sessionId) {
     if (!shouldApplyWsEvent(seq, lastAppliedSeq[sessionId])) {
@@ -121,17 +114,17 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     setLastAppliedSeq(sessionId, seq);
   }
 
-  switch (type) {
+  switch (data.type) {
+    case "submission":
+    case "command_receipt":
+      // Pending command ownership belongs to this hook's captured socket.
+      break;
     case "attempt_started":
-      if (typeof data.request_id === "string" && typeof data.attempt_id === "string") {
-        clearStreamingText(sessionId);
-        getState().setActiveAttempt(sessionId, { request_id: data.request_id, attempt_id: data.attempt_id });
-      }
+      clearStreamingText(sessionId);
+      getState().setActiveAttempt(sessionId, { request_id: data.request_id, attempt_id: data.attempt_id });
       break;
     case "wiki_job_changed":
-      if (typeof data.vault_id !== "string" || typeof data.job_id !== "string" ||
-        !Number.isInteger(data.state_version) || Number(data.state_version) < 1) break;
-      getState().invalidateWikiJob(sessionId, { vault_id: data.vault_id, job_id: data.job_id, state_version: Number(data.state_version) });
+      getState().invalidateWikiJob(sessionId, { vault_id: data.vault_id, job_id: data.job_id, state_version: data.state_version });
       if (sessionId === getState().activeSessionId) void refreshWikiJobs(sessionId).catch(() => {});
       break;
     case "dispatch_state":
@@ -156,7 +149,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     // Partial text, still being written. `addMessage` drops the buffer when
     // the completed block lands, so there's nothing to clear here.
     case "assistant_delta":
-      appendStreamingText(sessionId, data.content as string, readRuntimeMetadata(data.runtime_metadata));
+      appendStreamingText(sessionId, data.content, (data.runtime_metadata ?? undefined));
       break;
 
     // A schedule was created, changed or deleted — by this browser, another
@@ -170,8 +163,8 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       addMessage(sessionId, {
         role: "assistant",
         type: "text",
-        content: data.content as string,
-        tool_input: data.tool_input as Message["tool_input"],
+        content: data.content,
+        tool_input: data.tool_input ?? undefined,
       });
       break;
 
@@ -184,23 +177,23 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
           !["type", "session_id", "seq", "created_at", "runtime_metadata", "summary", "prompt"].includes(key))),
       });
       upsertSubagent(sessionId, {
-        task_id: data.task_id as string,
-        card_id: (data.card_id as string) ?? null,
-        native_thread_id: (data.native_thread_id as string) ?? null,
-        native_turn_id: (data.native_turn_id as string) ?? null,
-        parent_thread_id: (data.parent_thread_id as string) ?? null,
-        runtime_metadata: readRuntimeMetadata(data.runtime_metadata),
-        tool_call_id: (data.tool_call_id as string) ?? null,
-        tool_use_id: (data.tool_use_id as string) ?? null,
-        status: (data.status as SubagentRun["status"]) ?? "running",
-        stop_reason: (data.stop_reason as string) ?? null,
-        name: (data.name as string) ?? "",
-        description: (data.description as string) ?? "",
-        prompt: (data.prompt as string) ?? "",
-        summary: (data.summary as string) ?? "",
-        tokens: (data.tokens as number) ?? null,
-        tool_uses: (data.tool_uses as number) ?? null,
-        duration_ms: (data.duration_ms as number) ?? null,
+        task_id: data.task_id,
+        card_id: (data.card_id) ?? null,
+        native_thread_id: (data.native_thread_id) ?? null,
+        native_turn_id: (data.native_turn_id) ?? null,
+        parent_thread_id: (data.parent_thread_id) ?? null,
+        runtime_metadata: (data.runtime_metadata ?? undefined),
+        tool_call_id: (data.tool_call_id) ?? null,
+        tool_use_id: (data.tool_use_id) ?? null,
+        status: (data.status) ?? "running",
+        stop_reason: (data.stop_reason) ?? null,
+        name: (data.name) ?? "",
+        description: (data.description) ?? "",
+        prompt: (data.prompt) ?? "",
+        summary: (data.summary) ?? "",
+        tokens: (data.tokens) ?? null,
+        tool_uses: (data.tool_uses) ?? null,
+        duration_ms: (data.duration_ms) ?? null,
         // The trail is built in the store from each step as it arrives; the
         // wire carries the step, not the history.
         steps: [],
@@ -208,14 +201,14 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       break;
 
     case "tool_use": {
-      const toolName = data.tool as string;
-      const toolInput = data.input as Record<string, unknown>;
+      const toolName = data.tool;
+      const toolInput = data.input;
       addMessage(sessionId, {
         role: "assistant",
         type: "tool_use",
         tool_name: toolName,
-        tool_input: toolInput,
-        tool_use_id: data.tool_use_id as string,
+        tool_input: toolInput ?? undefined,
+        tool_use_id: data.tool_use_id ?? undefined,
       });
       break;
     }
@@ -224,17 +217,17 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       addMessage(sessionId, {
         role: "tool",
         type: "tool_result",
-        content: data.output as string,
-        tool_input: data.tool_input as Message["tool_input"],
-        tool_use_id: data.tool_use_id as string,
-        is_error: data.is_error as boolean,
+        content: data.output,
+        tool_input: data.tool_input ?? undefined,
+        tool_use_id: data.tool_use_id ?? undefined,
+        is_error: data.is_error,
       });
       break;
 
     case "question_request": {
-      const questionId = data.question_id as string;
+      const questionId = data.question_id;
       if (getState().closedQuestionIds[sessionId]?.[questionId]) break;
-      const questions = (data.questions as PendingQuestion["questions"]) || [];
+      const questions = (data.questions) || [];
       addMessage(sessionId, {
         role: "assistant",
         type: "question_request",
@@ -245,41 +238,41 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       addPendingQuestion(sessionId, {
         question_id: questionId,
         questions,
-        deadline: data.deadline as string | null | undefined,
-        request_id: data.request_id as string | null | undefined,
-        attempt_id: data.attempt_id as string | null | undefined,
+        deadline: data.deadline,
+        request_id: data.request_id,
+        attempt_id: data.attempt_id,
       });
       break;
     }
 
     case "question_answer": {
-      const questionId = data.question_id as string;
+      const questionId = data.question_id;
       addMessage(sessionId, {
         role: "user",
         type: "question_answer",
-        content: data.content as string,
+        content: data.content,
         tool_use_id: questionId,
-        tool_input: data.tool_input as Record<string, unknown> | undefined,
+        tool_input: data.tool_input ?? undefined,
       });
       removePendingQuestion(sessionId, questionId);
       break;
     }
 
     case "question_closed": {
-      const questionId = data.question_id as string;
+      const questionId = data.question_id;
       addMessage(sessionId, {
         role: "system",
         type: "question_closed",
-        content: data.message as string,
+        content: data.message,
         tool_use_id: questionId,
-        tool_input: (data.tool_input as Record<string, unknown> | undefined) ?? { reason: data.reason },
+        tool_input: (data.tool_input) ?? { reason: data.reason },
       });
       removePendingQuestion(sessionId, questionId);
       break;
     }
 
     case "status":
-      sessionList.patch(sessionId, { status: data.status as SessionStatus });
+      sessionList.patch(sessionId, { status: data.status });
       break;
 
     case "recovery":
@@ -296,10 +289,10 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
         role: "system",
         type: "result",
         content: data.content ?? data.message,
-        is_error: data.is_error as boolean | undefined,
-        tool_input: data.tool_input as Message["tool_input"],
-        cost: data.cost as number,
-        session_id: data.claude_session_id as string,
+        is_error: data.is_error,
+        tool_input: data.tool_input ?? undefined,
+        cost: data.cost ?? undefined,
+        session_id: data.claude_session_id ?? undefined,
       });
       if (data.code === "auth_expired") {
         const t = getState().token;
@@ -316,9 +309,9 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       addMessage(sessionId, {
         role: "user",
         type: "text",
-        content: data.content as string,
+        content: data.content,
         steered: true,
-        tool_input: data.tool_input as Message["tool_input"],
+        tool_input: data.tool_input ?? undefined,
         seq: seq ?? undefined,
       });
       break;
@@ -327,9 +320,9 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       addMessage(sessionId, {
         role: "user",
         type: "text",
-        content: data.content as string,
-        attachments: (data.attachments as Message["attachments"]) ?? undefined,
-        tool_input: data.tool_input as Message["tool_input"],
+        content: data.content,
+        attachments: (data.attachments) ?? undefined,
+        tool_input: data.tool_input ?? undefined,
         // Carry the row seq so "Fork from here" can target a just-sent
         // message without waiting for a detail reload (the event always
         // includes it for persisted rows).
@@ -342,7 +335,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       addMessage(sessionId || "__global", {
         role: "system",
         type: "error",
-        content: data.message as string,
+        content: data.message,
       });
       // A mid-turn 401 flagged the bound credential needs_reconnect server-side
       // (harness-credential-reauth.md §6). Refetch credentials so the Harness
@@ -372,14 +365,14 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     // the row comes down whole and the store mirrors it.
     case "agent_created":
     case "agent_updated": {
-      const row = data.agent as Agent | undefined;
+      const row = data.agent;
       if (row) getState().upsertAgent(row);
       break;
     }
 
     case "agent_archived":
     case "agent_deleted": {
-      const id = data.agent_id as string | undefined;
+      const id = data.agent_id;
       if (id) getState().removeAgent(id);
       break;
     }
@@ -387,20 +380,20 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     case "bg_started": {
       const { upsertBgTask } = getState();
       upsertBgTask(sessionId, {
-        id: data.task_id as string,
+        id: data.task_id,
         session_id: sessionId,
-        command: data.command as string,
-        description: (data.description as string) ?? null,
+        command: data.command,
+        description: (data.description) ?? null,
         working_dir: "",
         status: "running",
         exit_code: null,
         stdout: "",
         stderr: "",
         truncated: false,
-        started_at: data.started_at as string,
+        started_at: data.started_at,
         completed_at: null,
-        idle_timeout_seconds: (data.idle_timeout_seconds as number | null) ?? null,
-        timeout_seconds: (data.timeout_seconds as number | null) ?? null,
+        idle_timeout_seconds: (data.idle_timeout_seconds) ?? null,
+        timeout_seconds: (data.timeout_seconds) ?? null,
         stop_reason: null,
       });
       break;
@@ -418,40 +411,40 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       if (current) {
         upsertBgTask(sessionId, {
           ...current,
-          status: data.status as BgTaskStatus,
-          exit_code: (data.exit_code as number | null) ?? null,
+          status: data.status,
+          exit_code: (data.exit_code) ?? null,
           truncated: !!data.truncated,
-          completed_at: data.completed_at as string,
-          idle_timeout_seconds: (data.idle_timeout_seconds as number | null)
+          completed_at: data.completed_at,
+          idle_timeout_seconds: (data.idle_timeout_seconds)
             ?? current.idle_timeout_seconds ?? null,
-          timeout_seconds: (data.timeout_seconds as number | null)
+          timeout_seconds: (data.timeout_seconds)
             ?? current.timeout_seconds ?? null,
-          stop_reason: (data.stop_reason as string | null) ?? null,
+          stop_reason: (data.stop_reason) ?? null,
         });
       }
       break;
     }
 
     case "delegation_delivery": {
-      const incoming = data.delegation as Delegation | undefined;
+      const incoming = data.delegation;
       if (!incoming?.delegation_id || !incoming.work_id || incoming.parent_session_id !== sessionId) break;
       getState().upsertDelegation(sessionId, incoming);
       break;
     }
 
     case "bg_delivery": {
-      getState().updateBgTaskDelivery(sessionId, data.task_id as string, {
-        delivery_disposition: (data.delivery_disposition as BgTask["delivery_disposition"]) ?? null,
-        delivery_error: (data.delivery_error as string | null) ?? null,
+      getState().updateBgTaskDelivery(sessionId, data.task_id, {
+        ...("delivery_disposition" in data ? { delivery_disposition: data.delivery_disposition } : {}),
+        ...("delivery_error" in data ? { delivery_error: data.delivery_error } : {}),
       });
       break;
     }
 
     case "research_started": {
       getState().upsertResearch(sessionId, {
-        id: data.research_id as string,
+        id: data.research_id,
         session_id: sessionId,
-        question: data.question as string,
+        question: data.question,
         status: "running",
         phase: "scope",
       });
@@ -460,49 +453,49 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
 
     case "research_progress": {
       getState().upsertResearch(sessionId, {
-        id: data.research_id as string,
-        phase: (data.phase as string) ?? null,
-        detail: data.detail as string,
-        counts: (data.counts as Record<string, number>) ?? undefined,
+        id: data.research_id,
+        ...("phase" in data ? { phase: data.phase } : {}),
+        ...("detail" in data ? { detail: data.detail } : {}),
+        ...("counts" in data ? { counts: data.counts } : {}),
       });
       break;
     }
 
     case "research_completed": {
       getState().upsertResearch(sessionId, {
-        id: data.research_id as string,
+        id: data.research_id,
         status: "completed",
         phase: "done",
         ...(typeof data.report_path === "string" ? { report_path: data.report_path } : {}),
-        sources: (data.sources as string[]) ?? undefined,
-        verified: (data.verified as number) ?? undefined,
-        unverified: (data.unverified as number) ?? undefined,
-        injection_status: (data.injection_status as ResearchJob["injection_status"]) ?? "pending",
+        ...("sources" in data ? { sources: data.sources } : {}),
+        ...("verified" in data ? { verified: data.verified } : {}),
+        ...("unverified" in data ? { unverified: data.unverified } : {}),
+        injection_status: (data.injection_status) ?? "pending",
       });
       break;
     }
 
     case "research_delivery": {
       getState().upsertResearch(sessionId, {
-        id: data.research_id as string,
-        injection_status: data.injection_status as ResearchJob["injection_status"],
-        error: (data.error as string) ?? null,
-        ...(data.delivery_receipt ? { delivery_receipt: data.delivery_receipt as ResearchJob["delivery_receipt"] } : {}),
+        id: data.research_id,
+        injection_status: data.injection_status,
+        ...("error" in data ? { error: data.error } : {}),
+        ...("delivery_receipt" in data ? { delivery_receipt: data.delivery_receipt } : {}),
       });
       break;
     }
 
     case "research_failed": {
       getState().upsertResearch(sessionId, {
-        id: data.research_id as string,
-        status: (data.status as ResearchJob["status"]) ?? "failed",
-        error: (data.error as string) ?? null,
+        id: data.research_id,
+        status: (data.status) ?? "failed",
+        ...("error" in data ? { error: data.error } : {}),
       });
       break;
     }
 
     case "session_unarchived": {
-      const revived = data.session as SessionInfo | undefined;
+      const revived = data.session;
       if (!revived || revived.id !== sessionId || revived.archived) break;
       sessionList.row(revived);
       break;
@@ -512,15 +505,15 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       // Another client (or this tab's archive POST) hid the old
       // session and replaced it with new_session_id. Update the
       // sessions list + swap active if this tab was on the old one.
-      const oldId = data.old_session_id as string;
+      const oldId = data.old_session_id;
       // null = the session was hidden with no replacement (a scheduler-origin
       // session auto-archiving on idle, or an agent being archived).
-      const newId = data.new_session_id as string | null;
-      const name = data.name as string;
+      const newId = data.new_session_id;
+      const name = data.name ?? "";
       const settings = {
-        model: (data.model as SessionInfo["model"]) ?? null,
-        reasoning_effort: (data.reasoning_effort as SessionInfo["reasoning_effort"]) ?? null,
-        service_tier: (data.service_tier as SessionInfo["service_tier"]) ?? null,
+        model: data.model ?? null,
+        reasoning_effort: data.reasoning_effort ?? null,
+        service_tier: data.service_tier ?? null,
       };
       const store = getState();
       const prev = store.sessions.find((s) => s.id === oldId);
@@ -574,7 +567,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       // tab already added + switched to it via handleDuplicated; dedupe by id
       // so this broadcast is a no-op there and a plain add elsewhere. We don't
       // switch the active session — only the initiator follows the fork.
-      const forkId = data.fork_session_id as string;
+      const forkId = data.fork_session_id;
       const store = getState();
       if (store.sessions.some((s) => s.id === forkId)) break;
       // Fetch the authoritative SessionInfo rather than synthesizing a partial
@@ -588,6 +581,10 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     case "session_deleted":
       sessionList.remove(sessionId);
       break;
+    default: {
+      const unhandled: never = data;
+      return unhandled;
+    }
   }
 }
 
@@ -668,12 +665,14 @@ export function useWebSocket() {
       ws.onmessage = (e) => {
         if (wsRef.current !== ws || getState().accountGeneration !== accountGeneration || getState().token !== token) return;
         try {
-          const data = JSON.parse(e.data);
+          const value: unknown = JSON.parse(e.data);
+          const data = readWsEvent(value);
+          if (!data) return;
           if (data.type === "submission") {
             const pending = submissions.current.get(data.client_request_id);
             if (pending && pending.sessionId === data.session_id) {
               submissions.current.delete(data.client_request_id);
-              pending.finish({ accepted: data.accepted === true, message: data.message,
+              pending.finish({ accepted: data.accepted, message: data.message ?? undefined,
                 ...(data.state === "unknown" ? { state: "unknown" as const } : {}),
                 ...(typeof data.code === "string" ? { code: data.code } : {}),
                 ...(typeof data.request_id === "string" ? { requestId: data.request_id } : {}),
@@ -684,13 +683,13 @@ export function useWebSocket() {
             const pending = controls.current.get(data.client_command_id);
             if (pending && pending.sessionId === data.session_id && pending.operation === data.operation) {
               controls.current.delete(data.client_command_id);
-              pending.finish({ accepted: data.accepted === true, message: data.message, code: data.code });
+              pending.finish({ accepted: data.accepted, message: data.message ?? undefined, code: data.code ?? undefined });
             }
           } else {
-            handleWsMessage(data, { socket: ws, accountGeneration });
+            applyWsEvent(data, { socket: ws, accountGeneration });
           }
-        } catch {
-          // ignore
+        } catch (error) {
+          console.warn("Could not process WebSocket event", error);
         }
       };
     }

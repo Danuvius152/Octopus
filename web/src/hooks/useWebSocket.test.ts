@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
-import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
+import { useSessionStore, type Agent, type Application, type SessionInfo } from "../stores/sessionStore";
 
 it.each(["question_answer", "question_closed"])("retains %s resolution facts from the original notification", (type) => {
   useSessionStore.setState({ messages: {}, pendingQuestions: {}, sessionMembership: {}, sessions: [] });
@@ -14,7 +14,9 @@ it.each(["question_answer", "question_closed"])("retains %s resolution facts fro
 });
 
 it("restores the original session and rejects a delayed archive projection", () => {
-  const original = { id: "woken-original", name: "Original", archived: false } as SessionInfo;
+  const original: SessionInfo = { id: "woken-original", name: "Original", archived: false,
+    working_dir: "/work", status: "idle", created_at: "now", message_count: 0, transcript_integrity: "ok",
+    origin: "user", backend: "codex", can_steer: true, can_fork: true, fork_is_full_copy: false };
   useSessionStore.setState({ sessions: [], archivedSessions: [original], activeSessionId: "another-session", sessionMembership: {} });
   const dispatch = { generation: "wake-service", revision: 12, paused: true, active_request_id: null, items: [] };
   handleWsMessage({ type: "session_unarchived", session_id: original.id, session: original, dispatch_state: dispatch });
@@ -64,11 +66,11 @@ it.each(["native", "without-randomUUID", "without-crypto"])("handles input admis
     const resolved = vi.fn();
     void pending.then(resolved);
     act(() => socket.onmessage?.({ data: JSON.stringify({ type: "submission", client_request_id: input.client_request_id,
-      session_id: "other-session", accepted: true }) }));
+      session_id: "other-session", accepted: true, request_id: "durable-request" }) }));
     await Promise.resolve();
     expect(resolved).not.toHaveBeenCalled();
     act(() => socket.onmessage?.({ data: JSON.stringify({ type: "submission", client_request_id: "other-request",
-      session_id: "own-session", accepted: true }) }));
+      session_id: "own-session", accepted: true, request_id: "durable-request" }) }));
     await Promise.resolve();
     expect(resolved).not.toHaveBeenCalled();
     act(() => socket.onmessage?.({ data: JSON.stringify({ type: "submission", client_request_id: input.client_request_id,
@@ -152,7 +154,7 @@ it("loads the replacement session's actual queue after an archive broadcast", as
     sessions: [{ id: "archived-old", name: "Archived" } as SessionInfo] });
   const dispatch = { generation: "archive-service", revision: 0, paused: false, active_request_id: null, items: [] };
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "archive-replacement", messages: [], dispatch_state: dispatch, active_attempt: null })));
-  handleWsMessage({ type: "session_archived", old_session_id: "archived-old", new_session_id: "archive-replacement" });
+  handleWsMessage({ type: "session_archived", old_session_id: "archived-old", new_session_id: "archive-replacement", name: "Archived" });
   await vi.waitFor(() => expect(useSessionStore.getState().dispatchStates["archive-replacement"]).toEqual(dispatch));
   vi.unstubAllGlobals();
 });
@@ -343,18 +345,21 @@ describe("schedules_changed", () => {
  * build fails where nobody can see it has to earn a place in the sidebar.
  */
 describe("agent and application events", () => {
-  const agentRow = (o: Record<string, unknown> = {}) => ({
+  const agentRow = (o: Partial<Agent> = {}): Agent => ({
     id: "ag2",
     name: "Vera",
     pinned: true,
     pin_order: 2,
+    description: "", system_prompt: "", backend: "codex", mcp_servers: [], tool_allow: "", tool_deny: "",
+    subagents: [], is_system: false, archived: false, created_at: "now", updated_at: "now", active_session_count: 0,
     ...o,
   });
-  const appRow = (o: Record<string, unknown> = {}) => ({
+  const appRow = (o: Partial<Application> = {}): Application => ({
     id: "a1",
     name: "Tracker",
     status: "building",
     pinned: false,
+    description: "", app_dir: "/apps/tracker", entrypoint: "index.html", archived: false, created_at: "now", updated_at: "now",
     ...o,
   });
 

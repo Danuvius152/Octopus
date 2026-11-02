@@ -64,6 +64,15 @@ Unscoped internal access is not permission for account-facing routes to read all
 rows. Shared registries and provider definitions are installation-level by design;
 users' instances and secrets are not.
 
+Session lookup uses the live registry first. Archived ownership and message-window
+fallbacks query the existing `get_session_binding(session_id)` and explicitly
+compare the account; they do not enumerate every stored session. Missing and
+foreign sessions both return 404. Internal calls with `user_id=None` retain their
+existing unscoped meaning. Paging still preserves `before_seq=0`, empty history
+and duplicate-sequence integrity reporting. Query-spy regressions in
+`tests/test_message_window.py` cover the real manager/HTTP paths, including a
+live hit that performs no binding query.
+
 Agent DELETE requires an explicit account scope in `AgentManager.delete_agent`.
 Absent scope, a foreign target and a missing target all fail before row deletion,
 memory cleanup or notification. The manager returns the authorized original row

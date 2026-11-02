@@ -70,7 +70,8 @@ class WikiTasks:
         return self.run_bindings.get(scope.run_lease_id)
 
     def resolve(self, scope) -> WikiTask | None:
-        return self.active.get(self.token_for_scope(scope))
+        token = self.token_for_scope(scope)
+        return self.active.get(token) if token is not None else None
 
     def assign(self, session_id, job_id, items, *, registration=None, request_id=None, attempt=None):
         """Capture the host-selected batch, independently of later path moves."""

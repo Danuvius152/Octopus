@@ -88,6 +88,7 @@ async def resolve_showme(
     if session.agent_id is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
+    assert session_manager.db is not None
     agent = await session_manager.db.get_agent(session.agent_id, user_id)
     if agent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")

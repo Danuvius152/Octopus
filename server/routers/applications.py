@@ -132,6 +132,7 @@ async def create_application(
 ):
     # The owner comes from the agent, so the agent has to be the caller's — the
     # same rule a session follows, and for the same reason.
+    assert session_manager.db is not None
     if await session_manager.db.get_agent(req.agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     try:

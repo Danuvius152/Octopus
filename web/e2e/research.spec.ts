@@ -146,6 +146,8 @@ test("the /research command surfaces a live research card", async ({ page, reque
     .locator(".session-item .session-name", { hasText: "Research E2E" })
     .click();
   await expect(page.locator(".chat-header .crumb-current")).toHaveText("Research E2E");
+  // The header switches before detail establishes the service observation.
+  await expect(page.getByText("hello", { exact: true })).toBeVisible();
 
   // Fire the slash command. A space after the command hides the slash menu, so
   // Enter sends rather than completing a menu item.

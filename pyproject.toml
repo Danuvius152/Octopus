@@ -11,7 +11,10 @@ dependencies = [
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
     "aiosqlite>=0.20",
+    "anyio>=4.0",
+    "cryptography>=46.0",
     "httpx>=0.27",
+    "pydantic-core>=2.0",
     "apscheduler>=3.10",
     "mcp>=1.30,<2",
     "PyYAML>=6.0",
@@ -27,6 +30,15 @@ test = [
     "pytest-cov>=7.0",
     "httpx>=0.27",
 ]
+dev = [
+    "ruff>=0.17.0",
+    "mypy>=2.4.0",
+    "packaging>=24.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project.scripts]
 octopus = "server.cli:main"
@@ -105,46 +117,8 @@ warn_return_any = false
 warn_redundant_casts = true
 no_implicit_optional = true
 
-# Enabling mypy on 28k previously-unchecked lines found 316 errors. 246 were
-# fixed in the F1 commit; six codes held the residue. Three of those six are
-# now enforced too — `has-type` (its cause went with A1's extraction),
-# `assignment` (two injected globals and one tuple now say they can be None)
-# and `index` (three `SELECT COUNT(*)` call sites went through one `_count`
-# helper instead of indexing a `Row | None`). Three remain below, each with a
-# reason that is a decision rather than a delay. Everything NOT listed is
-# enforced — including `return-value`, which was cleared, and
-# `unused-coroutine`, which caught a real bug (an un-awaited approve_tool that
-# made Telegram's Allow/Deny buttons silently do nothing).
-disable_error_code = [
-    # 26 remaining, and every one of them is a single attribute:
-    # `SessionManager.db`, typed `Database | None` because it is assigned in
-    # `initialize()` rather than `__init__`. The 16 errors that were NOT that
-    # attribute are fixed — one of them a latent `AttributeError` on credential
-    # delete. What is left is one initialization contract across 203 `self.db`
-    # reads, 46 of which guard with `if self.db:`. An asserting property (the
-    # `Database.conn` trick) would turn those 46 silent skips into raises,
-    # which is arguably more correct and is certainly a change in production
-    # failure modes — so it is a decision to take deliberately, not a tidy-up
-    # to slip into a polish pass. Sized and recorded in the plan's §11.
-    "union-attr",
-    # 8 remaining, after five were fixed — including a `create_session`
-    # signature that claimed `agent_id: str` while both the model and the column
-    # are nullable, and an `AgentRead(**agent)` that would have raised inside a
-    # 500 if the row had gone. What is left is two shapes, neither a delay:
-    # five are a `str` out of a DB row reaching a field typed as an enum
-    # (BackendKind, CredentialStatus, AuthType), where Pydantic already
-    # validates at runtime and the alternative is threading enums through the
-    # row dicts; two are aiosqlite's own stubs typing a cursor as
-    # `Iterable[Row]` where `Sized` is wanted; one is a callback whose
-    # implementation returns a bool the protocol does not ask for.
-    "arg-type",
-    # 2 remaining, both "Cannot infer type of lambda" where a lambda carries a
-    # `x=value` parameter to capture a value at definition time. A lambda's
-    # parameters cannot be annotated, so the only way to satisfy this is to
-    # rewrite working closures into named functions to please an inference
-    # limitation. Left alone on purpose.
-    "misc",
-]
+# Error codes are enforced globally. Any unavoidable external boundary
+# limitation is documented at the affected line rather than exempting new code.
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

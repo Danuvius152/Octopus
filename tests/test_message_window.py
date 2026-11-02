@@ -206,3 +206,32 @@ async def test_paging_requires_auth(client):
     sid = await _imported(client, 3)
     resp = await client.get(f"/api/sessions/{sid}/messages?before_seq=3", headers={"Authorization": ""})
     assert resp.status_code in (401, 403)
+
+
+async def test_archived_access_looks_up_only_the_requested_binding(client, monkeypatch):
+    """Ownership and paging never enumerate unrelated conversations."""
+    from unittest.mock import AsyncMock
+
+    sid = await _imported(client, 3)
+    db = session_manager.db
+    owner = (await db.get_session_binding(sid))["user_id"]
+    binding = AsyncMock(wraps=db.get_session_binding)
+    monkeypatch.setattr(db, "get_session_binding", binding)
+    assert await session_manager.session_belongs_to(sid, owner)
+    binding.assert_not_awaited()  # The live owner is already known.
+    assert (await client.post(f"/api/sessions/{sid}/archive")).status_code == 201
+
+    enumeration = AsyncMock(side_effect=AssertionError("must query the target binding"))
+    monkeypatch.setattr(db, "load_sessions", enumeration)
+    binding.reset_mock()
+    assert await session_manager.session_belongs_to(sid, owner)
+    assert not await session_manager.session_belongs_to(sid, "other-account")
+    assert not await session_manager.session_belongs_to("missing", owner)
+    assert await session_manager.session_belongs_to("missing", None)
+    assert [call.args for call in binding.await_args_list] == [(sid,), (sid,), ("missing",)]
+    page = await client.get(f"/api/sessions/{sid}/messages?before_seq=3")
+    assert page.status_code == 200, page.text
+    assert [message["content"] for message in page.json()["messages"]] == ["msg-0", "msg-1", "msg-2"]
+    assert (await client.get(f"/api/sessions/{sid}/messages?before_seq=0")).json()["messages"] == []
+    assert (await client.get("/api/sessions/missing/messages?before_seq=0")).status_code == 404
+    enumeration.assert_not_awaited()

@@ -484,6 +484,7 @@ class BgTaskManager:
                     logger.exception("Failed to reap aborted bg startup %s", task_id)
                     raise
                 else:
+                    assert self._db is not None  # Startup compensation retains its DB owner.
                     await self._db.update_bg_task(
                         task_id, status="interrupted", completed_at=_now_iso(),
                         stop_reason=reservation.stop_reason or "server_shutdown",
@@ -570,10 +571,10 @@ class BgTaskManager:
         captured = set(running)
         # Stop every captured process before joining. A failed compensation or
         # terminal recording must not skip another process or its original task.
-        results = await asyncio.gather(
+        results: list[object] = list(await asyncio.gather(
             *(self._terminate_proc(task, reason="work_cancelled") for task in captured),
             return_exceptions=True,
-        )
+        ))
         for task in captured:
             self._resume_settlement(task)
         results.extend(await asyncio.gather(

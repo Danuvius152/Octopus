@@ -116,6 +116,19 @@ async def test_claude_fork_cleanup_removes_copy(tmp_path, monkeypatch):
     await cc._fork_cleanup(dest_wd, None, "fork1")
 
 
+async def test_claude_rejects_native_checkpoint_before_removing_transcript(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    transcript = _write_claude_transcript(tmp_path, "/fork", "native-id")
+    cleanup = get_harness("claude-code").profile.fork_cleanup
+    assert cleanup is not None
+    with pytest.raises(ValueError, match="native fork checkpoint"):
+        await cleanup("/fork", "native-id", "fork", artifact={
+            "transport": "app-server", "phase": "created", "cleanup_allowed": True,
+            "home": str(tmp_path), "source_thread_id": "source", "thread_id": "native-id",
+        })
+    assert transcript.exists()
+
+
 # ----------------------------------------------------------------- Codex
 
 def _write_codex_rollout(home_dir, rid):

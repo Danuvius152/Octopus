@@ -373,9 +373,8 @@ class HarnessRun:
                 lambda timestamp: self._activity(timestamp, generation=generation),
                 resume_id=resume_id,
             )
-            attach = getattr(self._activity_observer, "set_event_handler", None)
-            if attach is not None:
-                attach(lambda events: self._publish_observations(events, generation=generation))
+            self._activity_observer.set_event_handler(
+                lambda events: self._publish_observations(events, generation=generation))
             if self._activity_callback is not None or self._tool_context is not None:
                 try:
                     await self._activity_observer.start()
@@ -840,8 +839,9 @@ class HarnessRun:
     def _retirement_finished(self, task: asyncio.Task[None]) -> None:
         if not self._driver.multiplexed:
             return
-        if task.cancelled() or (error := task.exception()) is not None:
-            detail = "Native retirement was cancelled" if task.cancelled() else self.format_exception(error)
+        error = None if task.cancelled() else task.exception()
+        if task.cancelled() or error is not None:
+            detail = self.format_exception(error) if error is not None else "Native retirement was cancelled"
             self.fail_stream("native_retirement_failed", detail)
             # A failed original retirement is an explicit collection cutoff,
             # never proof of exit. Let the Owner take over the failed resource
@@ -1184,9 +1184,8 @@ class HarnessRun:
             await self._emit(event)
 
     async def _drain_observations(self) -> None:
-        drain = getattr(self._activity_observer, "drain_observations", None)
-        if drain is not None and not self._lease_closed:
-            await drain()
+        if self._activity_observer is not None and not self._lease_closed:
+            await self._activity_observer.drain_observations()
 
     async def _handle_line(self, line: str) -> None:
         self._stdout_line_number += 1

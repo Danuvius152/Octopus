@@ -27,6 +27,7 @@ async def model_settings(
     _: str = Depends(verify_token),
 ):
     try:
+        assert session_manager.db is not None
         return await model_settings_for(session_manager.db, backend.value, credential_id, user_id)
     except CredentialBindingError as error:
         raise HTTPException(404 if str(error) == "Credential not found" else 400, str(error)) from error

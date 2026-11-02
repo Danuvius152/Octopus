@@ -25,6 +25,29 @@ from tests.harness_profiles import process_profile
 question_host = question_tests.question_host
 
 
+@pytest.mark.parametrize(("recording", "ended", "expected_state", "expected_recording"), [
+    ("selected", False, "recording_failed", "unconfirmed"),
+    ("committed", False, "completed", "committed"),
+    ("failed", False, "recording_failed", "failed"),
+    ("selected", True, "unavailable", "none"),
+])
+async def test_completion_exposes_recording_evidence_without_leaking_selection(
+    question_host, recording, ended, expected_state, expected_recording,
+):
+    from server.models import TurnOutcome
+    from server.sessions.base import QueuedPrompt
+    from server.sessions.runtime_types import _Settlement
+
+    manager, session, _client, _events = question_host
+    request = QueuedPrompt("Original accepted input", [], started=True)
+    settlement = _Settlement(outcome=TurnOutcome(request_id=request.request_id, status="success"),
+                             recording_state=recording)
+    completion = manager._session_owner(session).runtime.completion(request, settlement=settlement, owner_ended=ended)
+    assert completion.state == expected_state
+    assert completion.recording_state == expected_recording
+    assert (completion.outcome is not None) is (not ended)
+
+
 @pytest.mark.parametrize("operation", ["interrupt", "archive"])
 async def test_runtime_text_subscriber_can_stop_its_original_request(question_host, tmp_path, monkeypatch, operation):
     manager, original, client, events = question_host

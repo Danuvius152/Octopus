@@ -219,6 +219,7 @@ class LifecycleMixin(SessionManagerBase):
     async def archive_agent(self, agent_id: str) -> None:
         from ..agent_manager import AgentError, AgentManager
 
+        assert self.db is not None
         async with self._agent_lifecycle_lock:
             agent = await self.db.get_agent(agent_id)
             if agent is None:
@@ -230,6 +231,7 @@ class LifecycleMixin(SessionManagerBase):
                 self._closed_agents.add(agent_id)
 
                 async def finish() -> None:
+                    assert self.db is not None  # This operation drains before DB close.
                     # No lifecycle lock spans creation, model retirement or DB
                     # settlement. New creation and old-session sends are closed.
                     pending = tuple(self._agent_operations.get(agent_id, ()))
@@ -248,6 +250,7 @@ class LifecycleMixin(SessionManagerBase):
     async def unarchive_agent(self, agent_id: str, user_id: str | None) -> dict[str, Any]:
         from ..agent_manager import AgentError, AgentManager
 
+        assert self.db is not None
         async with self._agent_lifecycle_lock:
             agent = await self.db.get_agent(agent_id, user_id=user_id)
             if agent is None or agent.get("user_id") != user_id:
@@ -724,7 +727,7 @@ class LifecycleMixin(SessionManagerBase):
         for row in rows:
             if not row["archived"]:
                 continue
-            count, _next_seq, duplicates = await self.db.message_sequence_state(row["id"])
+            count, _next_seq, duplicates = await database.message_sequence_state(row["id"])
             out.append(session_info(row, count, archived=True,
                                     transcript_integrity="duplicate_seq" if duplicates else "ok").model_dump())
         return out
@@ -746,11 +749,11 @@ class LifecycleMixin(SessionManagerBase):
         # Windowed like a live open, and counted separately: `len(messages)`
         # stopped being the message count once a window is all we fetch
         # (polish-2026-09.md §4 B2).
-        messages_raw = await self.db.load_messages(
+        messages_raw = await database.load_messages(
             session_id, limit=_ARCHIVED_MESSAGE_WINDOW, newest_first=True
         )
         messages = [MessageContent(**m) for m in messages_raw]
-        total, _next_seq, duplicates = await self.db.message_sequence_state(session_id)
+        total, _next_seq, duplicates = await database.message_sequence_state(session_id)
         if duplicates:
             messages = []
         oldest = messages[0].seq if messages else None
@@ -759,7 +762,7 @@ class LifecycleMixin(SessionManagerBase):
             messages=messages,
             pending_questions=[],
             oldest_loaded_seq=oldest,
-            has_more_messages=await self.db.has_messages_before(session_id, oldest),
+            has_more_messages=await database.has_messages_before(session_id, oldest),
             next_message_seq=max((m.seq for m in messages if m.seq is not None), default=-1) + 1,
         )
 

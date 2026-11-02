@@ -55,7 +55,7 @@ class RegisterNativeQuestion:
 @dataclass(frozen=True)
 class AnswerQuestion:
     question_id: str
-    answers: list[dict[str, Any]]
+    answers: object  # OwnerQuestions validates the raw answer before using it.
     source: AnswerSource = AnswerSource()
 
 

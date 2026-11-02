@@ -149,13 +149,13 @@ it("finishes archived viewing without an active snapshot or loading state", asyn
   expect(useSessionStore.getState().dispatchStates.session).toBeUndefined();
 });
 
-it("keeps the last queue visible through an invalid live frame and recovers on confirmation", () => {
+it("keeps the confirmed queue visible and unchanged through an invalid live frame", () => {
   const snapshot = { ...dispatch,
     items: [{ request_id: "queued", source: "bg", summary: "Retained work", priority: false }] };
   handleWsMessage({ type: "queued", session_id: "session", dispatch_state: snapshot });
   render(<DispatchQueue sessionId="session" />);
   act(() => handleWsMessage({ type: "dispatch_state", session_id: "session", dispatch_state: { generation: snapshot.generation } }));
-  expect(screen.getByRole("alert")).toHaveTextContent("Queue state unavailable");
+  expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.getByText("Retained work")).toBeTruthy();
   act(() => handleWsMessage({ type: "dispatch_state", session_id: "session", dispatch_state: snapshot }));
   expect(screen.queryByRole("alert")).toBeNull();

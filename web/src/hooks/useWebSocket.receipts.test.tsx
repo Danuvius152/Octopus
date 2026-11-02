@@ -128,7 +128,7 @@ it("keeps live card completions across delayed reconnect responses and accepts n
   act(() => {
     emit({ type: "subagent", task_id: "child", tool_call_id: "call", status: "completed", summary: "fresh answer" });
     emit({ type: "bg_started", task_id: "bg", command: "build", started_at: "now" });
-    emit({ type: "bg_completed", task_id: "bg", status: "completed", exit_code: 0 });
+    emit({ type: "bg_completed", task_id: "bg", status: "completed", exit_code: 0, completed_at: "now" });
     emit({ type: "research_started", research_id: "research", question: "q" });
     emit({ type: "research_completed", research_id: "research", verified: 2 });
   });
@@ -176,6 +176,7 @@ it("keeps recovery provenance on a new identity and on lost-ACK confirmation", a
   const confirmation = result.current.sendMessage("s", "restored", undefined, undefined, "new-request", "withdrawn-request");
   expect(JSON.parse(next.send.mock.calls[0][0])).toEqual(JSON.parse(original.send.mock.calls[0][0]));
   act(() => next.onmessage?.({ data: JSON.stringify({ type: "submission", session_id: "s", client_request_id: "new-request", accepted: true,
-    request_id: "durable-new-request", execution: { state: "withdrawn", recoverable_input: true } }) }));
+    request_id: "durable-new-request", execution: { state: "withdrawn", recoverable_input: true,
+      delivery_state: "none", state_version: 1, execution_owner_request_id: "durable-new-request" } }) }));
   expect(await confirmation).toMatchObject({ accepted: true, execution: { state: "withdrawn" } });
 });

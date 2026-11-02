@@ -903,8 +903,8 @@ class SessionManagerBase:
             return True
         if self.get_session(session_id, user_id) is not None:
             return True
-        rows = await self.input_database().load_sessions(include_archived=True, user_id=user_id)
-        return any(row["id"] == session_id for row in rows)
+        binding = await self.input_database().get_session_binding(session_id)
+        return binding is not None and binding["user_id"] == user_id
 
     def get_session(
         self, session_id: str, user_id: str | None = None

@@ -80,6 +80,7 @@ async def _check_credential_binding(
     user_id: str | None,
 ) -> None:
     """Validate the explicit binding before changing any session fields."""
+    assert session_manager.db is not None
     try:
         await validate_credential_binding(
             session_manager.db, credential_id, backend, user_id,
@@ -126,6 +127,7 @@ async def create_session(
     # Inherit the owning agent's default backend when none is pinned. Scoped,
     # because a session takes its owner from its agent: an agent id belonging to
     # somebody else would otherwise create a session in their account.
+    assert session_manager.db is not None
     agent = await session_manager.db.get_agent(agent_id, user_id)
     if agent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
@@ -176,6 +178,7 @@ async def import_session(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
+    assert session_manager.db is not None
     agent_id = req.agent_id
     if agent_id is None:
         sys_agent = await session_manager.db.get_system_agent(user_id)
@@ -229,6 +232,7 @@ async def wiki_jobs(
     vault_id: str | None = Query(None, min_length=1),
     _: str = Depends(verify_token),
 ):
+    assert session_manager.db is not None
     binding = await session_manager.db.get_session_binding(session_id)
     if binding is None or binding["user_id"] != user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
@@ -303,6 +307,7 @@ async def recover_submission_attachment(session_manager: SessionMgr, session_id:
     from ..attachments import AttachmentError, get_path
     if not await session_manager.session_belongs_to(session_id, user_id):
         raise HTTPException(404, "Session not found")
+    assert session_manager.db is not None
     row = await session_manager.db.get_client_submission(session_id, client_id)
     files = (row or {}).get("payload") or {}
     saved = next((file for file in files.get("attachments", []) if file["id"] == attachment_id), None)
@@ -364,6 +369,7 @@ async def get_session(
     # pending queue / pending questions / live status).
     s = session_manager.get_session(session_id, user_id)
     if s is not None:
+        assert session_manager.db is not None
         messages_raw = await session_manager.db.load_messages(
             s.id, limit=MESSAGE_WINDOW, newest_first=True
         )
@@ -410,6 +416,7 @@ async def export_transcript(
     session_manager: SessionMgr, session_id: str, user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
+    assert session_manager.db is not None
     binding = await session_manager.db.get_session_binding(session_id)
     if binding is None or binding["user_id"] != user_id:
         raise HTTPException(404, "Session not found")
@@ -427,6 +434,7 @@ async def native_child_details(
     limit: int = Query(50, ge=1, le=100), _: str = Depends(verify_token),
 ):
     """Read only saved items; the original host and its lease are untouched."""
+    assert session_manager.db is not None
     try:
         return await session_manager.db.read_native_details(session_id, user_id, anchor_seq, after_seq=after_seq, limit=limit)
     except NativeDetailError as error:
@@ -460,14 +468,8 @@ async def older_messages(
     if session_manager.db is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "no database")
     if session_manager.get_session(session_id, user_id) is None:
-        rows = await session_manager.db.load_sessions(include_archived=True)
-        owned = [
-            r
-            for r in rows
-            if r["id"] == session_id
-            and (user_id is None or r.get("user_id") == user_id)
-        ]
-        if not owned:
+        binding = await session_manager.db.get_session_binding(session_id)
+        if binding is None or (user_id is not None and binding["user_id"] != user_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     if before_seq == 0:
         return MessagePage(messages=[], oldest_loaded_seq=None, has_more_messages=False)

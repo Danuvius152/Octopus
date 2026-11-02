@@ -69,17 +69,13 @@ def _require_db():
 
 
 def _row_to_info(row: dict) -> CredentialInfo:
-    return CredentialInfo(
-        id=row["id"],
-        backend=row["backend"],
-        label=row["label"],
-        auth_type=row["auth_type"],
-        created_at=row["created_at"],
-        status=row.get("status") or "active",
-        token_expires_at=row.get("token_expires_at"),
-        needs_reconnect=bool(row.get("needs_reconnect", False)),
-        last_refresh_error_code=row.get("last_refresh_error_code"),
-    )
+    return CredentialInfo.model_validate({
+        "id": row["id"], "backend": row["backend"], "label": row["label"],
+        "auth_type": row["auth_type"], "created_at": row["created_at"],
+        "status": row.get("status") or "active", "token_expires_at": row.get("token_expires_at"),
+        "needs_reconnect": bool(row.get("needs_reconnect", False)),
+        "last_refresh_error_code": row.get("last_refresh_error_code"),
+    })
 
 
 @router.get("", response_model=list[CredentialInfo])

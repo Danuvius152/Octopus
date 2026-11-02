@@ -46,7 +46,7 @@ it.each([false, true])("a list fills final output across an execution event whil
   const reply = deferred();
   vi.stubGlobal("fetch", vi.fn(() => reply.promise));
   const reading = loadBgTaskSnapshot("s");
-  handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "a", status: "completed", exit_code: 0 });
+  handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "a", status: "completed", exit_code: 0, completed_at: "now" });
   if (delivery) handleWsMessage({ type: "bg_delivery", session_id: "s", task_id: "a", delivery_disposition: "unknown", delivery_error: "New live error" });
   reply.resolve(json([backgroundTask("a", { stdout: "Complete original output", delivery_disposition: null, delivery_error: null })]));
   await reading;

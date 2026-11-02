@@ -119,7 +119,8 @@ def observed_input_receipt(row: dict[str, Any], session: Session | None) -> Subm
     observation, never replacing a known completion with an inference.
     """
     if session is not None:
-        original = session._delivery_receipts.get((row["payload"] or {}).get("delivery_id"))
+        delivery_id = (row["payload"] or {}).get("delivery_id")
+        original = session._delivery_receipts.get(delivery_id) if isinstance(delivery_id, str) else None
         if original is not None and original.request_id == row["request_id"]:
             return replace(original, disposition="duplicate")
     future = session._request_completions.get(row["request_id"]) if session is not None else None

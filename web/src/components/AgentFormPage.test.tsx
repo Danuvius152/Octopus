@@ -33,8 +33,9 @@ function agent(o: Partial<Agent> = {}): Agent {
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     active_session_count: 0,
+    subagents: [],
     ...o,
-  } as Agent;
+  };
 }
 
 let fetchMock: ReturnType<typeof vi.fn>;

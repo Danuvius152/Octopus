@@ -329,7 +329,7 @@ class Execution:
     preparation_diagnostic: PreparationDiagnostic | None = None
     reader: RuntimeReader | None = None
     activity: _Activity | None = None
-    activity_token: object | None = None
+    activity_token: int | None = None
     deadline: RuntimeDeadline | None = None
     interrupted: bool = False
     stream_ended: bool = False
@@ -1023,11 +1023,22 @@ class OwnerRuntime:
         outcome = settlement.outcome if settlement is not None else None
         if owner_ended and settlement is not None and settlement.recording_state != "committed":
             outcome = None
-        recording = settlement.recording_state if outcome is not None else "none"
-        state = "completed" if outcome is not None else (
-            "unavailable" if uncertain or owner_ended and not unsent else
-            reason if reason in {"deleted", "shutdown", "expired"} else "withdrawn"
-        )
+        recording: Literal["committed", "failed", "unconfirmed", "none"] = "none"
+        if outcome is not None and settlement is not None:
+            recording = "unconfirmed" if settlement.recording_state == "selected" else settlement.recording_state
+        state: Literal["completed", "recording_failed", "withdrawn", "expired", "deleted", "shutdown", "unavailable"]
+        if outcome is not None:
+            state = "completed"
+        elif uncertain or owner_ended and not unsent:
+            state = "unavailable"
+        elif reason == "deleted":
+            state = "deleted"
+        elif reason == "shutdown":
+            state = "shutdown"
+        elif reason == "expired":
+            state = "expired"
+        else:
+            state = "withdrawn"
         if outcome is not None and recording != "committed":
             state = "recording_failed"
             if reason is None and settlement is not None and settlement.event is not None:

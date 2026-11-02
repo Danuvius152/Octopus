@@ -200,8 +200,9 @@ class ConnectorLoginManager:
         if pl.status != ConnectorLoginState.pending:
             raise ConnectorLoginError(f"Connection is {pl.status.value}; this callback has already been consumed", status=pl.status)
         if self._now() - pl.created_at > _LOGIN_TTL_SECONDS:
-            self.mark_error(login_id, "Connection request expired; start a new connection")
-            raise ConnectorLoginError(pl.message)
+            message = "Connection request expired; start a new connection"
+            self.mark_error(login_id, message)
+            raise ConnectorLoginError(message)
         pl.status = ConnectorLoginState.processing
         return pl
 

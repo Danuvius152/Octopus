@@ -181,10 +181,16 @@ Phone / Browser
 
 ## Quick Start
 
+The resolved Python snapshot targets CPython 3.14.4 on Linux x86_64. For another
+supported Python/platform combination, resolve and verify its own snapshot using
+the [environment guide](docs/local-wsl.md#环境重建).
+
 ```bash
 # Clone and set up
 git clone https://github.com/Danuvius152/Octopus.git && cd Octopus
-python3 -m venv .venv && .venv/bin/pip install -c constraints-wiki.txt -e "."
+python3 -m venv .venv
+PIP_CONSTRAINT="$PWD/constraints-python.txt" .venv/bin/pip install \
+  -c constraints-python.txt -c constraints-wiki.txt -e "."
 cp .env.example .env          # set your own OCTOPUS_AUTH_TOKEN setup proof
 
 # Build the frontend (the server serves web/dist/)
@@ -216,8 +222,12 @@ Auth for the agent's backend uses your existing CLI login (`claude login` /
 it to an agent.
 
 Install development dependencies with
-`pip install -c constraints-wiki.txt -e '.[test]'`. The constraints preserve the
-Wiki parsing baseline; application compatibility ranges remain in `pyproject.toml`.
+`PIP_CONSTRAINT="$PWD/constraints-python.txt" .venv/bin/pip install -c constraints-python.txt -c constraints-wiki.txt -e '.[test,dev]'`.
+`pyproject.toml` owns direct runtime, test and checking-tool requirements;
+`constraints-wiki.txt` owns the four-package parsing baseline, while the generated
+`constraints-python.txt` records the verified resolved combination. The build
+constraint also applies inside pip's isolated build. Install into an isolated
+environment when a running service shares the existing venv.
 
 For a managed Linux/WSL installation, `scripts/setup-services.sh` previews a
 systemd user unit. After validation and natural drain, stop the existing

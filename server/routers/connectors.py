@@ -71,19 +71,14 @@ def _http_error(e: ConnectorError) -> HTTPException:
 
 
 def _to_info(row: dict) -> ConnectorInstallationInfo:
-    return ConnectorInstallationInfo(
-        id=row["id"],
-        kind=row["kind"],
-        label=row["label"],
-        auth_type=row.get("auth_type") or "oauth",
-        external_account_id=row.get("external_account_id"),
-        scopes=row.get("scopes") or [],
-        enable_by_default=bool(row.get("enable_by_default", False)),
-        needs_reconnect=bool(row.get("needs_reconnect", False)),
-        token_expires_at=row.get("token_expires_at"),
-        last_refresh_error_code=row.get("last_refresh_error_code"),
-        created_at=row["created_at"],
-    )
+    return ConnectorInstallationInfo.model_validate({
+        "id": row["id"], "kind": row["kind"], "label": row["label"],
+        "auth_type": row.get("auth_type") or "oauth", "external_account_id": row.get("external_account_id"),
+        "scopes": row.get("scopes") or [], "enable_by_default": bool(row.get("enable_by_default", False)),
+        "needs_reconnect": bool(row.get("needs_reconnect", False)),
+        "token_expires_at": row.get("token_expires_at"), "last_refresh_error_code": row.get("last_refresh_error_code"),
+        "created_at": row["created_at"],
+    })
 
 
 def _public_base(request: Request) -> str:
@@ -116,6 +111,7 @@ async def _own_agent(
     so it needs the same check the agents router makes — and without it, an
     agent id was enough to attach somebody's Gmail to your own agent.
     """
+    assert session_manager.db is not None
     if await session_manager.db.get_agent(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 

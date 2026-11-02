@@ -104,6 +104,31 @@ WS 集成入口只接收已解析的应用事件、计划失效通知，以及�
 它不是供页面任意灌入快照的公共接口。连接来源身份由 hook 捕获并传入，模块
 核对后才改变列表或触发失败提示、会话补取等副作用。
 
+### WS wire 校验
+
+`wsEvents.decodeWsEvent(unknown)` 是普通事件与 submission/command_receipt 专用回执
+共用的唯一解码边界，按 `type` 返回已验证事件、unknown 或 invalid。字段读者同时
+推导判别联合，复用 HTTP DTO 和既有 dispatch/runtime 读者；不保留宽 Record 分发或
+校验失败后的旧 cast 入口。工具参数与 provider 展示载荷保持 opaque；Octopus 自有
+outcome/recovery 的身份、状态及实际消费字段须校验，内外 request 身份须一致。
+
+校验发生在 pending 删除/Promise 结算、seq 去重推进、dispatch generation、列表
+membership、store 写入及补查之前。成功 submission 必须带非空持久 request_id，
+供原输入和附件恢复关联使用；失败及 unknown 回执保留原缺省规则。已知畸形帧记录
+console 摘要后拒绝，原 pending 保持等待，随后合法同身份回执仍可结算；未知 type
+忽略，不推进 seq、不触发重连。合法额外字段允许，账户、连接、服务和领域排序守卫
+继续负责已验证事件的资格。
+
+稀疏事件按原合同保留缺失与 null 的区别：BG delivery 可显式清除诊断，Research
+progress 是局部补丁，recording_failed 可以没有 dispatch_state，archive 可以没有
+session_id，文本问题可以没有 options。畸形高 seq 之后同 seq 合法帧、畸形回执之后
+原合法回执，以及 archive 的零副作用回归固定这些时机。
+
+`tests/test_ws_contract.py` 从真实 Python 构造路径产出共享
+`wsProducerFixtures.json`，普通检查只比对，显式 `--update-ws-fixtures` 才更新；TS
+decoder 和真实 hook/store 消费同一产物。Owner 结构化结果另复用 recordingReplay
+证据。HTTP OpenAPI 生成检查仅证明复用的 HTTP 字段，不能代替这条 WS 契约检查。
+
 ## 读取与冲突规则
 
 ### 每个模块最多一个有效在途 GET

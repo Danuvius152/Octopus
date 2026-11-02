@@ -539,6 +539,12 @@ async def test_cancel_during_activity_startup_drains_owned_observer(tmp_path, mo
     closed = asyncio.Event()
 
     class WaitingObserver:
+        def set_event_handler(self, handler):
+            pass
+
+        async def drain_observations(self):
+            pass
+
         def observe_stdout(self, obj):
             pass
 
@@ -552,8 +558,9 @@ async def test_cancel_during_activity_startup_drains_owned_observer(tmp_path, mo
         def invalidate(self):
             pass
 
-        async def close(self):
+        async def close(self, *, deadline=None):
             closed.set()
+            return True
 
     async def forbidden_spawn(*args, **kwargs):
         pytest.fail("cancelled startup spawned a CLI")
@@ -576,6 +583,12 @@ async def test_unbound_run_scrubs_diagnostics_without_starting_native_reader(tmp
     from dataclasses import replace
 
     class Scrubber:
+        def set_event_handler(self, handler):
+            pass
+
+        async def drain_observations(self):
+            pass
+
         def observe_stdout(self, obj):
             pass
 
@@ -588,8 +601,8 @@ async def test_unbound_run_scrubs_diagnostics_without_starting_native_reader(tmp
         def invalidate(self):
             pass
 
-        async def close(self):
-            pass
+        async def close(self, *, deadline=None):
+            return True
 
     profile = replace(CODEX, activity_observer=lambda *args, **kwargs: Scrubber(),
                       build_turn_argv=lambda _: ([sys.executable, "-c", "import sys; print('private diagnostic', file=sys.stderr)"], {}))

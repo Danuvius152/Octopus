@@ -80,7 +80,7 @@ export function QuestionPrompt({ question, onSubmit }: Props) {
                 {q.question}
               </div>
               <div className="question-options flex flex-col gap-2">
-                {q.options.map((opt, j) => {
+                {(q.options ?? []).map((opt, j) => {
                   const isSelected = selected.includes(opt.label);
                   return (
                     <label

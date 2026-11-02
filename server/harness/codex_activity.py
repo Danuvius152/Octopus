@@ -529,6 +529,7 @@ class CodexActivityObserver:
                     if obj is not None:
                         self._record_header(obj)
                     if self.identity_confirmed and self._native_metrics is not None and self._native_turn:
+                        assert self._thread is not None
                         if self._native_turn not in self._native_metrics:
                             if len(self._native_metrics) >= 16384:
                                 self._disable("metrics_turn_limit")
@@ -538,7 +539,8 @@ class CodexActivityObserver:
                             )
                         self._metrics = self._native_metrics[self._native_turn]
                         events.extend(self._metrics.feed_line(line, self._wall()))
-                    elif self.identity_confirmed and self._native_turn == self._turn:
+                    elif self._native_metrics is None and self.identity_confirmed and self._native_turn == self._turn:
+                        assert self._thread is not None and self._turn is not None
                         if self._metrics is None:
                             self._metrics = CodexResponseMetrics(self._thread, self._turn, self._started)
                         events.extend(self._metrics.feed_line(line, self._wall()))

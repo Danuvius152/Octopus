@@ -9,9 +9,11 @@ function deferred() {
   const promise = new Promise<Response>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-const round = (work_id = "original", state: Delegation["state"] = "running") => ({
+const round = (work_id = "original", state: Delegation["state"] = "running"): Delegation => ({
   delegation_id: "child", work_id, state, parent_session_id: "parent",
-} as Delegation);
+    sub_session_id: "child", target_agent_id: "agent", target_agent_name: "Helper", request: "Work",
+    created_at: "now", finished_at: null, error: null,
+});
 beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);
   useSessionStore.setState({ token: "test", dispatchGeneration: "service" });

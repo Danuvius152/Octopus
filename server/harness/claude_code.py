@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..models import MessageContent
 from .driver import RunDriver
 from .events import (
     HarnessCredential,
@@ -29,6 +30,7 @@ from .events import (
     HarnessOneshotError,
     SubagentUpdate,
 )
+from .fork import ForkArtifact, ForkCheckpoint, ForkHooks
 from .harness import Harness
 from .login import LoginMethod, OAuthCompletion, OAuthCredentialWriter
 from .model_settings import ModelOption, ModelSettings
@@ -712,17 +714,15 @@ class _JsonlTranscriptCodec:
 
 
 async def _fork_prepare_replay(
-    messages: list[Any],
+    messages: list[MessageContent],
     working_dir: str,
     resume_id_hint: str | None,
     fork_id: str,
-) -> Any:
+) -> ForkArtifact:
     """No on-disk work. The first fork turn's user prompt is wrapped with the
     truncated history (in SessionManager._execute_claimed_request); `session_started`
     captures claude's real session id on turn 1; turn 2+ uses native resume of
     that own-session id. The `resume_id_hint` is ignored. Used by /rewind."""
-    from .fork import ForkArtifact
-
     return ForkArtifact(resume_id=None, needs_replay=True)
 
 
@@ -743,11 +743,11 @@ async def _fork_copy(
     *,
     parent_working_dir: str,
     parent_resume_id: str | None,
-    parent_credential: Any = None,  # unused: Claude transcripts live under ~/.claude
+    parent_credential: HarnessCredential | None = None,  # Claude uses ~/.claude
     dest_working_dir: str,
     new_resume_id: str,
-    hooks: Any = None,
-) -> Any:
+    hooks: ForkHooks | None = None,
+) -> ForkArtifact:
     """Full-copy fork (session-fork.md): copy the parent's REAL transcript
     into the fork's project slug under `new_resume_id`, rewriting each line's
     `cwd` -> dest and `sessionId` -> new id. The fork then resumes natively with
@@ -755,8 +755,6 @@ async def _fork_copy(
     CLI resumes such a copied (own-format) transcript reliably; the earlier
     'No conversation found' was specific to SYNTHESIZED transcripts. Falls back
     to replay when the parent has no transcript yet (never ran a turn)."""
-    from .fork import ForkArtifact
-
     if not parent_resume_id:
         return ForkArtifact(resume_id=None, needs_replay=True)
     src = _claude_project_dir(parent_working_dir) / f"{parent_resume_id}.jsonl"
@@ -797,13 +795,17 @@ async def _fork_cleanup(
     resume_id_hint: str | None,
     fork_id: str,
     *,
-    credential: Any = None,
+    credential: HarnessCredential | None = None,
+    artifact: ForkCheckpoint | None = None,
+    hooks: ForkHooks | None = None,
 ) -> None:
     """Remove a copied transcript left by an incomplete full-copy saga
     (session-fork.md). The transcript lives under ~/.claude/projects, NOT
     inside the working dir, so removing the fork's copied dir doesn't reach it —
     this does. No-op for /rewind (replay leaves no transcript: the file named by
     the unused hint doesn't exist)."""
+    if artifact is not None:
+        raise ValueError("Claude cannot clean a native fork checkpoint; retain recovery material")
     if not resume_id_hint:
         return
     f = _claude_project_dir(working_dir) / f"{resume_id_hint}.jsonl"

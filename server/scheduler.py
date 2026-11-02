@@ -160,7 +160,6 @@ class ScheduleRunner:
         body = self._compose_prompt(row, prompt)
         context = decode_context(row.get("knowledge_context"))
         assert context is not None  # _target_is_active validated this exact definition snapshot.
-        wiki_kwargs = {"knowledge_context": context}
 
         if run_at is not None:
             target = None
@@ -196,7 +195,7 @@ class ScheduleRunner:
             try:
                 # Queue-aware: appends to the live session, waiting its turn if
                 # the user is mid-conversation rather than failing on a held lock.
-                receipt = await self._session_mgr.start_message(origin_session_id, body, source="schedule", **wiki_kwargs)
+                receipt = await self._session_mgr.start_message(origin_session_id, body, source="schedule", knowledge_context=context)
                 if not receipt.accepted:
                     logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
                     return
@@ -239,7 +238,7 @@ class ScheduleRunner:
             await self._db.update_schedule(
                 schedule_id, last_run_session_id=session.id
             )
-            receipt = await self._session_mgr.start_message(session.id, body, source="schedule", **wiki_kwargs)
+            receipt = await self._session_mgr.start_message(session.id, body, source="schedule", knowledge_context=context)
             if not receipt.accepted:
                 logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
                 return

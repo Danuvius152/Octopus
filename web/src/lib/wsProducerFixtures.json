@@ -1,0 +1,349 @@
+{
+  "agent_updated": {
+    "agent": {
+      "active_session_count": 0,
+      "archived": false,
+      "avatar": null,
+      "backend": "claude-code",
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "credential_id": null,
+      "description": "",
+      "id": "agent",
+      "is_system": true,
+      "mcp_servers": [
+        "ask",
+        "bg",
+        "ask_agent",
+        "research",
+        "schedule"
+      ],
+      "model": null,
+      "name": "Octo",
+      "pin_order": 1,
+      "pinned": true,
+      "reasoning_effort": null,
+      "service_tier": null,
+      "subagents": [],
+      "system_prompt": "",
+      "tool_allow": "",
+      "tool_deny": "",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    "agent_id": "agent",
+    "type": "agent_updated"
+  },
+  "application_updated": {
+    "application": {
+      "agent_id": "agent",
+      "app_dir": "/work",
+      "archived": false,
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "deletion": null,
+      "description": "",
+      "entrypoint": "index.html",
+      "error": null,
+      "icon": null,
+      "icon_src": null,
+      "id": "application",
+      "last_built_at": null,
+      "name": "Contract application",
+      "pin_order": 1,
+      "pinned": true,
+      "session_id": null,
+      "status": "building",
+      "updated_at": "2026-01-01T00:00:00+00:00",
+      "user_id": "owner"
+    },
+    "application_id": "application",
+    "type": "application_updated"
+  },
+  "assistant_delta": {
+    "content": "Streaming text",
+    "session_id": "session",
+    "type": "assistant_delta"
+  },
+  "assistant_text": {
+    "content": "Complete text",
+    "session_id": "session",
+    "type": "assistant_text"
+  },
+  "attempt_started": {
+    "attempt_id": "attempt",
+    "request_id": "request",
+    "session_id": "session",
+    "type": "attempt_started"
+  },
+  "command_receipt": {
+    "accepted": true,
+    "client_command_id": "command",
+    "operation": "interrupt",
+    "session_id": "session",
+    "type": "command_receipt"
+  },
+  "dequeued": {
+    "dispatch_state": {
+      "active_request_id": "request",
+      "generation": "service",
+      "items": [],
+      "paused": true,
+      "revision": 12
+    },
+    "queue_length": 0,
+    "request_id": "request",
+    "session_id": "session",
+    "type": "dequeued"
+  },
+  "dispatch_state": {
+    "dispatch_state": {
+      "active_request_id": null,
+      "generation": "service",
+      "items": [],
+      "paused": true,
+      "revision": 14
+    },
+    "session_id": "session",
+    "type": "dispatch_state"
+  },
+  "question_request": {
+    "question_id": "question",
+    "questions": [
+      {
+        "question": "Directory?"
+      }
+    ],
+    "session_id": "session",
+    "type": "question_request"
+  },
+  "queued": {
+    "content": "Conflicting original outcome",
+    "dispatch_state": {
+      "active_request_id": null,
+      "generation": "service",
+      "items": [
+        {
+          "priority": true,
+          "request_id": "request",
+          "source": "human",
+          "summary": "Conflicting original outcome"
+        }
+      ],
+      "paused": true,
+      "revision": 11
+    },
+    "queue_length": 1,
+    "request_id": "request",
+    "session_id": "session",
+    "type": "queued"
+  },
+  "recording_failed": {
+    "message": "This request conflicts with an already recorded outcome.",
+    "recording_state": "failed",
+    "request_id": "request",
+    "session_id": "session",
+    "terminal": false,
+    "type": "recording_failed"
+  },
+  "recovery": {
+    "attempt_id": null,
+    "code": "transient_retry",
+    "content": {
+      "attempt": null,
+      "code": "transient_retry",
+      "delay": null,
+      "kind": "recovery",
+      "maximum": null,
+      "message": "Retrying the original request",
+      "phase": "retrying",
+      "request_id": "request"
+    },
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "message": "Retrying the original request",
+    "request_id": "request",
+    "retrying": true,
+    "seq": 0,
+    "session_id": "session",
+    "terminal": false,
+    "type": "recovery"
+  },
+  "research_delivery": {
+    "delivery_receipt": {
+      "error": null,
+      "request_id": "request",
+      "stage": "queued",
+      "version": 1
+    },
+    "injection_status": "delivered",
+    "research_id": "research",
+    "session_id": "session",
+    "type": "research_delivery"
+  },
+  "research_failed": {
+    "error": "Original worker retired",
+    "research_id": "research",
+    "session_id": "session",
+    "status": "interrupted",
+    "type": "research_failed"
+  },
+  "result": {
+    "claude_session_id": "native-thread",
+    "content": "Legacy result",
+    "cost": null,
+    "duration_ms": null,
+    "is_error": false,
+    "session_id": "session",
+    "turns": null,
+    "type": "result"
+  },
+  "session_archived": {
+    "dispatch_state": {
+      "active_request_id": null,
+      "generation": "service",
+      "items": [],
+      "paused": true,
+      "revision": 9
+    },
+    "name": "Contract session",
+    "new_session_id": null,
+    "old_session_id": "session",
+    "type": "session_archived"
+  },
+  "session_unarchived": {
+    "dispatch_state": {
+      "active_request_id": null,
+      "generation": "service",
+      "items": [],
+      "paused": true,
+      "revision": 10
+    },
+    "name": "Contract session",
+    "session": {
+      "agent_id": "agent",
+      "app_id": null,
+      "archived": false,
+      "backend": "codex",
+      "can_fork": true,
+      "can_steer": true,
+      "claude_session_id": null,
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "credential_id": null,
+      "delegation_request": null,
+      "fork_after_seq": null,
+      "fork_is_full_copy": false,
+      "fork_prefilled_prompt": null,
+      "fork_revert_record": null,
+      "forked_from_session_id": null,
+      "id": "session",
+      "message_count": 0,
+      "model": null,
+      "name": "Contract session",
+      "origin": "user",
+      "parent_session_id": null,
+      "reasoning_effort": null,
+      "service_tier": null,
+      "status": "idle",
+      "transcript_integrity": "ok",
+      "working_dir": "/work"
+    },
+    "session_id": "session",
+    "type": "session_unarchived"
+  },
+  "status": {
+    "session_id": "session",
+    "status": "idle",
+    "type": "status"
+  },
+  "subagent": {
+    "card_id": null,
+    "description": "",
+    "duration_ms": null,
+    "name": "Helper",
+    "native_thread_id": null,
+    "native_turn_id": null,
+    "parent_thread_id": null,
+    "prompt": "",
+    "runtime_metadata": null,
+    "session_id": "session",
+    "status": "running",
+    "stop_reason": null,
+    "summary": "",
+    "task_id": "child",
+    "tokens": null,
+    "tool_call_id": null,
+    "tool_use_id": null,
+    "tool_uses": null,
+    "type": "subagent"
+  },
+  "submission": {
+    "accepted": true,
+    "client_request_id": "submission",
+    "disposition": "accepted",
+    "execution": {
+      "delivery_state": "none",
+      "execution_owner_request_id": "request",
+      "native_inputs": [],
+      "reason_code": null,
+      "recoverable_input": false,
+      "state": "pending",
+      "state_version": 0,
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    "input": {
+      "attachment_ids": [],
+      "attachments": [],
+      "content": "Retained original input",
+      "wiki_mode": "auto"
+    },
+    "request_id": "request",
+    "session_id": "session",
+    "type": "submission"
+  },
+  "tool_result": {
+    "is_error": false,
+    "output": "File text",
+    "session_id": "session",
+    "tool_use_id": "tool",
+    "type": "tool_result"
+  },
+  "tool_use": {
+    "input": {
+      "path": "README.md"
+    },
+    "session_id": "session",
+    "tool": "read_file",
+    "tool_use_id": "tool",
+    "type": "tool_use"
+  },
+  "user_message": {
+    "content": "Conflicting original outcome",
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "seq": 1,
+    "session_id": "session",
+    "tool_input": {
+      "request_context": {
+        "knowledge": {
+          "value": {
+            "maintenance": {
+              "may_submit": false,
+              "required_selections": []
+            },
+            "mode": "auto",
+            "origin": {
+              "request_id": "request",
+              "session_id": "session",
+              "user_id": "owner"
+            },
+            "registration": null,
+            "sources": [],
+            "task_requirements": [],
+            "trusted_request": "Conflicting original outcome"
+          },
+          "version": 1
+        },
+        "request_id": "request",
+        "source": "human",
+        "work_id": null
+      }
+    },
+    "type": "user_message"
+  }
+}
