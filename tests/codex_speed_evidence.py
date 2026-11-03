@@ -58,7 +58,9 @@ def successful_thread(
     events: list[HarnessEvent], *, expected_thread: str | None = None,
     recalled_word: str | None = None,
 ) -> str:
-    assert not any(event.type == "error" for event in events), "turn emitted an error"
+    errors = [event for event in events if event.type == "collection_error" or (event.type == "error" and not (
+        event.error_code == "native_provider_retry" and (event.error_details or {}).get("willRetry") is True))]
+    assert not errors, [(event.error_code, event.content, event.error_details) for event in errors]
     results = [event for event in events if event.type == "result"]
     assert len(results) == 1, "turn must have exactly one result"
     result = results[0]

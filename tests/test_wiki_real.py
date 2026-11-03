@@ -215,7 +215,7 @@ async def test_codex_explicit_wiki_and_native_helper(
         assert all(child.runtime_metadata["attempt_id"] == contexts[0][1] for child in finished)
         assert "NATIVE_CARD_ACCEPTED" in "".join(event.content or "" for event in raw if event.type == "text")
         assert raw[-1].type == "result" and not raw[-1].is_error
-        assert "Sent prompt with event ID:" not in backend.stderr_text
+        assert not any("Sent prompt with event ID:" in (event.content or "") for event in raw)
     finally:
         await manager.drain_turns(timeout=30)
         await manager.stop_all_held_processes()

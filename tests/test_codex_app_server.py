@@ -62,6 +62,7 @@ for line in sys.stdin:
         assert received.read_text() == prompt
         assert [event.content for event in events if event.type == "text"] == ["Bound answer"]
         assert [event.type for event in events].count("result") == 1
+        assert events[-1].type == "result", "Internal retirement observations must precede the terminal result"
         assert not events[-1].is_error
         assert evidence[-1].state == "accepted"
         assert evidence[-1].turn_id == "turn-1"

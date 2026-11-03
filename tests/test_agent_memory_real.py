@@ -156,8 +156,8 @@ async def test_codex_memory_read_emits_native_activity_and_metadata(tmp_path, mo
         assert run_row["resource_state"] == "proven" and run_row["metrics_collection_complete"] == 1
         assert not any(e.type == "model_measurement" for e in events)
         assert any(e.type == "result" and not e.is_error for e in events)
-        assert "Sent prompt with event ID:" not in run.stderr_text
-        assert "SessionConfiguredEvent" not in run.stderr_text
+        assert not any("Sent prompt with event ID:" in (event.content or "") for event in events)
+        assert not any("SessionConfiguredEvent" in (event.content or "") for event in events)
     finally:
         await run.stop()
         await metrics.stop()

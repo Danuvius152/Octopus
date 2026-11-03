@@ -798,9 +798,6 @@ class HarnessRun:
                 self._event_changed.set()
                 yield event
             elif self._stream_closed:
-                if self._provider_terminal is not None:
-                    terminal, self._provider_terminal = self._provider_terminal, None
-                    yield terminal
                 # The original projection already bounds these identities.
                 # Derive retirement facts only after the accepted output prefix
                 # and proven shutdown, without sending them through a saturated
@@ -813,6 +810,11 @@ class HarnessRun:
                 if self._stream_failure is not None and not self._failure_delivered:
                     self._failure_delivered = True
                     yield self._stream_failure
+                # Keep the public terminal last. Internal closure/summary
+                # observations still follow all accepted items and their saves.
+                if self._provider_terminal is not None:
+                    terminal, self._provider_terminal = self._provider_terminal, None
+                    yield terminal
                 if self._driver.multiplexed:
                     self._tool_context = None
                     self._tool_identity_tracker = None

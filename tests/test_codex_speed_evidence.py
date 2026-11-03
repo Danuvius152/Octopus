@@ -183,7 +183,7 @@ def test_capture_requires_unique_matching_meta_and_complete_bytes(tmp_path, defe
             capture_rollout(tmp_path, THREAD, CWD)
 
 
-@pytest.mark.parametrize("defect", [None, "missing-result", "duplicate-result", "failed-result", "error-event", "wrong-thread", "missing-thread", "lost-memory"])
+@pytest.mark.parametrize("defect", [None, "retry-diagnostic", "retry-without-evidence", "retry-then-failure", "collection-gap", "missing-result", "duplicate-result", "failed-result", "error-event", "wrong-thread", "missing-thread", "lost-memory"])
 def test_successful_same_thread_and_recall_are_required(defect):
     result = HarnessEvent(type="result", session_id=THREAD)
     events = [HarnessEvent(type="text", content="MARIGOLD"), result]
@@ -195,13 +195,19 @@ def test_successful_same_thread_and_recall_are_required(defect):
         result.is_error = True
     elif defect == "error-event":
         events.append(HarnessEvent(type="error"))
+    elif defect == "collection-gap":
+        events.insert(0, HarnessEvent(type="collection_error", error_code="native_collection_incomplete"))
+    elif defect in {"retry-diagnostic", "retry-without-evidence", "retry-then-failure"}:
+        events.insert(0, HarnessEvent(type="error", error_code="native_provider_retry",
+                                     content="Reconnecting...", error_details={"willRetry": defect != "retry-without-evidence"}))
+        result.is_error = defect == "retry-then-failure"
     elif defect == "wrong-thread":
         result.session_id = "foreign"
     elif defect == "missing-thread":
         result.session_id = None
     elif defect == "lost-memory":
         events[0].content = "forgotten"
-    if defect is None:
+    if defect in {None, "retry-diagnostic"}:
         assert successful_thread(events, expected_thread=THREAD, recalled_word="MARIGOLD") == THREAD
     else:
         with pytest.raises(AssertionError):

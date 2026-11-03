@@ -221,6 +221,9 @@ outcome already won, or collection failure initiated cleanup before that termina
 Completed with a true required-record gap is failed, keeps `native_status=completed`
 and any saved answer, and grants no automatic replay. Chat displays the native
 status and distinguishes saved-but-incomplete content from a known missing final.
+The public Harness stream ends with its single provider result after internal
+retirement/summary observations and collection diagnostics. Wire terminal parsing
+still closes admission immediately; stream presentation order cannot extend it.
 
 `TurnOutcome.final_answer` references ordered original root final-message rows.
 Commentary, child text and tool text remain in the transcript and never become
