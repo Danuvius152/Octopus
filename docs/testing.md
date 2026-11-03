@@ -223,6 +223,14 @@ evidence under the reuse policy above.
 - `tests/native_app_server.py` keeps its function-scoped runtime, original Manager,
   SQLite database and cleanup together. `tests/session_runtime.py` owns shared
   dispatcher observations. Import support modules directly, not case modules.
+- `tests/session_fork_support.py` owns the function-scoped fork source, SQLite
+  and HTTP fixture; `tests/session_held_process.py` owns the original live
+  process, readers and their teardown for rewind and failed-Owner tests.
+  Scenario barriers and assertions stay in the consuming case files. Neither
+  shared fixture imports case modules or creates resources at import time.
+  Frontend read tests share only Promise preparation through
+  `web/src/test-support/deferred.ts`; callers still arrange request/event order,
+  reset stores and settle their own promises.
 - Short steer-ACK and accepted-input idle budgets begin after original-root
   preparation or acceptance commit. A test changing runtime idle budgets must
   wake the Owner; otherwise it probes startup or sleeping dispatch, not the

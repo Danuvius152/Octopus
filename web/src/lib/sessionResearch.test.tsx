@@ -1,3 +1,4 @@
+import { deferred } from "../test-support/deferred";
 import { Socket } from "../test-support/socket";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
@@ -14,11 +15,6 @@ import { useSessionStore, type SessionInfo, type ResearchJob } from "../stores/s
 const dispatch = (generation = "service") => ({ generation, revision: 1, paused: false, items: [], active_request_id: null });
 const job: ResearchJob = { id: "r1", session_id: "s1", question: "Existing research", status: "running", phase: "search" };
 const session = { id: "s1", name: "Saved conversation", archived: false, agent_id: "ag1" } as SessionInfo;
-function deferred() {
-  let resolve!: (response: Response) => void;
-  const promise = new Promise<Response>((yes) => { resolve = yes; });
-  return { promise, resolve };
-}
 beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);
   useSessionStore.setState({ token: "tok" });
@@ -39,7 +35,7 @@ function submitResearch() {
 }
 
 it.each(["progress", "completed", "failed", "cancelled"])("a late creation receipt preserves earlier %s facts through ChatView", async (kind) => {
-  const response = deferred();
+  const response = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
     String(url).endsWith("/research") && init?.method === "POST" ? response.promise : Promise.resolve(Response.json([]))));
   submitResearch();
@@ -58,7 +54,7 @@ it.each(["progress", "completed", "failed", "cancelled"])("a late creation recei
 });
 
 it("initializes the actual creation state and retains valid results after viewing another session", async () => {
-  const response = deferred();
+  const response = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
     String(url).endsWith("/research") && init?.method === "POST" ? response.promise : Promise.resolve(Response.json([]))));
   submitResearch();
@@ -68,7 +64,7 @@ it("initializes the actual creation state and retains valid results after viewin
 });
 
 it.each(["account", "service", "unmount"])("drops old creation data and errors after %s changes", async (change) => {
-  const response = deferred();
+  const response = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
     String(url).endsWith("/research") && init?.method === "POST" ? response.promise : Promise.resolve(Response.json([]))));
   const view = submitResearch();
@@ -83,7 +79,7 @@ it.each(["account", "service", "unmount"])("drops old creation data and errors a
 });
 
 it.each([true, false])("a missed-started snapshot remains authoritative across creation (read first=%s)", async (readFirst) => {
-  const post = deferred(), read = deferred();
+  const post = deferred<Response>(), read = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
     if (String(url).endsWith("/research")) return init?.method === "POST" ? post.promise : read.promise;
     return Promise.resolve(Response.json([]));
@@ -105,7 +101,7 @@ it.each([true, false])("a missed-started snapshot remains authoritative across c
 it.each([1, 2])("a browser confirmation preserves a concurrent authoritative delivery snapshot v%s", async (version) => {
   const receipt = { request_id: "original", version: 1, stage: "queued" as const };
   useSessionStore.setState({ dispatchGeneration: "service", research: { s1: [{ ...job, status: "completed", delivery_receipt: receipt }] } });
-  const snapshot = deferred(), confirmation = deferred();
+  const snapshot = deferred<Response>(), confirmation = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
     init?.method === "POST" ? confirmation.promise : String(url).endsWith("/research") ? snapshot.promise : Promise.resolve(Response.json([]))));
   const reading = loadResearchSnapshot("s1");
@@ -159,7 +155,7 @@ it("loads retained research when viewing archived history", async () => {
 
 it("preserves newer WS progress and newly started jobs when a snapshot arrives late", async () => {
   useSessionStore.setState({ dispatchGeneration: "service", research: { s1: [job] } });
-  const response = deferred();
+  const response = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn(() => response.promise));
   const loaded = loadResearchSnapshot("s1");
   handleWsMessage({ type: "research_progress", session_id: "s1", research_id: "r1", phase: "verify" });
@@ -174,7 +170,7 @@ it("preserves newer WS progress and newly started jobs when a snapshot arrives l
 
 it("recovers an unknown progress event during the first snapshot without accepting its stale status", async () => {
   useSessionStore.setState({ activeSessionId: "s1", dispatchGeneration: "service" });
-  const old = deferred();
+  const old = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => old.promise)
     .mockResolvedValueOnce(Response.json([{ ...job, phase: "verify" }])));
   const loaded = loadResearchSnapshot("s1");
@@ -201,8 +197,8 @@ it("reloads research on WS reconnect after establishing the detail's service gen
 
 it.each(["old-first", "new-first"])("keeps recovered completion across overlapping empty-baseline snapshots (%s)", async (order) => {
   useSessionStore.setState({ activeSessionId: "s1", dispatchGeneration: "service" });
-  const old = deferred();
-  const latest = deferred();
+  const old = deferred<Response>();
+  const latest = deferred<Response>();
   const fetcher = vi.fn().mockImplementationOnce(() => old.promise).mockImplementationOnce(() => latest.promise);
   vi.stubGlobal("fetch", fetcher);
   const first = loadResearchSnapshot("s1");
@@ -226,7 +222,7 @@ it.each(["old-first", "new-first"])("keeps recovered completion across overlappi
 
 it("does not treat an earlier snapshot as a live event across overlapping empty-baseline reads", async () => {
   useSessionStore.setState({ dispatchGeneration: "service" });
-  const a = deferred(), b = deferred();
+  const a = deferred<Response>(), b = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
   const first = loadResearchSnapshot("s1"), second = loadResearchSnapshot("s1");
   a.resolve(Response.json([job])); await first;
@@ -236,8 +232,8 @@ it("does not treat an earlier snapshot as a live event across overlapping empty-
 
 it("preserves real WS completion and newly started jobs across the newest overlapping response", async () => {
   useSessionStore.setState({ activeSessionId: "s1", dispatchGeneration: "service" });
-  const old = deferred();
-  const latest = deferred();
+  const old = deferred<Response>();
+  const latest = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => old.promise).mockImplementationOnce(() => latest.promise));
   const first = loadResearchSnapshot("s1");
   handleWsMessage({ type: "research_progress", session_id: "s1", research_id: "r1", phase: "verify" });
@@ -256,8 +252,8 @@ it("preserves real WS completion and newly started jobs across the newest overla
 
 it.each(["account", "service"])("rejects both overlapping responses after changing %s", async (kind) => {
   useSessionStore.setState({ activeSessionId: "s1", dispatchGeneration: "service" });
-  const old = deferred();
-  const latest = deferred();
+  const old = deferred<Response>();
+  const latest = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => old.promise).mockImplementationOnce(() => latest.promise));
   const first = loadResearchSnapshot("s1").catch(() => {});
   const second = loadResearchSnapshot("s1").catch(() => {});
@@ -272,8 +268,8 @@ it.each(["account", "service"])("rejects both overlapping responses after changi
 
 it.each(["account", "service"])("keeps the new %s read owned when old calls and responses finish", async (kind) => {
   useSessionStore.setState({ activeSessionId: "s1", dispatchGeneration: "service" });
-  const old = deferred();
-  const latest = deferred();
+  const old = deferred<Response>();
+  const latest = deferred<Response>();
   const fetcher = vi.fn().mockImplementationOnce(() => old.promise).mockImplementationOnce(() => latest.promise);
   vi.stubGlobal("fetch", fetcher);
   const first = loadResearchSnapshot("s1").catch(() => {});
@@ -290,7 +286,7 @@ it.each(["account", "service"])("keeps the new %s read owned when old calls and 
 
 it("settles a failed newest read without letting an older response replace the next successful retry", async () => {
   useSessionStore.setState({ dispatchGeneration: "service" });
-  const old = deferred();
+  const old = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => old.promise)
     .mockResolvedValueOnce(new Response(null, { status: 503 }))
     .mockResolvedValueOnce(Response.json([{ ...job, status: "completed", phase: "done" }])));
@@ -304,7 +300,7 @@ it("settles a failed newest read without letting an older response replace the n
 
 it.each(["account", "service"])("rejects research from a retired %s", async (kind) => {
   useSessionStore.setState({ dispatchGeneration: "service" });
-  const response = deferred();
+  const response = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn(() => response.promise));
   const loaded = loadResearchSnapshot("s1").catch((error: Error) => error.message);
   if (kind === "account") useSessionStore.getState().setToken("other-account");

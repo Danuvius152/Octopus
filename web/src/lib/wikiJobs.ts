@@ -3,6 +3,11 @@ import { useSessionStore } from "../stores/sessionStore";
 
 const API = window.location.origin;
 
+export function isWikiJobComplete(card: WikiJobCard): boolean {
+  return card.status === "completed" && ["none", "confirmed"].includes(card.settlement_phase)
+    && (card.recording_pending ?? 0) === 0 && (card.effects?.index_pending ?? 0) === 0;
+}
+
 function cardsFrom(value: unknown): WikiJobCard[] {
   if (!Array.isArray(value) || value.some((card) => !card ||
     typeof card.job_id !== "string" || typeof card.vault_id !== "string" ||
@@ -52,9 +57,7 @@ export function reconcileWikiJobs(sessionId: string): Promise<number> {
   // A disconnected browser may have missed the only invalidation. Recheck
   // retained work by identity even when newer cards fill the first page.
   for (const card of state.wikiJobs[sessionId] || []) {
-    if (card.status !== "completed" || card.settlement_phase === "pending" ||
-      ["unconfirmed", "attention"].includes(card.settlement_phase) || (card.recording_pending ?? 0) > 0 ||
-      (card.effects?.index_pending ?? 0) > 0) {
+    if (!isWikiJobComplete(card)) {
       state.invalidateWikiJob(sessionId, card);
     }
   }

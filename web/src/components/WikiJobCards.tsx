@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { IconBook, IconCheck, IconAlertTriangle } from "@tabler/icons-react";
 import type { WikiJobCard } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
-import { controlWikiJob, reconcileWikiJobs, refreshWikiJobs } from "../lib/wikiJobs";
+import { controlWikiJob, isWikiJobComplete, reconcileWikiJobs, refreshWikiJobs } from "../lib/wikiJobs";
 import { WikiJobDetails } from "./WikiJobDetails";
 
 const LABELS: Record<string, string> = {
@@ -75,6 +75,7 @@ export function WikiJobCards({ sessionId }: { sessionId: string }) {
   const [offset, setOffset] = useState(0);
   const [more, setMore] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [showCompleted, setShowCompleted] = useState(false);
   useEffect(() => {
     let active = true;
     void reconcileWikiJobs(sessionId).then((count) => {
@@ -93,8 +94,15 @@ export function WikiJobCards({ sessionId }: { sessionId: string }) {
     finally { setLoading(false); }
   };
   if (!cards?.length && !error) return null;
+  const completed = cards?.filter(isWikiJobComplete) ?? [];
   return <section aria-label="Wiki maintenance tasks" className="max-h-64 overflow-y-auto space-y-2 pb-2">
-    {cards?.map((card) => <Card key={`${generation}/${card.vault_id}/${card.job_id}`} card={card} sessionId={sessionId} />)}
+    {cards?.filter((card) => !isWikiJobComplete(card)).map((card) => <Card key={`${generation}/${card.vault_id}/${card.job_id}`} card={card} sessionId={sessionId} />)}
+    {completed.length > 0 && <>
+      <button type="button" aria-expanded={showCompleted} onClick={() => setShowCompleted(!showCompleted)} className="text-xs text-muted-foreground">
+        Completed maintenance ({completed.length} loaded)
+      </button>
+      {showCompleted && completed.map((card) => <Card key={`${generation}/${card.vault_id}/${card.job_id}`} card={card} sessionId={sessionId} />)}
+    </>}
     {more && <button type="button" disabled={loading} onClick={() => void loadMore()} className="text-xs text-primary">More maintenance tasks</button>}
     {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
   </section>;

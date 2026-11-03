@@ -137,5 +137,6 @@
 - [后台结果管线](post-mortems/2026-05-18-bg-pipeline-hardening.md)：四类历史故障；当时 `server/backends/` 现为 `server/harness/`。
 - [SessionOwner 范围遗漏](post-mortems/2026-10-21-session-owner-scope-creep.md)：遗漏消费者、未收敛接口与错过目标故障的验证。
 - [账户 setup 退役](post-mortems/2026-10-24-account-setup-retirement.md)：身份夹具、冷恢复假设及验证范围。
+- [OAuth 连续修复](post-mortems/2026-11-03-oauth-repeated-boundary-bugs.md)：近一个月登录、刷新、绑定、取消与 UI 的责任断点及回归经验。
 
 需要回读已退出的历史正文时，使用固定快照：[旧工程路线](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/plans/engineering-runtime-roadmap.md)、[旧架构候选](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/review/architecture/architecture-review-20261101.html)、[Wiki 修复](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md)、[2026-10-25 关闭的仓库审查](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/review-20261023.md)、[搬迁审查](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/migration-scope-and-portability-20261023.md)。这些快照只证明各自版本与范围。

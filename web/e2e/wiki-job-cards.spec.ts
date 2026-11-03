@@ -1,9 +1,68 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
-import { expect, test, type WebSocketRoute } from "./test";
+import { expect, test, type Page, type WebSocketRoute } from "./test";
 import { systemAgentId } from "./system-agent";
+import { wikiJob } from "../src/lib/wikiJobs.fixture";
 
 const API = "http://localhost:8765/api";
 const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+
+async function openSession(page: Page, name: string) {
+  const agent = page.locator(".agent-item", { hasText: "Octo" });
+  await expect(agent).toBeVisible();
+  const row = page.locator(".session-item", { hasText: name });
+  if (!(await row.isVisible())) await agent.click();
+  await row.click();
+  await expect(page.locator(".conn-status.on")).toBeVisible();
+}
+
+test("settled Wiki success leaves chat activity, with outputs still reachable after reload", async ({ page, request }) => {
+  // Controlled HTTP/WS observations exercise the real ChatView consumer;
+  // the separate persistence fixture covers product DB delivery.
+  const created = await request.post(`${API}/sessions`, {
+    headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: "Completed Wiki history" },
+  });
+  expect(created.ok()).toBeTruthy();
+  const session = await created.json();
+  let card = wikiJob();
+  let socket: WebSocketRoute | undefined;
+  await page.routeWebSocket(/\/ws(?:\?|$)/, (ws) => { socket = ws; ws.connectToServer(); });
+  await page.route(`**/api/sessions/${session.id}/wiki-jobs?*`, (route) => route.fulfill({ json: [card] }));
+  await page.route("**/api/wiki/jobs/job-1/details?*", (route) => route.fulfill({ status: 404, json: { detail: "Wiki job not found" } }));
+  const change = (updates: Partial<typeof card>) => {
+    card = { ...card, ...updates, state_version: card.state_version + 1 };
+    expect(socket).toBeDefined();
+    socket!.send(JSON.stringify({ type: "wiki_job_changed", session_id: session.id,
+      vault_id: card.vault_id, job_id: card.job_id, state_version: card.state_version }));
+  };
+  try {
+    await page.goto("/");
+    await enterAccountCredentials(page);
+    await openSession(page, session.name);
+    const activity = page.locator('[data-wiki-job="job-1"]');
+    await expect(activity).toHaveAttribute("data-status", "running");
+    change({ status: "completed", effects: { recorded: 1, applied: 1, index_pending: 1 } });
+    await expect(activity).toContainText("Content saved; indexing remains pending");
+    change({ effects: { recorded: 1, applied: 1, index_pending: 0 }, outcome_count: 1,
+      outcome_refs: [{ doc_id: "document", path: "Library/note.md", revision: "a".repeat(64) }] });
+    await expect(activity).toHaveCount(0);
+    const history = page.getByRole("button", { name: "Completed maintenance (1 loaded)" });
+    await expect(history).toHaveAttribute("aria-expanded", "false");
+    await history.click();
+    await expect(activity).toHaveAttribute("data-status", "completed");
+    await activity.getByText("Saved outputs (1)").click();
+    await expect(activity).toContainText("Library/note.md");
+    await activity.getByRole("button", { name: "Task details" }).click();
+    await expect(activity).toContainText("Task details are unavailable. The saved summary remains here.");
+    await page.reload();
+    await openSession(page, session.name);
+    await expect(history).toHaveAttribute("aria-expanded", "false");
+    await expect(activity).toHaveCount(0);
+    await history.click();
+    await expect(activity).toContainText("Saved outputs (1)");
+  } finally {
+    await request.delete(`${API}/sessions/${session.id}`, { headers });
+  }
+});
 
 test("Wiki cards persist, cancel their displayed attempt, and catch up after reconnect", async ({ page, context, request }) => {
   test.setTimeout(60_000);
@@ -24,14 +83,6 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
     sockets.push(socket);
     socket.connectToServer();
   });
-  const openOriginalSession = async () => {
-    const agent = page.locator(".agent-item", { hasText: "Octo" });
-    await expect(agent).toBeVisible();
-    const row = page.locator(".session-item", { hasText: session.name });
-    if (!(await row.isVisible())) await agent.click();
-    await row.click();
-    await expect(page.locator(".conn-status.on")).toBeVisible();
-  };
   const submit = async (key: string) => {
     const result = await request.post(`${API}/wiki/maintain`, {
       headers: { Authorization: `Bearer ${scope.token}` },
@@ -100,7 +151,7 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
     await expect(secondCard).toHaveAttribute("data-status", "cancelled");
 
     await page.reload();
-    await openOriginalSession();
+    await openSession(page, session.name);
     await expect(page.locator(`[data-wiki-job="${first.id}"]`)).toHaveAttribute("data-status", "cancelled");
     await expect(page.locator(`[data-wiki-job="${second.id}"]`)).toHaveAttribute("data-status", "cancelled");
     expect((await request.post(`${API}/sessions/${session.id}/archive?replace=false`, { headers })).ok()).toBeTruthy();
@@ -117,7 +168,7 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
     expect(detail.messages[0].content).toContain("原请求的执行约束无法核实");
     expect((await request.post(`${API}/sessions/${session.id}/unarchive`, { headers })).ok()).toBeTruthy();
     await page.reload();
-    await openOriginalSession();
+    await openSession(page, session.name);
     await expect(page.locator("[data-wiki-job]")).toHaveCount(2);
   } finally {
     disconnected = false;

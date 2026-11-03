@@ -16,6 +16,7 @@ it("shows persisted completed outputs after a chat is reopened", () => {
     outcome_refs: [{ doc_id: "document", path: "Library/note.md", revision: "a".repeat(64) }],
   })]);
   render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByRole("button", { name: "Completed maintenance (1 loaded)" }));
   expect(screen.getByText(/Wiki maintenance · Completed/)).toBeTruthy();
   expect(screen.getByText(/2\/2 items completed/)).toBeTruthy();
   expect(screen.getByText(/Saved outputs \(1\)/)).toBeTruthy();
@@ -31,6 +32,7 @@ it("keeps the original card read-only when task details are no longer available"
     ? Response.json({ detail: "Wiki job not found" }, { status: 404 }) : Response.json([card]));
   vi.stubGlobal("fetch", fetcher);
   render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByRole("button", { name: "Completed maintenance (1 loaded)" }));
   fireEvent.click(screen.getByRole("button", { name: "Task details" }));
   await screen.findByText("Task details are unavailable. The saved summary remains here.");
   expect(screen.getByText(/Wiki maintenance · Completed/)).toBeTruthy();
@@ -50,6 +52,7 @@ it.each([403, 503])("does not treat HTTP %s as missing task details", async (sta
   vi.stubGlobal("fetch", vi.fn(async (url: string) => String(url).includes("/details")
     ? Response.json({ detail: "Cannot read this task" }, { status }) : Response.json([card])));
   render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByRole("button", { name: "Completed maintenance (1 loaded)" }));
   fireEvent.click(screen.getByRole("button", { name: "Task details" }));
   expect((await screen.findByRole("alert")).textContent).toBe("Cannot read this task");
   expect(screen.queryByText("Task details are unavailable. The saved summary remains here.")).toBeNull();
@@ -100,6 +103,9 @@ it("reconciles a retained task missed while disconnected even after it leaves th
   const { container } = render(<WikiJobCards sessionId="original" />);
   await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("503"));
   await act(async () => useSessionStore.setState({ connected: true }));
+  await screen.findByRole("button", { name: "Completed maintenance (31 loaded)" });
+  expect(container.querySelector('[data-wiki-job="old-job"]')).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Completed maintenance (31 loaded)" }));
   await waitFor(() => expect(container.querySelector('[data-wiki-job="old-job"]')).toHaveAttribute("data-status", "completed"));
   expect(fetcher.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method || (init as RequestInit).method === "GET")).toBe(true);
 });
@@ -125,6 +131,7 @@ it("opens complete historical evidence and moved current text using only GET req
   });
   vi.stubGlobal("fetch", fetcher);
   render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByRole("button", { name: "Completed maintenance (1 loaded)" }));
   fireEvent.click(screen.getByText("Task details"));
   await waitFor(() => expect(screen.getByText(diagnostic.trim()).textContent).toBe(diagnostic));
   expect(screen.getByText(/Library\/moved.md/)).toBeTruthy();

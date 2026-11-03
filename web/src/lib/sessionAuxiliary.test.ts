@@ -1,13 +1,9 @@
+import { deferred } from "../test-support/deferred";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { loadBgTaskSnapshot, loadResearchSnapshot, observeSessionAuxiliary } from "./hydrateSession";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { useSessionStore, type BgTask, type ResearchJob } from "../stores/sessionStore";
 
-function deferred() {
-  let resolve!: (response: Response) => void;
-  const promise = new Promise<Response>((yes) => { resolve = yes; });
-  return { promise, resolve };
-}
 const bg = { id: "task", session_id: "s", status: "running" } as BgTask;
 const research = { id: "task", session_id: "s", question: "A question", status: "running", phase: "search" } as ResearchJob;
 beforeEach(() => {
@@ -17,7 +13,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 it.each(["background", "research"] as const)("accepts completion across two %s snapshots sharing a running baseline", async (kind) => {
-  const a = deferred(), b = deferred();
+  const a = deferred<Response>(), b = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
   const load = kind === "background" ? loadBgTaskSnapshot : loadResearchSnapshot;
   const row = kind === "background" ? bg : research;
@@ -30,7 +26,7 @@ it.each(["background", "research"] as const)("accepts completion across two %s s
 });
 
 it.each(["background", "research"] as const)("keeps completed %s when a later-started running snapshot arrives last", async (kind) => {
-  const a = deferred(), b = deferred();
+  const a = deferred<Response>(), b = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
   const load = kind === "background" ? loadBgTaskSnapshot : loadResearchSnapshot;
   const row = kind === "background" ? bg : research;
@@ -43,7 +39,7 @@ it.each(["background", "research"] as const)("keeps completed %s when a later-st
 });
 
 it.each(["background", "research"] as const)("accepts an older-started completed %s response after the newer running response", async (kind) => {
-  const a = deferred(), b = deferred();
+  const a = deferred<Response>(), b = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
   const load = kind === "background" ? loadBgTaskSnapshot : loadResearchSnapshot;
   const row = kind === "background" ? bg : research;
@@ -56,7 +52,7 @@ it.each(["background", "research"] as const)("accepts an older-started completed
 });
 
 it("keeps real BG completion and a new task while both old lists finish", async () => {
-  const a = deferred(), b = deferred();
+  const a = deferred<Response>(), b = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
   const first = loadBgTaskSnapshot("s"), second = loadBgTaskSnapshot("s");
   handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "task", status: "completed", exit_code: 0, completed_at: "now" });
@@ -69,7 +65,7 @@ it("keeps real BG completion and a new task while both old lists finish", async 
 });
 
 it.each(["unknown", null] as const)("allows an old list's terminal fact without replacing newer detail delivery (%s)", async (disposition) => {
-  const a = deferred(), b = deferred();
+  const a = deferred<Response>(), b = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
   const list = loadBgTaskSnapshot("s");
   const detail = observeSessionAuxiliary("s", "background", "task");
@@ -85,7 +81,7 @@ it.each(["unknown", null] as const)("allows an old list's terminal fact without 
 });
 
 it.each(["background", "research"] as const)("cancels only the %s observation", async (kind) => {
-  const response = deferred();
+  const response = deferred<Response>();
   const fetcher = vi.fn((_url: RequestInfo | URL) => response.promise);
   vi.stubGlobal("fetch", fetcher);
   const read = observeSessionAuxiliary("s", kind);
@@ -98,7 +94,7 @@ it.each(["background", "research"] as const)("cancels only the %s observation", 
 });
 
 it("keeps receipt and parent processing facts distinct across a late research list", async () => {
-  const response = deferred();
+  const response = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn(() => response.promise));
   const read = loadResearchSnapshot("s");
   handleWsMessage({ type: "research_completed", session_id: "s", research_id: "task" });

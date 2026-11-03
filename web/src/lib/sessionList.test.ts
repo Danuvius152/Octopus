@@ -1,13 +1,8 @@
+import { deferred } from "../test-support/deferred";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SessionList } from "./sessionList";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 const row = (id = "old", status = "running") => ({ id, name: id, status, archived: false } as SessionInfo);
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 let list: SessionList;

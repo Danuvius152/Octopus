@@ -12,13 +12,10 @@ from server.database import Database
 from server.harness import get_harness
 from server.sessions import SessionManager
 from server.sessions.owner import SessionOwnerUnavailable
-from tests import test_session_fork_installation as fork_tests
-from tests import test_session_owner_rewind_retirement as rewind_tests
 from tests.accounts import create_account
+from tests.session_fork_support import installation as installation
+from tests.session_held_process import held_rewind as held_rewind
 from tests.session_runtime import fail_destination_owner
-
-installation = fork_tests.installation
-held_rewind = rewind_tests.held_rewind
 
 
 @pytest.mark.parametrize("held_rewind", [.4], indirect=True)
