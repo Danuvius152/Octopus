@@ -63,10 +63,10 @@ async def test_multiple_receivers_rounds_stale_wait_and_duplicate_notifications(
     await start_output(native_runtime)
     spawn = {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
         "id": "spawn", "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "completed",
-        "receiverThreadIds": ["one", "two"], "agentsStates": {}, "prompt": "Two helpers"}}}
+        "receiverThreadIds": ["one", "two"], "senderThreadId": ROOT, "agentsStates": {}, "prompt": "Two helpers"}}}
     wait = {"method": "item/started", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
         "id": "old-wait", "type": "collabAgentToolCall", "tool": "wait", "status": "inProgress",
-        "receiverThreadIds": ["one"], "agentsStates": {}}}}
+        "receiverThreadIds": ["one"], "senderThreadId": ROOT, "agentsStates": {}}}}
     old_wait_end = {"method": "item/completed", "params": {**wait["params"], "item": {
         **wait["params"]["item"], "status": "completed", "agentsStates": {"one": {"status": "completed"}}}}}
     inject(tmp_path, spawn, spawn, child_start("one", "first"), child_start("two", "only"), wait,
@@ -105,7 +105,7 @@ async def test_same_raw_tool_id_keeps_separate_root_child_provenance(native_runt
     await start_output(native_runtime)
     def tool(thread, turn, phase):
         return {"method": "item/" + phase, "params": {"threadId": thread, "turnId": turn, "item": {
-            "id": "same", "type": "commandExecution", "command": "true", "status": "completed", "aggregatedOutput": thread, "exitCode": 0}}}
+            "id": "same", "type": "commandExecution", "command": "true", "cwd": "/tmp", "commandActions": [], "status": "completed", "aggregatedOutput": thread, "exitCode": 0}}}
     inject(tmp_path, child_start(), tool(ROOT, "turn-1", "started"), tool("child", "child-turn", "started"),
         tool(ROOT, "turn-1", "completed"), tool("child", "child-turn", "completed"), terminal())
     await wait_dispatch_idle(manager, session.id)
@@ -215,7 +215,7 @@ async def test_waiting_on_grandchild_does_not_rewrite_its_actual_parent(native_r
             "id": "spawn-" + child, "type": "subAgentActivity", "kind": "started", "agentThreadId": child, "agentPath": "/root/middle/grand"}}}
     inject(tmp_path, child_start("middle", "middle-turn"), spawned("middle", "middle-turn", "grand"),
         child_start("grand", "grand-turn"), {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
-            "id": "observe-grand", "type": "collabAgentToolCall", "tool": "wait", "status": "completed", "receiverThreadIds": ["grand"], "agentsStates": {}}}},
+            "id": "observe-grand", "type": "collabAgentToolCall", "tool": "wait", "status": "completed", "receiverThreadIds": ["grand"], "senderThreadId": ROOT, "agentsStates": {}}}},
         item("grand", "grand-turn", "body", "Grandchild partial"), terminal())
     await wait_dispatch_idle(manager, session.id)
     rows = await database.load_messages(session.id)

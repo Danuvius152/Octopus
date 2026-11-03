@@ -27,7 +27,9 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from server.mcp_servers.connectors._shared import (  # noqa: E402
     ConnectorContext,
+    ConnectorTokenError,
     to_text,
+    token_failure_message,
     truncate,
 )
 
@@ -46,10 +48,6 @@ _GH_HEADERS = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
 }
-_RECONNECT_MSG = (
-    "Error: GitHub token expired or revoked — ask the user to reconnect "
-    "GitHub in Octopus's sidebar."
-)
 
 
 def _gh(method: str, path: str, **kw: Any) -> tuple[Any, str | None]:
@@ -64,10 +62,11 @@ def _gh(method: str, path: str, **kw: Any) -> tuple[Any, str | None]:
     an empty result. It also lets the return type drop the `| None`, so a
     type checker stops reporting the 20-odd `data.get(...)` calls that are
     already guarded."""
-    token = ctx.access_token()
-    if token is None:
-        return {}, "Error: connector unavailable — reconnect GitHub in Octopus."
-    headers = {**_GH_HEADERS, "Authorization": f"Bearer {token}"}
+    try:
+        info = ctx.token_info()
+    except ConnectorTokenError as error:
+        return {}, token_failure_message(error)
+    headers = {**_GH_HEADERS, "Authorization": f"Bearer {info['access_token']}"}
     url = path if path.startswith("http") else f"{_API}{path}"
     for attempt in range(3):
         try:
@@ -75,8 +74,7 @@ def _gh(method: str, path: str, **kw: Any) -> tuple[Any, str | None]:
         except httpx.HTTPError as e:
             return {}, f"Error: GitHub request failed: {e}"
         if r.status_code == 401:
-            ctx.mark_needs_reconnect("invalid_grant")
-            return {}, _RECONNECT_MSG
+            return {}, ctx.rejection_message(info)
         if r.status_code == 429 or r.status_code >= 500:
             if attempt < 2:
                 retry_after = float(r.headers.get("Retry-After", "1") or 1)

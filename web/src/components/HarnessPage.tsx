@@ -458,7 +458,7 @@ export function HarnessPage({
                     </div>
                     <div className="mt-1 font-mono text-[11.5px] text-gray-700">
                       {c.backend === "claude-code" ? "Claude Code" : "Codex"} ·{" "}
-                      {c.auth_type === "oauth" ? "OAuth" : "API key"}
+                      {c.auth_type === "oauth" ? "OAuth authorization" : "API key"}
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2.5">
@@ -584,7 +584,7 @@ export function HarnessPage({
                   Claude Code
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  Sign in with Anthropic (OAuth).
+                  Sign in with Anthropic (OAuth). Re-authorizing an API key converts its saved authorization and keeps its bindings.
                 </span>
               </button>
               <button

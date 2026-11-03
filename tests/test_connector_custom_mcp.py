@@ -26,11 +26,11 @@ class FakeResp:
 @pytest.fixture
 def authed(monkeypatch):
     monkeypatch.setattr(cu.ctx, "token_info", lambda: {
-        "access_token": "tok", "api_base": "https://api.x.com/v1",
+        "access_token": "tok", "api_base": "https://api.x.com/v1", "grant_stamp": "stamp",
     })
     recon: list[str] = []
     monkeypatch.setattr(
-        cu.ctx, "mark_needs_reconnect", lambda code="invalid_grant": recon.append(code)
+        cu.ctx, "mark_needs_reconnect", lambda stamp: recon.append(stamp) or "applied"
     )
     return recon
 
@@ -68,7 +68,7 @@ def test_request_401_marks_reconnect(monkeypatch, authed):
     monkeypatch.setattr(cu.httpx, "request", lambda *a, **k: FakeResp(status=401))
     out = cu.request(method="get", path="/x")
     assert "reconnect" in out.lower()
-    assert authed == ["invalid_grant"]
+    assert authed == ["stamp"]
 
 
 def test_request_no_api_base(monkeypatch):
@@ -77,7 +77,9 @@ def test_request_no_api_base(monkeypatch):
 
 
 def test_request_no_token(monkeypatch):
-    monkeypatch.setattr(cu.ctx, "token_info", lambda: None)
+    def unavailable():
+        raise cu.ConnectorTokenError("unavailable", kind="temporary", code="transport")
+    monkeypatch.setattr(cu.ctx, "token_info", unavailable)
     out = cu.request(method="get", path="/x").lower()
     assert "unavailable" in out or "reconnect" in out
 

@@ -246,7 +246,8 @@ async def test_cli_stream_ending_without_a_result_is_a_truthful_failure(runtime,
     live, history = await drive(runtime)
     final = [e for e in live if e["type"] == "result"]
     assert len(final) == 1 and final[0]["content"]["status"] == "failed"
-    assert "transport unexpectedly closed" in final[0]["content"]["message"]
+    assert "Backend ended without a terminal result" in final[0]["content"]["message"]
+    assert "transport unexpectedly closed" not in final[0]["content"]["message"]
     assert "secret123" not in final[0]["content"]["message"]
     assert history[-1]["content"] == final[0]["content"]
 

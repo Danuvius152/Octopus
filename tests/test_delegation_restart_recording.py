@@ -210,10 +210,19 @@ async def _crash_scenario(directory: Path, mode: str, applied: bool) -> None:
 
     async def execute_round(sql, parameters=()):
         nonlocal armed, revoke_after_commit
+        previous = None
+        if sql.startswith("UPDATE sessions SET delegation_state = "):
+            if len(parameters) == 2:
+                # Child admission and the parent's responsibility now share a
+                # transaction. Capture its old value at that actual write.
+                before = await execute("SELECT delegation_state FROM sessions WHERE id=?", (parameters[1],))
+                row = await before.fetchone()
+                previous = json.loads(row[0]) if row and row[0] is not None else None
+            else:
+                previous = json.loads(parameters[-1]) if parameters[-1] is not None else None
         cursor = await execute(sql, parameters)
         if sql.startswith("UPDATE sessions SET delegation_state = "):
             proposed = json.loads(parameters[0])
-            previous = json.loads(parameters[-1]) if parameters[-1] is not None else None
             if mode == "nested_setup" and proposed["parent_work_id"] == outer.work_id:
                 metadata.update(leaf_id=parameters[1], leaf_work=proposed["work_id"])
             new_followup = original is not None and proposed["state"] == "running" and proposed["work_id"] != original.work_id
@@ -225,9 +234,9 @@ async def _crash_scenario(directory: Path, mode: str, applied: bool) -> None:
                 or (mode == "rollback" and previous is not None
                     and previous["work_id"] != proposed["work_id"]
                     and proposed["work_id"] == original.work_id)
-                or (mode == "nested_setup" and parameters[1] == outer.delegation_id and proposed["awaiting_sub_relay"])
+                or (mode == "nested_setup" and parameters[1] == outer.delegation_id and proposed["child_work_ids"])
                 or (mode == "nested_failure" and parameters[1] == outer.delegation_id and proposed["state"] == "failed")
-                or (mode == "nested_defer" and parameters[1] == outer.delegation_id and proposed["deferred_request_id"] is not None)
+                or (mode == "nested_defer" and parameters[1] == outer.delegation_id and proposed["candidate_request_id"] is not None)
                 or (mode in {"close", "restore"} and proposed["state"] == "interrupted")
             )
             if mode == "rollback" and new_followup:
@@ -334,7 +343,7 @@ async def test_complete_manager_command_fails_stop_then_cold_reopen_preserves_fa
                 expected_work = metadata["work_id"]
                 expected_state = "interrupted"
                 if mode == "terminal":
-                    expected_state = "completed"
+                    expected_state = "completed" if applied else "interrupted"
                 elif mode in {"closed", "cancel"} and applied:
                     expected_state = "cancelled"
                 elif mode == "followup" and not applied:
@@ -343,20 +352,24 @@ async def test_complete_manager_command_fails_stop_then_cold_reopen_preserves_fa
                     expected_work = metadata["proposed" if applied else "previous"]["work_id"]
                     expected_state = "completed" if applied else "interrupted"
                 elif mode == "nested_failure":
-                    expected_state = "failed"
+                    expected_state = "failed" if applied else "interrupted"
                 assert rec.work_id == expected_work and rec.state == expected_state
                 assert rec.to_public_dict()["recording_state"] == "committed"
                 if expected_state == "completed":
                     messages = await database.load_messages(rec.delegation_id)
                     assert any(row["content"] == "acknowledged review answer" for row in messages)
-                if mode == "nested_failure":
+                if mode == "nested_failure" and applied:
                     assert "authentication failed" in rec.error
                 if mode == "cancel" and applied:
                     assert rec.error == "caller withdrew the review"
                 if mode == "nested_setup":
                     leaf = delegations.get_delegation(metadata["leaf_id"])
-                    assert leaf.work_id == metadata["leaf_work"] and leaf.state == "interrupted"
-                    assert await database.load_messages(leaf.delegation_id) == []
+                    if applied:
+                        assert leaf.work_id == metadata["leaf_work"] and leaf.state == "interrupted"
+                        assert rec._child_work_ids == {leaf.work_id}
+                    else:
+                        assert leaf is None and rec._child_work_ids == set()
+                    assert await database.load_messages(metadata["leaf_id"]) == []
                 if mode in {"terminal", "nested_failure", "close", "nested_defer"}:
                     messages = await database.load_messages(rec.delegation_id)
                     terminal = [row["content"] for row in messages if row["type"] == "result"]

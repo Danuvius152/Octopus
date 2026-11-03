@@ -200,6 +200,14 @@ class ClientSubmissionsMixin(DatabaseBase):
             existing = await self._get_client_submission(tx, session_id, client_id)
             if existing is not None:
                 return False, existing
+            if payload.get("work_id") is not None and payload.get("source") == "delegation":
+                # Share the original round's durable seal, even if admission
+                # checked its process-local lease before waiting for this writer.
+                work = await tx.fetch_one("SELECT delegation_state FROM sessions WHERE id=? AND origin='delegation'", (session_id,))
+                if work is not None and work[0] is not None:
+                    current = json.loads(work[0])
+                    if current["work_id"] != payload["work_id"] or current["state"] != "running":
+                        raise ValueError("Delegation work is closed")
             await require_application_writable(tx, session_id)
             if schedule is not None:
                 # The fire consumes exactly the definition it authorized. No

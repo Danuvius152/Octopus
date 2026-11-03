@@ -3822,6 +3822,19 @@ export interface components {
             /** Message */
             message?: string | null;
         };
+        /** ConnectorRejectionRequest */
+        ConnectorRejectionRequest: {
+            /** Grant Stamp */
+            grant_stamp: string;
+        };
+        /** ConnectorRejectionResponse */
+        ConnectorRejectionResponse: {
+            /**
+             * Disposition
+             * @enum {string}
+             */
+            disposition: "applied" | "obsolete" | "gone";
+        };
         /**
          * ConnectorTokenResponse
          * @description Internal — returned only to the connector MCP subprocess.
@@ -3833,6 +3846,8 @@ export interface components {
             expires_at_epoch: number;
             /** Api Base */
             api_base?: string | null;
+            /** Grant Stamp */
+            grant_stamp: string;
         };
         /** CreateAgentScheduleRequest */
         CreateAgentScheduleRequest: {
@@ -11796,7 +11811,6 @@ export interface operations {
     mark_needs_reconnect_api_connectors__installation_id__mark_needs_reconnect_post: {
         parameters: {
             query?: {
-                error_code?: string;
                 token?: string | null;
             };
             header?: never;
@@ -11805,14 +11819,20 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectorRejectionRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
-            204: {
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ConnectorRejectionResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

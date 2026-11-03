@@ -21,7 +21,7 @@ def send(value): print(json.dumps(value,ensure_ascii=False),flush=True)
 for line in sys.stdin:
  f=json.loads(line); method=f.get('method'); params=f.get('params',{}); result={}
  if method=='initialized': continue
- if method=='config/read': result={'config':{'model':'fixture','model_reasoning_effort':'low','features':{'fast_mode':True,'wake_on_agent_messages':False,'goals':False,'sleep_tool':False,'multi_agent':True,'multi_agent_v2':{'enabled':True,'wait_agent_enabled':True}}}}
+ if method=='config/read': result={'config':{'model':'fixture','model_reasoning_effort':'low','features':{'fast_mode':True,'wake_on_agent_messages':False,'goals':False,'sleep_tool':False,'unbounded_connection_retries':False,'multi_agent':True,'multi_agent_v2':{'enabled':True,'wait_agent_enabled':True}}}}
  if method=='thread/start': result={'thread':{'id':'thread-1'},'model':'fixture','reasoningEffort':'low','serviceTier':'default','cwd':params['cwd'],'approvalPolicy':'never','sandbox':{'type':'dangerFullAccess'}}
  if method=='turn/start':
   Path(sys.argv[1]).write_text(params['input'][0]['text'])

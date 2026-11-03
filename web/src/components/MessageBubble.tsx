@@ -70,6 +70,14 @@ function OutcomeResult({ message, onRestoreInput, restoreInputDisabled }: Pick<M
       {labels[outcome.status]}{message.cost != null ? ` · $${message.cost.toFixed(4)}` : ""}
     </span>
     {retries > 0 && <span className="text-xs text-muted-foreground">{retries} {retries === 1 ? "recovery" : "recoveries"}</span>}
+    {outcome.recording_integrity === "incomplete" && <>
+      {outcome.native_status && <span className="text-xs text-muted-foreground">Native: {outcome.native_status}</span>}
+      <div className="max-w-[85%] text-sm text-destructive">
+        {outcome.recording_issues?.native_final_missing ? "A declared final answer is missing from the saved transcript." :
+          outcome.final_answer?.message_seqs?.length ? "The answer was saved; completion records are incomplete." :
+            "Completion records are incomplete."}
+      </div>
+    </>}
     {outcome.message && <div className="max-w-[85%] whitespace-pre-wrap break-words text-sm">{outcome.message}</div>}
     {outcome.code === "attachment_unavailable" && Boolean(message.tool_input?.rejected_input) && onRestoreInput &&
       <button type="button" className="text-sm text-primary underline" disabled={restoreInputDisabled}
@@ -307,12 +315,17 @@ export function MessageBubble({
         </div>
       );
 
-    case "question_answer":
+    case "question_answer": {
+      const resolution = message.tool_input?.question_resolution as
+        { disposition?: string; source?: { kind?: string } } | undefined;
+      const source = resolution?.source?.kind;
+      const label = resolution?.disposition === "expired" ? "System · expired" : source === "account" ? "You" :
+        source === "agent" ? "Agent" : source === "system" ? "System" : "Answer · source unknown";
       return (
         <div className="msg msg-user flex justify-end">
           <div className="max-w-[85%] space-y-1">
             <div className="msg-label text-xs font-semibold text-muted-foreground text-right">
-              You
+              {label}
             </div>
             <div className="msg-content msg-question-answer inline-block whitespace-pre-wrap break-words rounded-[14px] rounded-br-[4px] bg-primary px-4 py-3 text-[14px] italic leading-relaxed text-white">
               {message.content}
@@ -320,6 +333,7 @@ export function MessageBubble({
           </div>
         </div>
       );
+    }
 
     case "result":
       return <OutcomeResult message={message} onRestoreInput={onRestoreInput} restoreInputDisabled={restoreInputDisabled} />;

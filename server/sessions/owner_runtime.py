@@ -1530,6 +1530,7 @@ class OwnerRuntime:
         # after an actual attempt still gets a fresh identity.
         attempt_id = execution.settlement.attempt_id if execution.attempt is None else None
         attempt = execution.attempt = _Attempt(backend, prepared.prompt, reused, attempt_id=attempt_id or uuid.uuid4().hex)
+        attempt.credential = getattr(backend, "credential", None) if reused else prepared.credential
         if isinstance(backend, HarnessRun):
             from ..harness import Harness
             assert execution.turn is not None
@@ -1792,17 +1793,19 @@ class OwnerRuntime:
             self.owner.wake()
             return
         detail = decision.events[-1] if decision.events else {}
-        failed = (attempt.failed or attempt.timeout is not None or bool(settlement.protocol_issues.get("fatal_protocol_error"))
-                  or bool(getattr(attempt.backend, "protocol_issues", {}).get("fatal_protocol_error")))
+        issues = {**settlement.protocol_issues, **getattr(attempt.backend, "protocol_issues", {})}
+        recording_failed = (bool(issues) if getattr(attempt.backend, "captures_retirement_output", False)
+                            else bool(issues.get("fatal_protocol_error")))
+        failed = attempt.failed or attempt.timeout is not None or recording_failed
         reason = detail.get("message")
         raw = attempt.result.content if attempt.result else attempt.error_text
         if failed and raw:
             reason = f"{reason}\n{raw}" if reason else raw
         if failed and not reason:
-            reason = safe_diagnostic(getattr(attempt.backend, "stderr_text", "")) or "Backend ended without a terminal result"
+            reason = "Backend ended without a terminal result; process diagnostics are available in the server log"
         status: Literal["success", "failed", "interrupted"] = "failed" if failed else "success"
         if (attempt.result is not None and attempt.result.error_code == "native_turn_interrupted"
-                and attempt.timeout is None and not getattr(attempt.backend, "protocol_issues", {})):
+                and attempt.timeout is None and not getattr(attempt.backend, "collection_preceded_terminal", False)):
             status = "interrupted"
         await self.settle(execution, status=status,
                                    message=reason, code=detail.get("code"), result=attempt.result,

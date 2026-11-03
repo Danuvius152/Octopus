@@ -10,6 +10,8 @@ export interface TurnOutcome {
   recovery: Record<string, number>;
   final_answer?: components["schemas"]["FinalAnswerRef"] | null;
   native_status?: "completed" | "failed" | "interrupted" | null;
+  recording_integrity?: "complete" | "incomplete";
+  recording_issues?: Record<string, number>;
 }
 
 export interface TurnRecovery {
@@ -47,6 +49,8 @@ export function normalizeMessage(message: MessageInput): Message {
       code: text(data.code), provider_code: text(data.provider_code), recovery,
       final_answer: data.final_answer as TurnOutcome["final_answer"],
       native_status: data.native_status as TurnOutcome["native_status"],
+      recording_integrity: data.recording_integrity as TurnOutcome["recording_integrity"],
+      recording_issues: data.recording_issues as TurnOutcome["recording_issues"],
     };
     return { ...message, content: outcome.message, outcome };
   }

@@ -162,7 +162,7 @@ async def runtime(monkeypatch, tmp_path, short_process_shutdown):
 
 @pytest.mark.parametrize("diagnostic,code,preparations", [
     ("503 service unavailable", None, 2),
-    ("Your authentication token has expired", "auth_expired", 1),
+    ("Your authentication token has expired", "auth_failed", 1),
     ("controller protocol identity mismatch", "preparation_failed", 1),
 ])
 async def test_preparation_failures_use_bounded_classification(runtime, monkeypatch, diagnostic, code, preparations):
@@ -209,12 +209,10 @@ async def test_corrupt_protocol_reports_incomplete_success_without_reexecution(r
     assert set(location) == {"attempt_id", "kind", "line", "characters", "sha256"}
 
 
-@pytest.mark.parametrize("diagnostic,expected,spawns", [
-    ("Your authentication token has expired", "auth_expired", 1),
-    ("503 service unavailable", "transient_exhausted", 3),
-    ("insufficient quota", None, 1),
+@pytest.mark.parametrize("diagnostic", [
+    "Your authentication token has expired", "503 service unavailable", "insufficient quota",
 ])
-async def test_long_execution_diagnostics_classify_tail_without_exposing_stderr(runtime, monkeypatch, diagnostic, expected, spawns):
+async def test_long_process_diagnostics_do_not_classify_an_unrelated_failure(runtime, monkeypatch, diagnostic):
     manager, _, session, _, starts, events = runtime
     secret = "secret-material-keep-private"
     def argv(context):
@@ -230,8 +228,8 @@ async def test_long_execution_diagnostics_classify_tail_without_exposing_stderr(
     receipt = await manager.start_message(session.id, "classify full evidence")
     completion = await asyncio.wait_for(receipt.wait(), 5)
     assert completion.outcome.status == "failed"
-    assert completion.outcome.code == expected
-    assert starts.qsize() == spawns
+    assert completion.outcome.code is None and completion.outcome.message == "execution failed"
+    assert starts.qsize() == 1
     assert secret not in json.dumps(events)
     assert len(completion.outcome.message or "") <= 2001
 

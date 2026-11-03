@@ -40,14 +40,38 @@ proposals are [separately scoped](../plans/multi-tenancy-gaps.md).
 
 OAuth state, expiry and single callback claim do not currently bind the callback
 to the initiating browser's cookie. Disconnect deletes the local installation,
-without promising to revoke the provider grant. Refresh currently catches
-provider/transport exceptions broadly and marks `needs_reconnect`, so a temporary
-timeout/429/5xx can also produce that flag. Browser binding, revocation policy and
-temporary-versus-permanent refresh classification remain in
+without promising to revoke the provider grant. Browser binding and revocation policy remain in
 [the account plan](../plans/multi-tenancy-gaps.md), rather than being claimed as
 current guarantees. Complete long-result access, sensitive-write authorization,
 health checks and per-tool policy have their own
 [capability plan](../plans/connector-capabilities.md).
+
+## Token failures and delayed rejection
+
+The refresh producer preserves HTTP status and machine error code, including
+non-JSON error pages. Transport failure, 429 and 5xx are temporary; 5xx remains
+temporary even with an `invalid_grant` body. Only a 400/401 `invalid_grant`
+establishes a permanent grant rejection. Configuration, permission, unavailable
+installation/account and unknown failures remain distinct through manager,
+internal route and MCP consumer. A temporary failure does not mark authorization
+invalid; a later call may retry refresh. Successful refresh preserves an omitted refresh token
+and clears prior error state.
+
+One token resolution captures access token, expiry, API base and an opaque
+`grant_stamp` under the installation lock. The stamp hashes the owned installation,
+authentication type, encrypted material and endpoint; it is comparison evidence,
+not a token or execution grant. Gmail, GitHub and custom consumers keep that
+snapshot local to each call. A resource 401 submits its stamp in a JSON rejection
+request. The original DB transaction compares current account, installation and
+material: `applied` marks the current grant, `obsolete` preserves a replacement,
+and `gone` reports its absence/unavailability. Unconfirmed marking has its own
+message; none of those latter cases falsely asks the current login to reconnect.
+Only the first applied state change emits the reconnect-needed metric; every
+resource rejection remains a call-failure observation.
+
+This does not change the shared HTTP retry policy or replay a resource operation
+after authorization failure. Write idempotence and unknown external effects
+remain independently scoped work.
 
 ## Navigation and verification
 
@@ -63,6 +87,9 @@ Regression entry points are `tests/test_connectors_oauth.py`,
 `tests/test_router_connectors.py`, `tests/test_connectors_db.py`,
 `tests/test_connectors_registry.py` and `tests/test_backend_connectors.py`.
 They do not prove current external-provider access.
+`tests/test_connector_grant_failures.py` additionally joins the real internal
+routes, Context, three consumers and SQLite across provider HTTP failures,
+authorization replacement, deletion/disable and concurrent calls sharing Context.
 
 The [original design](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/connectors.md)
 contains the superseded per-session model, Notion proposal and implementation

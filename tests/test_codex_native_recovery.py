@@ -227,7 +227,7 @@ async def test_unowned_stderr_and_child_tool_errors_do_not_authorize_recovery(na
     failed_child["params"]["turn"].update(status="failed", error={"message": "selected model is at capacity"})
     inject(tmp_path, {"__stderr": "selected model is at capacity 401 Unauthorized"}, child_start(), failed_child,
         {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
-            "id": "tool", "type": "commandExecution", "command": "false", "status": "failed", "exitCode": 1,
+            "id": "tool", "type": "commandExecution", "command": "false", "cwd": "/tmp", "commandActions": [], "status": "failed", "exitCode": 1,
             "aggregatedOutput": "selected model is at capacity 401 Unauthorized"}}}, terminal("failed"))
     await wait_dispatch_idle(manager, session.id)
     result = await database.read_session_result(session.id, receipt["request_id"])

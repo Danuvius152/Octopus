@@ -1496,10 +1496,8 @@ async def _bind_credential(manager, backend, secret="sk-ant-x"):
 
 
 @pytest.mark.asyncio
-async def test_auth_error_in_stderr_flags_credential_and_emits(manager, monkeypatch):
-    """Claude 401 lands in stderr with no `result` — the turn is failed, the
-    blob matches the claude harness patterns, so the bound credential is
-    flagged and an `auth_expired` event is emitted."""
+async def test_unattributed_auth_stderr_does_not_invalidate_current_credential(manager, monkeypatch):
+    """A process diagnostic without a request identity is not a rejection receipt."""
     cid = await _bind_credential(manager, "claude-code")
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(
@@ -1514,17 +1512,14 @@ async def test_auth_error_in_stderr_flags_credential_and_emits(manager, monkeypa
     events = await _request_events(manager, session, "hi")
 
     auth = [e for e in events if e.get("code") == "auth_expired"]
-    assert len(auth) == 1
-    assert auth[0]["credential_id"] == cid
-    assert auth[0]["backend"] == "claude-code"
+    assert auth == []
     row = await manager.db.get_credential(cid)
-    assert row["needs_reconnect"] is True
-    assert row["status"] == "needs_reconnect"
-    assert row["last_refresh_error_code"] == "invalid_credentials"
+    assert row["needs_reconnect"] is False
+    assert row["status"] == "active"
 
 
 @pytest.mark.asyncio
-async def test_auth_error_codex_result_content_flags_credential(manager, monkeypatch):
+async def test_codex_auth_error_without_material_proof_keeps_current_login(manager, monkeypatch):
     """Codex surfaces auth failure as a `turn.failed` → is_error result whose
     content carries the message; detection reads it from the event stream."""
     from server.harness import HarnessEvent
@@ -1545,9 +1540,9 @@ async def test_auth_error_codex_result_content_flags_credential(manager, monkeyp
 
     events = await _request_events(manager, session, "hi")
 
-    assert any(e.get("code") == "auth_expired" for e in events)
+    assert any(e.get("code") == "auth_failed" for e in events)
     row = await manager.db.get_credential(cid)
-    assert row["needs_reconnect"] is True
+    assert row["needs_reconnect"] is False
 
 
 @pytest.mark.asyncio
@@ -2956,7 +2951,7 @@ async def test_hidden_activity_and_true_silence_keep_cumulative_recovery_budget(
     import time
     from types import SimpleNamespace
 
-    from server.harness.codex import CODEX
+    from server.harness.codex import CODEX_WEB_LEAF as CODEX
     from server.harness.run import HarnessRun
 
     class Run(HarnessRun):

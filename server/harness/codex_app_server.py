@@ -32,8 +32,10 @@ from .codex_activity import CodexActivityObserver
 from .codex_control import _latest_checkpoint, controller_message, turn_message
 from .codex_items import (
     NATIVE_LINE_BYTES,
+    ItemObservation,
     diagnostic_frame,
     item_events,
+    item_fingerprint,
     observation_frame,
 )
 from .codex_rpc import NativeProtocolError, NativeRpcError, RpcConnection
@@ -53,7 +55,7 @@ _METRICS_CLOSE_GRACE = 1.0
 _METRICS_PENDING_COUNT = 256
 _METRICS_PENDING_BYTES = 1024 * 1024
 _REQUIRED_FEATURES = {"features.fast_mode": True, "features.wake_on_agent_messages": False, "features.goals": False,
-                "features.sleep_tool": False, "features.multi_agent": True,
+                "features.sleep_tool": False, "features.unbounded_connection_retries": False, "features.multi_agent": True,
                 "features.multi_agent_v2.enabled": True, "features.multi_agent_v2.wait_agent_enabled": True}
 
 
@@ -225,6 +227,8 @@ class AppServerDriver(RunDriver):
         self._buffer: list[dict[str, Any]] = []
         self._buffer_bytes = 0
         self._terminal: str | None = None
+        self._terminal_error: dict[str, Any] | None = None
+        self._summary_finals: dict[str, str] = {}
         # Retain original evidence after a waiter times out or is cancelled;
         # a late ACK can still settle only that input on this connection.
         self._steers: dict[str, NativeInputEvidence] = {}
@@ -232,7 +236,7 @@ class AppServerDriver(RunDriver):
         self._proof_tail: asyncio.Task[None] | None = None
         self._proofs: set[asyncio.Task[None]] = set()
         self._output: NativeOutput | None = None
-        self._items: dict[tuple[str, str, str], tuple[str | None, str]] = {}
+        self._items: dict[tuple[str, str, str], ItemObservation] = {}
         self._items_changed = asyncio.Event()
         self._started_turns: set[tuple[str, str]] = set()
         self._metrics: dict[str, CodexActivityObserver] = {}
@@ -729,7 +733,7 @@ class AppServerDriver(RunDriver):
                 failed = self._protocol_failure(frame, error)
                 output.events.extend(failed.events)
                 output.end_of_stream = True
-                break
+                continue  # Preserve later parseable facts in this finite prefix.
             output.events.extend(parsed.events)
             output.end_of_stream |= parsed.end_of_stream
         self._flush_measurements()
@@ -762,9 +766,8 @@ class AppServerDriver(RunDriver):
         self._rpc.reject_all(NativeProtocolError(detail), exclude=protected)
         if self._io is not None:
             self._io._note_protocol_issue("fatal_protocol_error", json.dumps(obj), error=error)
-            self._io.retire()
-        return ParseOutput(events=[HarnessEvent(type="result", is_error=True,
-            error_code="native_protocol_failed", content=detail, raw=obj)], end_of_stream=True)
+            self._io.fail_stream("native_protocol_failed", detail)
+        return ParseOutput(activity=False)
 
     def _receive(self, obj: dict[str, Any]) -> ParseOutput:
         assert self._input is not None
@@ -820,6 +823,8 @@ class AppServerDriver(RunDriver):
                     self._rpc.receive(obj)
             return output
         if identifier is not None:
+            if self._io is not None and (self._terminal or not self._io.question_admission_open):
+                return ParseOutput(activity=False)
             if obj["method"] == "item/tool/requestUserInput":
                 if not self._input.turn_id:
                     self._buffer_frame(obj)
@@ -863,6 +868,9 @@ class AppServerDriver(RunDriver):
             return ParseOutput()
         if (params.get("threadId") == self._input.thread_id and obj["method"] == "item/completed"
                 and (params.get("item") or {}).get("type") == "userMessage"):
+            # Correlation cannot promote malformed content into durable input
+            # acceptance. Validate before either start or steer proof is saved.
+            item_events(obj["method"], params)
             client_id = params["item"].get("clientId")
             for rpc_id, evidence in self._steers.items():
                 if client_id == evidence.input_id:
@@ -915,19 +923,30 @@ class AppServerDriver(RunDriver):
                 self._io.questions_changed()
 
     def _event(self, obj: dict[str, Any]) -> ParseOutput:
-        assert self._output is not None
+        assert self._output is not None and self._input is not None
         method, params = obj["method"], obj.get("params") or {}
         if not method.startswith(("turn/", "item/")) and method != "error":
             return ParseOutput()
-        if not self._output.accepts(params.get("threadId"), params.get("turn") or {}):
-            raise NativeProtocolError("Native output has no original root/child association")
-        observer = self._metrics_observer(params["threadId"])
         turn_id = (params.get("turn") or {}).get("id") if method in {"turn/started", "turn/completed"} else params.get("turnId")
         if not isinstance(turn_id, str) or not turn_id:
             raise NativeProtocolError("Native output has no turn identity")
+        if params["threadId"] == self._input.thread_id and turn_id != self._input.turn_id:
+            raise NativeProtocolError(f"Unexpected root turn: {turn_id}")
+        if not isinstance(params.get("threadId"), str):
+            raise NativeProtocolError("Native output has no thread identity")
+        if method in {"item/started", "item/completed"}:
+            candidate = params.get("item")
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str) or not candidate["id"]:
+                raise NativeProtocolError("Native item has no identity")
+            item_events(method, params)
+        if not self._output.accepts(params.get("threadId"), params.get("turn") or {}):
+            raise NativeProtocolError("Native output has no original root/child association")
+        observer = self._metrics_observer(params["threadId"])
         if method == "item/agentMessage/delta" and (not isinstance(params.get("itemId"), str) or not params["itemId"]):
             raise NativeProtocolError("Native delta has no item identity")
         if method == "turn/started":
+            if params["threadId"] == self._input.thread_id and self._terminal:
+                raise NativeProtocolError("Native root restarted after terminal")
             turn_key = params["threadId"], turn_id
             if turn_key in self._started_turns:
                 return ParseOutput(activity=False)
@@ -935,21 +954,37 @@ class AppServerDriver(RunDriver):
             if len(self._started_turns) > 16384:
                 raise NativeProtocolError("Native turn identity capacity exceeded")
         if method == "item/agentMessage/delta":
-            # A root delta promises a complete item, even if its started
-            # notification was omitted. Child cancellation promises no answer.
-            self._items.setdefault((params["threadId"], turn_id, params["itemId"]), ("agentMessage", "started"))
+            if not isinstance(params.get("delta"), str):
+                raise NativeProtocolError("Native message delta has no text")
+            previous = self._items.get((params["threadId"], turn_id, params["itemId"]))
+            if previous is not None and previous.complete is not None:
+                return ParseOutput(activity=False)
         item = params.get("item") or {}
         if method in {"item/started", "item/completed"}:
             if not isinstance(item.get("id"), str) or not item["id"]:
                 raise NativeProtocolError("Native item has no identity")
             key = params["threadId"], turn_id, item["id"]
             previous = self._items.get(key)
-            digest = hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest() if method == "item/completed" else "started"
-            if previous == (item.get("type"), digest) or previous is not None and method == "item/started":
-                return ParseOutput(activity=False)
-            if previous is not None and previous[1] != "started":
-                raise NativeProtocolError("Conflicting complete native item")
-            self._items[key] = item.get("type"), digest
+            observed = ItemObservation.started(item)
+            if previous is not None and previous.kind != observed.kind:
+                raise NativeProtocolError("Conflicting native item kind")
+            if method == "item/started":
+                if previous is not None:
+                    if previous.start is not None and previous.start != observed.start:
+                        raise NativeProtocolError("Conflicting native item source or operation")
+                    return ParseOutput(activity=False)
+                if self._terminal and params["threadId"] == self._input.thread_id:
+                    raise NativeProtocolError("New root item started after terminal")
+                self._items[key] = observed
+            else:
+                digest = item_fingerprint(item)
+                if previous is not None and previous.complete is not None:
+                    if previous.complete == digest:
+                        return ParseOutput(activity=False)
+                    raise NativeProtocolError("Conflicting complete native item")
+                observed = previous or ItemObservation(item["type"])
+                observed.complete = digest
+                self._items[key] = observed
             self._items_changed.set()
         if len(self._items) > 16384:
             raise NativeProtocolError("Native item identity capacity exceeded")
@@ -974,10 +1009,18 @@ class AppServerDriver(RunDriver):
         return output
 
     def retirement_events(self, reason: str, *, reconcile: bool = False) -> list[HarnessEvent]:
-        return self._output.retire(reason, reconcile=reconcile) if self._output is not None else []
+        if self._output is None:
+            return []
+        events = self._output.retire(reason, reconcile=reconcile)
+        # Freeze positive constraints before release_output clears the wire
+        # cache. The original ordered consumer checks committed rows and refs.
+        events.append(HarnessEvent(type="native_completion", raw=dict(self._summary_finals),
+            runtime_metadata=self._output.metadata(self._output.source(self._output.thread_id, self._output.turn_id))))
+        return events
 
     def release_output(self) -> None:
         self._items.clear()
+        self._summary_finals.clear()
         self._started_turns.clear()
         self._buffer.clear()
         self._buffer_bytes = 0
@@ -1017,11 +1060,17 @@ class AppServerDriver(RunDriver):
             status = turn.get("status")
             if status not in {"completed", "failed", "interrupted"}:
                 raise NativeProtocolError(f"Invalid native root terminal status: {status}")
+            error = turn.get("error")
+            if error is not None and (not isinstance(error, dict) or not isinstance(error.get("message"), str)):
+                raise NativeProtocolError("Malformed native root error")
             if self._terminal:
-                if status != self._terminal:
+                if status != self._terminal or error != self._terminal_error:
                     raise NativeProtocolError("Conflicting native root terminals")
+                self._constrain_summary(turn)
                 return ParseOutput(activity=False)
+            self._constrain_summary(turn)
             self._terminal = status
+            self._terminal_error = error
             self._terminal_at = time.monotonic()
             assert self._io is not None
             if self._io.native_end_reason == "process_ended":
@@ -1041,6 +1090,30 @@ class AppServerDriver(RunDriver):
             return output
         return ParseOutput(activity=method.startswith(("turn/", "item/")))
 
+    def _constrain_summary(self, turn: dict[str, Any]) -> None:
+        if turn.get("itemsView") == "notLoaded" or "items" not in turn:
+            return
+        items = turn["items"]
+        if not isinstance(items, list) or len(items) > 16384:
+            raise NativeProtocolError("Malformed native terminal summary")
+        constraints: dict[str, str] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                raise NativeProtocolError("Malformed native summary item")
+            if item.get("type") != "agentMessage" or item.get("phase") != "final_answer":
+                continue
+            completed = item.get("completedAtMs")
+            if not isinstance(completed, int) or isinstance(completed, bool) or completed <= 0:
+                continue  # The summary does not prove this observation completed.
+            if not isinstance(item.get("id"), str) or not item["id"] or not isinstance(item.get("text"), str):
+                raise NativeProtocolError("Malformed completed final in native summary")
+            digest = hashlib.sha256(item["text"].encode()).hexdigest()
+            old = constraints.get(item["id"], self._summary_finals.get(item["id"]))
+            if old is not None and old != digest:
+                raise NativeProtocolError("Conflicting native final summaries")
+            constraints[item["id"]] = digest
+        self._summary_finals.update(constraints)
+
     async def interrupt(self, io: HarnessRun) -> None:
         if self._input is not None and self._input.turn_id and not self._terminal:
             await io.write_control((json.dumps({"id": "octopus:interrupt", "method": "turn/interrupt",
@@ -1059,16 +1132,19 @@ class AppServerDriver(RunDriver):
 
     def _pending_root_commands(self) -> bool:
         return self._input is not None and any(
-            key[:2] == (self._input.thread_id, self._input.turn_id) and value == ("commandExecution", "started")
+            key[:2] == (self._input.thread_id, self._input.turn_id) and value.kind == "commandExecution" and value.complete is None
             for key, value in self._items.items())
 
     def connection_closed(self) -> None:
         self._questions.clear()
         if self._input is not None and self._input.state == "accepted" and self._io is not None:
             missing = [key[2] for key, value in self._items.items()
-                       if key[:2] == (self._input.thread_id, self._input.turn_id) and value[1] == "started"]
+                       if key[:2] == (self._input.thread_id, self._input.turn_id) and value.required and value.complete is None
+                       and not (value.kind == "collabAgentToolCall" and value.operation == "wait" and self._terminal == "interrupted")]
             if missing:
-                self._io.fail_stream("native_collection_incomplete", f"Native root items did not complete: {missing}")
+                detail = ("Native result records are unavailable; effects may be unknown" if self._terminal == "interrupted"
+                          or self._io.native_end_reason in {"parent_stop", "parent_timeout"} else "Native root items did not complete")
+                self._io.fail_stream("native_collection_incomplete", f"{detail}: {missing}")
         protected = {identifier for identifier, evidence in self._steers.items() if evidence.state in {"accepted", "rejected"}}
         if self._input and self._input.rpc_id:
             if self._input.state in {"accepted", "rejected"}:

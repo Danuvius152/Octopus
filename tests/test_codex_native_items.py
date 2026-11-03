@@ -51,17 +51,43 @@ def native_item(payload, stage="completed", thread=ROOT, turn="turn-1"):
     return {"method": f"item/{stage}", "params": {"threadId": thread, "turnId": turn, "item": payload}}
 
 
+@pytest.mark.parametrize("variant", ["image", "localImage"])
+@pytest.mark.parametrize("detail", ["omitted", None, "auto", "low", "high", "original"])
+def test_user_image_detail_keeps_all_pinned_legal_values(variant, detail):
+    from server.harness.codex_items import item_events
+
+    image = {"type": variant, "url": "https://example.test/image.png", "path": "/tmp/image.png"}
+    if detail != "omitted":
+        image["detail"] = detail
+    output = item_events("item/completed", {"item": {"id": "input", "type": "userMessage", "content": [image]}})
+    assert output.events == []
+
+
+async def test_complete_duplicates_compare_payload_facts_with_optional_defaults(native_runtime, tmp_path):
+    manager, database, session, _, _, _ = native_runtime
+    receipt = await start_output(native_runtime)
+    original = {"id": "command", "type": "commandExecution", "command": "true", "cwd": "/tmp",
+                "commandActions": [], "status": "completed", "startedAtMs": 1}
+    duplicate = {**original, "startedAtMs": 2, "completedAtMs": 3, "source": "agent", "exitCode": None}
+    inject(tmp_path, native_item(original), native_item(duplicate), terminal())
+    await wait_dispatch_idle(manager, session.id)
+    result = await database.read_session_result(session.id, receipt["request_id"])
+    assert result.outcome.status == "success"
+    rows = [row for row in await database.load_messages(session.id) if row["type"] == "tool_result"]
+    assert len(rows) == 1 and rows[0]["tool_input"]["native_item"] == original
+
+
 @pytest.mark.parametrize("payload", [
     {"id": "call", "type": "mcpToolCall", "server": "example", "tool": "lookup", "arguments": {},
      "status": "failed", "result": {"content": [{"type": "text", "text": "Business failure body"}]}, "error": None},
-    {"id": "call", "type": "commandExecution", "command": "false", "status": "failed",
+    {"id": "call", "type": "commandExecution", "command": "false", "cwd": "/tmp", "commandActions": [], "status": "failed",
      "exitCode": None, "aggregatedOutput": "Command failed"},
-    {"id": "call", "type": "commandExecution", "command": "denied", "status": "declined",
+    {"id": "call", "type": "commandExecution", "command": "denied", "cwd": "/tmp", "commandActions": [], "status": "declined",
      "exitCode": None, "aggregatedOutput": ""},
     {"id": "call", "type": "fileChange", "changes": [], "status": "declined"},
     {"id": "call", "type": "fileChange", "changes": [], "status": "failed"},
     {"id": "call", "type": "collabAgentToolCall", "tool": "wait", "receiverThreadIds": [],
-     "agentsStates": {}, "status": "interrupted"},
+     "agentsStates": {}, "senderThreadId": ROOT, "status": "interrupted"},
 ])
 async def test_unsuccessful_native_tool_does_not_look_successful_or_fail_the_root(native_runtime, tmp_path, payload):
     manager, database, session, _, starts, events = native_runtime

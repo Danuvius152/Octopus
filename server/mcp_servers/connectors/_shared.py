@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 
+from ...connectors.errors import ConnectorTokenError, TokenFailureKind
+from ...connectors.grants import GrantDisposition
 from .. import _host
 
 logger = logging.getLogger(__name__)
@@ -56,16 +58,11 @@ class ConnectorContext:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.auth_token}"}
 
-    def access_token(self) -> str | None:
-        """Read the current installation's authoritative token from the host."""
-        body = self.token_info()
-        return body["access_token"] if body else None
-
-    def token_info(self) -> dict[str, Any] | None:
+    def token_info(self) -> dict[str, Any]:
         """Read token and definition together, scoped to the same installation."""
         if not self.ready():
             logger.error("connector MCP misconfigured: missing callback env")
-            return None
+            raise ConnectorTokenError("Connector callback is not configured", kind="configuration", code="callback_missing")
         try:
             r = httpx.get(
                 f"{self.api_base}/api/connectors/{self.installation_id}/token",
@@ -74,27 +71,67 @@ class ConnectorContext:
             )
         except httpx.HTTPError as e:
             logger.warning("token fetch failed: %s", e)
-            return None
+            raise ConnectorTokenError("Connector token service is temporarily unavailable", kind="temporary", code="transport") from e
         if r.status_code != 200:
             logger.warning("token fetch HTTP %s", r.status_code)
             _record_connector(self.installation_id, ok=False,
                               error_code=f"token_http_{r.status_code}")
-            return None
-        return r.json()
-
-    def mark_needs_reconnect(self, error_code: str = "invalid_grant") -> None:
-        if not self.ready():
-            return
+            try:
+                detail = r.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = None
+            kinds: tuple[TokenFailureKind, ...] = ("temporary", "reconnect", "unavailable", "configuration", "permission", "unknown")
+            if isinstance(detail, dict) and detail.get("kind") in kinds:
+                raise ConnectorTokenError(detail.get("message") or "Connector token resolution failed",
+                                          kind=detail["kind"], code=detail.get("code") or "unknown")
+            kind: TokenFailureKind = "temporary" if r.status_code == 429 or r.status_code >= 500 else "unavailable"
+            raise ConnectorTokenError(f"Connector token service HTTP {r.status_code}", kind=kind, code=f"http_{r.status_code}")
         try:
-            httpx.post(
+            body = r.json()
+            if (not isinstance(body, dict) or not isinstance(body.get("access_token"), str)
+                    or not isinstance(body.get("grant_stamp"), str)):
+                raise ValueError("Incomplete token snapshot")
+        except ValueError as error:
+            raise ConnectorTokenError("Invalid token service response", kind="unknown", code="invalid_response") from error
+        return body
+
+    def mark_needs_reconnect(self, stamp: str) -> GrantDisposition | None:
+        if not self.ready():
+            return None
+        try:
+            response = httpx.post(
                 f"{self.api_base}/api/connectors/{self.installation_id}"
                 "/mark-needs-reconnect",
-                params={"error_code": error_code},
+                json={"grant_stamp": stamp},
                 headers=self._headers(),
                 timeout=_HTTP_TIMEOUT,
             )
+            if response.status_code == 200:
+                disposition = response.json().get("disposition")
+                if disposition in {"applied", "obsolete", "gone"}:
+                    return disposition
+        except (ValueError, AttributeError) as error:
+            logger.warning("Invalid connector rejection receipt: %s", error)
         except httpx.HTTPError as e:
             logger.warning("mark-needs-reconnect failed: %s", e)
+        return None
+
+    def rejection_message(self, info: dict[str, Any]) -> str:
+        _record_connector(self.installation_id, ok=False, error_code="auth_rejected")
+        disposition = self.mark_needs_reconnect(info["grant_stamp"])
+        if disposition == "applied":
+            return "Error: the API rejected the current connector authorization. Ask the user to reconnect it in Octopus."
+        if disposition == "obsolete":
+            return "Error: the API rejected the authorization used by this call. The connector authorization has since changed; its current sign-in was left unchanged."
+        if disposition == "gone":
+            return "Error: the API rejected this call's authorization. The installation or account is no longer available."
+        return "Error: the API rejected this call's authorization. Updating the connector state could not be confirmed."
+
+
+def token_failure_message(error: ConnectorTokenError) -> str:
+    if error.kind == "reconnect":
+        return f"Error: {error}. Ask the user to reconnect this connector in Octopus."
+    return f"Error: connector token {error.kind} ({error.code}): {error}"
 
 
 def _record_connector(installation_id, *, ok: bool, error_code: str | None = None,

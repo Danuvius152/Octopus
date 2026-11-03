@@ -463,7 +463,7 @@ async def test_confirmed_process_identity_can_wait_for_incremental_discovery(tmp
 
 
 @pytest.mark.asyncio
-async def test_diagnostic_reader_never_exposes_new_metadata(tmp_path):
+async def test_process_diagnostics_remain_local_and_do_not_publish_activity_metadata(tmp_path):
     import os
     import sys
     from dataclasses import replace
@@ -490,7 +490,8 @@ async def test_diagnostic_reader_never_exposes_new_metadata(tmp_path):
         events = [event async for event in run.stream()]
     finally:
         await run.stop()
-    assert run.stderr_text == "2026-10-14T00:00:00Z ERROR codex_exec: existing error"
+    assert "private init metadata" in run.stderr_text
+    assert run.stderr_text.endswith("2026-10-14T00:00:00Z ERROR codex_exec: existing error")
     assert all("private" not in (event.content or "") for event in events)
 
 
@@ -578,7 +579,7 @@ async def test_cancel_during_activity_startup_drains_owned_observer(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_unbound_run_scrubs_diagnostics_without_starting_native_reader(tmp_path):
+async def test_unbound_run_keeps_local_diagnostics_without_starting_native_reader(tmp_path):
     import sys
     from dataclasses import replace
 
@@ -612,7 +613,7 @@ async def test_unbound_run_scrubs_diagnostics_without_starting_native_reader(tmp
         assert [event async for event in run.stream()] == []
     finally:
         await run.stop()
-    assert run.stderr_text == ""
+    assert run.stderr_text == "private diagnostic"
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..config import settings
+from ..credential_use import CredentialUse
 from ..database import Database
 from ..harness import (
     HarnessCredential,
@@ -25,7 +26,6 @@ from ..models import (
     MessageContent,
     SessionStatus,
 )
-from ..oauth_errors import RefreshErrorCode
 from .observation import RequestObservation
 from .submission import (
     RequestCompletion,
@@ -554,11 +554,6 @@ class SessionManagerBase:
     ) -> HarnessRun:
         raise NotImplementedError  # provided by a mixin
 
-    async def _mark_needs_reconnect(
-        self, credential_id: str, code: RefreshErrorCode
-    ) -> None:
-        raise NotImplementedError  # provided by a mixin
-
     async def drain_credential_refreshes(self) -> None:
         raise NotImplementedError  # provided by a mixin
 
@@ -588,7 +583,8 @@ class SessionManagerBase:
 
 
     async def _surface_auth_expiry(
-        self, session: Session, *, cred_id: str | None, backend: str
+        self, session: Session, *, cred_id: str | None, backend: str,
+        use: CredentialUse | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError  # provided by a mixin
 

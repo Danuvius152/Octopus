@@ -76,8 +76,10 @@ App Server 的根 terminal 是 provider 候选。一个 attempt 只接纳一个�
 terminal 后，Run 同步冻结 target、问题回答和工具准入，启动原有界退休；同一
 reader 仍以原 connection/request/attempt/work 和 native 身份采集完整晚事件，
 不转入 Claude held/idle，也不恢复 grant。EOF、原采集截止和真实退出分别取证；
-raw drain 不证明完整 item 已保存。已观察的根 started/delta 缺少完整 item 时
-不能成功，未承诺采集或取消前从未产生的 child 答案则不成为成功依赖。
+raw drain 不证明完整 item 已保存。按锁版 producer 核定的实际工具结果缺口不能
+成功；可放弃的 sampling/维护观察与 delta 不自动形成完成债务。来源与类型的
+具体规则归 [Codex 完成合同](codex-backend.md#root-completion-and-selected-answer)，
+未承诺采集或取消前从未产生的 child 答案不成为成功依赖。
 
 正常结算等待必要前缀和原资源退出。Stop 与 start 等待失败可以先由原 Owner
 唯一选定 interrupted/failed，待有限前缀结束后再一次定稿引用、分配 terminal
@@ -85,6 +87,9 @@ seq 和入库；迟到终态不改选业务状态。`native_status` 保留实际
 status 独立。选定后的 Stop 不改写原结论，仍暂停派发和关闭准入。退休失败唤醒
 原 Owner 并沿 Manager 的既有失败接管和 health 边界结束等待，保留原资源引用，
 不靠无限 pending 或新 writer 代替退出证明。记录/通知失败也不重跑模型。
+provider 终态与收集失败分流，native interrupted 保留主结论并单列记录缺口；
+若原收集失败先触发清理，其后 interrupted 不覆盖先前失败。summary 只约束明确
+completed final，待原保存管道结束后核原行和 refs，不补正文或另建结果副本。
 
 原生根失败携带的错误正文、provider 错误结构和原 request/attempt/native 来源
 沿既有 recovery 诊断消息保存，位于 terminal 之前。即使 Stop 或 start 等待失败
@@ -255,6 +260,8 @@ request/attempt、产品 question 与原生 question IDs。客户端与服务端
 之间不让出。存储期间或等待写锁期间失效的答案不会写出，也不跨连接重放。
 本地已答记录不证明原生接收或模型消费；不增设 ACK 账本。通知是否已显示或
 成功送达不参与实际发送资格判断。产品 deadline 与原生 isBlocking 分别解释。
+展示使用已保存的 resolution/source：账户回答标 You，Agent、System 和系统到期
+分别显示，缺少历史来源时保持 unknown，不从答案正文猜成人类回答。
 
 可提前退休的关联 Stop 先按原 Owner 的首个在途命令信封核对 command ID
 及内容，再沿同一控制判定执行；最终被拒绝为 command_conflict 的命令不能
@@ -529,6 +536,10 @@ installation 和 owner。ConnectorManager 负责该 installation 的持久刷新
 Connector OAuth 在本地安装绑定前可取消，回调单次领取；普通失败重新发起连接。
 十五分钟 TTL 限制回调领取，领取后的网络操作使用各自超时，不反向恢复已消费的
 回调；取消与本地绑定由原 login 的锁确定先后。
+刷新错误的 HTTP 事实、每次调用的授权比较依据和迟到拒绝回执归
+[Connector 合同](connectors.md#token-failures-and-delayed-rejection)。模型凭据的
+实际采用与条件失效归 [凭据合同](harness-credential-reauth.md#4-run-loop-wiring-serversessionsturnspy)；
+不能凭当前对象 ID 将旧调用的拒绝作用到新授权。
 
 ## 当前数据与存储演进
 

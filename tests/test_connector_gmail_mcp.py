@@ -26,10 +26,10 @@ class FakeResp:
 
 @pytest.fixture
 def authed(monkeypatch):
-    monkeypatch.setattr(gm.ctx, "access_token", lambda: "tok")
+    monkeypatch.setattr(gm.ctx, "token_info", lambda: {"access_token": "tok", "grant_stamp": "stamp"})
     recon: list[str] = []
     monkeypatch.setattr(
-        gm.ctx, "mark_needs_reconnect", lambda code="invalid_grant": recon.append(code)
+        gm.ctx, "mark_needs_reconnect", lambda stamp: recon.append(stamp) or "applied"
     )
     return recon
 
@@ -160,9 +160,11 @@ def test_401_marks_reconnect(monkeypatch, authed):
     _patch(monkeypatch, lambda m, u, **k: FakeResp(status=401))
     out = gm.get(message_id="m1")
     assert "reconnect" in out.lower()
-    assert authed == ["invalid_grant"]
+    assert authed == ["stamp"]
 
 
 def test_token_unavailable(monkeypatch):
-    monkeypatch.setattr(gm.ctx, "access_token", lambda: None)
+    def unavailable():
+        raise gm.ConnectorTokenError("unavailable", kind="temporary", code="transport")
+    monkeypatch.setattr(gm.ctx, "token_info", unavailable)
     assert "reconnect" in gm.list_labels().lower() or "unavailable" in gm.list_labels().lower()

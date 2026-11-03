@@ -15,6 +15,7 @@ import httpx
 
 from ..oauth_providers import OAuthTokenSet
 from .base import ConnectorBase
+from .errors import refresh_body
 from .registry import register
 
 _GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
@@ -90,14 +91,7 @@ class GmailOAuthProvider:
                     "grant_type": "refresh_token",
                 },
             )
-        if resp.status_code != 200:
-            # invalid_grant = user revoked access; surface a stable code so the
-            # manager flips needs_reconnect with a meaningful reason.
-            body = resp.json() if resp.content else {}
-            err = RuntimeError(body.get("error") or f"HTTP {resp.status_code}")
-            err.code = body.get("error", "refresh_failed")  # type: ignore[attr-defined]
-            raise err
-        ts = self._parse(resp.json())
+        ts = self._parse(refresh_body(resp))
         # Google omits refresh_token on refresh responses; keep the old one.
         if ts.refresh_token is None:
             ts.refresh_token = refresh_token

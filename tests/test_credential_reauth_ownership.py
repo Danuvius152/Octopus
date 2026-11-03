@@ -73,8 +73,12 @@ async def test_target_changed_during_exchange_is_not_written(accounts, monkeypat
 
 
 @pytest.mark.parametrize("bundle", [False, True])
-async def test_owned_reauth_keeps_binding_and_decryptable_secret(accounts, monkeypatch, bundle):
+@pytest.mark.parametrize("original_type", ["api_key", "oauth"])
+async def test_owned_reauth_keeps_binding_and_decryptable_secret(accounts, monkeypatch, bundle, original_type):
     connection, db, users, actor, other, headers, login_id = accounts
+    async with db.transaction() as tx:
+        await tx.execute("UPDATE backend_credentials SET auth_type=? WHERE id=?", (original_type, actor["id"]))
+    before = await db.get_credential(actor["id"])
     await db.update_credential(actor["id"], status="needs_reconnect", needs_reconnect=True,
                                last_refresh_error_code="invalid_grant")
     agent = await db.get_system_agent(actor["id"])
@@ -87,9 +91,23 @@ async def test_owned_reauth_keeps_binding_and_decryptable_secret(accounts, monke
     row = await db.get_credential(actor["id"], actor["id"])
     assert row["status"] == "active" and not row["needs_reconnect"]
     assert row["last_refresh_error_code"] is None
+    assert row["auth_type"] == "oauth"
+    assert row["created_at"] == before["created_at"]
     secret = decrypt(row["secret_encrypted"], users.data_key(actor))
     assert "new-access" in secret if bundle else secret == "new-secret"
     assert (await db.get_agent(agent["id"]))["credential_id"] == actor["id"]
+    from server.harness import RunConfig, get_harness
+    from server.session_manager import session_manager
+
+    resolved = await session_manager.resolve_credential_by_id(
+        actor["id"], backend="claude-code", user_id=actor["id"],
+    )
+    run = get_harness("claude-code").create_run(RunConfig())
+    _, rendered = run.build_argv("next call", "/tmp", credential=resolved)
+    selected, competing = (("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY") if bundle
+                           else ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"))
+    assert rendered["env"][selected] == ("new-access" if bundle else "new-secret")
+    assert rendered["env"][competing] == ""
     # Historical completion remains readable after its mutable target is gone.
     await db.delete_credential(actor["id"])
     repeated = await complete(connection, headers, actor["id"], login_id)
@@ -109,3 +127,22 @@ async def test_reauth_rechecks_owner_after_waiting_for_the_storage_writer(accoun
     assert await updating is None
     assert await db.get_credential(actor["id"]) == {**before, "user_id": other["id"]}
     assert await db.reauthorize_credential(other["id"], user_id=None, backend="claude-code", label="install") is None
+
+
+@pytest.mark.parametrize("reauthorize", [False, True])
+async def test_disabled_account_cannot_commit_exchanged_oauth_material(accounts, monkeypatch, reauthorize):
+    connection, db, users, actor, other, headers, login_id = accounts
+    before = await db.load_credentials(actor["id"])
+    provider = patch_provider(monkeypatch, api_key="new-secret")
+
+    async def exchange(**kwargs):
+        await db.update_user_field(actor["id"], disabled_at="now")
+        return OAuthTokenSet("access", "refresh", 2000000000, ["scope"])
+
+    monkeypatch.setattr(provider, "exchange_code", exchange)
+    request = {"login_id": login_id, "code": "synthetic-code", "label": "replacement"}
+    if reauthorize:
+        request["credential_id"] = actor["id"]
+    response = await connection.post("/api/credentials/oauth/complete", headers=headers, json=request)
+    assert response.status_code >= 400
+    assert await db.load_credentials(actor["id"]) == before

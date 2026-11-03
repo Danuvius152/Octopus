@@ -1,25 +1,12 @@
 # 账户边界：具体剩余行为与产品政策
 
-> **Status:** proposed — 优先收敛 Connector refresh 分类，按证据级别保留其余账户政策。
+> **Status:** proposed — OAuth 浏览器绑定与其余账户政策按证据级别独立选择。
 
 本页按 `fd7ab9c` 源码重核旧租户审计，只描述剩余变化。静态路径确认、待验证
 性质和产品政策分开；没有运行利用复现或生产检查。现行保证归
 [账户合同](../implemented/multi-tenancy.md)、[Connector 合同](../implemented/connectors.md)
 与[凭据刷新合同](../implemented/harness-credential-reauth.md)。原审计的账户数、
 现场结果和旧漏洞实现不代表当前部署。
-
-## 源码可确认的剩余行为
-
-### Connector refresh 的临时与永久错误分类
-
-[get_access_token](../../server/connector_manager.py)在 provider refresh 周围
-`except Exception`，统一保存 `needs_reconnect=True`。临时 timeout/429/5xx
-与永久 invalid_grant 尚未在这里分开，不能把全部刷新失败都解释为授权失效。
-
-先通过真实 manager 的隔离测试保留该反例，再定义错误分类、可行动提示与
-安全的重试边界。完成条件包括临时错误不伪造永久撤权、永久错误准确要求重连、
-成功刷新清除旧错误且保全原 refresh token；有副作用的 provider 工作不因重连
-自动重放，完整异常链继续可诊断。
 
 ## 还需验证或选择的性质
 
@@ -41,6 +28,10 @@
 [Schedule 通知](../../server/routers/schedules.py)。
 
 ## 已处理的旧待办与明确例外
+
+Connector refresh 的 HTTP 临时/永久分类、调用局部授权快照和迟到拒绝条件失效
+已归 [Connector 当前合同](../implemented/connectors.md#token-failures-and-delayed-rejection)。
+不再把全部 refresh failure 当成重新授权信号；这不完成第三方写入幂等政策。
 
 这些主体不再作为待开发同一修复：Connector token 按调用 scope 取得，custom
 请求拒绝绝对 URL/穿越与跳转，disabled 账户在 token 使用端检查；WS/控制操作

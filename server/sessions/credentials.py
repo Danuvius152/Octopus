@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..credential_bindings import CredentialBindingError, validate_credential_binding
+from ..credential_use import CredentialUse
 from ..crypto import decrypt, encrypt
 from ..harness import HarnessCredential, get_harness
 from ..models import CredentialStatus
@@ -155,6 +156,7 @@ class CredentialsMixin(SessionManagerBase):
             backend=row["backend"],
             auth_type="api_key",
             secret=plaintext,
+            use=CredentialUse.from_row(row),
         )
 
     async def _refresh_oauth_if_needed(
@@ -195,7 +197,8 @@ class CredentialsMixin(SessionManagerBase):
             isinstance(expires_at_epoch, (int, float))
             and expires_at_epoch - time.time() > minimum_lifetime
         ):
-            return HarnessCredential(backend=backend, auth_type="oauth", secret=access_token)
+            return HarnessCredential(backend=backend, auth_type="oauth", secret=access_token,
+                                     use=CredentialUse.from_row(captured))
 
         if not refresh:
             raise CredentialBindingError("Credential changed during refresh; try the current credential again.")
@@ -234,15 +237,3 @@ class CredentialsMixin(SessionManagerBase):
         if current is None or current["user_id"] != captured["user_id"]:
             raise CredentialBindingError("Credential not found")
         return await self._resolve_secret_credential(credential_id, current, secret_key, refresh=False)
-
-    async def _mark_needs_reconnect(
-        self, credential_id: str, code: RefreshErrorCode
-    ) -> None:
-        if self.db is None:
-            return
-        await self.db.update_credential(
-            credential_id,
-            status=CredentialStatus.needs_reconnect.value,
-            needs_reconnect=True,
-            last_refresh_error_code=code.value,
-        )

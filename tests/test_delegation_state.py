@@ -114,7 +114,7 @@ async def test_reparenting_cannot_commit_an_original_parents_round(db, tmp_path)
     assert await db.load_delegation_state(child, parent_session_id="another-parent", user_id="alice") == running
 
 
-async def test_latest_request_is_bound_to_child_work_and_its_owner(db):
+async def test_transcript_order_cannot_prove_return_consumption(db):
     child, parent, _agent = await _save_conversation(db, owner="owner")
     await db.append_message(
         child, 0, "user", "text", content="Initial review",
@@ -132,13 +132,31 @@ async def test_latest_request_is_bound_to_child_work_and_its_owner(db):
         child, 3, "user", "text", content="Another round",
         tool_input={"request_context": {"work_id": "round-b", "request_id": "next-round"}},
     )
-    scope = {"parent_session_id": parent, "user_id": "owner"}
-    assert await db.get_latest_delegation_request(child, "round-a", **scope) == "relay"
-    assert await db.get_latest_delegation_request(child, "round-b", **scope) == "next-round"
-    assert await db.get_latest_delegation_request(child, "unknown", **scope) is None
-    assert await db.get_latest_delegation_request(
-        child, "round-a", parent_session_id=parent, user_id="another-owner",
-    ) is None
+    for work in ("round-a", "round-b", "unknown"):
+        remaining, ready = await db.delegation_work_consumption(child, work, {"helper-work"}, "relay")
+        assert remaining == {"helper-work"} and not ready
+
+
+async def test_one_execution_consumes_multiple_owned_returns_only_after_confirmed_delivery(db, owner):
+    child, _parent, _agent = await _save_conversation(db, owner=owner)
+    for index, request in enumerate(("initial", "return-a", "return-b")):
+        created, _ = await db.admit_client_submission(child, request, request, request,
+            payload={"source": "delegation", "work_id": "round-a", "order": index,
+                     "delivery_id": None if index == 0 else f"agent-terminal:leaf-{index}"}, receipt={})
+        assert created
+        assert await db.claim_client_submission(child, request, "initial", "same-execution")
+        if index:
+            assert await db.set_steer_delivery(child, request, confirmed=False)
+    await db.record_terminal(session_id=child, request_id="initial", seq=0,
+        role="system", type="result", created_at=STAMP,
+        content={"kind": "outcome", "request_id": "initial", "status": "success"})
+    children = {"leaf-1", "leaf-2"}
+    assert await db.delegation_work_consumption(child, "round-a", children, "initial") == (children, False)
+    await db.set_steer_delivery(child, "return-a", confirmed=True)
+    assert await db.delegation_work_consumption(child, "round-a", children, "initial") == ({"leaf-2"}, False)
+    await db.set_steer_delivery(child, "return-b", confirmed=True)
+    assert await db.delegation_work_consumption(child, "round-a", children, "unrelated-success") == (set(), False)
+    assert await db.delegation_work_consumption(child, "round-a", children, "initial") == (set(), True)
 
 
 async def test_concurrent_follow_up_reservations_have_one_winner(db, tmp_path, owner):

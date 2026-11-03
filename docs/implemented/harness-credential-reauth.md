@@ -4,8 +4,8 @@
 
 ## 2. Scope
 
-In: detect a mid-turn auth-credential rejection, mark the bound
-credential, surface it (chat error + sidebar badge), and let the user
+In: detect an attributed auth-credential rejection, conditionally mark the
+adopted authorization, surface it (chat error + sidebar badge), and let the user
 re-authorize **in place** (same credential id, so all agent/session
 bindings survive) which clears the flag.
 
@@ -96,22 +96,51 @@ See [native error source and recovery](codex-backend.md#error-source-and-recover
 
 The original Owner classifies the failed attempt using its actual selected
 profile. It passes the terminal error code and, where that profile enables text
-matching, the terminal diagnostic plus captured `stderr_text`. App Server's
+matching, attributed terminal/preparation diagnostics. App Server's
 typed bound-root code is its auth evidence; native retry/child notifications
 and arbitrary stderr cannot supply it. Resource retirement remains owned by
 the original execution.
 
 - A turn is *failed* when its terminal `result` is an error, or it ended with
   no `result`. Native diagnostic notifications do not select a failed result.
-- If failed AND `harness.is_auth_error(blob, code=attempt.error_code)`:
-  - mark the bound credential (`session.credential_id` ?? agent's)
-    `needs_reconnect` with `RefreshErrorCode.invalid_credentials` (reuses
-    `_mark_needs_reconnect`); no-op if no credential is bound (host-default
-    auth);
-  - persist + broadcast a tagged error event
-    `{type:"error", code:"auth_expired", credential_id, backend, message}`;
-  - return immediately — the Claude premature-exit "continue" respawn must
-    NOT run (re-auth won't fix itself, and retrying just burns the budget).
+- On attributed rejection, stop recovery and compare the attempt's actual
+  `CredentialUse` with the current owned row inside the original DB transaction.
+  The resolver derives this non-secret evidence from the exact encrypted
+  material, account, backend and auth type it decrypted. A held process keeps its
+  adopted evidence; later attempts capture their own. Labels and status are not
+  authorization material, and provenance is excluded from process reuse signatures.
+- `applied` marks that current authorization `needs_reconnect` and emits
+  `auth_expired`. Replacement or reauthorization yields `obsolete`; a missing,
+  foreign or unavailable account/credential yields `gone`. Those outcomes emit
+  `auth_failed` without changing the current login or asking it to reauthorize.
+  Unproven adoption and host-default authentication use that same conservative
+  failure. Trusted provider rejection remains actionable even if a later frame
+  damages collection; collection damage never supplies authentication evidence.
+
+A Codex home path cannot identify what the independent CLI loaded, cached,
+reloaded or refreshed. Its filesystem publication and DB reauth update are
+separate effects. The current adapter therefore does not manufacture adoption
+evidence from that path or a post-failure read: a typed root unauthorized stops
+with `auth_failed`, preserving the current login. This is a deliberate limit,
+not a claim that the provider accepted the credential.
+
+### Process diagnostics
+
+Unidentified held-process stderr can arrive during idle or a later request.
+Clearing a buffer, offsets and read time do not establish attempt ownership, so
+that text cannot classify authentication, resume or transient failure. An exit
+without a terminal reports a backend/process failure and points to server logs.
+Current attributed structured errors and dedicated preparation failures retain
+their existing classification.
+
+Run reads stderr in bounded chunks with incremental UTF-8 decoding. Its masked
+tail is at most 16,384 characters; the existing INFO logger receives the complete
+stream in bounded pieces. Streaming masking retains secret-prefix, quoted-value
+and URL-userinfo state across chunk boundaries, including arbitrary separating
+whitespace. Supplementary activity parsing stays bounded and grants no business
+authority. The checked installation uses the existing journal sink at INFO with
+systemd rate limiting disabled; retention follows that journal's policy, not a
+new diagnostic store. These facts do not promise indefinite log retention.
 
 Detection reads the raw `HarnessEvent` stream directly (terminal event
 `content`/`raw` captured in the loop), not the WS/persistence mappers — so
@@ -150,10 +179,14 @@ valid and the flag clears.
 - **Claude** (`POST /credentials/oauth/complete`): optional
   `credential_id`. On first completion, the target must belong to the login's
   account and use the Claude backend before the code is exchanged. Storage checks
-  the target owner again under the same write lock as the in-place update,
-  clearing reconnect/status fields without changing the credential ID. A
+  the target owner and current account availability under the same write lock as
+  the in-place update. It atomically writes `auth_type=oauth`, returned material,
+  expiry and cleared reconnect/status fields without changing the credential ID.
+  Both old API-key and OAuth records can receive a minted key or token bundle;
+  resolver and renderer interpret the committed OAuth representation. A
   target deleted or adopted before commit returns 404 without replacing its
-  secret. A current account is required. Repeated matching completion reads the
+  secret. First-time creation checks current account availability in its commit
+  transaction too. Repeated matching completion reads the
   original operation result before revalidating mutable target existence:
   deletion after success does not erase that historical result or recreate a row.
 - **Codex** (`POST /credentials/codex/start`): optional
@@ -200,6 +233,12 @@ Storage uncertainty follows the existing database health boundary, without repla
 `tests/test_oauth_operation.py` covers stage barriers, lost waiters, deduplication,
 GC/shutdown and real route-to-SQLite commits; reauth ownership tests cover changed
 targets and historical result reads. These are offline provider tests.
+`tests/test_credential_rejection.py` drives actual controlled process adoption
+and delayed single/concurrent rejection across replacement, OAuth commit, label
+change, deletion and disable. `test_credential_reauth_ownership.py` covers all
+old/new representation combinations through commit, resolver and renderer;
+`test_claude_diagnostic_ownership.py` and `test_harness_diagnostics.py` cover
+late process output and bounded, masked full logging.
 
 ## 6. Frontend
 
@@ -207,6 +246,8 @@ targets and historical result reads. These are offline provider tests.
   "needs reauth" badge + a "Re-authorize" button that opens the existing
   dialog in re-auth mode, threading `credential_id` (Claude) /
   `reauth_credential_id` (Codex). On success, refetch → flag clears.
+  Claude's OAuth authorization action also supports an existing API-key record;
+  the dialog explains that conversion retains its ID and bindings.
 - Claude submission and recoverable errors retain the original completion request
   for explicit **Wait again**. **Close** ends observation; **Cancel sign-in**
   consumes the typed cancellation receipt. Late success, error and cancellation

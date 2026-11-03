@@ -47,13 +47,22 @@ class CompletionModels:
         future = asyncio.get_running_loop().create_future()
         receipt = SubmissionReceipt("accepted", request_id, future)
         knowledge = kwargs.get("knowledge_context")
+        requests = self.requests.setdefault((id(manager), session_id), [])
+        delivery_id = kwargs.get("delivery_id")
+        payload = {"content": prompt, "attachment_ids": [], "wiki_mode": "read", "source": source,
+                   "work_id": work_id, "delivery_id": delivery_id, "order": len(requests) + 1}
+        from server.sessions.client_submissions import input_digest
+
+        await manager.db.admit_client_submission(
+            session_id, f"{source}:{delivery_id}" if delivery_id else request_id, input_digest(payload), request_id,
+            payload=payload, receipt={"accepted": True, "disposition": "accepted", "request_id": request_id},
+        )
         _, seq, _ = await manager.db.message_sequence_state(session_id)
         await manager.db.record_request(
             request_id=request_id, session_id=session_id, seq=seq, role="user", type="text", content=prompt,
             tool_input={"request_context": {"request_id": request_id, "work_id": work_id, "source": source,
                                            "knowledge": json.loads(encode(knowledge)) if knowledge is not None else {}}},
         )
-        requests = self.requests.setdefault((id(manager), session_id), [])
         requests.append(ModelRequest(session, receipt, attempt_id, work_id))
         first = next(item for item in requests if not item.receipt._completion.done())
         session._run.settlement = _Settlement(request_id=first.receipt.request_id, work_id=first.work_id)
@@ -68,6 +77,9 @@ class CompletionModels:
         manager = getattr(consumer, "session_mgr", None) or consumer
         request = self.pending(manager, event.get("session_id"))
         matching = request is not None and event.get("work_id", request.work_id) == request.work_id
+        if matching:
+            await manager.db.claim_client_submission(request.session.id, request.receipt.request_id,
+                                                     request.receipt.request_id, "controlled-model")
         if matching and event.get("type") == "status":
             request.session.status = SessionStatus(event["status"])
         if matching and event.get("type") == "assistant_text":

@@ -61,7 +61,7 @@ def send(frame):
 def background_completed():
     send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id,
         "item": {"id": "background-command", "type": "commandExecution", "status": "failed",
-            "command": "pytest fixture", "processId": "45196", "aggregatedOutput": "1 passed, 1 teardown error",
+            "command": "pytest fixture", "cwd": str(root), "commandActions": [], "processId": "45196", "aggregatedOutput": "1 passed, 1 teardown error",
             "exitCode": -1}}})
 
 
@@ -144,7 +144,7 @@ for line in frames():
                     "turn": {"id": "unsolicited", "status": "completed"}}})
         result = {"config": {"model": defaults["model"], "model_reasoning_effort": defaults["effort"],
             "features": {"fast_mode": mode != "bad_fast_config", "wake_on_agent_messages": mode == "bad_config", "goals": False,
-            "sleep_tool": False, "multi_agent": True, "multi_agent_v2": {"enabled": True, "wait_agent_enabled": True}}}}
+            "sleep_tool": False, "unbounded_connection_retries": False, "multi_agent": True, "multi_agent_v2": {"enabled": True, "wait_agent_enabled": True}}}}
         if (root / "native-config.json").exists():
             result["config"].update(json.loads((root / "native-config.json").read_text()))
         if (root / "native-config-layers.json").exists():
@@ -270,7 +270,7 @@ for line in frames():
             if mode.startswith("control_background_"):
                 send({"method": "item/started", "params": {"threadId": thread_id, "turnId": turn_id,
                     "item": {"id": "background-command", "type": "commandExecution", "status": "inProgress",
-                        "command": "pytest fixture", "processId": "45196"}}})
+                        "command": "pytest fixture", "cwd": str(root), "commandActions": [], "processId": "45196"}}})
             if mode == "control_group":
                 child = subprocess.Popen([sys.executable, "-c",
                     "import signal,sys,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
@@ -284,8 +284,10 @@ for line in frames():
             for kind in kinds:
                 for phase in ("started", "completed"):
                     event_params = {"threadId": thread_id, "turnId": turn_id, "item": {
-                        "id": kind + "-1", "type": kind, "command": "printf TOOL", "aggregatedOutput": "TOOL", "exitCode": 0,
-                        "tool": "wait", "receiverThreadIds": ["child-1"], "status": "completed"}}
+                        "id": kind + "-1", "type": kind, "command": "printf TOOL", "cwd": str(root), "commandActions": [], "aggregatedOutput": "TOOL", "exitCode": 0,
+                        "changes": [], "kind": "completed", "agentThreadId": "child-1", "agentPath": "/root/child",
+                        "senderThreadId": thread_id, "agentsStates": {},
+                        "tool": "wait", "query": "child-1", "receiverThreadIds": ["child-1"], "status": "completed"}}
                     if mode == "missing_item_turn":
                         event_params.pop("turnId")
                     send({"method": "item/" + phase, "params": event_params})
@@ -299,7 +301,7 @@ for line in frames():
         if mode.startswith("steer_"):
             send({"method": "item/started", "params": {"threadId": thread_id, "turnId": turn_id,
                 "item": {"id": "native-wait", "type": "collabAgentToolCall", "tool": "wait",
-                    "receiverThreadIds": ["child-1"], "status": "inProgress"}}})
+                    "receiverThreadIds": ["child-1"], "senderThreadId": thread_id, "agentsStates": {}, "status": "inProgress"}}})
             (root / "native-waiting").touch()
         elif mode != "held":
             send({"method": "turn/completed", "params": {"threadId": thread_id,
@@ -322,11 +324,12 @@ for line in frames():
             gated_steer = frame["id"], turn_id
         elif mode == "steer_user_message":
             send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id,
-                "item": {"type": "userMessage", "id": "steered-input", "clientId": params["clientUserMessageId"]}}})
+                "item": {"type": "userMessage", "id": "steered-input", "content": [], "clientId": params["clientUserMessageId"]}}})
         elif mode != "steer_lost":
             send({"id": frame["id"], "result": {"turnId": turn_id}})
         send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id,
-            "item": {"id": "native-wait", "type": "collabAgentToolCall", "tool": "wait", "status": "completed"}}})
+            "item": {"id": "native-wait", "type": "collabAgentToolCall", "tool": "wait", "status": "completed",
+                "senderThreadId": thread_id, "receiverThreadIds": ["child-1"], "agentsStates": {}}}})
         continue
     if method == "thread/backgroundTerminals/clean":
         (root / "native-clean-requested").write_text(json.dumps(params))

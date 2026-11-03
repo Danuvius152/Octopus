@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from server.config import settings
+from server.diagnostics import diagnostic_text
 from server.harness import (
     EventParser,
     Harness,
@@ -111,15 +112,89 @@ async def test_success_diagnostics_preserve_input_stderr_and_native_tail(
     assert PRIVATE_PERSONA in events[0].raw["persona"]
     assert events[0].raw["credential"] == PRIVATE_TOKEN
     assert [event.raw for event in tail] == [{"type": "native.tail", "content": PRIVATE_TAIL}]
-    assert run.stderr_text == stderr
+    assert run.stderr_text == diagnostic_text(stderr, secrets=(PRIVATE_TOKEN, installation_token))
     assert "PRIVATE-PROMPT-46" in caplog.text and PRIVATE_PERSONA in caplog.text
     assert PRIVATE_TOKEN not in caplog.text and installation_token not in caplog.text
     assert "argv=" in caplog.text and f"cwd={tmp_path}" in caplog.text
     stderr_messages = [record.message for record in caplog.records if "CLI stderr" in record.message]
     assert any("native stderr detail" in message for message in stderr_messages)
-    assert any("x" * 2500 + PRIVATE_TAIL in message for message in stderr_messages)
+    stderr_body = "".join(message.split(": ", 1)[1] for message in stderr_messages)
+    assert "x" * 2500 + PRIVATE_TAIL in stderr_body
     assert "synthetic" in caplog.text and "request-diagnostics-46" in caplog.text
     assert "exit_code=0" in caplog.text and "elapsed_ms=" in caplog.text
+
+
+async def test_long_stderr_is_drained_bounded_and_logged_at_default_level(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    script = '''import json, os, sys
+sys.stderr.write("x" * (5 * 1024 * 1024))
+sys.stderr.write('\\naccess_token="' + "z" * 40000 + '"\\n')
+sys.stderr.write("y" * 8180 + os.environ["PRIVATE_CREDENTIAL"] + "\\n后续诊断\\n")
+sys.stderr.flush()
+print(json.dumps({"type":"result"}), flush=True)
+'''
+    run = Harness(_profile(script)).create_run(RunConfig(mcp_servers=[]))
+    try:
+        await run.start("diagnostics", str(tmp_path), credential=HarnessCredential("synthetic", "api_key", PRIVATE_TOKEN))
+        await asyncio.wait_for(_collect(run), 5)
+    finally:
+        await run.stop()
+    assert len(run.stderr_text) <= 16384
+    assert "后续诊断" in run.stderr_text
+    records = [record.getMessage().split(": ", 1)[1] for record in caplog.records
+               if record.getMessage().startswith("Harness CLI stderr ")]
+    logged = "".join(records)
+    assert "x" * (5 * 1024 * 1024) in logged
+    assert "后续诊断" in logged and "z" * 32 not in logged
+    assert PRIVATE_TOKEN not in logged
+
+
+async def test_unclosed_quoted_stderr_secret_is_masked_through_eof(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    secret = "first-word second-word secret-tail"
+    script = 'import sys; sys.stderr.write(\'access_token="\' + sys.argv[1])'
+    run = Harness(_profile(script)).create_run(RunConfig(mcp_servers=[]))
+    try:
+        await run.start(secret, str(tmp_path))
+        await asyncio.wait_for(_collect(run), 3)
+    finally:
+        await run.stop()
+    logged = "".join(record.getMessage() for record in caplog.records if "Harness CLI stderr" in record.getMessage())
+    assert "[redacted]" in logged and "second-word" not in logged and "secret-tail" not in logged
+    assert "secret-tail" not in run.stderr_text
+
+
+async def test_long_url_credentials_are_masked_across_stderr_chunks(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    secret = "private-url-password-" * 1100
+    script = ('import sys; sys.stderr.write("https://user:" + sys.argv[1] + "@host/path\\n"'
+              ' + "后续诊断\\n"); sys.stderr.flush()')
+    run = Harness(_profile(script)).create_run(RunConfig(mcp_servers=[]))
+    try:
+        await run.start(secret, str(tmp_path))
+        await asyncio.wait_for(_collect(run), 3)
+    finally:
+        await run.stop()
+    logged = "".join(record.getMessage() for record in caplog.records if "Harness CLI stderr" in record.getMessage())
+    assert "private-url-password" not in logged and "private-url-password" not in run.stderr_text
+    assert "[redacted]" in logged and "@host/path" in logged and "后续诊断" in logged
+
+
+@pytest.mark.parametrize("prefix", ["refresh_token=", "refresh_token", "Authorization: Bearer", "client_secret="])
+async def test_secret_fields_wait_for_values_across_arbitrary_whitespace(tmp_path, caplog, prefix):
+    caplog.set_level(logging.INFO)
+    suffix = "=unknown-private-value" if prefix == "refresh_token" else "unknown-private-value"
+    script = ('import os,sys,time; os.write(2, sys.argv[1].encode()+b" "*20000); time.sleep(.05); '
+              f'os.write(2, {suffix!r}.encode()+b"\\nfollowing diagnostic\\n")')
+    run = Harness(_profile(script)).create_run(RunConfig(mcp_servers=[]))
+    try:
+        await run.start(prefix, str(tmp_path))
+        await asyncio.wait_for(_collect(run), 3)
+    finally:
+        await run.stop()
+    logged = "".join(record.getMessage() for record in caplog.records if "Harness CLI stderr" in record.getMessage())
+    assert "unknown-private-value" not in logged and "unknown-private-value" not in run.stderr_text
+    assert "following diagnostic" in logged and len(run.stderr_text) <= 16384
 
 
 @pytest.mark.parametrize("backend", ["codex", "claude-code"])

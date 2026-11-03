@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from .codex import _mcp_result_text
@@ -20,6 +21,40 @@ from .profile import ParseOutput
 IMAGE_BYTES = 32 * 1024 * 1024
 NATIVE_LINE_BYTES = ((IMAGE_BYTES + 2) // 3) * 4 + 4 * 1024 * 1024
 TEXT_FRAME_BYTES = 4 * 1024 * 1024
+
+
+def completion_required(item: dict[str, Any]) -> bool:
+    """Pinned producer obligations, never inferred from item-id spelling."""
+    kind = item.get("type")
+    if kind in {"agentMessage", "reasoning", "contextCompaction", "userMessage"}:
+        return False
+    if kind == "webSearch":
+        # Core maps even a missing Responses action to explicit Other. The
+        # extension starts its actual invocation with action=None. An absent
+        # or unknown action cannot establish sampling provenance.
+        action = item.get("action")
+        if isinstance(action, dict) and action.get("type") in {"search", "openPage", "findInPage", "other"}:
+            return False
+    return True
+
+
+@dataclass
+class ItemObservation:
+    kind: str
+    start: tuple[bool, str | None] | None = None
+    complete: str | None = None
+
+    @property
+    def required(self) -> bool:
+        return self.start[0] if self.start else True
+
+    @property
+    def operation(self) -> str | None:
+        return self.start[1] if self.start else None
+
+    @classmethod
+    def started(cls, item: dict[str, Any]) -> ItemObservation:
+        return cls(item["type"], (completion_required(item), item.get("tool")))
 
 
 def observation_frame(obj: dict[str, Any]) -> dict[str, Any]:
@@ -59,25 +94,135 @@ def diagnostic_frame(obj: dict[str, Any]) -> dict[str, Any]:
     return {**obj, "params": {**params, "item": {**item, "result": "<inline media omitted>"}}}
 
 
+def _validate_item_fields(item: dict[str, Any]) -> None:
+    """Pinned payload shapes, before any completion obligation is discharged.
+
+    Nullable provider results may be absent; an empty result is legitimate.
+    Required identity and result containers cannot be replaced by display text.
+    """
+    kind = item.get("type")
+    if not isinstance(kind, str) or not isinstance(item.get("id"), str) or not item["id"]:
+        raise ValueError("Native item has no kind or identity")
+    required_fields: dict[str, dict[str, type]] = {
+        "userMessage": {"content": list},
+        "commandExecution": {"command": str, "cwd": str, "commandActions": list},
+        "fileChange": {"changes": list},
+        "mcpToolCall": {"server": str, "tool": str},
+        "dynamicToolCall": {"tool": str},
+        "collabAgentToolCall": {"tool": str, "senderThreadId": str, "receiverThreadIds": list, "agentsStates": dict},
+        "subAgentActivity": {"kind": str, "agentThreadId": str, "agentPath": str},
+    }
+    optional_fields: dict[str, dict[str, type]] = {
+        "userMessage": {"clientId": str},
+        "commandExecution": {"processId": str, "aggregatedOutput": str, "exitCode": int, "durationMs": int},
+        "mcpToolCall": {"result": dict, "error": dict, "durationMs": int},
+        "dynamicToolCall": {"contentItems": list, "success": bool, "durationMs": int},
+        "collabAgentToolCall": {"prompt": str, "model": str, "reasoningEffort": str},
+        "subAgentActivity": {"model": str, "reasoningEffort": str},
+    }
+    required = required_fields.get(kind, {})
+    optional = optional_fields.get(kind, {})
+    for field, expected in {**required, **optional}.items():
+        value = item.get(field)
+        if field in optional and value is None:
+            continue
+        if not isinstance(value, expected) or expected is int and isinstance(value, bool):
+            raise ValueError(f"Malformed native {kind} field: {field}")
+    if kind in {"mcpToolCall", "dynamicToolCall"} and "arguments" not in item:
+        raise ValueError(f"Native {kind} has no arguments")
+    if kind == "userMessage":
+        input_fields = {"text": ("text",), "localImage": ("path",), "audio": ("url",),
+                        "localAudio": ("path",), "skill": ("name", "path"), "mention": ("name", "path")}
+        for part in item["content"]:
+            if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+                raise ValueError("Malformed native user content")
+            if part["type"] == "image":
+                if not any(isinstance(part.get(field), str) for field in ("url", "fileId")):
+                    raise ValueError("Malformed native user image")
+            elif part["type"] not in input_fields or any(
+                    not isinstance(part.get(field), str) for field in input_fields[part["type"]]):
+                raise ValueError("Malformed native user input")
+            if part["type"] in {"image", "localImage"} and part.get("detail") is not None and (
+                    not isinstance(part["detail"], str) or part["detail"] not in {"auto", "low", "high", "original"}):
+                raise ValueError("Malformed native user image detail")
+            if part["type"] == "text":
+                elements = part.get("text_elements", [])
+                if not isinstance(elements, list):
+                    raise ValueError("Malformed native text elements")
+                for element in elements:
+                    if not isinstance(element, dict) or not isinstance(element.get("byteRange"), dict):
+                        raise ValueError("Malformed native text element")
+                    if (any(type(element["byteRange"].get(field)) is not int
+                            or element["byteRange"][field] < 0 for field in ("start", "end"))
+                            or element.get("placeholder") is not None and not isinstance(element["placeholder"], str)):
+                        raise ValueError("Malformed native text range or placeholder")
+    if kind == "commandExecution" and any(not isinstance(action, dict) for action in item["commandActions"]):
+        raise ValueError("Malformed native command actions")
+    if kind == "fileChange":
+        for change in item["changes"]:
+            if (not isinstance(change, dict) or not isinstance(change.get("path"), str)
+                    or not isinstance(change.get("diff"), str) or not isinstance(change.get("kind"), dict)
+                    or change["kind"].get("type") not in {"add", "delete", "update"}
+                    or change["kind"].get("move_path") is not None and not isinstance(change["kind"]["move_path"], str)):
+                raise ValueError("Malformed native file change")
+    if kind == "mcpToolCall":
+        result, error = item.get("result"), item.get("error")
+        if result is not None and not isinstance(result.get("content"), list):
+            raise ValueError("Malformed native MCP result")
+        if error is not None and not isinstance(error.get("message"), str):
+            raise ValueError("Malformed native MCP error")
+    if kind == "dynamicToolCall":
+        fields = {"inputText": "text", "inputImage": "imageUrl", "inputAudio": "audioUrl"}
+        for part in item.get("contentItems") or []:
+            if (not isinstance(part, dict) or part.get("type") not in fields
+                    or not isinstance(part.get(fields[part["type"]]), str)):
+                raise ValueError("Malformed native dynamic tool content")
+    if kind == "collabAgentToolCall":
+        if (item["tool"] not in {"spawnAgent", "sendInput", "resumeAgent", "wait", "closeAgent", "sendMessage",
+                                 "followupTask", "interruptAgent", "listAgents"}
+                or any(not isinstance(thread, str) for thread in item["receiverThreadIds"])):
+            raise ValueError("Malformed native collaboration target")
+        for state in item["agentsStates"].values():
+            if (not isinstance(state, dict) or state.get("status") not in {"pendingInit", "running", "interrupted",
+                    "completed", "errored", "shutdown", "notFound"}
+                    or state.get("message") is not None and not isinstance(state["message"], str)):
+                raise ValueError("Malformed native collaboration state")
+    if kind == "subAgentActivity" and item["kind"] not in {"started", "interacted", "interrupted", "completed"}:
+        raise ValueError("Malformed native child activity kind")
+
+
+def item_fingerprint(item: dict[str, Any]) -> str:
+    """Compare normalized payload facts, excluding observation timestamps."""
+    normalized = {key: value for key, value in item.items()
+                  if key not in {"startedAtMs", "completedAtMs"} and value is not None}
+    if item["type"] == "reasoning":
+        normalized.setdefault("summary", [])
+        normalized.setdefault("content", [])
+    if item["type"] == "commandExecution":
+        normalized.setdefault("source", "agent")
+    return hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
+
+
 def item_events(method: str, params: dict[str, Any]) -> ParseOutput:
     item = params["item"]
     kind, identifier = item.get("type"), item["id"]
     started = method == "item/started"
+    _validate_item_fields(item)
     if kind == "userMessage":
         return ParseOutput(activity=False)  # Original submission owns the input.
     if kind == "agentMessage":
+        if not isinstance(item.get("text"), str) or item.get("phase") not in {None, "commentary", "final_answer"}:
+            raise ValueError("Native message has invalid text or phase")
         if started:
             return ParseOutput(activity=False)
-        if not isinstance(item.get("text"), str):
-            raise ValueError("Complete native message has no text")
         return ParseOutput(events=[HarnessEvent(type="text", content=item["text"],
             tool_input={"native_item": {key: value for key, value in item.items() if key != "text"}})])
     if kind == "reasoning":
-        if started:
-            return ParseOutput(activity=False)
         parts = [item.get("summary", []), item.get("content", [])]
         if any(not isinstance(part, list) or any(not isinstance(text, str) for text in part) for part in parts):
             raise ValueError("Malformed native reasoning")
+        if started:
+            return ParseOutput(activity=False)
         return ParseOutput(events=[HarnessEvent(type="thinking", content="\n".join(parts[0] + parts[1]),
             tool_input={"native_item": item})])
 
@@ -135,6 +280,19 @@ def item_events(method: str, params: dict[str, Any]) -> ParseOutput:
         content = json.dumps(item, ensure_ascii=False)
         failed |= kind == "dynamicToolCall" and item.get("success") is False
     elif kind in {"collabAgentToolCall", "subAgentActivity", "webSearch", "fileChange", "contextCompaction"}:
+        if kind == "webSearch":
+            if not isinstance(item.get("query"), str):
+                raise ValueError("Native web search has no query")
+            action = item.get("action")
+            if action is not None:
+                if not isinstance(action, dict) or not isinstance(action.get("type"), str):
+                    raise ValueError("Malformed native search action")
+                for field in ("query", "url", "pattern"):
+                    if action.get(field) is not None and not isinstance(action[field], str):
+                        raise ValueError("Malformed native search action field")
+                if action.get("queries") is not None and (not isinstance(action["queries"], list)
+                        or any(not isinstance(query, str) for query in action["queries"])):
+                    raise ValueError("Malformed native search queries")
         name = item.get("tool") or kind
         tool_input = params
         content = json.dumps(params, ensure_ascii=False)

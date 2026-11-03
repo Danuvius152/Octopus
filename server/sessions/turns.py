@@ -7,6 +7,7 @@ publication tasks report their original results without mutating Session.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -824,6 +825,36 @@ class TurnsMixin(SessionManagerBase):
                                               agent_id=session.agent_id, backend="codex",
                                               duration_ms=event.duration_ms, detail=detail))
             return []
+        if event.type == "native_completion":
+            expected = event.raw or {}
+            if not expected:
+                return []
+            assert self.db is not None and session._run.settlement is not None
+            assert event.runtime_metadata is not None
+            rows = await self.db.load_committed_request_messages(session.id, session._run.settlement.request_id)
+            root = event.runtime_metadata["native"]
+            references = set(attempt.final_answer.message_seqs if attempt.final_answer else [])
+            recorded = {}
+            for row in rows:
+                metadata = row.get("runtime_metadata") or {}
+                native = metadata.get("native") or {}
+                if (row["seq"] in references and metadata.get("attempt_id") == attempt.attempt_id
+                        and native.get("thread_id") == root["thread_id"] and native.get("turn_id") == root["turn_id"]
+                        and native.get("phase") == "final_answer" and isinstance(row.get("content"), str)):
+                    recorded[native.get("item_id")] = hashlib.sha256(row["content"].encode()).hexdigest()
+            missing = [identifier for identifier, digest in expected.items() if recorded.get(identifier) != digest]
+            if missing:
+                gap_detail = f"Completed final answers declared by the native summary were not saved with their original references: {missing}"
+                attempt.backend._note_protocol_issue("native_final_missing", gap_detail)
+                return [await self._recovery_frame(session, code="native_final_missing", phase="diagnostic", message=gap_detail)]
+            return []
+        if event.type == "collection_error":
+            # This reliable queue-external diagnostic never replaces the
+            # provider's root terminal or grants credential invalidation.
+            return [await self._recovery_frame(
+                session, code=event.error_code or "native_collection_incomplete", phase="diagnostic",
+                message=event.content or "Native records could not be collected", source=event,
+            )]
         if event.type == "subagent" and session._run.backend is not attempt.backend and not (event.runtime_metadata or {}).get("native"):
             return []
         from ..harness.tool_identity import ToolIdentityTracker
@@ -943,12 +974,10 @@ class TurnsMixin(SessionManagerBase):
 
     @staticmethod
     def _failure_blob(attempt: _Attempt) -> str:
-        """Everything a failed attempt said, for the pattern matchers: the
-        terminal event's content/raw plus the CLI's stderr. Display summaries
-        are bounded separately; classification must also see trailing evidence.
+        """Only attributed provider events can classify the current attempt.
 
-        getattr: a real HarnessRun exposes stderr_text; lightweight test and
-        backend stand-ins may not.
+        A held process's stderr can arrive after its original turn ended.
+        Neither a read offset nor clearing a buffer establishes attribution.
         """
         if getattr(attempt.backend, "captures_retirement_output", False):
             # Native retry classification consumes only the original root's
@@ -958,8 +987,7 @@ class TurnsMixin(SessionManagerBase):
                 return attempt.error_text
             detail = (attempt.result.error_details or {}).get("additionalDetails")
             return (attempt.result.content or "") + ("\n" + detail if isinstance(detail, str) else "")
-        stderr_text = getattr(attempt.backend, "stderr_text", "") or ""
-        return attempt.error_text + "\n" + stderr_text
+        return attempt.error_text
 
     async def _timeout_decision(
         self, session: Session, turn: _Turn, attempt: _Attempt
@@ -1030,19 +1058,19 @@ class TurnsMixin(SessionManagerBase):
         )
 
     async def _auth_decision(
-        self, session: Session, turn: _Turn, blob: str, *, error_code: str | None = None
+        self, session: Session, turn: _Turn, attempt: _Attempt, blob: str, *, error_code: str | None = None
     ) -> _Decision | None:
-        """Reactive auth-expiry: a failed turn whose error text matches this
-        backend's auth-rejection patterns means the bound credential is dead
-        (revoked / rotated / expired past what the proactive refresh caught).
-        Flag it needs_reconnect and surface a re-authorize prompt, then STOP —
-        re-auth won't fix itself, and a retry just burns the budget
-        (harness-credential-reauth.md §4)."""
+        """Stop on attributed rejection; conditionally revoke adopted material.
+
+        Only the original resolver evidence can match the current authorization.
+        Obsolete or unproven adoption keeps the current login unchanged.
+        """
         if not turn.harness.is_auth_error(blob, code=error_code):
             return None
         return _Decision.stop(
             await self._surface_auth_expiry(
-                session, cred_id=turn.cred_id, backend=turn.harness.backend
+                session, cred_id=turn.cred_id, backend=turn.harness.backend,
+                use=attempt.credential.use if attempt.credential else None,
             )
         )
 
@@ -1194,8 +1222,13 @@ class TurnsMixin(SessionManagerBase):
         Premature-exit recovery is last and always answers, because "the CLI
         just stopped" is only knowable once nothing else claimed the failure.
         """
-        if getattr(attempt.backend, "protocol_issues", {}).get("fatal_protocol_error"):
-            detail = safe_diagnostic(attempt.error_text)
+        auth = None
+        if attempt.failed:
+            auth = await self._auth_decision(session, turn, attempt, self._failure_blob(attempt),
+                                             error_code=attempt.failure_code)
+        if auth is None and getattr(attempt.backend, "protocol_issues", {}).get("fatal_protocol_error"):
+            collection = getattr(attempt.backend, "collection_error", None)
+            detail = safe_diagnostic(collection.content if collection else attempt.error_text)
             return _Decision.stop({"code": "protocol_failed", "message":
                 "Backend protocol ownership could not be established; execution stopped."
                 + (f" {detail}" if detail else "")})
@@ -1213,11 +1246,15 @@ class TurnsMixin(SessionManagerBase):
         if decision is not None:
             return decision
 
+        if auth is not None:
+            return auth
+
+        if getattr(attempt.backend, "protocol_issues", None) and (
+                attempt.failed or getattr(attempt.backend, "captures_retirement_output", False)):
+            return _Decision.stop({"code": "protocol_incomplete"})
+
         if attempt.failed:
             blob = self._failure_blob(attempt)
-            decision = await self._auth_decision(session, turn, blob, error_code=attempt.failure_code)
-            if decision is not None:
-                return decision
             if attempt.preparation_failed:
                 decision = await self._stale_session_decision(session, turn, attempt, blob)
                 if decision is not None:
@@ -1226,8 +1263,6 @@ class TurnsMixin(SessionManagerBase):
                 if decision is not None:
                     return decision
                 return _Decision.stop({"code": "preparation_failed"})
-            if getattr(attempt.backend, "protocol_issues", None):
-                return _Decision.stop({"code": "protocol_incomplete"})
             decision = await self._stale_session_decision(session, turn, attempt, blob)
             if decision is not None:
                 return decision

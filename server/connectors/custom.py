@@ -17,6 +17,7 @@ import httpx
 
 from ..oauth_providers import OAuthTokenSet
 from .base import ConnectorBase
+from .errors import refresh_body
 from .registry import get_connector as _get_builtin
 
 _TIMEOUT = 15.0
@@ -105,12 +106,7 @@ class GenericOAuthProvider:
                 },
                 headers={"Accept": "application/json"},
             )
-        if resp.status_code != 200:
-            body = resp.json() if resp.content else {}
-            err = RuntimeError(body.get("error") or f"HTTP {resp.status_code}")
-            err.code = body.get("error", "refresh_failed")  # type: ignore[attr-defined]
-            raise err
-        ts = self._parse(resp.json())
+        ts = self._parse(refresh_body(resp))
         if ts.refresh_token is None:
             ts.refresh_token = refresh_token
         return ts

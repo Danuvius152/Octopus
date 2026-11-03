@@ -97,6 +97,25 @@ results, duplicate input receipts or prove parent processing. Empty diagnostics
 do not authorize replay. Live question delivery controls stay with the original
 round/question and are not a new persistent queue.
 
+The same `sessions.delegation_state` JSON now retains `child_work_ids` and an
+optional successful `candidate_request_id`. These are the outstanding parent-work
+responsibilities and final-candidate identity that cannot be reconstructed from
+the child's current round after follow-up. Original `client_submissions` payload,
+execution owner, delivery/native proof and terminal derive consumption; result
+bodies and historical rounds are not copied. Parent responsibility and child
+round admission share the original CAS transaction; final sealing rechecks those
+inputs in its own CAS transaction. Unsealed running snapshots restore as
+interrupted, while a committed completed snapshot retains its seal. Legacy
+boolean markers are accepted only for reading and never infer completion or get
+written again. There is no DDL, format-marker change, startup backfill or new root.
+Complete backup retains these session facts; account archives exclude them under
+their existing chat/execution-history boundary.
+
+Model `CredentialUse` and Connector `grant_stamp` are derived comparison evidence,
+not new persistent revisions. The original credential/installation transaction
+compares current encrypted material and ownership before applying rejection.
+OAuth reauthorization atomically updates the existing `auth_type` and secret fields.
+
 The current main declaration includes `client_submissions.native_inputs`, a checked JSON array with
 default `[]`. Each version-1 entry belongs to the original product input and one
 attempt, retaining separate RPC/thread/turn identities, acceptance proof and

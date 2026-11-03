@@ -175,11 +175,12 @@ async def test_stop_retires_a_backpressured_child_without_a_stream_consumer(tmp_
         script.write_text(
             "import json,os,sys\n"
             "with open(sys.argv[1], 'a', buffering=1) as progress:\n"
-            "    for index in range(512):\n"
+            "    index = 0\n"
+            "    while True:\n"
             "        pending = memoryview(b'x'*65536)\n"
             "        while pending: pending = pending[os.write(2, pending):]\n"
             "        progress.write(json.dumps({'written':index})+'\\n')\n"
-            "    progress.write('{\"finished\":true}\\n')\n"
+            "        index += 1\n"
         )
     if ignore_term:
         script.write_text("import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n" + script.read_text())
@@ -189,7 +190,15 @@ async def test_stop_retires_a_backpressured_child_without_a_stream_consumer(tmp_
     try:
         await run.start("prompt", str(tmp_path))
         pid = run.process_group_id
-        await _wait_for_stalled_writer(progress)
+        if pipe == "stderr":
+            # Stderr drains independently of the presentation consumer, even
+            # without newlines. Stop still retires a continuously writing peer.
+            async with asyncio.timeout(5):
+                while len(_written(progress)) < 2:
+                    await asyncio.sleep(.01)
+            assert len(run.stderr_text) <= 16384
+        else:
+            await _wait_for_stalled_writer(progress)
         output_pipe = os.readlink(f"/proc/{pid}/fd/{descriptor}")
         stopping = asyncio.create_task(run.stop())
         await asyncio.wait_for(asyncio.shield(stopping), 5)

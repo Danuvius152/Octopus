@@ -9,8 +9,9 @@ changed.
 from __future__ import annotations
 
 import sqlite3
-from typing import Any
+from typing import Any, Literal
 
+from ..credential_use import CredentialUse
 from .base import DatabaseBase
 from .transaction import Transaction
 from .users import owner_is_available
@@ -45,8 +46,11 @@ class CredentialsMixin(DatabaseBase):
         created_at: str,
         user_id: str | None = None,
         token_expires_at: str | None = None,
+        require_available_owner: bool = False,
     ) -> None:
         async with self.transaction(write=True) as tx:
+            if require_available_owner and not await owner_is_available(tx, user_id):
+                raise ValueError("Account is unavailable")
             await tx.execute(
                 "INSERT INTO backend_credentials "
                 "(id, backend, label, auth_type, created_at, "
@@ -126,7 +130,7 @@ class CredentialsMixin(DatabaseBase):
         write. None here names the install owner, not an unfiltered query.
         """
         async with self.transaction(write=True) as tx:
-            if user_id is None and await self._count(tx, "SELECT COUNT(*) FROM users"):
+            if not await owner_is_available(tx, user_id):
                 return None
             existing = await self._get_credential(tx, credential_id, user_id)
             if (existing is None or existing["user_id"] != user_id
@@ -151,8 +155,23 @@ class CredentialsMixin(DatabaseBase):
             await self._update_credential(tx, captured["id"], **fields)
             return True
 
+    async def reject_credential_use(self, use: CredentialUse) -> Literal["applied", "obsolete", "gone"]:
+        """Only the adopted material can invalidate this account's current login."""
+        async with self.transaction(write=True) as tx:
+            current = await self._get_credential(tx, use.credential_id, use.user_id)
+            if (current is None or current["user_id"] != use.user_id
+                    or not await owner_is_available(tx, use.user_id)):
+                return "gone"
+            if CredentialUse.from_row(current) != use:
+                return "obsolete"
+            await self._update_credential(tx, use.credential_id,
+                status="needs_reconnect", needs_reconnect=True,
+                last_refresh_error_code="invalid_credentials")
+            return "applied"
+
     async def _update_credential(self, tx: Transaction, credential_id: str, **fields: Any) -> None:
         meta_allowed = {
+            "auth_type",
             "label",
             "status",
             "token_expires_at",

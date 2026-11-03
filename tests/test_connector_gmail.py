@@ -115,7 +115,9 @@ async def test_refresh_failure_carries_code(monkeypatch):
     monkeypatch.setattr(
         gm.httpx, "AsyncClient", _fake_client({"error": "invalid_grant"}, status=400)
     )
-    with pytest.raises(RuntimeError) as ei:
+    from server.connectors.errors import ConnectorRefreshError
+
+    with pytest.raises(ConnectorRefreshError) as ei:
         await gm.GmailOAuthProvider().refresh(
             client_id="cid", client_secret="csec", refresh_token="1//revoked"
         )

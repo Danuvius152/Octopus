@@ -125,6 +125,70 @@ reader，沿产品未修改的 500ms protocol-interrupt 窗口收尾：该次清
 由当前 `test_codex_app_server_completion.py` 的受控宿主回归覆盖。
 产品的退休与结果规则见 [根完成合同](../implemented/codex-backend.md#root-completion-and-selected-answer)。
 
+## 上游流重试遗留的未完成消息
+
+2026-11-03 在同一锁版 0.166.0、产品 revision `d40d830` 的 Octo 会话“5”
+观察到当时未修复的边界。逻辑 request 为
+`8b6f3810d1b0421897aa4bdf4f6f2767`，原生 turn 为
+`01a1a00c-e5e0-7963-b6e1-29cc82d5733f`。原生 `logs_2.sqlite`、rollout、
+产品结果与服务日志相互印证以下顺序（北京时间）：
+
+- 14:20:22，Codex 开始消息 `msg_038e3a369ed7703f016ae97d2693348191a68a0cb368b31408`。
+- 14:20:42，`codex_core::responses_retry` 记录流断开，TLS peer 未发送
+  `close_notify`；原生运行时在 201ms 后重试 sampling request（1/5）。
+- 14:20:53，替代消息 `msg_00803522baa3cd4f016ae97d3fe3048191b0878ec9a54ac763`
+  完整返回；rollout 保存 `item_completed`、完整 response item 和 `task_complete`。
+  产品 seq 684 保存完整最终答案，原生状态 `completed`，进程退出码 0。
+- 同次产品 seq 685 却以 `protocol_incomplete` / `native_collection_incomplete`
+  结束，指出旧消息未完成，`recording_integrity=incomplete`；已保存答案未丢失。
+
+当时驱动把 started/delta 消息保留在 `_items`，仅原 ID 的 complete 使其结算。
+原生重试可能放弃旧消息、以新 ID 完成；关闭连接时旧项仍为 started，完整性
+检查因此把这次已恢复的原生轮次判失败。真实现场未保存完整 wire，不能据此
+断言重试必有或必无 `error(willRetry=true)` 通知。
+
+修复前产品经过真实 SessionManager、SQLite、Harness stdout reader 和
+受控 stdio 宿主重放：`旧消息 started → 新 ID 的完整 final → completed terminal`
+稳定触发同类失败；中间另加 `error(willRetry=true)` 仍失败，不含旧 started 的
+对照成功（2 项预期成功断言失败、1 项通过，1.20s）。这证明驱动的状态组合
+缺口，不是对真实 wire 的逐字重放。现有重试诊断用例没有遗留 started 消息；
+缺完整 root item 用例没有原生重试，二者分别通过不能证明此组合正确。
+
+后续处理必须保全真正缺失的消息、工具结果和已发生效果；不能用清空所有
+pending item、换 ID 即视为成功或自动重跑整个请求来隐藏此问题。
+当前[根完成合同](../implemented/codex-backend.md#root-completion-and-selected-answer)
+已按 producer 完成义务修正；以上保留当时缺陷及首红证据，不代表当前实现或部署。
+
+## 同锁版源码与局部重试核验
+
+剩余修复使用相同源码 revision `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`，
+没有改 Codex 源码或升级 CLI。核对链包括
+[Responses sampling](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/session/turn.rs)、
+[non-tool mapping](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/stream_events_utils.rs)、
+[wire item adapter](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server-protocol/src/protocol/v2/item.rs)
+与 Extension web-search producer。Core 的缺 action 会映射为明确 Other，
+Extension 实际调用 started 可为 action=None；图像可选字段重叠，不足以判来源。
+这证明哪些序列可能合法，不证明上述现场 wire 的每一帧；产品 stdio→Owner→DB
+受控回归另行核对 sampling 成功、真实工具缺口、summary 和错误原因。
+
+真实 0.166.0 CLI 另以隔离 CODEX_HOME、合成 API key 和本地拒绝端点探测。
+CLI `config/read` 与 thread override 均确认
+`features.unbounded_connection_retries=false`；配置 `stream_max_retries=1`、
+`request_max_retries=0` 时，HTTP 断流观察到 2 POST；开启 WebSocket 后为
+3 GET 加 2 POST，有限 fallback 后 native failed，原进程组退休已确认。
+独立关闭端口探针从 stderr 观察到两次 `is_connect=true` POST 连接失败，
+一次约 208ms 退避后以 `httpConnectionFailed` 结束。端点没有接收请求，
+因此其 HTTP 记录为空不能误写成“零次连接尝试”。
+[原生 retry 分支](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/responses_retry.rs)
+解释无限开关、有限 sampling 重试和 fallback 的作用域；这些局部计数不代表
+整轮所有模型/工具调用，也不构成墙钟总上限。探针没有使用账号登录或外部模型。
+
+[认证 manager](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/login/src/auth/manager.rs)
+可缓存、reload 和自行刷新授权，文件发布与 Octopus DB 更新又不在同一效果点。
+本轮没有得到该进程实际采用某份目录凭据的可靠证明，因此产品采用
+[条件失效合同](../implemented/harness-credential-reauth.md#4-run-loop-wiring-serversessionsturnspy)
+的保守分支，而不从当前 auth.json 反推历史采用。
+
 ## 证据定位与边界
 
 当次审计材料位于 `~/.cache/octopus-tests/codex-app-server-g0-base-20261101/`：

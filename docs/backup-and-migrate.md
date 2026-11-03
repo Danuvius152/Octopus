@@ -61,6 +61,14 @@ associations; restoring it does not revive callbacks or infer missing legacy
 structure/provenance from text. Compatibility is described in the
 [current storage contract](implemented/current-storage-format.md#publication-boundary).
 
+Delegation's existing session JSON also retains outstanding child-work references
+and its successful candidate request. Complete backup preserves them together
+with the original submissions, carriers and terminals. Account archives exclude
+these round/execution facts with chats; restore does not infer consumption from
+the latest request or restart an unsealed round. No additional collection root
+or transfer/import step is introduced. Derived credential-use and Connector grant
+comparison evidence is not a persistent revision service or a new backup resource.
+
 App Server native source, child text/tool messages, `native_subagent` status
 facts and original question bindings use the same existing chat-message JSON
 and follow that same archive exclusion. Complete backup/restore retains their

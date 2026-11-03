@@ -43,7 +43,7 @@ async def test_unrelated_401_in_failed_root_does_not_revoke_credential(native_ru
 
 @pytest.mark.parametrize("info", ["unauthorized", {"httpConnectionFailed": {"httpStatusCode": 401}},
                                   {"responseStreamConnectionFailed": {"httpStatusCode": 401}}])
-async def test_only_bound_provider_auth_revokes_the_selected_credential(native_runtime, tmp_path, info):
+async def test_provider_auth_without_adoption_proof_preserves_current_login(native_runtime, tmp_path, info):
     manager, database, session, mode, starts, events = native_runtime
     credential = await _bind_credential(manager, "codex")
     await manager.update_session_configuration(session.id, {"credential_id": credential}, session.user_id)
@@ -52,9 +52,9 @@ async def test_only_bound_provider_auth_revokes_the_selected_credential(native_r
     await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
     inject(tmp_path, failed(info))
     completion = await asyncio.wait_for(receipt.wait(), 4)
-    assert completion.outcome.code == "auth_expired"
-    assert (await database.get_credential(credential))["needs_reconnect"]
-    assert len([event for event in events if event.get("code") == "auth_expired"]) == 1
+    assert completion.outcome.code == "auth_failed"
+    assert not (await database.get_credential(credential))["needs_reconnect"]
+    assert len([event for event in events if event.get("code") == "auth_failed"]) == 1
     assert len(starts) == 1 and not any(completion.outcome.recovery.values())
 
 
@@ -180,7 +180,7 @@ async def test_retry_notification_before_ack_is_bound_and_retained_without_becom
     inject(tmp_path, {"method": "error", "params": {"threadId": ROOT, "turnId": "turn-1", "willRetry": True,
                "error": {"message": "Recovering response stream", "codexErrorInfo": "serverOverloaded"}}},
            {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1",
-               "item": {"type": "userMessage", "id": "original", "clientId": receipt.request_id}}},
+               "item": {"type": "userMessage", "id": "original", "content": [], "clientId": receipt.request_id}}},
            item(ROOT, "turn-1", "final", "Recovered in this turn"), terminal())
     completion = await asyncio.wait_for(receipt.wait(), 4)
     assert completion.outcome.status == "success" and not any(completion.outcome.recovery.values())

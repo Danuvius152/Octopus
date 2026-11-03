@@ -25,7 +25,9 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from server.mcp_servers.connectors._shared import (  # noqa: E402
     ConnectorContext,
+    ConnectorTokenError,
     to_text,
+    token_failure_message,
     truncate,
 )
 
@@ -39,10 +41,6 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("octopus-custom-connector")
 ctx = ConnectorContext()
 
-_RECONNECT = (
-    "Error: token expired or revoked — ask the user to reconnect this "
-    "connector in Octopus's sidebar."
-)
 
 
 def _request_url(api_base: str, path: str) -> str:
@@ -75,9 +73,10 @@ def request(
     (e.g. '/issues'); `query` are optional query params; `body` is an optional
     JSON body for writes. The connector's OAuth token is attached automatically.
     """
-    info = ctx.token_info()
-    if info is None:
-        return "Error: connector unavailable — reconnect it in Octopus."
+    try:
+        info = ctx.token_info()
+    except ConnectorTokenError as error:
+        return token_failure_message(error)
     api_base = info.get("api_base")
     if not api_base:
         return "Error: connector misconfigured (no API base)."
@@ -101,8 +100,7 @@ def request(
         except httpx.HTTPError as e:
             return f"Error: request failed: {e}"
         if r.status_code == 401:
-            ctx.mark_needs_reconnect("invalid_grant")
-            return _RECONNECT
+            return ctx.rejection_message(info)
         if r.status_code in {301, 302, 303, 307, 308}:
             return "Error: upstream redirect refused; use a path within this connector's API base."
         if r.status_code == 429 or r.status_code >= 500:

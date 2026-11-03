@@ -18,9 +18,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
+
 from .config import settings
 from .connectors.base import ConnectorInstallation
 from .connectors.custom import CustomConnector, resolve_connector
+from .connectors.errors import ConnectorError, ConnectorTokenError
+from .connectors.grants import GrantDisposition, grant_stamp
 from .connectors.registry import all_connectors, get_connector
 from .crypto import decrypt, encrypt, master_key
 from .database import Database
@@ -35,10 +39,6 @@ _RESERVED_KINDS = {"oauth", "catalog", "custom"}
 
 # Refresh when the access token expires within this window.
 _REFRESH_SKEW_SECONDS = 300
-
-
-class ConnectorError(Exception):
-    """Connector business-rule violation; routes map this to 400/404."""
 
 
 @dataclass(frozen=True)
@@ -342,20 +342,23 @@ class ConnectorManager:
     async def mark_needs_reconnect(
         self,
         installation_id: str,
-        error_code: str = "invalid_grant",
+        stamp: str,
+        error_code: str = "auth_rejected",
         user_id: str | None = None,
-    ) -> None:
-        await self.update_installation(
-            installation_id, user_id, needs_reconnect=True, last_refresh_error_code=error_code,
-        )
+    ) -> GrantDisposition:
+        async with self._lock(installation_id):
+            return await self._reject_grant(installation_id, user_id, stamp, error_code)
+
+    async def _reject_grant(self, installation_id, user_id, stamp, error_code) -> GrantDisposition:
+        disposition, changed = await self.db.reject_connector_grant(installation_id, user_id, stamp, error_code)
         # The other half of the Gmail case (§9 G0): the app knew the connector
         # was broken, but nothing counted how long it stayed that way.
-        _mon_record(_MonEvent(
-            kind="connector_reconnect_needed",
-            ok=False,
-            error_code=error_code,
-            detail={"installation_id": installation_id},
-        ))
+        if changed:
+            _mon_record(_MonEvent(
+                kind="connector_reconnect_needed", ok=False, error_code=error_code,
+                detail={"installation_id": installation_id},
+            ))
+        return disposition
 
     # --- token access (the internal /token route) ------------------------
 
@@ -380,36 +383,49 @@ class ConnectorManager:
     async def get_access_token(
         self, installation_id: str, user_id: str | None = None
     ) -> dict[str, Any]:
-        """Return {access_token, expires_at_epoch}, refreshing server-side if
-        near expiry. On refresh failure marks needs_reconnect and raises.
+        """Resolve a token, endpoint and rejection stamp under one installation lock.
+
+        Refresh near expiry; only a proven permanent grant rejection can mark
+        this captured authorization as needing reconnection.
 
         The caller supplies its captured current account; a missing owner
         cannot become an unscoped read of a stored secret.
         """
-        secret_key = await UserManager(self.db).data_key_for(user_id)
+        try:
+            secret_key = await UserManager(self.db).data_key_for(user_id)
+        except ValueError as error:
+            raise ConnectorTokenError("Account is unavailable", kind="unavailable", code="account_unavailable") from error
         async with self._lock(installation_id):
-            await self.require_available_owner(user_id)
+            try:
+                await self.require_available_owner(user_id)
+            except ConnectorError as error:
+                raise ConnectorTokenError(str(error), kind="unavailable", code="account_unavailable") from error
             inst = await self.db.get_connector_installation(installation_id, user_id)
             if inst is None or inst.get("user_id") != user_id:
-                raise ConnectorError("connector installation not found")
+                raise ConnectorTokenError("connector installation not found", kind="unavailable", code="gone")
+            if inst["needs_reconnect"]:
+                raise ConnectorTokenError("Connector authorization requires reconnecting", kind="reconnect",
+                                          code=inst["last_refresh_error_code"] or "auth_rejected")
             blob = await self.db.get_connector_secret(installation_id)
             if blob is None:
-                raise ConnectorError("connector secret missing")
+                raise ConnectorTokenError("connector secret missing", kind="unavailable", code="secret_missing")
             ts = _deserialize_token_set(decrypt(blob, secret_key))
+            connector = await resolve_connector(self.db, inst["kind"])
+            api_base = getattr(connector, "api_base", None)
+            stamp = grant_stamp(inst, blob, api_base)
 
             near_expiry = (
                 ts.expires_at_epoch
                 and ts.expires_at_epoch - time.time() < _REFRESH_SKEW_SECONDS
             )
             if near_expiry and ts.refresh_token:
-                connector = await resolve_connector(self.db, inst["kind"])
                 provider = getattr(connector, "oauth", None)
                 if provider is None:
-                    raise ConnectorError(f"no provider for kind {inst['kind']!r}")
+                    raise ConnectorTokenError(f"no provider for kind {inst['kind']!r}", kind="configuration", code="provider_missing")
                 creds = await self.resolve_client_creds(inst["kind"])
                 if creds is None:
-                    raise ConnectorError(
-                        f"{inst['kind']} OAuth client is not configured"
+                    raise ConnectorTokenError(
+                        f"{inst['kind']} OAuth client is not configured", kind="configuration", code="client_missing"
                     )
                 try:
                     new_ts = await provider.refresh(
@@ -417,30 +433,37 @@ class ConnectorManager:
                         client_secret=creds[1],
                         refresh_token=ts.refresh_token,
                     )
-                except Exception as e:  # provider/transport failure → reconnect
-                    await self._save_refresh_result(
-                        installation_id,
-                        needs_reconnect=True,
-                        last_refresh_error_code=getattr(e, "code", "refresh_failed"),
-                    )
-                    raise ConnectorError(f"token refresh failed: {e}") from e
+                except ConnectorTokenError as error:
+                    if error.kind == "reconnect":
+                        disposition = await self._reject_grant(installation_id, user_id, stamp, error.code)
+                        if disposition != "applied":
+                            raise ConnectorTokenError("Old authorization was rejected; current authorization was left unchanged",
+                                                      kind="unknown", code=disposition) from error
+                    raise
+                except httpx.HTTPError as error:
+                    raise ConnectorTokenError("Token refresh transport failed; try again later", kind="temporary", code="transport") from error
+                except Exception as error:
+                    if not await owner_is_available(self.db, user_id):
+                        raise ConnectorTokenError("Account is unavailable", kind="unavailable", code="account_unavailable") from error
+                    raise ConnectorTokenError("Token refresh failed with an unclassified provider error", kind="unknown", code="refresh_failed") from error
                 # Providers may omit the refresh token when the old one stands.
                 if new_ts.refresh_token is None:
                     new_ts.refresh_token = ts.refresh_token
                 ts = new_ts
+                blob = encrypt(_serialize_token_set(ts), secret_key)
                 await self._save_refresh_result(
                     installation_id,
-                    secret_encrypted=encrypt(_serialize_token_set(ts), secret_key),
+                    secret_encrypted=blob,
                     token_expires_at=_expires_iso(ts.expires_at_epoch),
                     needs_reconnect=False,
                     last_refresh_error_code=None,
                 )
 
-            connector = await resolve_connector(self.db, inst["kind"])
             return {
                 "access_token": ts.access_token,
                 "expires_at_epoch": ts.expires_at_epoch,
-                "api_base": getattr(connector, "api_base", None),
+                "api_base": api_base,
+                "grant_stamp": grant_stamp(inst, blob, api_base),
             }
 
     # --- agent-scoped enablement -----------------------------------------

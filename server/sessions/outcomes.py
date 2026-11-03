@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..oauth_errors import RefreshErrorCode
+from ..credential_use import CredentialUse
 from .base import (
     Session,
     SessionManagerBase,
@@ -57,7 +57,8 @@ class OutcomesMixin(SessionManagerBase):
         )
 
     async def _surface_auth_expiry(
-        self, session: Session, *, cred_id: str | None, backend: str
+        self, session: Session, *, cred_id: str | None, backend: str,
+        use: CredentialUse | None = None,
     ) -> dict[str, Any]:
         """Flag the bound credential needs_reconnect (if any) and build the
         re-authorize chat event for a mid-turn 401 (harness-credential-reauth.md
@@ -65,35 +66,33 @@ class OutcomesMixin(SessionManagerBase):
         carries `code`/`credential_id`/`backend` so the client can refresh the
         sidebar and light up the re-auth badge.
         """
-        label: str | None = None
-        if cred_id is not None:
-            await self._mark_needs_reconnect(
-                cred_id, RefreshErrorCode.invalid_credentials
-            )
-            if self.db:
-                row = await self.db.get_credential(cred_id)
-                if row:
-                    label = row.get("label")
+        disposition = "unattributed"
+        if (self.db is not None and use is not None and use.credential_id == cred_id
+                and use.user_id == session.user_id and use.backend == backend):
+            disposition = await self.db.reject_credential_use(use)
         display = self._BACKEND_DISPLAY.get(backend, backend)
-        if cred_id is not None:
-            quoted = f" “{label}”" if label else ""
+        if disposition == "applied":
             human = (
                 f"Authentication failed (401) for the {display} credential"
-                f"{quoted}. Its sign-in has expired or been revoked — "
+                ". The current sign-in was rejected — "
                 "re-authorize it in the Harness section of the sidebar, then "
                 "resend your message."
             )
+        elif disposition == "obsolete":
+            human = f"Authentication failed for the {display} authorization used by this request. The credential has since changed."
+        elif disposition == "gone":
+            human = f"Authentication failed for the {display} authorization used by this request. Its credential or account is no longer available."
         else:
             human = (
-                f"Authentication failed (401) for {display}. The CLI's own "
-                "sign-in has expired — re-authorize the backend, then resend "
-                "your message."
+                f"Authentication failed for {display}. The authorization used by the CLI "
+                "could not be identified; the current sign-in was left unchanged."
             )
         event: dict[str, Any] = {
             "type": "error",
             "session_id": session.id,
             "message": human,
-            "code": "auth_expired",
+            "code": "auth_expired" if disposition == "applied" else "auth_failed",
+            "auth_disposition": disposition,
             "credential_id": cred_id,
             "backend": backend,
         }

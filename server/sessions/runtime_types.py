@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..harness import Harness, HarnessEvent, HarnessRun
+from ..harness import Harness, HarnessCredential, HarnessEvent, HarnessRun
 from ..models import FinalAnswerRef, MessageContent, TurnOutcome
 
 if TYPE_CHECKING:
@@ -58,6 +58,7 @@ class _Attempt:
     # prompt goes in as the next message rather than a fresh invocation.
     reused: bool
     attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    credential: HarnessCredential | None = None
     result: HarnessEvent | None = None
     final_answer: FinalAnswerRef | None = None
     saw_tool_use: bool = False

@@ -13,6 +13,39 @@ from tests.native_app_server import native_runtime as native_runtime
 from tests.session_runtime import wait_dispatch_idle
 
 
+@pytest.mark.parametrize("kind", ["start", "steer"])
+@pytest.mark.parametrize("missing", ["id", "content", "bad_content", "image_detail_array", "image_detail_unknown",
+                                     "localImage_detail_array", "localImage_detail_unknown"])
+async def test_malformed_correlated_user_item_cannot_prove_acceptance(native_runtime, tmp_path, kind, missing):
+    from tests.native_app_server import ROOT, active_root, inject, until
+
+    manager, database, session, mode, starts, _ = native_runtime
+    if kind == "steer":
+        mode[0] = "steer_lost"
+        await active_root(native_runtime, tmp_path)
+        reply = await submit_client_message(manager, session.id, "Lost ACK correction", [], "bad-proof", wiki_mode=None)
+        await until(lambda: (tmp_path / "native-steers.jsonl").exists())
+    else:
+        mode[0] = "unknown"
+        reply = await submit_client_message(manager, session.id, "Lost start ACK", [], "bad-proof", wiki_mode=None)
+        await until(lambda: (tmp_path / "native-business.jsonl").exists())
+    payload = {"type": "userMessage", "id": "proof", "content": [], "clientId": reply["request_id"]}
+    if missing == "bad_content":
+        payload["content"] = [{"type": "text", "text": {"truncated": True}}]
+    elif "_detail_" in missing:
+        variant, _, invalid = missing.split("_")
+        payload["content"] = [{"type": variant, "url": "https://example.test/image.png", "path": "/tmp/image.png",
+                               "detail": [] if invalid == "array" else "unknown"}]
+    else:
+        del payload[missing]
+    inject(tmp_path, {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": payload}})
+    await wait_dispatch_idle(manager, session.id)
+    status = await submission_status(manager, session.id, "bad-proof")
+    assert status["execution"]["state"] == "unknown"
+    assert status["execution"]["native_inputs"][-1]["state"] == "unknown"
+    assert status["outcome"]["status"] == "failed" and len(starts) == 1
+
+
 async def test_browser_deduplication_and_exact_history_resume(native_runtime, tmp_path):
     manager, database, session, mode, starts, events = native_runtime
     first = await submit_client_message(manager, session.id, "First input", [], "browser-1", wiki_mode=None)

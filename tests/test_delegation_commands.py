@@ -222,9 +222,9 @@ async def test_followup_rolls_back_confirmed_round_when_real_session_refuses_arc
     assert await current.database.load_delegation_state(
         original.delegation_id, parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
     ) == snapshot
-    assert await current.database.get_latest_delegation_request(
-        original.delegation_id, committed_rounds[0], parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
-    ) is None
+    remaining, ready = await current.database.delegation_work_consumption(
+        original.delegation_id, committed_rounds[0], set(), "no-admitted-request")
+    assert remaining == set() and not ready
     assert await current.database.load_messages(original.delegation_id) == messages
     assert current.manager.dispatch_snapshot(original.delegation_id)["items"] == []
     assert starts.empty()

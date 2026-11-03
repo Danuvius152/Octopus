@@ -850,6 +850,15 @@ class ConnectorTokenResponse(BaseModel):
     access_token: str
     expires_at_epoch: float
     api_base: str | None = None
+    grant_stamp: str
+
+
+class ConnectorRejectionRequest(BaseModel):
+    grant_stamp: str = Field(min_length=64, max_length=64)
+
+
+class ConnectorRejectionResponse(BaseModel):
+    disposition: Literal["applied", "obsolete", "gone"]
 
 
 class AgentConnectorsResponse(BaseModel):

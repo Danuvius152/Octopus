@@ -161,6 +161,26 @@ EOF or the collection cutoff ends that responsibility. Raw drain only releases
 descriptors. Missing complete root items, malformed necessary records or overflow
 prevent success; a cancelled helper need not have produced an answer.
 
+Completion obligations follow pinned producer provenance. Uncommitted sampling
+Message/Reasoning and proven Core WebSearch observations may be abandoned with
+or without a retry notice; deltas alone create no completion debt. Context
+compaction is ordinary maintenance. WebSearch with absent/unknown action and
+ambiguous ImageGeneration retain conservative actual-result obligations;
+extension invocations are not excused by sharing a wire kind with sampling.
+Command, file-change, MCP and dynamic-tool results remain necessary. A cancelled
+collaboration wait may lack completion without proving every child finished.
+The [pinned observation and source evidence](../reference/codex-app-server-g0.md#上游流重试遗留的未完成消息)
+explain why abandoned sampling does not make an otherwise complete root fail.
+
+The driver validates identity and supported payload before accounting or proof
+effects, including correlated userMessage acceptance when an ACK is missing.
+Complete snapshots without a start are saved; normalized duplicates are
+idempotent, while kind/body/result conflicts preserve the original and fail
+collection. Observation timestamps and optional defaults do not create conflicts.
+Late old starts/deltas cannot regress a completed item. After a trusted terminal,
+the finite window accepts original complete facts and known closure/proof, while
+new root starts and new questions/business RPC remain closed.
+
 If the accepted root has an unfinished `commandExecution`, retirement sends
 `thread/backgroundTerminals/clean` on its original connection before stdin EOF.
 The same reader waits for the original thread/turn/item's complete event within
@@ -193,6 +213,15 @@ retirement. Remaining helpers become interrupted only after proven retirement,
 with the original cause; completed helpers retain completion. Root success does
 not claim that every descendant result was understood.
 
+Provider terminal and reliable collection failure have separate bounded Run
+slots. A damaged frame or overflowing handoff cannot replace typed provider
+status/code/details or discard the accepted safe prefix. Native interrupted
+remains interrupted with independent recording gaps unless an earlier local
+outcome already won, or collection failure initiated cleanup before that terminal.
+Completed with a true required-record gap is failed, keeps `native_status=completed`
+and any saved answer, and grants no automatic replay. Chat displays the native
+status and distinguishes saved-but-incomplete content from a known missing final.
+
 `TurnOutcome.final_answer` references ordered original root final-message rows.
 Commentary, child text and tool text remain in the transcript and never become
 reply fragments. Complete empty items are retained; a legal empty selection is
@@ -200,6 +229,16 @@ distinct from invalid/missing refs. SessionResult, LiveReply, App ask/SSE/status
 and named delegation share that selection. Legacy records retain their prior
 interpretation. See the [result contract](architecture-contract.md#原请求结果读取)
 for formatting, input uncertainty and failure semantics.
+
+A terminal summary only adds positive constraints for explicitly completed
+`final_answer` items (positive completion timestamp). After the original ordered
+message pipeline finishes saving, the Owner checks exact request/attempt,
+thread/turn/item, phase, text digest, saved rows and final refs. Missing or
+conflicting declared finals fail recording; summaries never backfill body text.
+Absent/notLoaded summaries impose no empty-list constraint, and a legal empty
+final or the existing ordered final selection stays valid. Duplicate terminals
+compare status and declared error facts, ignore observation times and may add
+compatible summary constraints.
 
 Stop before the Owner's unique outcome selection chooses interrupted, even
 after a native success candidate. Stop after selection preserves the chosen
@@ -337,7 +376,13 @@ Fast requires the native Fast feature and the selected model's advertised
 capability or the effective tier is missing. Normal explicitly resets the
 thread to `default`; the pinned native provider request omits that tier field.
 Process and thread overrides keep wake, goals and sleep disabled even when
-the shared native home enables them. Current controller checkpoints are checked
+the shared native home enables them. They also set
+`features.unbounded_connection_retries=false`; `config/read` must confirm the
+effective false value before input. The pinned runtime then uses its existing
+finite retry/backoff and WebSocket-to-HTTP fallback. Stream/request counts have
+different scopes and are not a whole-turn call budget or wall-clock bound.
+Version changes require checking the key and effective value; no CLI fork or
+new recovery stage is maintained. Current controller checkpoints are checked
 after exact resume, including compacted history, and changed trusted instructions
 are acknowledged before business input. An uncertain injection blocks sending.
 
@@ -426,6 +471,10 @@ authentication rejection: `unauthorized`, or HTTP 401 on the known provider
 connection/response variants. Arbitrary stderr, RPC rejection, connector/tool
 text and child errors cannot mark the selected credential invalid. The original
 reauth flow keeps its binding and login entry available.
+Permanent invalidation additionally requires actual adopted-material evidence.
+The current mutable Codex home cannot establish that fact, so typed unauthorized
+produces `auth_failed` and preserves the current credential under the
+[conditional rejection contract](harness-credential-reauth.md#4-run-loop-wiring-serversessionsturnspy).
 
 Native error notifications retain original request/attempt/thread/turn and
 connection identity, including before ACK after correlation. `willRetry` and

@@ -12,6 +12,7 @@ import json
 import sqlite3
 from typing import Any
 
+from ..connectors.grants import GrantDisposition, grant_stamp
 from .base import DatabaseBase
 from .users import owner_is_available
 
@@ -171,6 +172,26 @@ class ConnectorsMixin(DatabaseBase):
             )
             row = await cursor.fetchone()
             return row[0] if row else None
+
+    async def reject_connector_grant(
+        self, installation_id: str, user_id: str | None, stamp: str, code: str,
+    ) -> tuple[GrantDisposition, bool]:
+        async with self.transaction(write=True) as tx:
+            row = await tx.fetch_one(
+                "SELECT i.id,i.user_id,i.kind,i.auth_type,i.needs_reconnect,s.secret_encrypted,c.api_base "
+                "FROM connector_installations i "
+                "JOIN connector_installation_secrets s ON s.installation_id=i.id "
+                "LEFT JOIN custom_connectors c ON c.kind=i.kind WHERE i.id=?", (installation_id,))
+            if row is None or row[1] != user_id or not await owner_is_available(tx, user_id):
+                return "gone", False
+            identity = dict(zip(("id", "user_id", "kind", "auth_type"), row[:4], strict=True))
+            if grant_stamp(identity, row[5], row[6]) != stamp:
+                return "obsolete", False
+            changed = not row[4]
+            if changed:
+                await tx.execute("UPDATE connector_installations SET needs_reconnect=1,last_refresh_error_code=? WHERE id=?",
+                                 (code, installation_id))
+            return "applied", changed
 
     async def update_connector_installation(
         self, installation_id: str, *, require_available_owner: bool = False, **fields: Any,

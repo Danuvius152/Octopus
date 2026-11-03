@@ -9,13 +9,15 @@ Idle timeout classification precedes this dispatch; see [turn safety](turn-safet
 
 A failed turn's owned error facts are classified behind the harness contract.
 Ordinary Codex uses only its bound root provider error (message, additional
-details and typed code), or its preparation refusal. Claude retains its existing
-terminal/raw/stderr classification. Native tool, child and unbound stderr text
+details and typed code), or its preparation refusal. Claude uses attributed
+terminal/raw and preparation errors; held-process stderr remains local diagnosis.
+Native tool, child and unbound stderr text
 cannot classify the main request or its credential.
 
 1. **Auth-credential rejection** (401 / revoked / expired) →
-   `Harness.is_auth_error` → flag the credential needs_reconnect and STOP
-   (harness-credential-reauth.md). Never retried — re-auth won't fix itself.
+   `Harness.is_auth_error` → STOP and conditionally reject the actual adopted
+   material under the [credential contract](harness-credential-reauth.md#4-run-loop-wiring-serversessionsturnspy).
+   Obsolete or unproven adoption leaves the current login unchanged.
 2. **Transient backend error** (5xx / overloaded / dropped connection /
    timeout) → `Harness.is_transient_error` → bounded retry (this doc).
 3. **Everything else** — including quota/credit ("rate limit", 429,

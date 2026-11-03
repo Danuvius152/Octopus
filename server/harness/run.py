@@ -12,6 +12,7 @@ come from the `RuntimeProfile` it's constructed with: how to build argv
 from __future__ import annotations
 
 import asyncio
+import codecs
 import glob
 import hashlib
 import json
@@ -30,7 +31,7 @@ from typing import Any
 
 from ..aio import complete_cleanup
 from ..config import settings
-from ..diagnostics import diagnostic_text, exception_diagnostic
+from ..diagnostics import DiagnosticStream, diagnostic_text, exception_diagnostic
 from ..process_groups import group_exists, wait_group_exit
 from ..submission_models import NativeInputEvidence
 from . import assembly
@@ -252,13 +253,18 @@ class HarnessRun:
         self._event_changed = asyncio.Event()
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
-        self._stderr_lines: list[str] = []
+        self._stderr_tail = ""
         self._diagnostic_secrets: tuple[str, ...] = ()
+        self.credential: HarnessCredential | None = None
         self.protocol_issues: dict[str, int] = {}
         self.protocol_locations: list[dict[str, Any]] = []
         self._stdout_line_number = 0
         self._stream_closed: bool = False
         self._stream_failure: HarnessEvent | None = None
+        # A bound provider terminal must survive presentation overflow too.
+        # It is delivered once, after the accepted finite output prefix.
+        self._provider_terminal: HarnessEvent | None = None
+        self.collection_preceded_terminal = False
         self._failure_delivered = False
         self.native_end_reason = "process_ended"
         self._activity_generation = 0
@@ -333,6 +339,7 @@ class HarnessRun:
             raise RuntimeError("HarnessRun has been retired")
 
         self._diagnostic_secrets = (settings.auth_token, credential.secret if credential else "")
+        self.credential = credential
         self._started_at = time.monotonic()
         self._driver.begin_turn()
 
@@ -726,7 +733,8 @@ class HarnessRun:
             "memory_dir": ctx.memory_dir,
             "web_research": ctx.web_research,
             "working_dir": ctx.working_dir,
-            "credential": asdict(ctx.credential) if ctx.credential else None,
+            "credential": {key: value for key, value in asdict(ctx.credential).items()
+                           if key != "use"} if ctx.credential else None,
         }
         return hashlib.sha256(json.dumps(parts, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
@@ -765,6 +773,8 @@ class HarnessRun:
         self._stream_closed = False
         self._event_changed.set()
         self.protocol_issues.clear()
+        self._provider_terminal = None
+        self.collection_preceded_terminal = False
         self.protocol_locations.clear()
         self._driver.begin_turn()
         self.input_may_have_run = False
@@ -788,6 +798,9 @@ class HarnessRun:
                 self._event_changed.set()
                 yield event
             elif self._stream_closed:
+                if self._provider_terminal is not None:
+                    terminal, self._provider_terminal = self._provider_terminal, None
+                    yield terminal
                 # The original projection already bounds these identities.
                 # Derive retirement facts only after the accepted output prefix
                 # and proven shutdown, without sending them through a saturated
@@ -1072,7 +1085,9 @@ class HarnessRun:
     async def _emit(self, event: HarnessEvent) -> None:
         if self._stream_closed:
             return
-        if self._driver.multiplexed and self._stream_failure is not None:
+        if self._driver.multiplexed and event.type == "result":
+            if self._provider_terminal is None:
+                self._provider_terminal = event
             return
         # Include raw protocol data and normalized fields. This is a payload
         # budget, not an RSS claim; the count cap bounds small-event overhead.
@@ -1109,7 +1124,11 @@ class HarnessRun:
         read its accepted prefix first, then this failure after reader closure.
         """
         if self._stream_failure is None:
-            self._stream_failure = HarnessEvent(type="result", is_error=True, error_code=code, content=detail)
+            # Retain whether collection failure initiated cleanup before a
+            # provider terminal existed. Cleanup's later interrupted terminal
+            # is evidence, not permission to replace that earlier failure.
+            self.collection_preceded_terminal = self.native_terminal_status is None
+            self._stream_failure = HarnessEvent(type="collection_error", is_error=True, error_code=code, content=detail)
             self._note_protocol_issue(code, detail)
         self.retire(reason="parent_error")
 
@@ -1124,7 +1143,12 @@ class HarnessRun:
 
     @property
     def stderr_text(self) -> str:
-        return "\n".join(self._stderr_lines)
+        return self._stderr_tail.rstrip("\r\n")
+
+    @property
+    def collection_error(self) -> HarnessEvent | None:
+        """The reliable recording diagnostic, separate from provider failure."""
+        return self._stream_failure
 
     # ------------------------------------------------------------------ readers
 
@@ -1291,16 +1315,29 @@ class HarnessRun:
 
     async def _read_stderr(self) -> None:
         assert self._process and self._process.stderr
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        masking = DiagnosticStream(self._diagnostic_secrets)
+
+        def retain(text: str, *, final: bool = False) -> None:
+            for chunk in masking.feed(text, final=final):
+                self._stderr_tail = (self._stderr_tail + chunk)[-16384:]
+                logger.info("Harness CLI stderr provider=%s run=%s: %s",
+                            self._profile.backend, self.run_lease_id, chunk)
+
         try:
-            async for raw in self._process.stderr:
-                line = raw.decode(errors="replace").rstrip("\r\n")
-                if line:
-                    if self._activity_observer is not None and self._activity_observer.consume_stderr(line):
-                        continue
-                    self._stderr_lines.append(line)
-                    logger.debug("Harness CLI stderr provider=%s run=%s: %s",
-                                 self._profile.backend, self.run_lease_id,
-                                 diagnostic_text(line, secrets=self._diagnostic_secrets))
+            pending = ""
+            while raw := await self._process.stderr.read(8192):
+                text = decoder.decode(raw)
+                retain(text)
+                if self._activity_observer is not None:
+                    pending += text
+                    while "\n" in pending:
+                        line, pending = pending.split("\n", 1)
+                        self._activity_observer.consume_stderr(line)
+                    # Supplementary observation is line-based, not an authority.
+                    # Oversize diagnostics must still drain and remain bounded.
+                    pending = pending[-8192:]
+            retain(decoder.decode(b"", final=True), final=True)
         except asyncio.CancelledError:
             raise
         except Exception as error:

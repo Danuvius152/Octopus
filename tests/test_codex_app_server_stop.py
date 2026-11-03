@@ -35,7 +35,7 @@ async def test_stop_retires_silent_native_work_but_keeps_independent_returns_in_
     inject(tmp_path, child_start("finished", "finished-turn"), child_end("finished", "finished-turn"), child_start(),
            {"method": "item/completed", "params": {"threadId": "child", "turnId": "child-turn", "item": {
                "id": "nested", "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "completed",
-               "receiverThreadIds": ["grandchild"], "agentsStates": {}}}},
+               "receiverThreadIds": ["grandchild"], "senderThreadId": ROOT, "agentsStates": {}}}},
            child_start("grandchild", "grand-turn"), item("grandchild", "grand-turn", "partial", "Nested partial"),
            {"id": "native-question", "method": "item/tool/requestUserInput", "params": {
                "threadId": ROOT, "turnId": "turn-1", "itemId": "question", "isBlocking": True,

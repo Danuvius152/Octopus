@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..credential_use import CredentialUse
+
 
 @dataclass(frozen=True)
 class NativeQuestionRef:
@@ -55,6 +57,7 @@ class HarnessCredential:
     auth_type: str          # "api_key" | "oauth"
     secret: str = ""        # plaintext key/token (env_secret style)
     home_dir: str | None = None   # CODEX_HOME dir (home_dir style)
+    use: CredentialUse | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

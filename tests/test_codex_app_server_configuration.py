@@ -12,6 +12,25 @@ from tests.native_app_server import native_runtime as native_runtime
 from tests.session_runtime import wait_dispatch_idle
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_unbounded_connection_retry_must_be_effectively_disabled(native_runtime, tmp_path, enabled):
+    manager, _, session, _, _, _ = native_runtime
+    (tmp_path / "native-config.json").write_text(json.dumps({"features": {
+        "fast_mode": True, "wake_on_agent_messages": False, "goals": False, "sleep_tool": False,
+        "unbounded_connection_retries": enabled, "multi_agent": True,
+        "multi_agent_v2": {"enabled": True, "wait_agent_enabled": True},
+    }}))
+    await submit_client_message(manager, session.id, "Use finite connection retries", [], "finite", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    saved = await submission_status(manager, session.id, "finite")
+    assert saved["outcome"]["status"] == ("failed" if enabled else "success")
+    assert (tmp_path / "native-business.jsonl").exists() == (not enabled)
+    if not enabled:
+        frames = [json.loads(line) for line in (tmp_path / "native-frames.jsonl").read_text().splitlines()]
+        start = next(frame for frame in frames if frame.get("method") == "thread/start")
+        assert start["params"]["config"]["features.unbounded_connection_retries"] is False
+
+
 @pytest.mark.parametrize("native,accepted", [
     ({"url": "http://old.invalid/mcp"}, True),
     ({"enabled": True}, True),
@@ -94,7 +113,7 @@ async def test_incompatible_resume_is_refused_before_business_input(native_runti
 async def test_effective_external_clock_requires_a_supported_client(native_runtime, tmp_path, enabled, source, accepted):
     manager, _, session, _, _, _ = native_runtime
     (tmp_path / "native-config.json").write_text(json.dumps({"features": {
-        "fast_mode": True, "wake_on_agent_messages": False, "goals": False, "sleep_tool": False,
+        "fast_mode": True, "wake_on_agent_messages": False, "goals": False, "sleep_tool": False, "unbounded_connection_retries": False,
         "multi_agent": True, "multi_agent_v2": {"enabled": True, "wait_agent_enabled": True},
         "current_time_reminder": {"enabled": enabled, "clock_source": source},
     }}))

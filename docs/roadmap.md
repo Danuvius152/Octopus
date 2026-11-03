@@ -19,19 +19,18 @@ Codex 当前保证活动根内协作、原生输入接纳证据和根终态后�
 [原四阶段路线](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/plans/engineering-runtime-roadmap.md)
 保留历史顺序与当次证据，后续变更直接更新所属主题。
 
-本次审查修复仅收口 fork/rewind 目录保全、Research 首次创建确认、App 创建准入、
-Wiki 搜索资源状态及 scoped bearer 形状校验；各自行为归现行合同。按用户要求，
-模型凭据迟到拒绝、Native 完成与 Question、委派回信消费、OAuth 认证表示、
-Claude 诊断归属和 Connector 授权失败的其余修正均暂停，未随本批实施。
-尤其不能把上述修复当作 Native 遗留 started 消息问题已解决；该问题仍受
-[现有完成边界](implemented/codex-backend.md#root-completion-and-selected-answer)约束。
-恢复这些修复或生产发布需沿后续实际任务推进。
+审查修复还包括模型凭据迟到拒绝、Native 完成与 Question、委派逐份回信消费、
+OAuth 认证表示、Claude 诊断归属和 Connector 授权失败，分别归现行主题合同。
+已证实的可放弃 sampling started 不再阻止根成功，真实工具和已证明 final 缺口
+仍失败；见 [Native 完成边界](implemented/codex-backend.md#root-completion-and-selected-answer)。
+第三方写入重试幂等仍独立待选，不将局部有限连接重试扩大为恢复重构或全工具
+效果证明。上述为实现状态，不表示本机已发布这一版本。
 
 ## 建议先处理什么
 
-优先收敛[多租户剩余项](plans/multi-tenancy-gaps.md)中的具体行为缺口：
-Agent DELETE 的副作用前作用域校验、Connector refresh 的临时/永久错误分类，
-以及 OAuth 发起浏览器绑定策略。更强托管政策和 OS 隔离另行选择，
+按实际需求选择[多租户剩余项](plans/multi-tenancy-gaps.md)中的 OAuth 发起浏览器
+绑定策略及待验证性质；Agent DELETE 校验和 Connector refresh 分类已有实现。
+更强托管政策和 OS 隔离另行选择，
 不将全部 SaaS 能力设为本机功能的共同前提。
 
 随后按实际重点选择独立范围：

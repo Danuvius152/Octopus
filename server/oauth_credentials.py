@@ -47,7 +47,8 @@ class OAuthCredentials:
         if request.credential_id is not None:
             row = await self.db.reauthorize_credential(
                 request.credential_id, user_id=request.user_id, backend=BackendKind.claude_code.value,
-                label=request.label, secret_encrypted=encrypted, token_expires_at=expires_at,
+                label=request.label, auth_type=AuthType.oauth.value,
+                secret_encrypted=encrypted, token_expires_at=expires_at,
                 status="active", needs_reconnect=False, last_refresh_error_code=None,
             )
             if row is None:
@@ -55,10 +56,14 @@ class OAuthCredentials:
             return CredentialInfo(**row)
         identity = uuid.uuid4().hex[:12]
         created_at = datetime.now(UTC).isoformat()
-        await self.db.save_credential(
-            identity, BackendKind.claude_code.value, request.label, AuthType.oauth.value,
-            encrypted, created_at, user_id=request.user_id, token_expires_at=expires_at,
-        )
+        try:
+            await self.db.save_credential(
+                identity, BackendKind.claude_code.value, request.label, AuthType.oauth.value,
+                encrypted, created_at, user_id=request.user_id, token_expires_at=expires_at,
+                require_available_owner=True,
+            )
+        except ValueError as error:
+            raise OAuthLoginError(str(error), status_code=403) from error
         return CredentialInfo(
             id=identity, backend=BackendKind.claude_code, label=request.label,
             auth_type=AuthType.oauth, created_at=created_at, token_expires_at=expires_at,

@@ -48,9 +48,9 @@ class FakeProvider:
         if self.refresh_delay:
             await asyncio.sleep(self.refresh_delay)
         if self.refresh_should_fail:
-            err = RuntimeError("token revoked")
-            err.code = "invalid_grant"  # type: ignore[attr-defined]
-            raise err
+            from server.connectors.errors import ConnectorRefreshError
+
+            raise ConnectorRefreshError(400, "invalid_grant")
         return OAuthTokenSet("refreshed", None, time.time() + 3600, scopes=["s"])
 
 
@@ -388,10 +388,10 @@ async def test_concurrent_token_refreshes_once(mgr, provider, owner):
 @pytest.mark.asyncio
 async def test_mark_needs_reconnect_and_missing(mgr, owner):
     inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
-    await mgr.mark_needs_reconnect(inst["id"], "invalid_grant")
+    stamp = (await mgr.get_access_token(inst["id"], owner["id"]))["grant_stamp"]
+    assert await mgr.mark_needs_reconnect(inst["id"], stamp, user_id=owner["id"]) == "applied"
     assert (await mgr.get_installation(inst["id"]))["needs_reconnect"] is True
-    with pytest.raises(ConnectorError):
-        await mgr.mark_needs_reconnect("ghost")
+    assert await mgr.mark_needs_reconnect("ghost", stamp, user_id=owner["id"]) == "gone"
 
 
 @pytest.mark.asyncio
@@ -516,7 +516,10 @@ async def test_same_installation_mutations_wait_for_inflight_refresh(mgr, db, ow
         elif operation == "delete":
             call = mgr.delete_installation(iid, owner["id"])
         elif operation == "mark":
-            call = mgr.mark_needs_reconnect(iid, "new-rejection", owner["id"])
+            from server.connectors.grants import grant_stamp
+
+            stamp = grant_stamp(installation, await db.get_connector_secret(iid), None)
+            call = mgr.mark_needs_reconnect(iid, stamp, user_id=owner["id"])
         else:
             call = mgr.update_installation(iid, owner["id"], label="Updated")
         mutation = asyncio.create_task(call)
@@ -534,7 +537,7 @@ async def test_same_installation_mutations_wait_for_inflight_refresh(mgr, db, ow
     elif operation == "delete":
         assert current is None
     elif operation == "mark":
-        assert current["last_refresh_error_code"] == "new-rejection"
+        assert current["last_refresh_error_code"] == ("auth_rejected" if refresh_fails else None)
     else:
         assert current["label"] == "Updated"
 

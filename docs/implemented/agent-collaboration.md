@@ -44,31 +44,34 @@ A delegation child session keeps the ordinary session retention policy:
   through SessionOwner. Setup failures before admission retain their cleanup
   policy. Already archived history stays read-only until explicitly continued;
   startup does not mass-unarchive it. Sidebar delegation filters still apply.
-- **A delegation with a sub-delegation in flight does not finalise.**
-  The load-bearing half of the note above. `ask_agent` is asynchronous, so
-  Vera's turn-1 `result` arrives the instant she has asked Pete — it is not
-  her answer. The original receipt's completion classification therefore skips terminal
-  injection while `_has_running_children(sid)` holds **or** the record's
-  `_awaiting_sub_relay` flag is set, and finalises on the next non-error
-  result (the turn Pete's reply wakes her for). Without this Octo received
-  "awaiting Pete's response" as Vera's reply and her session was archived
-  mid-chain, so the relay could never land — the 3-hop backend test could not
-  pass and had been skipping itself. An **error** result still finalises
-  immediately, so a crashed middle agent can't hang its caller.
+- **Every owned child reply must finish its exact parent input.** A child's
+  terminal, a registry with no running children or an arbitrary successful parent
+  request does not prove a queued return was processed. The parent round keeps
+  only outstanding child `work_id` references and its successful candidate
+  request. Fast follow-up replaces the child's current round without erasing an
+  older responsibility. Original submissions bind each stable terminal delivery
+  to an input, actual execution carrier and committed terminal; steered/native
+  inputs also require their original delivery/acceptance proof. One execution
+  may process several returns; one success cannot consume unrelated queued input.
 
-  The flag exists because `_has_running_children` samples the registry at the
-  instant the turn ends, and that instant is a race: if Pete is quick, or
-  Vera's own wrap-up is slow, Pete is already `completed` when Vera's turn-1
-  `result` lands and nothing looks in flight — so she finalised with "I've
-  asked Pete" as her answer and Pete's real reply, already queued into her
-  session, was dropped on a record that was no longer `running`. What decides
-  the deferral is that she *asked* someone during the turn, not whether they
-  are still working when it ends, so `start_delegation` marks the caller's own
-  record and completion classification consumes the mark on the deferred turn (a relay
-  turn that asks again re-arms it). The real-CLI 3-hop test only caught this
-  on runs slow enough to invert the two events; `test_delegations.py` now pins
-  both orderings, plus the one-hop case that must still finalise on its first
-  result.
+  Initial child creation and follow-up register responsibility before child
+  admission, under the parent round's save lock. The original CAS transaction
+  writes child round and parent responsibility together. Final sealing uses that
+  same ordering point and rechecks consumption inside its commit transaction.
+  New related input invalidates final eligibility through the latest carrier
+  check. New responsibility blocks sealing without deleting the successful
+  candidate: concurrent setups may all be refused before admission. Withdrawing
+  the last such responsibility rechecks that candidate and can seal directly.
+  A refused empty child is archived; storage uncertainty follows fail-stop.
+
+  Once every owned reply and related input is processed, the last successful
+  carrier can be the final candidate without an extra synthesis call. The seal
+  rejects further delegated responsibility/input for that work. Parent failure
+  or cancellation retains its original policy; a failed child may still be a
+  complete return processed successfully by its parent. Normal sealing does not
+  cancel independent BG tasks or resend an old upstream reply. Ordinary human
+  backlog is not an owned-return obligation, and consumption makes no claim about
+  the model's semantic use of the reply.
 
 Otherwise: same harness, same MCP set, same credentials, same memory
 dir as Vera's other sessions. Memory writes from concurrent
@@ -141,6 +144,12 @@ list snapshot cannot overwrite a delivery event received after its fetch began.
 Restart retains diagnostics but never replays old replies; old empty dispositions
 still recover as `not_replayed`. A follow-up owns a new work identity and fresh
 question delivery controls.
+The committed completed-round snapshot is its durable seal. Unsealed running
+rounds recover as interrupted, even when a request succeeded before restart;
+neither the latest transcript/request nor retired boolean markers can reconstruct
+the missing ordering. The existing JSON retains only outstanding child-work
+references and candidate identity, without copying result bodies, completions,
+historical rounds or a second input queue.
 
 The existing command registry retains explicit checks for those diagnostic
 writes. Neither a domain-error type nor a finished coroutine proves that its
@@ -292,6 +301,9 @@ Source: [DelegationManager](../../server/delegations.py),
 [routes](../../server/routers/delegations.py), [tool](../../server/mcp_servers/ask_agent.py).
 Regression entry points: `tests/test_delegations.py` and the shared
 [completion/retirement checks](../testing.md).
+`tests/test_delegation_consumption.py` covers fast two/three-child replies,
+reused-child follow-up, seal/admission races and concurrent setup withdrawal;
+`test_delegation_state.py` covers one carrier processing multiple confirmed inputs.
 Native subagents have a separate [observation contract](native-subagents.md).
 Per-agent delegation allowlists and automatic memory-write locking are outside
 the current contract; adding them requires a concrete policy or concurrency need.

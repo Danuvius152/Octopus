@@ -148,7 +148,8 @@ async def test_unconfirmed_round_finish_exits_and_cold_reopen_preserves_actual_f
             assert messages[0]["tool_input"] == {"request_context": {
                 "work_id": "round-original", "request_id": "request-original",
             }}
-            assert await reopened.get_latest_delegation_request("child", "round-original", **scope) == "request-original"
+            _, ready = await reopened.delegation_work_consumption("child", "round-original", set(), "request-original")
+            assert not ready  # Transcript position is not consumption evidence.
         finally:
             await reopened.close()
 

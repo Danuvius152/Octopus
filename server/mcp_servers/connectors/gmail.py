@@ -26,7 +26,9 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from server.mcp_servers.connectors._shared import (  # noqa: E402
     ConnectorContext,
+    ConnectorTokenError,
     to_text,
+    token_failure_message,
     truncate,
 )
 
@@ -41,20 +43,17 @@ mcp = FastMCP("octopus-gmail")
 ctx = ConnectorContext()
 
 _API = "https://gmail.googleapis.com/gmail/v1"
-_RECONNECT_MSG = (
-    "Error: Gmail token expired or revoked — ask the user to reconnect "
-    "Gmail in Octopus's sidebar."
-)
 
 
 def _api(method: str, path: str, **kw: Any) -> tuple[Any, str | None]:
     """Authenticated Gmail call. Returns (parsed_body, None) on success or
     ({}, error) on failure. The failure body is an empty dict, never None —
     see the note on github.py's _gh for why."""
-    token = ctx.access_token()
-    if token is None:
-        return {}, "Error: connector unavailable — reconnect Gmail in Octopus."
-    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        info = ctx.token_info()
+    except ConnectorTokenError as error:
+        return {}, token_failure_message(error)
+    headers = {"Authorization": f"Bearer {info['access_token']}"}
     url = path if path.startswith("http") else f"{_API}{path}"
     for attempt in range(3):
         try:
@@ -62,8 +61,7 @@ def _api(method: str, path: str, **kw: Any) -> tuple[Any, str | None]:
         except httpx.HTTPError as e:
             return {}, f"Error: Gmail request failed: {e}"
         if r.status_code == 401:
-            ctx.mark_needs_reconnect("invalid_grant")
-            return {}, _RECONNECT_MSG
+            return {}, ctx.rejection_message(info)
         if r.status_code == 429 or r.status_code >= 500:
             if attempt < 2:
                 time.sleep(min(float(r.headers.get("Retry-After", "1") or 1), 5.0))

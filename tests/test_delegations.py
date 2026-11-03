@@ -244,7 +244,7 @@ async def test_files_resolved_against_working_dir(
 
     async def fake_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         started.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
     # Build a real working dir with one file that exists and one
@@ -403,7 +403,7 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
         if sid not in mgr.sessions:
             raise ValueError(f"Session {sid} not found")
         delivered.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     def capture_logger_exception(msg, *args, **kwargs):
         # When DelegationManager._inject_terminal catches a missing-
@@ -503,7 +503,7 @@ async def test_start_delegation_happy_path(models, dm, mgr, db, monkeypatch):
 
     async def fake_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         started.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
 
@@ -762,7 +762,7 @@ async def test_reply_injection_on_result(models, dm, mgr, db, monkeypatch):
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -806,7 +806,7 @@ async def test_parent_delegation_waits_for_its_own_sub_delegation(
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -878,7 +878,7 @@ async def test_parent_delegation_waits_when_its_sub_delegation_finished_first(
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -946,7 +946,7 @@ async def test_plain_delegation_finalises_on_its_first_result(
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -978,7 +978,7 @@ async def test_parent_delegation_still_fails_fast_on_error(models, dm, mgr, db, 
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1008,7 +1008,7 @@ async def test_error_injection_on_result_error(models, dm, mgr, db, monkeypatch)
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1035,7 +1035,7 @@ async def test_error_injection_on_error_event(models, dm, mgr, db, monkeypatch):
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1067,7 +1067,7 @@ async def test_recovery_events_do_not_terminate_a_delegation(models, dm, mgr, db
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1105,7 +1105,7 @@ async def test_delegation_waits_for_real_turn_recovery(models, dm, mgr, db, monk
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         if sid == parent.id:
             injected.append((sid, prompt))
-            return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+            return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
         receipt = await submit(sid, prompt, attachment_ids, source=source, work_id=work_id,
                                delivery_id=delivery_id, **kwargs)
         original_receipts.append(receipt)
@@ -1201,7 +1201,7 @@ async def test_empty_reply_gets_placeholder(models, dm, mgr, db, monkeypatch):
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1228,7 +1228,7 @@ async def test_cancel_delegation(models, dm, mgr, db, monkeypatch):
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     async def fake_interrupt(sid):
         return True
@@ -1265,7 +1265,7 @@ async def test_follow_up_happy_path(models, dm, mgr, db, monkeypatch):
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1410,7 +1410,7 @@ async def test_route_follow_up_requires_live_parent(models, client, monkeypatch)
     record and start the child, then silently drop the terminal
     turn because there's no live parent to inject into."""
     async def noop(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        return await models.start_message(session_manager, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(session_manager, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(session_manager, "start_message", noop)
 
@@ -1450,7 +1450,7 @@ async def test_route_follow_up(models, client, monkeypatch):
     """HTTP path mirrors the manager: 200/201 happy path; 404 for
     unknown delegation; 409 while running."""
     async def noop(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        return await models.start_message(session_manager, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(session_manager, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(session_manager, "start_message", noop)
 
@@ -1495,7 +1495,7 @@ async def test_cancel_cascades_to_descendants(models, dm, mgr, db, monkeypatch):
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     async def fake_interrupt(sid):
         return True
@@ -1556,7 +1556,7 @@ async def test_cancel_delegation_single_inject_under_interrupt_broadcast(
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
 
@@ -1604,7 +1604,7 @@ async def test_terminal_injection_is_idempotent(models, dm, mgr, db, monkeypatch
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1647,7 +1647,7 @@ async def test_concurrent_delegations_to_same_target(models, dm, mgr, db, monkey
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         injected.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1872,7 +1872,7 @@ async def test_terminated_delegations_ignore_questions(
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         captured.append((sid, prompt))
-        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id, delivery_id=delivery_id, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     await models.emit(dm, {

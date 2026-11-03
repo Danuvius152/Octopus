@@ -672,15 +672,16 @@ async def test_token_route(client):
 @pytest.mark.asyncio
 async def test_mark_needs_reconnect_route(client):
     inst, _ = await _install(client)
+    token = (await client.get(f"/api/connectors/{inst['id']}/token")).json()
     r = await client.post(
         f"/api/connectors/{inst['id']}/mark-needs-reconnect",
-        params={"error_code": "invalid_grant"},
+        json={"grant_stamp": token["grant_stamp"]},
         headers=client.headers,
     )
-    assert r.status_code == 204
+    assert r.status_code == 200 and r.json() == {"disposition": "applied"}
     rows = (await client.get("/api/connectors", headers=client.headers)).json()
     assert rows[0]["needs_reconnect"] is True
-    assert rows[0]["last_refresh_error_code"] == "invalid_grant"
+    assert rows[0]["last_refresh_error_code"] == "auth_rejected"
 
 
 # --- agent-scoped enablement ----------------------------------------------

@@ -33,6 +33,39 @@ _DELEGATION_RELATION = (
 )
 
 
+class DelegationWorkPending(Exception):
+    """A newly admitted input prevents the candidate from sealing its work."""
+
+
+async def delegation_consumption(
+    tx: Transaction, session_id: str, work_id: str, children: set[str], candidate: str | None,
+) -> tuple[set[str], bool]:
+    """Derive processing from original inputs and their committed carriers.
+
+    Neither a child terminal nor an arbitrary successful parent request proves
+    that a queued return was processed. Inline inputs name their actual carrier.
+    """
+    rows = await tx.fetch_all(
+        "SELECT i.request_id,i.execution_owner,i.delivery_state,i.native_inputs,"
+        "m.terminal_request_id,json_extract(i.payload,'$.delivery_id') "
+        "FROM client_submissions i LEFT JOIN messages m ON m.session_id=i.session_id "
+        "AND m.terminal_request_id=i.execution_owner "
+        "WHERE i.session_id=? AND json_extract(i.payload,'$.work_id')=? "
+        "AND json_extract(i.payload,'$.source')='delegation' "
+        "ORDER BY json_extract(i.payload,'$.order'),i.created_at,i.request_id", (session_id, work_id))
+    consumed = set()
+    all_processed = bool(rows)
+    for request, carrier, delivery, native, terminal, identity in rows:
+        processed = (terminal is not None and delivery != "unknown"
+                     and (carrier == request or delivery == "confirmed")
+                     and (not json.loads(native) or delivery == "confirmed"))
+        all_processed &= processed
+        if processed and isinstance(identity, str) and identity.startswith("agent-terminal:"):
+            consumed.add(identity.removeprefix("agent-terminal:"))
+    remaining = children - consumed
+    return remaining, bool(not remaining and all_processed and rows[-1][1] == candidate)
+
+
 async def insert_session(tx: Transaction, record: dict[str, Any]) -> None:
     """Insert a prepared session within its owning admission transaction."""
     columns = ("id", "name", "working_dir", "created_at", "claude_session_id", "credential_id",
@@ -114,9 +147,31 @@ class SessionsMixin(DatabaseBase):
     async def compare_and_set_delegation_state(
         self, child_id: str, expected_json: str | None, new_json: str,
         *, parent_session_id: str, user_id: str | None, target_agent_id: str,
+        parent_expected_state: str | None = None, parent_new_state: str | None = None,
+        seal_request_id: str | None = None,
     ) -> bool:
         """Commit a round only through its captured target and previous snapshot."""
         async with self.transaction(write=True) as tx:
+            if parent_expected_state is not None:
+                parent = await tx.fetch_one("SELECT delegation_state FROM sessions WHERE id=? AND user_id IS ?",
+                                            (parent_session_id, user_id))
+                if parent is None or parent[0] != parent_expected_state:
+                    return False
+            if seal_request_id is not None:
+                # The work owner explicitly requests a business seal. Ordinary
+                # opaque snapshot CAS and already sealed metadata keep their
+                # existing storage contract.
+                current = await tx.fetch_one("SELECT child.id " + _DELEGATION_RELATION +
+                    "AND child.id=? AND child.parent_session_id=? AND child.user_id IS ? "
+                    "AND child.agent_id=? AND child.delegation_state IS ?",
+                    (child_id, parent_session_id, user_id, target_agent_id, expected_json))
+                if current is None:
+                    return False
+                proposed = json.loads(new_json)
+                _, ready = await delegation_consumption(tx, child_id, proposed["work_id"],
+                    set(proposed["child_work_ids"]), seal_request_id)
+                if not ready:
+                    raise DelegationWorkPending()
             cursor = await tx.execute(
                 "UPDATE sessions SET delegation_state = ? WHERE id IN ("
                 "SELECT child.id " + _DELEGATION_RELATION +
@@ -125,26 +180,16 @@ class SessionsMixin(DatabaseBase):
                 "AND child.delegation_state IS ?)",
                 (new_json, child_id, parent_session_id, user_id, target_agent_id, expected_json),
             )
-            return cursor.rowcount == 1
+            saved = cursor.rowcount == 1
+            if saved and parent_expected_state is not None:
+                await tx.execute("UPDATE sessions SET delegation_state = ? WHERE id = ?", (parent_new_state, parent_session_id))
+            return saved
 
-    async def get_latest_delegation_request(
-        self, child_id: str, work_id: str, *,
-        parent_session_id: str, user_id: str | None,
-    ) -> str | None:
-        """Resolve the last stored turn in this round, including nested relays."""
+    async def delegation_work_consumption(
+        self, session_id: str, work_id: str, children: set[str], candidate: str,
+    ) -> tuple[set[str], bool]:
         async with self.transaction(write=False) as tx:
-            cursor = await tx.execute(
-                "SELECT (SELECT json_extract(tool_input, '$.request_context.request_id') "
-                "FROM messages WHERE session_id = child.id AND role = 'user' "
-                "AND type = 'text' "
-                "AND json_extract(tool_input, '$.request_context.work_id') = ? "
-                "AND json_type(tool_input, '$.request_context.request_id') = 'text' "
-                "ORDER BY seq DESC LIMIT 1) " + _DELEGATION_RELATION +
-                "AND child.id = ? AND child.parent_session_id = ? AND child.user_id IS ?",
-                (work_id, child_id, parent_session_id, user_id),
-            )
-            row = await cursor.fetchone()
-            return row[0] if row else None
+            return await delegation_consumption(tx, session_id, work_id, children, candidate)
 
     async def save_session(
         self,

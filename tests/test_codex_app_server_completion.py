@@ -32,6 +32,31 @@ from tests.session_runtime import wait_dispatch_idle
 native_runtime = native_tests.native_runtime
 
 
+@pytest.mark.parametrize("snapshot,field,bad", [
+    ({"type": "fileChange", "status": "completed", "changes": []}, "changes", "truncated"),
+    ({"type": "commandExecution", "status": "completed", "command": "true", "cwd": "/tmp", "commandActions": []}, "command", {}),
+    ({"type": "mcpToolCall", "status": "completed", "server": "octopus", "tool": "read", "arguments": {}}, "result", "truncated"),
+    ({"type": "dynamicToolCall", "status": "completed", "tool": "read", "arguments": {}}, "contentItems", "truncated"),
+    ({"type": "collabAgentToolCall", "tool": "wait", "status": "completed", "senderThreadId": ROOT,
+      "receiverThreadIds": [], "agentsStates": {}}, "agentsStates", []),
+    ({"type": "subAgentActivity", "kind": "completed", "agentThreadId": "child", "agentPath": "child"}, "agentThreadId", 12),
+])
+async def test_malformed_complete_snapshot_cannot_discharge_real_item_obligation(native_runtime, tmp_path, snapshot, field, bad):
+    manager, database, session, _, starts, _ = native_runtime
+    receipt = await start_output(native_runtime)
+    original = {"id": "strict-result", **snapshot}
+    inject(tmp_path,
+        {"method": "item/started", "params": {"threadId": ROOT, "turnId": "turn-1", "item": original}},
+        {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {**original, field: bad}}},
+        item(ROOT, "turn-1", "valid-final", "Keep the valid final"), terminal())
+    await wait_dispatch_idle(manager, session.id)
+    result = await database.read_session_result(session.id, receipt["request_id"])
+    assert result.outcome.status == "failed" and result.outcome.recording_integrity == "incomplete"
+    assert result.fragments == ("Keep the valid final",) and len(starts) == 1
+    rows = await database.load_messages(session.id)
+    assert not [row for row in rows if row["type"] == "tool_result" and row.get("tool_use_id") == "strict-result"]
+
+
 @pytest.mark.parametrize("window", ["committed", "delivered"])
 async def test_stop_after_selection_preserves_original_completion_and_pauses_dispatch(native_runtime, tmp_path, window):
     manager, database, session, _, starts, events = native_runtime
@@ -108,7 +133,7 @@ async def test_root_terminal_uses_retirement_grace_instead_of_active_budget(nati
 
 
 @pytest.mark.parametrize("missing", ["started", "delta"])
-async def test_root_success_cannot_hide_a_missing_complete_root_item(native_runtime, tmp_path, missing):
+async def test_uncommitted_sampling_observation_does_not_hide_saved_final(native_runtime, tmp_path, missing):
     manager, database, session, _, _, _ = native_runtime
     receipt = await start_output(native_runtime)
     if missing == "started":
@@ -120,9 +145,97 @@ async def test_root_success_cannot_hide_a_missing_complete_root_item(native_runt
     inject(tmp_path, item(ROOT, "turn-1", "saved", "Saved final"), incomplete, terminal())
     await wait_dispatch_idle(manager, session.id)
     result = await database.read_session_result(session.id, receipt["request_id"])
-    assert result.outcome.status == "failed"
-    assert result.outcome.recording_integrity == "incomplete"
+    assert result.outcome.status == "success"
+    assert result.outcome.recording_integrity == "complete"
     assert result.fragments == ("Saved final",)
+
+
+@pytest.mark.parametrize("native_status", ["completed", "failed", "interrupted"])
+@pytest.mark.parametrize("damage", ["missing_tool", "bad_identity"])
+async def test_collection_problem_preserves_original_native_cause(native_runtime, tmp_path, native_status, damage):
+    manager, database, session, _, starts, _ = native_runtime
+    receipt = await start_output(native_runtime)
+    unfinished = {"method": "item/started", "params": {"threadId": ROOT, "turnId": "turn-1",
+        "item": {"id": "command", "type": "commandExecution", "status": "inProgress", "command": "effect", "cwd": "/tmp", "commandActions": []}}}
+    end = terminal(native_status)
+    if native_status == "failed":
+        end["params"]["turn"]["error"] = {"message": "Original authorization rejection", "codexErrorInfo": "unauthorized", "additionalDetails": "Original details"}
+    frames = [item(ROOT, "turn-1", "saved", "Saved answer")]
+    if damage == "missing_tool":
+        frames.append(unfinished)
+    frames.append(end)
+    if damage == "bad_identity":
+        frames.append(item(ROOT, "wrong-turn", "invalid", "Must not become current"))
+    inject(tmp_path, *frames)
+    await wait_dispatch_idle(manager, session.id)
+    completion = await database.read_session_result(session.id, receipt["request_id"])
+    assert completion.outcome.native_status == native_status
+    assert completion.outcome.status == ("interrupted" if native_status == "interrupted" else "failed")
+    assert completion.outcome.recording_integrity == "incomplete"
+    if native_status == "failed":
+        assert completion.outcome.provider_code == "unauthorized"
+        assert completion.outcome.code == "auth_failed"
+        assert "Original authorization rejection" in completion.outcome.message
+    saved = await database.read_session_result(session.id, receipt["request_id"])
+    assert saved.fragments == ("Saved answer",)
+    assert len(starts) == 1 and not any(completion.outcome.recovery.values())
+
+
+@pytest.mark.parametrize("tail", [False, True])
+async def test_summary_requires_its_own_saved_final_after_the_bounded_tail(native_runtime, tmp_path, tail):
+    manager, database, session, _, _, _ = native_runtime
+    receipt = await start_output(native_runtime)
+    final = item(ROOT, "turn-1", "new", "New final")
+    end = terminal()
+    end["params"]["turn"].update(itemsView="summary", items=[{**final["params"]["item"], "completedAtMs": 100}])
+    frames = [item(ROOT, "turn-1", "old", "Old final"), end]
+    if tail:
+        frames.append(final)
+    inject(tmp_path, *frames)
+    await wait_dispatch_idle(manager, session.id)
+    saved = await database.read_session_result(session.id, receipt["request_id"])
+    assert saved.outcome.status == ("success" if tail else "failed")
+    assert saved.outcome.native_status == "completed"
+    assert saved.fragments == (("Old final", "New final") if tail else ("Old final",))
+    assert bool(saved.outcome.recording_issues.get("native_final_missing")) == (not tail)
+
+
+@pytest.mark.parametrize("observation,required", [
+    ({"type": "reasoning", "summary": [], "content": []}, False),
+    ({"type": "webSearch", "query": "", "action": {"type": "other"}}, False),
+    ({"type": "webSearch", "query": "", "action": None}, True),
+    ({"type": "webSearch", "query": ""}, True),
+    ({"type": "contextCompaction"}, False),
+    ({"type": "dynamicToolCall", "tool": "unregistered", "arguments": {}, "status": "inProgress"}, True),
+    ({"type": "mcpToolCall", "tool": "ask", "server": "ask", "arguments": {}, "status": "inProgress"}, True),
+])
+async def test_pinned_observation_and_invocation_obligations_are_distinct(native_runtime, tmp_path, observation, required):
+    manager, database, session, _, _, _ = native_runtime
+    receipt = await start_output(native_runtime)
+    started = {"method": "item/started", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {"id": "old", **observation}}}
+    retry = {"method": "error", "params": {"threadId": ROOT, "turnId": "turn-1", "willRetry": True,
+        "error": {"message": "Sampling retried", "codexErrorInfo": "other"}}}
+    inject(tmp_path, item(ROOT, "turn-1", "A", "Final A"), started, retry,
+           item(ROOT, "turn-1", "B", "Final B"), terminal())
+    await wait_dispatch_idle(manager, session.id)
+    saved = await database.read_session_result(session.id, receipt["request_id"])
+    assert saved.outcome.status == ("failed" if required else "success")
+    assert saved.fragments == ("Final A", "Final B")
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+async def test_duplicate_terminal_compares_error_and_ignores_observation_time(native_runtime, tmp_path, conflict):
+    manager, database, session, _, _, _ = native_runtime
+    receipt = await start_output(native_runtime)
+    first, second = terminal("failed"), terminal("failed")
+    first["params"]["turn"].update(error={"message": "Original failure", "codexErrorInfo": "other"}, completedAt=10)
+    second["params"]["turn"].update(error={"message": "Changed failure" if conflict else "Original failure", "codexErrorInfo": "other"}, completedAt=11)
+    inject(tmp_path, first, second)
+    await wait_dispatch_idle(manager, session.id)
+    saved = await database.read_session_result(session.id, receipt["request_id"])
+    assert saved.outcome.native_status == "failed"
+    assert "Original failure" in saved.outcome.message
+    assert bool(saved.outcome.recording_issues) == conflict
 
 
 @pytest.mark.parametrize("order", ["before_ack", "after_ack"])
@@ -146,7 +259,7 @@ async def test_background_command_is_collected_before_native_connection_closes(n
             assert not any(event.get("terminal") for event in events)
             other = {"method": "item/completed", "params": {"threadId": "child", "turnId": "child-turn",
                 "item": {"id": "background-command", "type": "commandExecution", "status": "completed",
-                    "command": "other command", "aggregatedOutput": "Other command finished", "exitCode": 0}}}
+                    "command": "other command", "cwd": "/tmp", "commandActions": [], "aggregatedOutput": "Other command finished", "exitCode": 0}}}
             inject(tmp_path, child_start(), other)
             await until(lambda: any(event.get("output") == "Other command finished" for event in events))
             assert not any(event.get("terminal") for event in events)
@@ -379,7 +492,8 @@ async def test_native_wait_and_duplicate_notifications_cannot_renew_idle_or_drop
     await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .2)
     wait = {"method": "item/started", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
-        "type": "collabAgentToolCall", "id": "wait", "tool": "wait", "receiverThreadIds": ["child"], "status": "inProgress"}}}
+        "type": "collabAgentToolCall", "id": "wait", "tool": "wait", "receiverThreadIds": ["child"],
+        "senderThreadId": ROOT, "agentsStates": {}, "status": "inProgress"}}}
     completed_wait = {"method": "item/completed", "params": {**wait["params"], "item": {**wait["params"]["item"], "status": "completed"}}}
     (tmp_path / "native-stop-tail.json").write_text(json.dumps([
         item("child", "child-turn", "partial", "Partial at idle cancellation"), completed_wait, terminal("interrupted"),

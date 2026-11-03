@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse
 
 from ..auth import verify_token
 from ..connector_manager import ConnectorError, ConnectorManager
+from ..connectors.errors import ConnectorTokenError
 from ..connectors.oauth import ConnectorLoginError, ConnectorLoginManager
 from ..deps import AdminUser, ScopeUser, SessionMgr
 from ..models import (
@@ -32,6 +33,8 @@ from ..models import (
     ConnectorOAuthStartRequest,
     ConnectorOAuthStartResponse,
     ConnectorOAuthStatusResponse,
+    ConnectorRejectionRequest,
+    ConnectorRejectionResponse,
     ConnectorTokenResponse,
     CustomConnectorCreateRequest,
     SetAgentConnectorsRequest,
@@ -384,6 +387,12 @@ async def get_token(
     # else's access token.
     try:
         out = await _require_manager().get_access_token(installation_id, user_id)
+    except ConnectorTokenError as error:
+        codes = {"temporary": 503, "reconnect": 409, "unavailable": 404,
+                 "configuration": 400, "permission": 403, "unknown": 502}
+        raise HTTPException(status_code=codes[error.kind], detail={
+            "kind": error.kind, "code": error.code, "message": str(error),
+        })
     except ConnectorError as e:
         raise _http_error(e)
     return ConnectorTokenResponse(**out)
@@ -391,18 +400,19 @@ async def get_token(
 
 @router.post(
     "/{installation_id}/mark-needs-reconnect",
-    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=ConnectorRejectionResponse,
 )
 async def mark_needs_reconnect(
     installation_id: str,
-    error_code: str = Query(default="invalid_grant"),
+    body: ConnectorRejectionRequest,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     try:
-        await _require_manager().mark_needs_reconnect(
-            installation_id, error_code, user_id
+        disposition = await _require_manager().mark_needs_reconnect(
+            installation_id, body.grant_stamp, user_id=user_id,
         )
+        return ConnectorRejectionResponse(disposition=disposition)
     except ConnectorError as e:
         raise _http_error(e)
 

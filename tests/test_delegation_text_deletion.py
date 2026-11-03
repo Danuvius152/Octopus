@@ -160,7 +160,8 @@ async def test_deleted_leaf_reply_still_finishes_the_original_nested_parent(
         saved = json.loads(await database.load_delegation_state(
             outer.delegation_id, parent_session_id=runtime.parent.id, user_id=runtime.parent.user_id,
         ))
-        assert saved["deferred_request_id"] == first.request_id
+        assert saved["candidate_request_id"] == first.request_id
+        assert saved["child_work_ids"] == [leaf.work_id]
         assert outer.state == leaf.state == "running"
         assert runtime.manager.dispatch_snapshot(runtime.parent.id)["items"] == []
 
@@ -178,7 +179,7 @@ async def test_deleted_leaf_reply_still_finishes_the_original_nested_parent(
         print("nested-deleted-leaf-handoff", {
             "leaf_outcome": completion.outcome.status, "leaf_state": leaf.state,
             "outer_state": outer.state, "leaf_delivery_count": len(leaf_deliveries),
-            "original_outer_deferred": saved["deferred_request_id"],
+            "original_outer_candidate": saved["candidate_request_id"],
         })
         assert len(leaf_deliveries) == 1
         parent_id, prompt, options, delivered = leaf_deliveries[0]

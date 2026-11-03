@@ -13,7 +13,7 @@ from server.mcp_identity import (
     set_current_scope,
 )
 from server.mcp_servers import _host
-from server.mcp_servers.connectors._shared import ConnectorContext
+from server.mcp_servers.connectors._shared import ConnectorContext, ConnectorTokenError
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def scoped_host(monkeypatch):
 def call(context, owner, installation):
     marker = set_current_scope(McpScope("synthetic-session", installation, owner))
     try:
-        return context.access_token()
+        return context.token_info()["access_token"]
     finally:
         reset_current_scope(marker)
 
@@ -42,7 +42,7 @@ def test_sequential_installations_and_secret_changes(scoped_host, monkeypatch, s
         installation = url.split("/")[-2]
         requests.append((current_scope().user_id, installation))
         value = tokens.get(installation)
-        return httpx.Response(200, json={"access_token": value}) if value else httpx.Response(404)
+        return httpx.Response(200, json={"access_token": value, "grant_stamp": "stamp"}) if value else httpx.Response(404)
 
     monkeypatch.setattr(httpx, "get", get)
     assert call(scoped_host, "owner-A", "install-A") == "token-A"
@@ -50,20 +50,23 @@ def test_sequential_installations_and_secret_changes(scoped_host, monkeypatch, s
     tokens["install-A"] = "replacement-A"
     assert call(scoped_host, "owner-A", "install-A") == "replacement-A"
     del tokens["install-A"]
-    assert call(scoped_host, "owner-A", "install-A") is None
-    assert scoped_host.access_token() is None  # No scope or diagnostic installation.
+    with pytest.raises(ConnectorTokenError):
+        call(scoped_host, "owner-A", "install-A")
+    with pytest.raises(ConnectorTokenError):
+        scoped_host.token_info()
     assert requests == [("owner-A", "install-A"), (second_owner, "install-B"),
                         ("owner-A", "install-A"), ("owner-A", "install-A")]
 
 
 def test_warmed_context_does_not_bypass_owner_denial(scoped_host, monkeypatch):
     def get(url, **kwargs):
-        return (httpx.Response(200, json={"access_token": "token-A"})
+        return (httpx.Response(200, json={"access_token": "token-A", "grant_stamp": "stamp"})
                 if current_scope().user_id == "owner-A" else httpx.Response(403))
 
     monkeypatch.setattr(httpx, "get", get)
     assert call(scoped_host, "owner-A", "install-A") == "token-A"
-    assert call(scoped_host, "owner-B", "install-A") is None
+    with pytest.raises(ConnectorTokenError):
+        call(scoped_host, "owner-B", "install-A")
 
 
 def test_concurrent_calls_keep_their_request_scopes(scoped_host, monkeypatch):
@@ -73,7 +76,7 @@ def test_concurrent_calls_keep_their_request_scopes(scoped_host, monkeypatch):
         installation = url.split("/")[-2]
         owner = current_scope().user_id
         barrier.wait(timeout=3)
-        return httpx.Response(200, json={"access_token": f"{owner}:{installation}"})
+        return httpx.Response(200, json={"access_token": f"{owner}:{installation}", "grant_stamp": "stamp"})
 
     monkeypatch.setattr(httpx, "get", get)
     identities = [("A", "one"), ("B", "two"), ("A", "three"), ("B", "four")]

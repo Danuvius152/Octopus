@@ -15,6 +15,34 @@ import { useSessionStore } from "../stores/sessionStore";
 
 afterEach(cleanup);
 
+it.each(["live", "history"])("keeps native status and missing-final evidence in %s results", async (path) => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const { normalizeMessage } = await import("../lib/turnOutcome");
+  const content = { kind: "outcome", request_id: "r", status: "failed", recovery: {}, native_status: "completed",
+    recording_integrity: "incomplete", recording_issues: { native_final_missing: 1 },
+    final_answer: { thread_id: "root", turn_id: "turn", message_seqs: [1] } };
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "result", session_id: "integrity", terminal: true, seq: 2, content });
+  const message = path === "live" ? useSessionStore.getState().messages.integrity[0] :
+    normalizeMessage({ type: "result", role: "system", content });
+  expect(message.outcome).toMatchObject({ recording_integrity: "incomplete", recording_issues: { native_final_missing: 1 } });
+  const { getByText } = render(<MessageBubble sessionId="integrity" message={message} />);
+  expect(getByText("Native: completed")).toBeTruthy();
+  expect(getByText("A declared final answer is missing from the saved transcript.")).toBeTruthy();
+});
+
+it.each([["expired", "system", "System · expired"], ["answered", "agent", "Agent"],
+  ["answered", "account", "You"], ["answered", "unknown", "Answer · source unknown"]])(
+  "labels %s answers from %s", (disposition, kind, label) => {
+    const { getByText, queryByText } = render(<MessageBubble sessionId="question-source" message={{
+      type: "question_answer", role: "user", content: "Answer content",
+      tool_input: { question_resolution: { disposition, source: { kind } } },
+    }} />);
+    expect(getByText(label)).toBeTruthy();
+    if (kind !== "account") expect(queryByText("You")).toBeNull();
+  },
+);
+
 it("offers a native image's original path through live WS and saved history", async () => {
   const { handleWsMessage } = await import("../hooks/useWebSocket");
   const savedPath = "/original/native-image.png";
