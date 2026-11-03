@@ -49,6 +49,11 @@ _SALT = b"octopus-credentials-v1"
 _ITERATIONS = 200_000
 
 
+def is_sha256_hexdigest(candidate: str | None) -> bool:
+    """Check the exact lowercase ASCII encoding emitted by our HMAC producer."""
+    return candidate is not None and len(candidate) == 64 and all(char in "0123456789abcdef" for char in candidate)
+
+
 @functools.lru_cache(maxsize=4)
 def _key_from_secret(secret: str) -> bytes:
     """Derive a 32-byte Fernet key from the auth token."""

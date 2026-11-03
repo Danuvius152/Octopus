@@ -43,6 +43,11 @@ class SubmissionReceipt:
     def accepted(self) -> bool:
         return self.disposition in {"accepted", "duplicate", "steered"}
 
+    @property
+    def completion(self) -> RequestCompletion | None:
+        """Read an already observed completion without waiting for execution."""
+        return self._completion.result() if self._completion.done() else None
+
     async def wait(self) -> RequestCompletion:
         return await asyncio.shield(self._completion)
 

@@ -5,7 +5,12 @@ import { unreadList, type ListReadState, type RefreshResult } from "./listState"
 import type { DispatchState } from "./sessionDispatch";
 
 interface Scope { account: number; token: string; generation: string | null; connection: number }
-export interface SessionObservation { scope: Scope; change: number; invalidated?: boolean }
+export interface SessionObservation {
+  scope: Scope; change: number; invalidated?: boolean;
+  // A null-generation observer may confirm only the first accepted generation.
+  // A subsequent transition permanently ends that candidate's lifetime.
+  initialGeneration?: string | null;
+}
 interface Read extends SessionObservation {
   archived: boolean; controller: AbortController; timer: ReturnType<typeof setTimeout>;
   promise: Promise<RefreshResult>; finish: (result: RefreshResult) => void;
@@ -33,6 +38,10 @@ export class SessionList {
     this.unsubscribe = useSessionStore.subscribe((state, before) => {
       const account = state.accountGeneration !== before.accountGeneration || state.token !== before.token;
       if (!account && state.dispatchGeneration === before.dispatchGeneration) return;
+      if (!account) for (const observation of this.observations.keys()) {
+        if (observation.scope.generation === null) observation.initialGeneration =
+          observation.initialGeneration === undefined && before.dispatchGeneration === null ? state.dispatchGeneration : null;
+      }
       this.retire({ state: "obsolete" }); this.dirty = false;
       if (account) {
         this.socket = null; this.connection++; this.engaged = false; this.archivedRequested = false;
@@ -55,6 +64,10 @@ export class SessionList {
   }
   accountCurrent(observation: SessionObservation): boolean {
     return this.sameAccount(observation.scope);
+  }
+  initialGenerationCurrent(observation: SessionObservation): boolean {
+    return observation.scope.generation === null && observation.initialGeneration != null &&
+      this.current(observation, observation.initialGeneration);
   }
   capture(start = useSessionStore.getState()): SessionObservation {
     const now = useSessionStore.getState();

@@ -96,6 +96,9 @@ promise `script_env` already makes — the server's environment, and the master
 token in it, never reach app code (application-backends.md §4) — while still
 letting a backend hold a conversation. It needs no storage: derived from the
 master key, so rotating that rotates every app's token with it.
+Signature-shape rejection and the legal account-token fallback follow the shared
+[scoped authentication contract](multi-tenancy.md#keys-and-secrets). A malformed
+App signature is an authentication failure, not a server comparison exception.
 
 ## 5. What the agent is told
 

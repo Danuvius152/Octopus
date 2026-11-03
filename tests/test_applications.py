@@ -100,10 +100,10 @@ def sent(mgr, monkeypatch, models):
     """Capture `start_message` calls instead of spawning a harness."""
     calls: list[tuple[str, str]] = []
 
-    async def fake_start_message(session_id, prompt, attachment_ids=None, *, source):
+    async def fake_start_message(session_id, prompt, attachment_ids=None, *, source, **kwargs):
         assert source == "application"
         calls.append((session_id, prompt))
-        return await models.start_message(mgr, session_id, prompt, source=source)
+        return await models.start_message(mgr, session_id, prompt, source=source, **kwargs)
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
     return calls
@@ -166,9 +166,9 @@ async def test_application_creation_reports_failed_build_when_admission_is_close
     assert row["status"] == "failed"
     assert "closed" in row["error"].lower()
     assert (await db.get_application(row["id"]))["status"] == "failed"
-    assert not mgr.session_is_executing(mgr.get_session(row["session_id"]))
-    assert mgr.dispatch_snapshot(row["session_id"])["items"] == []
-    assert not await db.load_messages(row["session_id"])
+    assert row["session_id"] is None
+    assert await db.application_session_ids(row["id"]) == []
+    assert not any(session.origin == "application" for session in mgr.sessions.values())
 
 
 @pytest.mark.parametrize("legacy_state", ["live", "archived", "restored_during_build"])
@@ -382,7 +382,7 @@ async def test_create_rejects_escaping_entrypoint(am, db, sent):
 async def test_create_marks_failed_when_the_build_session_wont_start(
     models, am, db, mgr, monkeypatch
 ):
-    async def boom(session_id, prompt, attachment_ids=None, *, source):
+    async def boom(session_id, prompt, attachment_ids=None, *, source, **kwargs):
         assert source == "application"
         raise RuntimeError("harness exploded")
         return await models.start_message(mgr, session_id, prompt, source=source)
@@ -1227,10 +1227,10 @@ async def client(models, apps_root, monkeypatch, db):
 
     calls: list[tuple[str, str]] = []
 
-    async def fake_start_message(session_id, prompt, attachment_ids=None, *, source):
+    async def fake_start_message(session_id, prompt, attachment_ids=None, *, source, **kwargs):
         assert source == "application"
         calls.append((session_id, prompt))
-        return await models.start_message(session_manager, session_id, prompt, source=source)
+        return await models.start_message(session_manager, session_id, prompt, source=source, **kwargs)
 
     monkeypatch.setattr(session_manager, "start_message", fake_start_message)
 
@@ -1276,6 +1276,22 @@ async def test_api_create_list_get(client):
     assert (
         await client.get("/api/applications/missing", headers=client.headers)
     ).status_code == 404
+
+
+async def test_api_archived_builder_is_refused_before_application_effects(client, db):
+    from server.workspace import paths_for
+
+    owner = await db.get_system_agent()
+    builder = await AgentManager(db).create_agent(name="Closed builder", user_id=owner["user_id"])
+    await session_manager.archive_agent(builder["id"])
+    directory = paths_for(owner["user_id"]).applications
+    before = sorted(str(path) for path in directory.rglob("*")) if directory.exists() else []
+    response = await client.post("/api/applications", json={"name": "Refused app", "description": "Must not build",
+        "agent_id": builder["id"]})
+    assert response.status_code == 409, response.text
+    assert (await client.get("/api/applications")).json() == []
+    assert (sorted(str(path) for path in directory.rglob("*")) if directory.exists() else []) == before
+    assert client.sent == []
 
 
 @pytest.mark.asyncio

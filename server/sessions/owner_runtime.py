@@ -151,6 +151,7 @@ class CloseExecution:
     reason: str
     reservation: object | None = None
     only_request_id: str | None = None
+    only_empty_application: str | None = None
 
 
 @dataclass(frozen=True)
@@ -515,6 +516,13 @@ class OwnerRuntime:
             return WorkRetirement(resources)
         if isinstance(command, (Reset, CloseExecution)):
             if isinstance(command, CloseExecution):
+                if command.only_empty_application is not None:
+                    # The original Owner serializes this proof with Submit.
+                    # Once closed, no later input can race session deletion.
+                    if (session.origin != "application" or session.app_id != command.only_empty_application
+                            or self.current is not None or session._pending_queue or session._steer_queue
+                            or await manager.input_database().session_has_inputs(session.id)):
+                        return False
                 if command.reason == "application_deleted":
                     # A conflicting lifecycle operation still owns its resources,
                     # but unfinished application deletion already forbids dispatch.

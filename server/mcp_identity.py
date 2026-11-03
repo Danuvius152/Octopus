@@ -23,6 +23,8 @@ import hmac
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+from .crypto import is_sha256_hexdigest
+
 # Set per request by the ASGI middleware below and read by the tool bodies.
 # A ContextVar rather than a parameter because the MCP SDK owns the call path
 # between the HTTP request and the tool function, so there is nowhere to thread
@@ -188,7 +190,7 @@ def verify(bearer: str | None) -> McpScope | None:
     session_id, installation_id, user_id = parts[:3]
     signature = parts[-1]
     wiki_task_id = (parts[3] or None) if len(parts) in (5, 7) else None
-    if not session_id:
+    if not session_id or not is_sha256_hexdigest(signature):
         return None
     scope = McpScope(
         session_id, installation_id or None, user_id or None, wiki_task_id,

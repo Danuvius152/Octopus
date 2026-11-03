@@ -54,6 +54,54 @@ ApplicationManager evaluates that build's entrypoint and outcome
 status = ready (entrypoint exists)  |  failed (it doesn't)
 ```
 
+Creation is one Manager-owned task shielded from its HTTP waiter. Before any
+resource effect, the existing agent lifecycle owner checks active admission and
+registers preparation. It exclusively creates the code directory, saves the App
+row and prepares its build session. The existing App projection coordination
+covers row → session → binding, so a concurrent build or delete cannot replace
+an unfinished first binding. A preexisting directory is never claimed for cleanup.
+
+Preparation hands its stable App/session to the same original task before
+releasing that registration. `application_created` is delivered outside agent
+registration and App coordination, before submitting the initial input. This
+permits a subscriber to archive the builder without waiting for itself and
+prevents an old building announcement following the completed build. The input
+phase takes fresh agent admission; archive closes new admission and drains work
+already registered. Nested session/input operations keep their own gates. Caller
+cancellation does not cancel either phase. Notification failure does not roll
+back resources or start another build. This includes a creation subscriber
+cancelling its notification: the same owned operation continues input handoff.
+
+Failure handling follows the confirmed effect. Before the App commits, only the
+directory this operation exclusively created is cleaned; cleanup errors retain
+the exact path and reason. After commit, the stable App ID and known session
+relationship are retained with a failed diagnostic. A known unaccepted input
+permits conditional cleanup of a dedicated empty session: its original Owner
+checks both admitted inputs and retained messages, then closes new admission
+before deletion. A failed or retired Owner cannot certify emptiness. Conditional
+refusal cannot replace an explicit delete; successful proof joins the existing
+shared deletion task. That task alone retires resources and deletes rows. Only
+confirmed deletion clears the App's session reference; cleanup failure retains
+the relationship and explanation. A conditional refusal without an error needs
+no projection write. After waiting for cleanup, an error can be appended only
+while the status, error and update stamp still identify the original failure;
+it cannot contaminate a newer build's completion.
+
+Initial submission uses one preallocated request/delivery identity. A positive
+receipt from that exact SQLite input proves admission. A pending original
+completion retains projection authority. If the observed completion is already
+unavailable, including an Owner ending between admission commit and in-memory
+receipt registration, creation instead saves failed with the accepted input's
+original request ID and an explicit unavailable diagnostic. It retains the
+resources and does not replay the input. Missing input is not proof that Submit
+was never handed off. Unconfirmed admission
+keeps App/session/request identity in a failed diagnostic without replay or
+deleting possible execution resources. The original late completion can still
+settle it. Failure projection rechecks the App/session and current input under
+the existing coordination; it cannot overwrite a committed result or another
+admitted build. Authoritative storage distrust retains the shared fail-stop
+boundary.
+
 `ApplicationManager` observes each original request
 completion through `SessionManager.on_request_complete`, including direct
 chat in the build session. An acknowledged business outcome triggers the
@@ -80,6 +128,16 @@ frame or old completion cannot overwrite the next build's status.
 Each transition broadcasts `application_created` / `application_updated` /
 `application_deleted` over the same WS bus every client already listens to, so
 the sidebar and the app view update live.
+
+`test_application_creation_owner.py` uses controlled native stdio, the real
+SessionOwner and SQLite to cover lost acceptance responses before/after commit,
+completion with/without an entrypoint, preparation versus followup build,
+subscriber archive/cancellation, archive/caller cancellation at effects, and
+conditional versus explicit deletion in both directions. It distinguishes an
+accepted input with a live pending completion from an Owner ending just after
+admission commits, and completes another build while the original empty-session
+cleanup waits. Existing projection-only model
+fixtures do not stand in for input-admission proof.
 
 ## 5. REST surface
 

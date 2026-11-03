@@ -45,6 +45,15 @@ async def insert_session(tx: Transaction, record: dict[str, Any]) -> None:
 
 class SessionsMixin(DatabaseBase):
 
+    async def session_has_inputs(self, session_id: str) -> bool:
+        """An empty builder has neither retained messages nor admitted inputs."""
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=?) "
+                "OR EXISTS(SELECT 1 FROM client_submissions WHERE session_id=?)", (session_id, session_id),
+            )
+            return bool(row and row[0])
+
     async def read_native_details(
         self, session_id: str, user_id: str | None, anchor_seq: int,
         *, after_seq: int | None = None, limit: int = 50,

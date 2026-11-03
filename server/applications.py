@@ -34,13 +34,16 @@ from weakref import WeakValueDictionary
 
 from .aio import complete_cleanup
 from .config import settings
+from .crypto import is_sha256_hexdigest
 from .models import SessionStatus
+from .sessions.runtime_types import SessionAdmissionClosed
 from .sessions.submission import RequestCompletion
 from .workspace import paths_for
 
 if TYPE_CHECKING:
     from .database import Database
     from .session_manager import SessionManager
+    from .sessions.base import Session
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +95,9 @@ def app_scope_token(app_id: str) -> str:
 
 def is_app_scope_token(app_id: str, candidate: str | None) -> bool:
     """Constant-time check of a presented app token against `app_id`'s."""
-    if not candidate:
+    if not is_sha256_hexdigest(candidate):
         return False
+    assert candidate is not None
     return hmac.compare_digest(app_scope_token(app_id), candidate)
 
 
@@ -401,9 +405,73 @@ class ApplicationManager:
         instructions: str = "",
         entrypoint: str = DEFAULT_ENTRYPOINT,
     ) -> dict[str, Any]:
-        """Create the directory + row, open the build session under `agent_id`,
-        and fire the build brief. Returns the row immediately — the app is
-        `building` until the agent's turn ends (applications.md §4)."""
+        """Keep preparation, notification and input handoff in one owned task."""
+        db = self._require_db()
+        if self.session_mgr is None:
+            raise ApplicationError("ApplicationManager not bound", status_code=500)
+        if not agent_id or await db.get_agent(agent_id) is None:
+            raise ApplicationError("Agent not found", status_code=404)
+        task = asyncio.create_task(self._create_application(
+            name=name, description=description, agent_id=agent_id, icon=icon,
+            instructions=instructions, entrypoint=entrypoint,
+        ), name="create-application")
+        self.session_mgr._own_task(task)
+        return await asyncio.shield(task)
+
+    async def _create_application(
+        self, *, name: str, description: str, agent_id: str, icon: str | None,
+        instructions: str, entrypoint: str,
+    ) -> dict[str, Any]:
+        assert self.session_mgr is not None
+        try:
+            async with self.session_mgr.agent_operation(agent_id):
+                row, session = await self._prepare_application(
+                    name=name, description=description, agent_id=agent_id, icon=icon, entrypoint=entrypoint,
+                )
+        except SessionAdmissionClosed as error:
+            raise ApplicationError(str(error), status_code=409) from error
+
+        # The original task retains the prepared app/session while subscribers
+        # run outside agent registration. A subscriber can archive the builder
+        # without waiting for the callback it is currently executing. Announce
+        # creation before input, so a late building snapshot cannot undo ready.
+        await self._publish_creation("application_created", row)
+        if session is not None and row["status"] == STATUS_BUILDING:
+            request_id = uuid.uuid4().hex
+            handed_off = False
+            try:
+                async with self.session_mgr.agent_operation(agent_id):
+                    async with self._build_updates.setdefault(row["id"], asyncio.Lock()):
+                        current = await self.get_application(row["id"])
+                        self.require_writable(current)
+                        if current["session_id"] != session.id:
+                            raise ApplicationError("Application builder changed during creation", status_code=409)
+                    prompt = self.compose_build_prompt(
+                        name=row["name"], description=row["description"], app_dir=row["app_dir"],
+                        entrypoint=row["entrypoint"], instructions=instructions,
+                    )
+                    # This exact identity can confirm acceptance after a lost
+                    # waiter response. Absence never proves an unsent command.
+                    handed_off = True
+                    receipt = await self.session_mgr.start_message(
+                        session.id, prompt, source="application", request_id=request_id, delivery_id=request_id,
+                    )
+                    if not receipt.accepted:
+                        handed_off = False
+                        raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
+            except Exception as error:
+                row = await self._fail_creation(row["id"], session, error,
+                    request_id=request_id, known_unaccepted=not handed_off or isinstance(error, SessionAdmissionClosed))
+                await self._publish_creation("application_updated", row)
+        latest = await self._require_db().get_application(row["id"])
+        if latest is None:
+            raise ApplicationError("Application was deleted during creation", status_code=409)
+        return latest
+
+    async def _prepare_application(
+        self, *, name: str, description: str, agent_id: str, icon: str | None, entrypoint: str,
+    ) -> tuple[dict[str, Any], Session | None]:
+        """Prepare resources only while the builder's activity is registered."""
         db = self._require_db()
         if self.session_mgr is None:
             raise ApplicationError("ApplicationManager not bound", status_code=500)
@@ -434,67 +502,117 @@ class ApplicationManager:
 
         app_id = uuid.uuid4().hex[:12]
         app_dir = allocate_app_dir(name, owner_id)
-        os.makedirs(app_dir, exist_ok=True)
+        os.mkdir(app_dir)  # A preexisting destination is never ours to clean.
         now = _now()
-        async with self._build_updates.setdefault(app_id, asyncio.Lock()):
-            await db.save_application(
-                app_id=app_id,
-                name=name,
-                description=description,
-                icon=icon,
-                agent_id=agent_id,
-                session_id=None,
-                app_dir=app_dir,
-                entrypoint=entrypoint,
-                status=STATUS_BUILDING,
-                created_at=now,
-                updated_at=now,
-                user_id=owner_id,
-            )
-
-            session = await self.session_mgr.create_session(
-                agent_id=agent_id,
-                name=f"Build: {name}",
-                working_dir=app_dir,
-                origin="application",
-                app_id=app_id,
-                backend=(agent.get("backend") or "claude-code"),
-            )
-            await db.update_application(app_id, session_id=session.id, updated_at=_now())
-
-        # Announce the row BEFORE the first turn starts, so the `created`
-        # event can never land after an `updated` one produced by that turn
-        # (clients upsert by id — a late `created` would re-apply the stale
-        # building row over a finished build).
-        row = await db.get_application(app_id)
-        await self._broadcast_application("application_created", row)
-
-        prompt = self.compose_build_prompt(
-            name=name,
-            description=description,
-            app_dir=app_dir,
-            entrypoint=entrypoint,
-            instructions=instructions,
-        )
+        session = None
         try:
+            # Coordinate the first binding with followup build/delete writers.
+            # create_session only prepares storage; notification stays outside.
             async with self._build_updates.setdefault(app_id, asyncio.Lock()):
-                self.require_writable(await self.get_application(app_id))
-                receipt = await self.session_mgr.start_message(session.id, prompt, source="application")
-                if not receipt.accepted:
-                    raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
-        except Exception as exc:
-            logger.exception("Failed to start build session for application %s", app_id)
-            await db.update_application(
-                app_id,
-                status=STATUS_FAILED,
-                error=f"failed to start the build session: {exc}",
-                updated_at=_now(),
-            )
-            row = await db.get_application(app_id)
-            await self._broadcast_application("application_updated", row)
-        if row is None:
-            raise ApplicationError("Application was deleted during creation", status_code=409)
-        return row
+                await db.save_application(
+                    app_id=app_id,
+                    name=name,
+                    description=description,
+                    icon=icon,
+                    agent_id=agent_id,
+                    session_id=None,
+                    app_dir=app_dir,
+                    entrypoint=entrypoint,
+                    status=STATUS_BUILDING,
+                    created_at=now,
+                    updated_at=now,
+                    user_id=owner_id,
+                )
+
+                session = await self.session_mgr.create_session(
+                    agent_id=agent_id,
+                    name=f"Build: {name}",
+                    working_dir=app_dir,
+                    origin="application",
+                    app_id=app_id,
+                    backend=(agent.get("backend") or "claude-code"),
+                )
+                await db.update_application(app_id, session_id=session.id, updated_at=_now())
+
+        except Exception as error:
+            db.health.require_healthy()
+            if await db.get_application(app_id) is None:
+                try:
+                    shutil.rmtree(app_dir)
+                except FileNotFoundError:
+                    if os.path.lexists(app_dir):
+                        raise
+                except OSError as cleanup:
+                    raise ApplicationError(f"Application preparation failed: {error}; directory cleanup failed at {app_dir}: {cleanup}",
+                                           status_code=500) from cleanup
+                raise
+            return await self._fail_creation(app_id, session, error, known_unaccepted=True), session
+        return await self.get_application(app_id), session
+
+    async def _fail_creation(
+        self, app_id: str, session: Session | None, error: Exception, *, request_id: str | None = None,
+        known_unaccepted: bool = False,
+    ) -> dict[str, Any]:
+        """Retain the original resources and defer confirmed input to its Owner."""
+        db = self._require_db()
+        db.health.require_healthy()
+        logger.error("Application creation failed app=%s request=%s", app_id, request_id, exc_info=error)
+        async with self._build_updates.setdefault(app_id, asyncio.Lock()):
+            row = await self.get_application(app_id)
+            if row.get("deletion") is not None or session is not None and row["session_id"] not in {None, session.id}:
+                return row
+            if row["status"] != STATUS_BUILDING:
+                return row  # A committed completion already owns this result.
+            if session is not None and self.session_mgr is not None and self.session_mgr.session_is_executing(session):
+                if request_id is None or not self._completion_is_current(session.id, request_id):
+                    return row  # Another admitted input owns the projection.
+            message = f"failed to prepare the build session: {error}"
+            if request_id is not None and not known_unaccepted:
+                message = f"Build admission is unconfirmed (request {request_id}); inspect the original session. {error}"
+            if request_id is not None and session is not None:
+                from .sessions.submission import observed_input_receipt
+
+                original = await db.get_submission_for_request(session.id, request_id)
+                if original is not None:
+                    receipt = observed_input_receipt(original, session)
+                    if receipt.accepted:
+                        completion = receipt.completion
+                        if completion is None or completion.state != "unavailable":
+                            return row  # Original completion keeps its projection authority.
+                        known_unaccepted = False
+                        message = f"Build input was accepted (request {request_id}), but its completion is unavailable; inspect the original session. {error}"
+            fields = {"status": STATUS_FAILED, "error": message, "updated_at": _now()}
+            if session is not None:
+                fields["session_id"] = session.id
+            await db.update_application(app_id, **fields)
+        if known_unaccepted and session is not None:
+            assert self.session_mgr is not None
+            cleanup_error = None
+            try:
+                removed = await self.session_mgr.delete_session(session.id, only_empty_application=app_id)
+            except Exception as cleanup:
+                db.health.require_healthy()
+                removed = False
+                logger.exception("Failed to retire empty application session %s", session.id)
+                cleanup_error = f"{message}; empty session {session.id} cleanup failed: {cleanup}"
+            if removed or cleanup_error is not None:
+                async with self._build_updates.setdefault(app_id, asyncio.Lock()):
+                    row = await self.get_application(app_id)
+                    if row["session_id"] == session.id and row.get("deletion") is None:
+                        if removed:
+                            await db.update_application(app_id, session_id=None)
+                        elif all(row[key] == fields[key] for key in ("status", "error", "updated_at")):
+                            await db.update_application(app_id, error=cleanup_error)
+        return await self.get_application(app_id)
+
+    async def _publish_creation(self, kind: str, row: dict[str, Any]) -> None:
+        try:
+            await self._broadcast_application(kind, row)
+        except (Exception, asyncio.CancelledError):
+            # A cancelled subscriber is a notification failure. The original
+            # task still owns the prepared resources and input handoff.
+            self._require_db().health.require_healthy()
+            logger.exception("Application creation notification failed app=%s kind=%s", row["id"], kind)
 
     # ------------------------------------------------------------------ build
 

@@ -142,15 +142,27 @@ final refs without remapping historical identities. Existing user-message
 delivery state and native input evidence. It is a historical observation, with
 no copied submission, process identity or recovery permission. Result reads use
 that observation to retain input uncertainty; malformed refs never read a parent
-session to reconstruct text. The existing `fork_metadata.native_fork` records a
+session to reconstruct text.
+
+An initializing full-copy saga commits its row before copying. Its existing
+`fork_metadata.owned_copy_dir` JSON field is written only after successful
+exclusive directory creation and names that exact destination. The initializing
+state, full-copy identity, receipt match and allowed scope jointly permit
+directory cleanup; native artifact cleanup and the original writer's exit remain
+separate prerequisites. An existing directory without a matching creation
+receipt is retained with the recovery row for inspection. Ready sessions are
+outside the sweep; normal first-turn metadata clearing need not keep this
+initialization receipt. There is no new table, storage root, format transition or
+startup backfill. Backup and transfer follow the existing session scope below.
+
+The existing `fork_metadata.native_fork` records a
 native creation's unknown/created phase, selected home/strategy, RPC connection
 and actual returned ID/path for its original initializing saga. Its
 `cleanup_allowed` qualification is closed through ACK and while a management
 host remains unconfirmed; only trusted, confirmed retirement can open it.
 Starting another management operation first persists it closed. Missing or false
 qualification retains the recovery material instead of authorizing deletion.
-Ready history
-does not restore management hosts or execution authority from that metadata.
+Ready history does not restore management hosts or execution authority from that metadata.
 These facts add no DDL or storage root and require no format transition.
 
 Native `fileChange` result records retain their producer's tool name in the

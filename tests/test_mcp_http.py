@@ -77,6 +77,28 @@ class TestIdentity:
     def test_malformed_bearers_are_refused(self, bad):
         assert verify(bad) is None
 
+    @pytest.mark.parametrize("parts", [4, 5, 7])
+    @pytest.mark.parametrize("signature", ["", "a" * 63, "a" * 65, "F" * 64, "g" * 64, "é" * 64, "０" * 64],
+                             ids=["empty", "short", "long", "uppercase", "nonhex", "latin1", "fullwidth"])
+    def test_only_canonical_ascii_signatures_reach_verification(self, parts, signature):
+        bearer = mint("sess-a", user_id="owner", wiki_task_id="task" if parts >= 5 else None,
+                      run_lease_id="lease" if parts == 7 else None, work_id="work" if parts == 7 else None)
+        assert len(bearer.split(".")) == parts
+        assert verify(bearer) is not None
+        assert verify(bearer.rsplit(".", 1)[0] + "." + signature) is None
+
+    def test_a_valid_signature_shape_does_not_hide_a_master_key_failure(self, monkeypatch):
+        from server import crypto
+
+        token = mint("session")
+
+        def unavailable():
+            raise OSError("master key unavailable")
+
+        monkeypatch.setattr(crypto, "master_key", unavailable)
+        with pytest.raises(OSError, match="master key unavailable"):
+            verify(token)
+
 
 class TestMountedNamespaces:
     def test_every_namespace_is_mounted(self):

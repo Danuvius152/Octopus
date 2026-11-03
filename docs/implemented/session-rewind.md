@@ -132,7 +132,12 @@ An `initializing` fork is cleaned using its exact saved identity; failed cleanup
 preserves retry responsibility. A crash during `reverting` produces
 `unknown_post_crash` and a usable ready conversation with an explicit inspection
 message. Recovery does not repeat uncertain Git effects or claim the stash/revert
-finished. Full-copy cleanup removes only its recognized private destination.
+finished. Rewind borrows the parent's directory, including when the parent is
+itself a full copy under the fork base. Recovery never derives directory
+ownership from that prefix. Only an initializing full-copy row with its matching
+creation receipt may remove its independent directory; cleanup must finish
+before deleting the recovery row. The [full-copy contract](session-fork.md#4-crash-safety--limits)
+owns copying, cancellation and unproven-directory recovery.
 
 ## 8. Verification and boundaries
 

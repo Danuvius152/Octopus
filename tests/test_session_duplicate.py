@@ -7,6 +7,7 @@ an independent full copy of the working directory and leaves the parent intact.
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -404,6 +405,212 @@ async def test_duplicate_replay_cutoff_covers_full_history(manager, tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_failed_rewind_recovery_preserves_its_full_copy_parent(manager, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    parent = await _seed_parent(manager, _repo(tmp_path))
+    copied = await manager.duplicate_session(parent.id)
+    sentinel = Path(copied.working_dir) / "user-change.txt"
+    sentinel.write_text("Changes made after the full copy must survive.")
+    harness = sm_forking.get_harness(copied.backend)
+    cleanup = harness.cleanup_incomplete_fork_artifacts
+
+    async def fail_prepare(*args, **kwargs):
+        raise RuntimeError("rewind preparation failed")
+
+    async def fail_cleanup(*args, **kwargs):
+        raise OSError("temporary artifact cleanup failure")
+
+    monkeypatch.setattr(harness, "prepare_fork", fail_prepare)
+    monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", fail_cleanup)
+    with pytest.raises(OSError, match="temporary artifact cleanup failure"):
+        await manager.fork_session(copied.id, 2)
+    assert len(await manager.db.load_incomplete_forks()) == 1
+    assert sentinel.read_text() == "Changes made after the full copy must survive."
+
+    monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", cleanup)
+    recovered = SessionManager()
+    await recovered.initialize(manager.db)
+    assert sentinel.read_text() == "Changes made after the full copy must survive."
+    assert recovered.get_session(copied.id, copied.user_id) is not None
+    assert not await manager.db.load_incomplete_forks()
+    rows = {row["id"]: row for row in await manager.db.load_sessions(include_archived=True)}
+    assert rows[copied.id]["fork_status"] == "ready"
+    assert rows[copied.id]["archived"] == 0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_does_not_copy_before_recovery_row_is_committed(manager, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    parent = await _seed_parent(manager, _repo(tmp_path))
+    copied = []
+    copy = manager._copy_tree
+
+    def observe_copy(src, dest):
+        copied.append(dest)
+        copy(src, dest)
+
+    async def fail_insert(**kwargs):
+        raise OSError("session insert failed")
+
+    monkeypatch.setattr(manager, "_copy_tree", observe_copy)
+    monkeypatch.setattr(manager.db, "create_fork_session", fail_insert)
+    with pytest.raises(OSError, match="session insert failed"):
+        await manager.duplicate_session(parent.id)
+    assert copied == []
+    assert parent._forking is False
+    assert Path(parent.working_dir).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_preserves_an_existing_destination(manager, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    parent = await _seed_parent(manager, _repo(tmp_path))
+    destination = Path(manager._fork_copy_dest(parent.working_dir, "existing"))
+    destination.mkdir()
+    sentinel = destination / "existing.txt"
+    sentinel.write_text("This directory was not created by the new fork.")
+    monkeypatch.setattr(manager, "_fork_copy_dest", lambda *_: str(destination))
+
+    with pytest.raises(ForkError) as failure:
+        await manager.duplicate_session(parent.id)
+    assert failure.value.reason == "copy_failed"
+    assert sentinel.read_text() == "This directory was not created by the new fork."
+    recovered = SessionManager()
+    await recovered.initialize(manager.db)
+    assert sentinel.read_text() == "This directory was not created by the new fork."
+    assert parent._forking is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_command", [False, True], ids=["waiter", "original-command"])
+async def test_duplicate_cancellation_retains_its_copy_writer(manager, tmp_path, monkeypatch, cancel_command):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    parent = await _seed_parent(manager, _repo(tmp_path))
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    destinations = []
+    copy = manager._copy_tree
+
+    def held_copy(src, dest):
+        destinations.append(dest)
+        loop.call_soon_threadsafe(started.set)
+        if not release.wait(5):
+            raise TimeoutError("copy barrier was not released")
+        copy(src, dest)
+
+    monkeypatch.setattr(manager, "_copy_tree", held_copy)
+    waiter = asyncio.create_task(manager.duplicate_session(parent.id))
+    command = None
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        command = next(task for task in manager._owned_tasks if task.get_name().startswith("agent-operation-"))
+        (command if cancel_command else waiter).cancel()
+        # Let cancellation reach the actual copy await without releasing it.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert parent._forking is True
+        pending = await manager.db.load_incomplete_forks()
+        assert len(pending) == 1
+        assert pending[0]["working_dir"] == destinations[0]
+    finally:
+        release.set()
+        await asyncio.gather(waiter, return_exceptions=True)
+        if command is not None:
+            await asyncio.gather(command, return_exceptions=True)
+
+    if cancel_command:
+        assert not Path(destinations[0]).exists()
+        assert not await manager.db.load_incomplete_forks()
+    else:
+        rows = [row for row in await manager.db.load_sessions() if row["id"] != parent.id]
+        assert len(rows) == 1 and rows[0]["fork_status"] == "ready"
+        assert (Path(destinations[0]) / "code.py").read_text() == "print('hi')\n"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_allocation_failure_releases_parent(manager, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    parent = await _seed_parent(manager, _repo(tmp_path))
+    allocate = manager._fork_copy_dest
+
+    def fail_allocate(*args):
+        raise PermissionError("cannot create copy base")
+
+    monkeypatch.setattr(manager, "_fork_copy_dest", fail_allocate)
+    with pytest.raises(PermissionError, match="cannot create copy base"):
+        await manager.duplicate_session(parent.id)
+    assert parent._forking is False
+    monkeypatch.setattr(manager, "_fork_copy_dest", allocate)
+    copied = await manager.duplicate_session(parent.id)
+    assert copied.fork_status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_directory_cleanup_failure_retains_recovery(manager, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    parent = await _seed_parent(manager, _repo(tmp_path))
+    harness = sm_forking.get_harness(parent.backend)
+
+    async def fail_prepare(*args, **kwargs):
+        raise RuntimeError("native preparation failed")
+
+    remove = sm_forking.shutil.rmtree
+
+    def fail_remove(path, *args, **kwargs):
+        if manager._is_fork_copy_dir(str(path)):
+            raise PermissionError("cannot remove copied directory")
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(harness, "prepare_fork_copy", fail_prepare)
+    monkeypatch.setattr(sm_forking.shutil, "rmtree", fail_remove)
+    with pytest.raises(PermissionError, match="cannot remove copied directory"):
+        await manager.duplicate_session(parent.id)
+    pending = await manager.db.load_incomplete_forks()
+    assert len(pending) == 1
+    destination = Path(pending[0]["working_dir"])
+    assert (destination / "code.py").read_text() == "print('hi')\n"
+    assert manager.get_session(pending[0]["id"], parent.user_id) is None
+
+    recovered = SessionManager()
+    await recovered.initialize(manager.db)
+    assert [row["id"] for row in await manager.db.load_incomplete_forks()] == [pending[0]["id"]]
+    assert destination.exists()
+    monkeypatch.setattr(sm_forking.shutil, "rmtree", remove)
+    await recovered._recover_incomplete_forks()
+    await recovered._recover_incomplete_forks()
+    assert not destination.exists()
+    assert not await manager.db.load_incomplete_forks()
+    assert (Path(parent.working_dir) / "code.py").read_text() == "print('hi')\n"
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_directory_receipt_does_not_start_copy_or_grant_cleanup(manager, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    parent = await _seed_parent(manager, _repo(tmp_path))
+    update = manager.db.update_session_field
+
+    async def fail_receipt(session_id, **fields):
+        if "owned_copy_dir" in fields.get("fork_metadata", ""):
+            raise OSError("directory receipt was not confirmed")
+        await update(session_id, **fields)
+
+    monkeypatch.setattr(manager.db, "update_session_field", fail_receipt)
+    with pytest.raises(OSError, match="directory receipt was not confirmed"):
+        await manager.duplicate_session(parent.id)
+    row, = await manager.db.load_incomplete_forks()
+    destination = Path(row["working_dir"])
+    assert destination.is_dir() and not list(destination.iterdir())
+    assert "owned_copy_dir" not in json.loads(row["fork_metadata"])
+    monkeypatch.setattr(manager.db, "update_session_field", update)
+    recovered = SessionManager()
+    await recovered.initialize(manager.db)
+    assert destination.is_dir()
+    assert [row["id"] for row in await manager.db.load_incomplete_forks()] == [row["id"]]
+    assert parent._forking is False
+
+
+@pytest.mark.asyncio
 async def test_duplicate_copy_failure_removes_partial_dir(manager, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     repo = _repo(tmp_path)
@@ -423,7 +630,7 @@ async def test_duplicate_copy_failure_removes_partial_dir(manager, tmp_path, mon
     with pytest.raises(ForkError) as ei:
         await manager.duplicate_session(parent.id)
     assert ei.value.reason == "copy_failed"
-    # The partial dir is swept; no row was created; parent freed.
+    # The partial dir and its recovery row are retired; parent freed.
     assert not Path(captured["dest"]).exists()
     rows = await manager.db.load_sessions(include_archived=True)
     assert len(rows) == 1
@@ -440,6 +647,7 @@ async def test_duplicate_cleanup_failure_leaves_row_and_dir(manager, tmp_path, m
     parent = await _seed_parent(manager, repo)
 
     harness = sm_forking.get_harness(parent.backend)
+    cleanup = harness.cleanup_incomplete_fork_artifacts
 
     async def boom(*a, **k):
         raise RuntimeError("prepare blew up")
@@ -461,10 +669,18 @@ async def test_duplicate_cleanup_failure_leaves_row_and_dir(manager, tmp_path, m
     # The copied dir survives for retry.
     assert Path(fr["working_dir"]).is_dir()
     assert manager._is_fork_copy_dir(fr["working_dir"])
+    recovered = SessionManager()
+    await recovered.initialize(manager.db)
+    assert [row["id"] for row in await manager.db.load_incomplete_forks()] == [fr["id"]]
+    monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", cleanup)
+    await recovered._recover_incomplete_forks()
+    assert not Path(fr["working_dir"]).exists()
+    assert not await manager.db.load_incomplete_forks()
 
 
 @pytest.mark.asyncio
-async def test_recover_removes_abandoned_fork_copy_dir(manager, tmp_path, monkeypatch):
+@pytest.mark.parametrize("ownership", ["confirmed", "legacy", "missing", "different", "installed"])
+async def test_recovery_requires_confirmed_uninstalled_copy_ownership(manager, tmp_path, monkeypatch, caplog, ownership):
     # The startup sweep purges an 'initializing' duplicate AND removes its
     # private copied dir (a /rewind fork's shared parent dir is left alone).
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -473,12 +689,22 @@ async def test_recover_removes_abandoned_fork_copy_dir(manager, tmp_path, monkey
     (copied / "f.txt").write_text("x")
     parent = await _seed_parent(manager, tmp_path / "proj")
 
+    metadata = {"full_copy": True}
+    if ownership in ("confirmed", "installed"):
+        metadata["owned_copy_dir"] = str(copied)
+    elif ownership == "different":
+        metadata["owned_copy_dir"] = str(copied.parent / "other-copy")
+    elif ownership == "missing":
+        sm_forking.shutil.rmtree(copied)
     await manager.db.create_fork_session(
         fork_id="deadbeef0001", name="o", working_dir=str(copied),
         created_at="2026-06-15T00:00:00+00:00", parent_id=parent.id,
         backend="claude-code", agent_id=parent.agent_id, credential_id=None,
         resume_id="resume-xyz", fork_after_seq=5,
+        fork_metadata=json.dumps(metadata),
     )
+    if ownership == "installed":
+        await manager.db.update_session_field("deadbeef0001", fork_status="ready")
 
     harness = sm_forking.get_harness("claude-code")
 
@@ -489,8 +715,11 @@ async def test_recover_removes_abandoned_fork_copy_dir(manager, tmp_path, monkey
     await manager._recover_incomplete_forks()
 
     rows = await manager.db.load_sessions(include_archived=True)
-    assert not any(r["id"] == "deadbeef0001" for r in rows)
-    assert not copied.exists()  # private copy removed
+    retained = ownership in ("legacy", "different", "installed")
+    assert any(r["id"] == "deadbeef0001" for r in rows) is retained
+    assert copied.exists() is retained
+    if ownership in ("legacy", "different"):
+        assert "no confirmed directory creation" in caplog.text
 
 
 @pytest.mark.asyncio

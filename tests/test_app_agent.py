@@ -767,6 +767,35 @@ async def test_http_accepts_the_apps_own_token_and_only_its_own(client, account_
     ).status_code == 200
 
 
+@pytest.mark.parametrize("signature", ["", "a" * 63, "a" * 65, "F" * 64, "g" * 64, "é" * 64, "０" * 64],
+                         ids=["empty", "short", "long", "uppercase", "nonhex", "latin1", "fullwidth"])
+def test_app_token_refuses_noncanonical_signature_shapes(signature):
+    assert not is_app_scope_token("app-a", signature)
+
+
+def test_app_token_does_not_hide_a_master_key_failure(monkeypatch):
+    from server import crypto
+
+    token = app_scope_token("app-a")
+
+    def unavailable():
+        raise OSError("master key unavailable")
+
+    monkeypatch.setattr(crypto, "master_key", unavailable)
+    with pytest.raises(OSError, match="master key unavailable"):
+        is_app_scope_token("app-a", token)
+
+
+async def test_http_non_ascii_app_signature_preserves_account_fallback(client, account_token):
+    row = await _api_app(client, account_token, "Malformed signature app")
+    path = f"/apps/{row['id']}/agent/agents"
+    invalid = [(b"x-octopus-app-token", b"\xff" * 64)]
+    assert (await client.get(path, headers=invalid)).status_code == 401
+    invalid.append((b"authorization", b"Bearer " + account_token.encode("ascii")))
+    assert (await client.get(path, headers=invalid)).status_code == 200
+    assert (await client.get(path, headers=[(b"authorization", b"Bearer " + b"\xff" * 64)])).status_code == 401
+
+
 @pytest.mark.asyncio
 async def test_http_ask_and_conversation_roundtrip(client, account_token):
     row = await _api_app(client, account_token)

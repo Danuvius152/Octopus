@@ -100,6 +100,15 @@ false qualification retains the recovery material after restore; an ACK alone
 cannot supply it. Restore does not substitute a preallocated hint or the target's
 current transport for the original fork strategy.
 
+The full-copy directory creation receipt in `fork_metadata.owned_copy_dir` uses
+that same existing session JSON and chat exclusion. Complete backup retains an
+initializing row, its receipt and the referenced independent directory while
+recovery depends on them. Missing or mismatched creation evidence preserves the
+directory; restoring or relocating a working directory does not manufacture new
+cleanup permission. Neither transfer nor backup restores the original copy
+thread. The [fork recovery contract](implemented/session-fork.md#4-crash-safety--limits)
+owns the artifact, directory and recovery-row ordering.
+
 ### Prepare and export
 
 Wiki document resource refusal does not make the original file disposable.

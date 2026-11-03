@@ -454,6 +454,9 @@ class CompactSearchItem(BaseModel):
     matched_section_count: int
     snippet: str
     snippet_start: int
+    stale: bool | None = None
+    resource_error: Literal["document_too_large"] | None = None
+    error: str | None = None
 
 
 class SearchResult(BaseModel):
@@ -474,7 +477,7 @@ class SearchResult(BaseModel):
     next_cursor: str | None
 
 
-@router.get("/search", response_model=SearchResult)
+@router.get("/search", response_model=SearchResult, response_model_exclude_unset=True)
 def search(
     request: Request,
     query: str,
@@ -493,7 +496,9 @@ def search(
     result = registry.store(user_id).search(query, limit, offset, kind, include_assets, directory, intent, view, cursor, model_response=task is not None)
     # This is the exact fitted model projection: bypass response_model's later
     # defaults/filtering, which could grow the envelope or erase clipping flags.
-    return JSONResponse(result) if task is not None else result
+    # Preserve the existing human envelope default, while absent compact item
+    # warnings remain absent through the typed response projection.
+    return JSONResponse(result) if task is not None else {"index_errors_truncated": False, **result}
 
 
 @router.get("/read")

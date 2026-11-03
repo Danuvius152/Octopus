@@ -127,7 +127,7 @@ export async function loadSessionSnapshot(sessionId: string) {
 
 /** Background cards merge against the live records observed before fetch. */
 export async function loadBgTaskSnapshot(sessionId: string): Promise<void> {
-  return observeSessionAuxiliary(sessionId, "background").done;
+  await observeSessionAuxiliary(sessionId, "background").done;
 }
 
 /** Cancelling a view's observation never cancels the server's job. */
@@ -147,10 +147,10 @@ function observeAuxiliarySnapshot(
   acceptedDetail?: Promise<Record<string, unknown> | null>,
   current = () => true,
   bgTaskId?: string,
-): { done: Promise<void>; cancel: () => void } {
+): { done: Promise<unknown[] | null>; cancel: () => void } {
   const lifetime = sessions.observe(sessionId, start);
   const { observation } = lifetime;
-  if (!start.token || !sessions.current(observation)) { lifetime.finish(); return { done: Promise.resolve(), cancel: () => {} }; }
+  if (!start.token || !sessions.current(observation)) { lifetime.finish(); return { done: Promise.resolve(null), cancel: () => {} }; }
   const read = auxiliaryReads[kind].begin(sessionId);
   const taskRead = kind === "background" ? backgroundReads.begin(sessionId) : undefined;
   const controller = new AbortController();
@@ -174,12 +174,12 @@ function observeAuxiliarySnapshot(
   }).then((rows) => ({ rows }), (error: unknown) => ({ error }));
   const done = (async () => { try {
     const detail = acceptedDetail ? await acceptedDetail.catch(() => null) : undefined;
-    if (acceptedDetail && !detail) return;
+    if (acceptedDetail && !detail) return null;
     const generation = detail ? readDispatchState(detail.dispatch_state)?.generation : undefined;
     const result = await response;
     if (!active || !current() || !sessions.current(observation, generation)) {
       if ("error" in result) throw result.error;
-      return;
+      return null;
     }
     // Valid older successes contribute terminal facts and output without
     // replacing a newer snapshot's delivery diagnostics or explicit clearing.
@@ -194,6 +194,7 @@ function observeAuxiliarySnapshot(
     else if (kind === "background") store.setBgTasks(sessionId, result.rows as BgTask[], start.bgTasks[sessionId] || [], false, taskRead!.claim);
     else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] || [], !ownsError);
     if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, null);
+    return result.rows;
   } finally {
     finish();
   } })();
@@ -203,7 +204,7 @@ function observeAuxiliarySnapshot(
 /** Selection, archived viewing and reconnect retain their original event
  * baseline. The store distinguishes per-job updates from snapshot writes. */
 export async function loadResearchSnapshot(sessionId: string): Promise<void> {
-  return observeSessionAuxiliary(sessionId, "research").done;
+  await observeSessionAuxiliary(sessionId, "research").done;
 }
 
 /** Navigation finishes with detail; auxiliary reads own independent errors. */

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .. import fork_helpers
+from ..aio import complete_cleanup
 from ..attachments import AttachmentError
 from ..attachments import get_path as get_attachment_path
 from ..harness import BackendForkNotSupported, HarnessRun, get_harness
@@ -143,9 +144,11 @@ class ForkingMixin(SessionManagerBase):
                         row["working_dir"], row["resume_id"], fork_id,
                         credential=cred, artifact=artifact, hooks=hooks,
                     )
+                    self._remove_fork_copy_directory(row["working_dir"], metadata)
+                    await self.db.delete_session(fork_id)
                 except Exception:
                     logger.exception(
-                        "fork %s: artifact cleanup failed; leaving "
+                        "fork %s: cleanup failed; leaving "
                         "'initializing' for next boot",
                         fork_id,
                     )
@@ -153,13 +156,6 @@ class ForkingMixin(SessionManagerBase):
                 finally:
                     if recovery is not None:
                         self._session_removed(recovery)
-                await self.db.delete_session(fork_id)
-                # A /fork duplicate owns a private working-dir copy under
-                # ~/.octopus/fork/ — remove it too so an abandoned saga doesn't
-                # leak the copied tree (session-fork.md). A /rewind fork
-                # shares the parent's dir, which `_is_fork_copy_dir` excludes.
-                if self._is_fork_copy_dir(row["working_dir"]):
-                    shutil.rmtree(row["working_dir"], ignore_errors=True)
                 logger.info("fork %s: purged incomplete (initializing) saga", fork_id)
             elif status == "reverting":
                 try:
@@ -483,9 +479,10 @@ class ForkingMixin(SessionManagerBase):
 
     @staticmethod
     def _is_fork_copy_dir(working_dir: str | None) -> bool:
-        """True iff `working_dir` is a private /fork copy (under the fork base)
-        and so safe to delete on cleanup — a /rewind fork instead SHARES the
-        parent's dir, which must never be removed."""
+        """Check the copy path's scope, without granting deletion authority.
+
+        A rewind can borrow a parent's working directory inside this scope.
+        """
         if not working_dir:
             return False
         # Normalize both sides (expanduser + abspath) so a `~/.octopus/fork/...`
@@ -498,12 +495,31 @@ class ForkingMixin(SessionManagerBase):
         wd = norm(working_dir)
         return wd != base and (wd + os.sep).startswith(base + os.sep)
 
+    def _remove_fork_copy_directory(self, working_dir: str, metadata: dict[str, Any]) -> None:
+        """Only an initializing full-copy saga can retire its own directory."""
+        if metadata.get("full_copy") is not True:
+            if self._is_fork_copy_dir(working_dir):
+                logger.info("Retaining borrowed or unproven fork directory %s", working_dir)
+            return
+        if not self._is_fork_copy_dir(working_dir):
+            raise ValueError("Incomplete fork copy is outside its directory scope")
+        if metadata.get("owned_copy_dir") != working_dir:
+            if not os.path.lexists(working_dir):
+                return
+            raise ValueError("Incomplete fork has no confirmed directory creation; retain recovery material")
+        try:
+            shutil.rmtree(working_dir)
+        except FileNotFoundError:
+            if os.path.lexists(working_dir):
+                raise
+
     @staticmethod
     def _copy_tree(src: str, dest: str) -> None:
         # Literal full copy (the user's explicit choice — incl. .git /
         # node_modules / .venv). Symlinks copied AS symlinks so we don't follow
         # them into huge targets / loops.
-        shutil.copytree(src, dest, symlinks=True)
+        # The saga exclusively created and recorded dest before this writer.
+        shutil.copytree(src, dest, symlinks=True, dirs_exist_ok=True)
 
     async def duplicate_session(
         self, parent_id: str, *, label: str | None = None,
@@ -553,8 +569,8 @@ class ForkingMixin(SessionManagerBase):
 
         fork_id = uuid.uuid4().hex[:12]
         resume_id_hint = str(uuid.uuid4())
-        dest = self._fork_copy_dest(parent.working_dir, fork_id)
         try:
+            dest = self._fork_copy_dest(parent.working_dir, fork_id)
             # Snapshot the transcript AFTER claiming `_forking` (Vera review):
             # loading it earlier risks a fast turn slipping in between the read
             # and the guard, which would copy a post-turn working dir against a
@@ -576,18 +592,6 @@ class ForkingMixin(SessionManagerBase):
                 user_id=source.user_id,
             )
 
-            # 1. Full literal copy of the working dir (large/slow → off-thread).
-            #    copytree can leave a partial dir behind on a mid-copy error, so
-            #    sweep it before surfacing the failure (Vera review).
-            try:
-                await asyncio.to_thread(self._copy_tree, parent.working_dir, dest)
-            except Exception as e:
-                shutil.rmtree(dest, ignore_errors=True)
-                raise ForkError(
-                    f"Failed to copy the working directory: {e}",
-                    reason="copy_failed", status_code=500,
-                )
-
             now = datetime.now(UTC).isoformat()
             fork_name = label or f"{parent.name} (fork)"
             # The fork's metadata, written at INSERT so it survives a prepare
@@ -604,28 +608,24 @@ class ForkingMixin(SessionManagerBase):
             if eff_cred_id and parent_cred is not None:
                 fork_meta_dict["cleanup_credential_id"] = eff_cred_id
             fork_meta = json.dumps(fork_meta_dict)
-            # 2. DB-only: insert the fork row + copy ALL messages (seq<=last).
+            # 1. Commit recovery responsibility before any directory copy.
             #    fork_after_seq = last_seq is the replay cutoff (it's also what
             #    HISTORY_REPLAY backends inject on turn 1 — so it MUST stay set,
             #    or the duplicate would continue with no copied context). The UI
             #    distinguishes a full copy from a rewind via fork_metadata's
             #    `full_copy` flag, not by nulling fork_after_seq (Vera review).
             assert self.db is not None  # Original saga drains before DB close.
-            try:
-                await self.db.create_fork_session(
-                    fork_id=fork_id, name=fork_name, working_dir=dest,
-                    created_at=now, parent_id=parent_id, backend=parent.backend,
-                    model=source.model,
-                    reasoning_effort=source.reasoning_effort,
-                    service_tier=source.service_tier,
-                    user_id=parent.user_id,
-                    agent_id=parent.agent_id, credential_id=source.credential_id,
-                    resume_id=resume_id_hint, fork_after_seq=last_seq,
-                    fork_metadata=fork_meta,
-                )
-            except Exception:
-                shutil.rmtree(dest, ignore_errors=True)
-                raise
+            await self.db.create_fork_session(
+                fork_id=fork_id, name=fork_name, working_dir=dest,
+                created_at=now, parent_id=parent_id, backend=parent.backend,
+                model=source.model,
+                reasoning_effort=source.reasoning_effort,
+                service_tier=source.service_tier,
+                user_id=parent.user_id,
+                agent_id=parent.agent_id, credential_id=source.credential_id,
+                resume_id=resume_id_hint, fork_after_seq=last_seq,
+                fork_metadata=fork_meta,
+            )
             fork = Session(
                 id=fork_id, name=fork_name, working_dir=dest, created_at=now,
                 claude_session_id=resume_id_hint, credential_id=source.credential_id,
@@ -639,12 +639,39 @@ class ForkingMixin(SessionManagerBase):
             )
             fork.restore_message_state(len(messages), last_seq + 1, 0)
 
-            # 3. Native-copy the parent's real transcript so the fork resumes
+            # A preexisting destination belongs to somebody else. Exclusive
+            # mkdir establishes creation; its committed receipt grants cleanup.
+            # A crash between them retains the row and directory for inspection.
+            try:
+                os.mkdir(dest)
+            except OSError as error:
+                await self.db.delete_session(fork_id)
+                raise ForkError(
+                    f"Failed to allocate the working directory: {error}",
+                    reason="copy_failed", status_code=500,
+                ) from error
+            fork_meta_dict["owned_copy_dir"] = dest
+            fork.fork_metadata = json.dumps(fork_meta_dict)
+            # Storage failure is not a copy failure: do not compensate a write
+            # whose COMMIT is unconfirmed through a second mutation path.
+            await self.db.update_session_field(fork_id, fork_metadata=fork.fork_metadata)
+
+            # 2. Copy the directory, then prepare the native transcript
             #    with the WHOLE conversation as genuine context — no history
             #    replay dumped into the first prompt (session-fork.md). On a
             #    backend/parent with no transcript yet, the harness returns
             #    needs_replay=True and we fall back to the replay path.
             try:
+                try:
+                    # Cancellation ends this command only after its original
+                    # thread exits. Neither compensation nor reservation release
+                    # can race a writer still populating the destination.
+                    await complete_cleanup(asyncio.to_thread(self._copy_tree, parent.working_dir, dest))
+                except Exception as error:
+                    raise ForkError(
+                        f"Failed to copy the working directory: {error}",
+                        reason="copy_failed", status_code=500,
+                    ) from error
                 artifact = await harness.prepare_fork_copy(
                     parent_working_dir=parent.working_dir,
                     parent_resume_id=parent.claude_session_id,
@@ -653,30 +680,26 @@ class ForkingMixin(SessionManagerBase):
                     new_resume_id=resume_id_hint,
                     hooks=self._fork_hooks(owner, fork, fork_meta_dict),
                 )
-            except Exception:
-                # Compensate in order (mirrors fork_session): cleanup artifacts
-                # FIRST (the row still anchors resume_id/fork_id), then delete
-                # the row + the copied dir. If cleanup fails, leave BOTH the row
-                # ('initializing') AND the copied dir in place so the startup
-                # sweep can retry cleanup idempotently — deleting the dir here
-                # would strand the row pointing at a missing working_dir (Vera
-                # review). The sweep rmtrees the copied dir once cleanup wins.
+            except BaseException:
+                # Retire artifacts, then the owned directory, then its recovery
+                # row. Failed cleanup retains responsibility for the next boot.
                 try:
+                    self.db.health.require_healthy()
                     await harness.cleanup_incomplete_fork_artifacts(
                         dest, fork.claude_session_id, fork_id, credential=parent_cred,
                         artifact=(read_fork_checkpoint(fork_meta_dict["native_fork"])
                                   if "native_fork" in fork_meta_dict else None),
                         hooks=self._fork_hooks(owner, fork, fork_meta_dict),
                     )
+                    self._remove_fork_copy_directory(dest, fork_meta_dict)
+                    await self.db.delete_session(fork_id)
                 except Exception:
                     logger.exception(
-                        "fork %s: artifact cleanup failed; leaving row + copied "
+                        "fork %s: cleanup failed; leaving row + copied "
                         "dir for next-boot retry",
                         fork_id,
                     )
                     raise
-                await self.db.delete_session(fork_id)
-                shutil.rmtree(dest, ignore_errors=True)
                 raise
 
             # 4. Apply resume state + finalize. fork_after_seq stays = last_seq

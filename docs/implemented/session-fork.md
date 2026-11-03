@@ -72,21 +72,29 @@ throwaway copy of the project without disturbing the original.
      active work and active delegation. The reservation excludes competing input.
   2. snapshot the transcript (`load_messages` + `last_seq`) AFTER claiming the
      guard — earlier risks a fast turn copying a post-turn dir against a
-     pre-turn message list (Vera review).
-  3. `copytree` parent.working_dir → dest, in `asyncio.to_thread` (it can be
-     large/slow); `rmtree` a partial dest on failure.
-  4. `create_fork_session(fork_after_seq = last_seq, working_dir = dest, …)` —
-     copies ALL messages, inserts the fork row (origin='fork', forked_from).
-  5. resolve the parent credential (Codex needs it for CODEX_HOME), then
+     pre-turn message list. Resolve the effective parent credential for native
+     history and its cleanup (Codex needs its selected CODEX_HOME).
+  3. `create_fork_session(fork_after_seq = last_seq, working_dir = dest, …)`
+     copies ALL messages and commits the `initializing` row, including
+     `full_copy` and the cleanup credential, before copying any directory bytes.
+  4. Exclusively create dest with `mkdir`, then commit its creation receipt in
+     `fork_metadata.owned_copy_dir`. A preexisting dest is refused without
+     cleanup. Only after the receipt commits does `copytree` populate dest in
+     `asyncio.to_thread`. The original managed operation owns that writer:
+     caller cancellation leaves the operation running; cancellation of the
+     command joins the actual copy before compensation or reservation release.
+  5. Call
      `prepare_fork_copy(parent_working_dir, parent_resume_id, parent_credential,
      dest, new_resume_id)` → prepare independent native history; set claude_session_id
      (= new id on success, None on replay-fallback) + fork_needs_replay.
      Compensation on failure: cleanup artifacts first (passing the credential so
-     Codex can find its rollout store), then delete row + `rmtree` dest; if
-     cleanup itself fails, leave BOTH the 'initializing' row AND the dest for the
-     startup sweep to retry idempotently (the sweep `rmtree`s the private copy
-     once cleanup wins — `_is_fork_copy_dir` excludes a rewind's shared parent
-     dir; the sweep resolves the credential from the row for Codex cleanup).
+     Codex can find its rollout store), then remove the proven independent copy,
+     and only then delete its recovery row. Directory absence is idempotent;
+     a real cleanup error is logged and retains the row for startup retry.
+     Both compensation and startup require the initializing full-copy identity,
+     matching creation receipt and allowed path scope. A path under the copy
+     base alone is no deletion permission: a rewind can borrow a ready parent's
+     directory there. The sweep resolves the saved credential for native cleanup.
      API creation additionally checkpoints unknown before write and the actual
      returned ID/path before subsequent work. Recovery uses that saved strategy,
      home and fork-time credential. An unknown artifact retains row and cwd for
@@ -112,12 +120,14 @@ throwaway copy of the project without disturbing the original.
 
 ## 4. Crash safety / limits
 
-A crash mid-copytree leaves a partial dir under `~/.octopus/fork/` — harmless
-data without a committed session owner; there is no general orphan-directory
-sweeper. A cleanup must establish ownership before removing such a directory.
-The fork-saga's existing `initializing`/`ready` + prepare_fork compensation
-still applies. Literal copy is the user's explicit choice; document the size
-cost in the command hint.
+A crash mid-copy retains the existing initializing row and its exact directory
+creation receipt. Startup uses the same artifact → owned copy → recovery row
+ordering as immediate compensation. If the process dies between exclusive mkdir
+and committing that receipt, an existing directory and recovery row are retained
+for inspection. Old unproven ownership never grants directory removal; ready
+sessions are outside this recovery sweep. There is no general orphan-directory
+sweeper. Destination-allocation errors also release the parent's reservation.
+Literal full copy remains the user's explicit choice and retains its size cost.
 
 ## 5. Tests
 
@@ -128,6 +138,12 @@ cost in the command hint.
   needs_replay False + new resume id) and replay fallback (no transcript);
   rejects when the parent has an active turn; compensation (copy/cleanup
   failure) leaves no orphans / leaves row+dir for the sweep.
+- `test_session_duplicate.py` and `test_account_file_lifetime.py` retain the
+  initializing copy receipt, parent reservation and original bytes across
+  blocked copying, cancellation and deletion. Failed rewind recovery preserves
+  a full-copy parent's later edits; existing/unproven directories and ready
+  copies are never reclaimed as failed copies. Artifact and directory cleanup
+  failures retain retry responsibility.
 - harness `prepare_fork_copy` / `_fork_copy` / `_fork_cleanup` per backend:
   Claude transcript copy/id/cwd rewrite, Codex native actual-ID fork and their
   fallback/cleanup. Rollout-copy coverage applies to saved legacy recovery only;

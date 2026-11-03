@@ -421,16 +421,32 @@ delivery 的两个字段分别接受缺失与显式 null。只有期间真正的
 
 ### Research 创建、观察与浏览器确认
 
-`/research` 在提交前捕获账户、目标会话和服务观察，组件卸载后不发布旧结果或
-错误；仅改为查看另一会话不使原账户的合法 job 丢失。创建 POST 按实际返回初始化
-缺记录的任务；已有任务只补缺失的 question/session/创建或报告元数据，不覆盖
+`/research` 在提交前捕获账户、目标会话、连接及服务观察。组件卸载或切换会话
+会取消原确认读取并释放观察资格，旧回执不向已离开的视图发布结果或错误；服务端
+job 仍由原 Research owner 负责，再次查看通过正常快照恢复，不重发创建。
+原观察仍有效时，创建 POST 按实际返回初始化缺记录的任务；已有任务只补缺失的
+question/session/创建或报告元数据，不覆盖
 已观察的阶段、状态或投递事实，也不推进 WS 标记。丢失 started 后的 partial
 event 仍沿原列表补查；创建回执不能使该补查失去纠正动态字段的资格。
+
+首次提交时服务代次可能仍为 null。仍在观察的操作只记录第一次真实建立的 G；
+只有账户/token、连接、目标存续及原视图都有效时，成功创建回执才发起一次当前 G
+下的新 Research GET。该读取自有 observation，经原 merge 接纳后返回实际快照，
+以原 job ID 核对创建；建代前缓存中存在同名 job 不作当前确认。null→G→H、
+删除/归档及连接替换均终止这一候选，不伪造代次或放宽全局 current。
+
+有有效创建回执但 GET 失败或未见原 ID，保留含原 job ID 的“已创建，当前状态待确认”
+通知及辅助错误，使用现有 Retry research updates；无有效回执而超时/断线时显示
+创建结果未确认。两者都不自动再 POST、递归 GET 或轮询。旧空快照仍经原合并规则
+保护后来建立的 job/进度，较新的权威删除仍可移除任务。
+本地 notice 可能被后到详情的 transcript 合并替换，不能据此判断创建没有发生。
 
 报告终态与后续 delivery 分开合并。`/seen` 回执只写匹配 request/version 的确认
 字段并保留事件标记，不能把旧 queued receipt 覆盖到新 processed。后到快照保留
 已经取得的确认版本；新版本状态仍需单独确认。`sessionResearch.test.tsx` 从真实
-ChatView 提交、partial event 补查和 ResearchCard 确认验证这些交错。
+ChatView 提交、partial event 补查和 ResearchCard 确认验证这些交错。离线
+`research.spec.ts` 在首份详情返回前提交，详情建 G 后才返回 201，验证原 job、
+报告链接、一次 POST 和一次新的确认 GET；既有已知代次场景继续保留。
 
 ### 任务取消反馈
 

@@ -1,4 +1,5 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { deferred } from "../src/test-support/deferred";
 import {
   test, expect, type Page, type APIRequestContext, type WebSocketRoute,
 } from "./test";
@@ -10,7 +11,7 @@ import {
 
 const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
-const OWNED = new Set(["Research E2E", "Restored original caller"]);
+const OWNED = new Set(["Research E2E", "Research first generation E2E", "Restored original caller"]);
 
 test.afterAll(async ({ request }) => {
   try {
@@ -58,11 +59,11 @@ async function openSessionRail(page: Page, agentName = "Octo") {
   }
 }
 
-async function importSession(request: APIRequestContext): Promise<{ id: string }> {
+async function importSession(request: APIRequestContext, name = "Research E2E"): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions/import`, {
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
     data: {
-      name: "Research E2E",
+      name,
       messages: [{ role: "user", type: "text", content: "hello" }],
     },
   });
@@ -182,4 +183,56 @@ test("the /research command surfaces a live research card", async ({ page, reque
     timeout: 20_000,
   });
   await expect(card.locator(".btn-research-cancel")).toHaveCount(0);
+});
+
+test("research submitted before the first detail is confirmed by one current read", async ({ page, request }) => {
+  const name = "Research first generation E2E";
+  const session = await importSession(request, name);
+  const detail = deferred<void>(), receipt = deferred<void>(), posted = deferred<void>();
+  const question = "Confirm the original research creation";
+  const job = { id: "research-first-generation", session_id: session.id, question,
+    status: "completed", phase: "done", report_path: "report.md" };
+  let posts = 0, reads = 0, receiptSent = false;
+  await page.route(`**/api/sessions/${session.id}`, async (route) => {
+    const response = await route.fetch();
+    await detail.promise;
+    await route.fulfill({ response });
+  });
+  await page.route(`**/api/sessions/${session.id}/research`, async (route) => {
+    if (route.request().method() === "GET") {
+      reads++;
+      await route.fulfill({ json: receiptSent ? [job] : [] });
+      return;
+    }
+    posts++;
+    expect(route.request().postDataJSON()).toEqual({ question });
+    posted.resolve();
+    await receipt.promise;
+    receiptSent = true;
+    await route.fulfill({ status: 201, json: { ...job, status: "running", phase: "scope", report_path: null } });
+  });
+  try {
+    await login(page);
+    await page.locator(".session-item .session-name", { hasText: name }).click();
+    await expect(page.locator(".chat-header .crumb-current")).toHaveText(name);
+    const composer = page.locator(".chat-input-bar textarea");
+    await composer.fill(`/research ${question}`);
+    await composer.press("Enter");
+    await posted.promise;
+    await expect(page.locator(".research-card")).toHaveCount(0);
+    await expect.poll(() => reads).toBe(1);
+    detail.resolve();
+    await expect(page.getByText("hello", { exact: true })).toBeVisible();
+    receipt.resolve();
+    const card = page.locator(`.research-card[data-research-id="${job.id}"]`);
+    await expect(card).toHaveAttribute("data-status", "completed");
+    await expect(card).toContainText(question);
+    await expect(card.getByRole("link", { name: "Download report" })).toHaveAttribute("href",
+      new RegExp(`/research/${job.id}/report\\?`));
+    expect(posts).toBe(1);
+    expect(reads).toBe(2);
+  } finally {
+    detail.resolve();
+    receipt.resolve();
+  }
 });

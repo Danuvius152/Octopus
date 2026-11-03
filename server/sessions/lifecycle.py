@@ -62,8 +62,12 @@ class LifecycleMixin(SessionManagerBase):
             if not owner.failed:
                 return await owner.call_runtime(command)
         except SessionOwnerUnavailable:
+            if command.only_empty_application is not None:
+                return False
             if not owner.failed:
                 raise
+        if command.only_empty_application is not None:
+            return False  # A failed writer cannot certify this conditional close.
         async with asyncio.timeout(_BACKEND_RETIRE_TIMEOUT):
             retirement = await self._failed_owner_retirement(owner)
             if retirement is None:
@@ -881,16 +885,34 @@ class LifecycleMixin(SessionManagerBase):
         context = receive_return(owned, session_id=session.id, user_id=session.user_id, work_id=binding.work_id)
         return (session, context) if context is not None else None
 
-    async def delete_session(self, session_id: str) -> bool:
+    async def delete_session(self, session_id: str, *, only_empty_application: str | None = None) -> bool:
         session = self.sessions.get(session_id)
         if session is None:
             return False
+        if only_empty_application is not None:
+            # A conditional refusal cannot fulfill an overlapping explicit
+            # delete. Successful proof joins the original shared deletion.
+            conditional = asyncio.create_task(self._delete_empty_application_session(session, only_empty_application),
+                                              name=f"delete-empty-session-{session_id}")
+            self._own_task(conditional)
+            return await asyncio.shield(conditional)
         task = session._deletion_task
         if task is None or task.done():
             task = asyncio.create_task(self._delete_live_session(session), name=f"delete-session-{session_id}")
             session._deletion_task = task
             self._own_task(task)
         return await asyncio.shield(task)
+
+    async def _delete_empty_application_session(self, session: Session, app_id: str) -> bool:
+        async with self._retirement_operation(session.agent_id):
+            owner = self._session_owners.get(id(session)) or self._session_owner(session)
+            if not await self._close_original_execution(owner, CloseExecution("deleted", only_empty_application=app_id)):
+                return False
+            # Another caller may have removed the registry entry after this
+            # proof. Its original task still owns the actual deletion result.
+            if session._deletion_task is not None:
+                return await asyncio.shield(session._deletion_task)
+            return await self.delete_session(session.id)
 
     async def _delete_live_session(self, session: Session) -> bool:
         async with self._retirement_operation(session.agent_id):
@@ -901,7 +923,8 @@ class LifecycleMixin(SessionManagerBase):
         if session.user_id is None:
             raise ValueError("The session has no attachment owner")
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
-        await self._close_original_execution(owner, CloseExecution("deleted"))
+        if not await self._close_original_execution(owner, CloseExecution("deleted")):
+            return False
         await self.await_session_execution(session_id, timeout=_BACKEND_RETIRE_TIMEOUT)
         await self._join_session_owner_commands(session)
         await self._retire_application_history(session)

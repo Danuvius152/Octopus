@@ -50,6 +50,15 @@ cryptographic isolation from the host administrator.
 `credential_secrets` is the unique stored secret authority. App tokens and MCP
 signatures use their scoped master-key mechanisms; neither is the retired global
 API access token. User deletion/crypto-shred is not an implemented product route.
+Before comparison, both scoped verifiers require the signature's exact producer
+encoding: 64 lowercase ASCII hex characters. Empty, malformed, non-ASCII and
+noncanonical signatures fail authentication without normalization or a digest
+comparison exception. MCP retains its existing 4/5/7-part identities and checks
+current session/account/run/work authority separately. A failed App-scoped check
+still permits the existing legitimate account-token fallback; it grants no
+cross-App access. Internal key/configuration failures propagate as service errors.
+The identity/App helper tables and real mounted MCP/App header regressions cover
+these boundaries, including legal account fallback and master-key failure.
 Secret rotation, current storage and release preparation follow
 [storage handoff](current-storage-format.md), not old migration SQL.
 

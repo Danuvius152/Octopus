@@ -19,6 +19,14 @@ Codex 当前保证活动根内协作、原生输入接纳证据和根终态后�
 [原四阶段路线](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/plans/engineering-runtime-roadmap.md)
 保留历史顺序与当次证据，后续变更直接更新所属主题。
 
+本次审查修复仅收口 fork/rewind 目录保全、Research 首次创建确认、App 创建准入、
+Wiki 搜索资源状态及 scoped bearer 形状校验；各自行为归现行合同。按用户要求，
+模型凭据迟到拒绝、Native 完成与 Question、委派回信消费、OAuth 认证表示、
+Claude 诊断归属和 Connector 授权失败的其余修正均暂停，未随本批实施。
+尤其不能把上述修复当作 Native 遗留 started 消息问题已解决；该问题仍受
+[现有完成边界](implemented/codex-backend.md#root-completion-and-selected-answer)约束。
+恢复这些修复或生产发布需沿后续实际任务推进。
+
 ## 建议先处理什么
 
 优先收敛[多租户剩余项](plans/multi-tenancy-gaps.md)中的具体行为缺口：

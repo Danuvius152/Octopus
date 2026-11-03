@@ -63,3 +63,11 @@ async def test_rejection_reason_keeps_authority_and_logs_only_verified_correlati
     assert "unverified-caller" not in caplog.text
     if token:
         assert token not in caplog.text
+
+
+async def test_non_ascii_header_signature_is_rejected_by_the_mounted_namespace():
+    from server.main import app
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/mcp/bg/mcp", headers=[(b"authorization", b"Bearer session..." + b"\xff" * 64)])
+    assert response.status_code == 401

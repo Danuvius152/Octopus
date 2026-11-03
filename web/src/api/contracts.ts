@@ -3676,6 +3676,12 @@ export interface components {
             snippet: string;
             /** Snippet Start */
             snippet_start: number;
+            /** Stale */
+            stale?: boolean | null;
+            /** Resource Error */
+            resource_error?: "document_too_large" | null;
+            /** Error */
+            error?: string | null;
         };
         /** CompactSearchSection */
         CompactSearchSection: {

@@ -155,6 +155,11 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const researchCreations = useRef(new Set<AbortController>());
+  useEffect(() => {
+    const operations = researchCreations.current;
+    return () => { operations.forEach((operation) => operation.abort()); operations.clear(); };
+  }, [activeSessionId]);
   const { attachments: pendingAttachments, addFiles, removeAttachment, retryAttachment,
     restoreAttachments, clearAttachments, rejectedFiles, dismissRejectedFiles, unready,
     readyIds: readyAttachmentIds } = useDraftAttachments(activeSessionId);
@@ -845,7 +850,10 @@ export function ChatView({
       }
       store.addMessage(sid, { role: "user", type: "text", content: trimmed });
       addNotice(`🔎 Starting deep research: “${question}”…`);
-      await createResearch(sid, question, () => mounted.current);
+      const observation = new AbortController();
+      researchCreations.current.add(observation);
+      try { await createResearch(sid, question, () => mounted.current, observation.signal); }
+      finally { researchCreations.current.delete(observation); }
       return;
     }
 

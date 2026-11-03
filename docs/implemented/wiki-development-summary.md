@@ -200,6 +200,11 @@ limit+1 字节；未知大小和读取中增长也受界限约束。`require_doc
 revision 与 FTS。首次见到的超限文件只产生不可用占位，revision 为空，不能当作
 当前读取证据或维护准入。full/compact 导航显式 stale/resource_error，健康状态为
 partial；其他合规文件仍可索引和读取，维护准入继续遵守原完整健康检查。
+普通 HTTP 搜索的类型投影保留这些事实：full 的 stale 与 metadata 中资源错误、
+compact 的 stale/resource_error/error 均保留最后可用 revision 的含义，与 App
+桥接及 MCP 所用的任务鉴权 host API 一致。compact 的正常条目省略告警字段，
+不补 false/null；full/compact union 与额外字段过滤仍有效，生成接口同步该可选形状。
+原 human envelope 的 index_errors_truncated=false 默认不变。
 小文档引用超限来源仍可读，但来源为 version_unknown/current_revision=null，
 不能误报 missing，也不能把保留的旧 revision 当作当前来源。
 
@@ -207,6 +212,9 @@ partial；其他合规文件仍可索引和读取，维护准入继续遵守原�
 投影并列出受影响路径。文件缩小后清除资源错误并恢复 quality；即使恢复成原来
 相同 bytes/hash、随后重启，也不能沿旧快路径保留错误。错误状态不授予已退休身份
 重新绑定权限，未知观察区间仍走原批准恢复映射。
+`test_wiki_search_resource_state.py` 经普通 HTTP、App 与任务鉴权 API 验证正常、
+超限、恢复原字节，以及最终序列化的字段和 full/compact 形状；资源字节、写入
+门禁和分页仍由原 Store 规则裁定。
 
 History 普通写入、维护候选和 Sapphire save 在文件、变更或发布效果前检查新 bytes；
 当前原文及提交前复核也有界。旧 blob 不截断；restore 超限时拒绝，legacy snapshot

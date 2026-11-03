@@ -4,6 +4,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { selectSession } from "./selectSession";
 import { loadResearchSnapshot } from "./hydrateSession";
+import { createResearch } from "./research";
+import { sessions } from "./sessionList";
 import { handleWsMessage, useWebSocket } from "../hooks/useWebSocket";
 import { ResearchCard } from "../components/ResearchCard";
 import { ChatView } from "../components/ChatView";
@@ -22,9 +24,9 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-function submitResearch() {
+function submitResearch(generation: string | null = "service") {
   mockChatViewport();
-  useSessionStore.setState({ activeSessionId: "s1", sessions: [{ ...session, status: "idle", backend: "codex" }], dispatchGeneration: "service" });
+  useSessionStore.setState({ activeSessionId: "s1", sessions: [{ ...session, status: "idle", backend: "codex" }], dispatchGeneration: generation });
   const view = render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
     <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()} connected
       onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
@@ -33,6 +35,127 @@ function submitResearch() {
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));
   return view;
 }
+
+it("confirms the original creation after the first detail establishes its generation", async () => {
+  const post = deferred<Response>();
+  const confirmation = deferred<Response>();
+  const fetcher = vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
+    if (String(url).endsWith("/research")) return init?.method === "POST" ? post.promise : confirmation.promise;
+    return Promise.resolve(Response.json([]));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  submitResearch(null);
+  act(() => useSessionStore.getState().applyDispatchState("s1", dispatch()));
+  await act(async () => { post.resolve(Response.json(job, { status: 201 })); });
+  const reads = () => fetcher.mock.calls.filter(([url, init]) => String(url).endsWith("/research") && init?.method !== "POST");
+  expect(reads()).toHaveLength(1);
+  const saved = { ...job, status: "completed", phase: "done", report_path: "report.md" };
+  await act(async () => { confirmation.resolve(Response.json([saved])); });
+  expect(useSessionStore.getState().research.s1).toEqual([saved]);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("does not use a pre-generation cached job as current creation confirmation", async () => {
+  const post = deferred<Response>();
+  const fetcher = vi.fn((url: RequestInfo | URL, init?: RequestInit) => String(url).endsWith("/research")
+    ? init?.method === "POST" ? post.promise : Promise.resolve(Response.json([])) : Promise.resolve(Response.json([])));
+  vi.stubGlobal("fetch", fetcher);
+  submitResearch(null);
+  act(() => {
+    useSessionStore.getState().setResearch("s1", [job]);
+    useSessionStore.getState().applyDispatchState("s1", dispatch());
+  });
+  await act(async () => { post.resolve(Response.json(job, { status: 201 })); });
+  expect(fetcher.mock.calls.filter(([url, init]) => String(url).endsWith("/research") && init?.method !== "POST")).toHaveLength(1);
+  expect(useSessionStore.getState().research.s1).toEqual([]);
+  expect(useSessionStore.getState().sessionAuxiliaryErrors.s1?.research).toContain("unconfirmed");
+});
+
+it.each(["failed", "missing"])("retains the creation identity when its confirmation is %s", async (result) => {
+  const post = deferred<Response>();
+  const fetcher = vi.fn((url: RequestInfo | URL, init?: RequestInit) => String(url).endsWith("/research")
+    ? init?.method === "POST" ? post.promise : Promise.resolve(result === "failed" ? new Response(null, { status: 503 }) : Response.json([]))
+    : Promise.resolve(Response.json([])));
+  vi.stubGlobal("fetch", fetcher);
+  submitResearch(null);
+  act(() => useSessionStore.getState().applyDispatchState("s1", dispatch()));
+  await act(async () => { post.resolve(Response.json(job, { status: 201 })); });
+  expect(useSessionStore.getState().messages.s1.some((message) =>
+    message.content?.includes("r1") && message.content.includes("created") && message.content.includes("unconfirmed"))).toBe(true);
+  expect(useSessionStore.getState().sessionAuxiliaryErrors.s1?.research).toContain("unconfirmed");
+  expect(useSessionStore.getState().research.s1?.length ?? 0).toBe(0);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it.each(["unmount", "session"])("cancels the current confirmation when the original view leaves via %s", async (change) => {
+  const post = deferred<Response>(), confirmation = deferred<Response>();
+  const fetcher = vi.fn((url: RequestInfo | URL, init?: RequestInit) => String(url).endsWith("/research")
+    ? init?.method === "POST" ? post.promise : confirmation.promise : Promise.resolve(Response.json([])));
+  vi.stubGlobal("fetch", fetcher);
+  const view = submitResearch(null);
+  act(() => useSessionStore.getState().applyDispatchState("s1", dispatch()));
+  await act(async () => { post.resolve(Response.json(job, { status: 201 })); });
+  const reading = fetcher.mock.calls.find(([url, init]) => String(url).endsWith("/research") && init?.method !== "POST");
+  expect(reading).toBeDefined();
+  act(() => { if (change === "unmount") view.unmount(); else useSessionStore.getState().setActiveSessionId("s2"); });
+  expect(reading![1]?.signal?.aborted).toBe(true);
+  await act(async () => { confirmation.resolve(Response.json([job])); });
+  expect(useSessionStore.getState().research.s1).toBeUndefined();
+  expect(useSessionStore.getState().research.s2).toBeUndefined();
+});
+
+it.each(["generation", "account", "token", "connection", "archive", "delete"])("does not transfer a first-generation receipt across %s changes", async (change) => {
+  useSessionStore.setState({ activeSessionId: "s1", sessions: [session] });
+  const post = deferred<Response>();
+  const fetcher = vi.fn((_: RequestInfo | URL, init?: RequestInit) =>
+    init?.method === "POST" ? post.promise : Promise.resolve(Response.json([])));
+  vi.stubGlobal("fetch", fetcher);
+  const creation = createResearch("s1", job.question, () => true);
+  useSessionStore.getState().applyDispatchState("s1", dispatch());
+  if (change === "generation") useSessionStore.getState().applyDispatchState("s1", dispatch("next-service"));
+  if (change === "account") useSessionStore.setState({ accountGeneration: useSessionStore.getState().accountGeneration + 1 });
+  if (change === "token") useSessionStore.getState().setToken("new-token");
+  if (change === "connection") sessions.connect({ socket: {}, accountGeneration: useSessionStore.getState().accountGeneration });
+  if (change === "archive") sessions.archive("s1");
+  if (change === "delete") sessions.remove("s1");
+  post.resolve(Response.json(job, { status: 201 }));
+  await creation;
+  expect(useSessionStore.getState().research.s1).toBeUndefined();
+  expect(fetcher.mock.calls.filter(([url, init]) => String(url).endsWith("/research") && init?.method !== "POST")).toHaveLength(0);
+  expect(useSessionStore.getState().messages.s1?.some((message) => message.is_error)).toBeFalsy();
+});
+
+it("reports an unknown creation result across the first generation without repeating the POST", async () => {
+  useSessionStore.setState({ activeSessionId: "s1", sessions: [session] });
+  const post = deferred<Response>();
+  const fetcher = vi.fn(() => post.promise);
+  vi.stubGlobal("fetch", fetcher);
+  const creation = createResearch("s1", job.question, () => true);
+  useSessionStore.getState().applyDispatchState("s1", dispatch());
+  post.reject(new TypeError("network disconnected"));
+  await creation;
+  expect(useSessionStore.getState().messages.s1[0].content).toContain("creation result is unconfirmed");
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a new job across an older empty read and accepts a later authoritative deletion", async () => {
+  useSessionStore.setState({ activeSessionId: "s1", sessions: [session] });
+  const post = deferred<Response>(), older = deferred<Response>(), confirmation = deferred<Response>();
+  let reads = 0;
+  vi.stubGlobal("fetch", vi.fn((_: RequestInfo | URL, init?: RequestInit) =>
+    init?.method === "POST" ? post.promise : ++reads === 1 ? older.promise : reads === 2 ? confirmation.promise : Promise.resolve(Response.json([]))));
+  const oldRead = loadResearchSnapshot("s1");
+  const creation = createResearch("s1", job.question, () => true);
+  useSessionStore.getState().applyDispatchState("s1", dispatch());
+  post.resolve(Response.json(job, { status: 201 }));
+  confirmation.resolve(Response.json([job]));
+  await creation;
+  older.resolve(Response.json([]));
+  await oldRead;
+  expect(useSessionStore.getState().research.s1?.map((item) => item.id)).toEqual(["r1"]);
+  await loadResearchSnapshot("s1");
+  expect(useSessionStore.getState().research.s1).toEqual([]);
+});
 
 it.each(["progress", "completed", "failed", "cancelled"])("a late creation receipt preserves earlier %s facts through ChatView", async (kind) => {
   const response = deferred<Response>();
@@ -53,14 +176,15 @@ it.each(["progress", "completed", "failed", "cancelled"])("a late creation recei
   if (kind === "completed") expect(saved.verified).toBe(3);
 });
 
-it("initializes the actual creation state and retains valid results after viewing another session", async () => {
+it("does not publish a late creation receipt after the original view selects another session", async () => {
   const response = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
     String(url).endsWith("/research") && init?.method === "POST" ? response.promise : Promise.resolve(Response.json([]))));
   submitResearch();
   act(() => useSessionStore.setState({ activeSessionId: "s2" }));
   await act(async () => response.resolve(Response.json({ ...job, status: "failed", error: "Creation already settled" })));
-  expect(useSessionStore.getState().research.s1[0]).toMatchObject({ status: "failed", error: "Creation already settled" });
+  expect(useSessionStore.getState().research.s1).toBeUndefined();
+  expect(useSessionStore.getState().research.s2).toBeUndefined();
 });
 
 it.each(["account", "service", "unmount"])("drops old creation data and errors after %s changes", async (change) => {
