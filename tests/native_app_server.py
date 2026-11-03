@@ -15,6 +15,7 @@ from server.harness import codex_app_server, get_harness
 from server.harness.profile import TurnContext
 from server.sessions import Session, SessionManager
 from server.sessions.client_submissions import submit_client_message
+from tests._fixtures.jsonl_frames import read_frames
 from tests.accounts import create_account
 
 PEER = Path(__file__).parent / "_fixtures" / "fake_app_server.py"
@@ -73,9 +74,8 @@ async def until(predicate):
             await asyncio.sleep(0)
 
 
-def wire_frames(root):
-    path = root / "native-frames.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+def wire_frames(root, *, finished=False):
+    return read_frames(root / "native-frames.jsonl", finished=finished)
 
 
 def inject(root, *frames):

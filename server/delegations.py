@@ -263,7 +263,7 @@ class DelegationManager:
         self.db = db
         self._closing = False
         self._closed_parents.clear()
-        session_mgr.on_broadcast(self.BROADCAST_KEY, self._on_broadcast)
+        session_mgr.on_broadcast(self.BROADCAST_KEY, self._on_broadcast, required=True)
         db.add_close_hook(self._before_database_close)
         db.add_session_delete_hook(self._session_deleted)
 

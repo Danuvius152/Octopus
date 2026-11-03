@@ -138,15 +138,32 @@ class UsersMixin(DatabaseBase):
             )
 
     async def change_password(
-        self, user_id: str, password_hash: str, *, at: str, keep: str | None = None
-    ) -> int:
+        self, user_id: str, password_hash: str, *, at: str, keep: str | None = None,
+        expected_password_hash: str | None = None,
+    ) -> int | None:
         """Commit the new password and other-device revocation together."""
         async with self.transaction(write=True) as tx:
-            await tx.execute(
-                "UPDATE users SET password_hash = ? WHERE id = ?",
-                (password_hash, user_id),
-            )
+            sql = "UPDATE users SET password_hash = ? WHERE id = ?"
+            parameters = [password_hash, user_id]
+            if expected_password_hash is not None:
+                sql += " AND password_hash = ? AND disabled_at IS NULL"
+                parameters.append(expected_password_hash)
+            cursor = await tx.execute(sql, parameters)
+            if not cursor.rowcount:
+                return None
             return await self._revoke_all_tokens(tx, user_id, at=at, keep=keep)
+
+    async def set_user_disabled(self, user_id: str, *, at: str | None) -> bool:
+        """Commit account availability and existing-bearer revocation together."""
+        async with self.transaction(write=True) as tx:
+            cursor = await tx.execute(
+                "UPDATE users SET disabled_at = ? WHERE id = ?", (at, user_id),
+            )
+            if not cursor.rowcount:
+                return False
+            if at is not None:
+                await self._revoke_all_tokens(tx, user_id, at=at, keep=None)
+            return True
 
 
     # -- invites ------------------------------------------------------------
@@ -251,13 +268,15 @@ class UsersMixin(DatabaseBase):
         created_at: str,
         expires_at: str | None = None,
         label: str | None = None,
-    ) -> None:
+    ) -> bool:
         async with self.transaction(write=True) as tx:
-            await tx.execute(
+            cursor = await tx.execute(
                 "INSERT INTO auth_tokens (token_hash, user_id, kind, label, "
-                " created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (token_hash, user_id, kind, label, created_at, expires_at),
+                " created_at, expires_at) SELECT ?, id, ?, ?, ?, ? FROM users "
+                "WHERE id = ? AND disabled_at IS NULL",
+                (token_hash, kind, label, created_at, expires_at, user_id),
             )
+            return cursor.rowcount > 0
 
     async def get_token(self, token_hash: str) -> dict[str, Any] | None:
         async with self.transaction(write=False) as tx:

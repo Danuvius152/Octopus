@@ -15,9 +15,29 @@ Session/PAT tokens are stored by digest with revocation and applicable expiry.
 Changing a password commits the new hash and revocation of other bearers in one
 short database transaction, preserving the existing current-token exception.
 UserManager owns password policy and hashing; the database owns this complete
-operation. Cancellation, a failed revocation or reopening the database exposes
-either the old state or the complete new state. No recovery queue finishes half
-a password change. Disabling an account also revokes its bearers.
+operation. A self-service change carries the exact password hash verified at
+entry. Its transaction updates only an enabled account whose current hash still
+matches that proof; a lost race returns HTTP 409 before revoking any tokens.
+Two requests using the same old password cannot overwrite each other. Policy
+validation and password hashing stay outside the transaction. The separately
+authorized administrative reset retains its own entry and needs no old-password
+proof.
+
+Revoking the admitted request's bearer alone does not withdraw its password
+proof. The current-token exception never clears an existing revocation. An
+account still disabled at commit is refused; disable followed by restore permits
+the admitted change if the password remains unchanged. There is no historical
+disable epoch or requirement to revalidate the bearer at commit.
+
+Disabling commits account unavailability and revocation of all existing session
+and PAT tokens together. Restore changes availability only: it cannot revive
+old bearers, and there is no delayed revocation tail that could revoke tokens
+legitimately issued after restore. Password change and disable each expose either
+the complete old state or complete new state after cancellation or a failed SQL
+operation. Cancellation alone does not prove rollback, particularly during
+COMMIT; durable state is checked by reopening the database. No recovery queue
+finishes half an account operation.
+
 Login throttling bounds guessing. Opaque tokens were chosen because
 revocation can be checked against the already-open SQLite authority without
 adding a JWT refresh/revocation subsystem.
@@ -27,7 +47,10 @@ the database inserts the session token only if the account still exists, is
 enabled and has the exact password hash observed by that verification. A password
 change, disable or deletion that wins this race produces an authentication
 failure without a bearer; throttling clears only after successful issuance.
-Setup, registration and PAT issuance retain their separate business entries.
+Setup, registration and PAT issuance retain their separate business entries,
+but their token INSERT also requires a currently enabled account. A disable
+between account creation and issuance returns HTTP 403 without a bearer; the
+already committed account and invitation use remain committed.
 This checks current validity, without adding a historical disable/re-enable epoch.
 The route-to-SQLite barriers in `tests/test_auth_routes.py` cover these races;
 `tests/test_users.py` retains revocation and current-device exceptions.
@@ -138,7 +161,12 @@ Code: [users](../../server/users.py), [keys](../../server/crypto.py),
 `tests/test_agent_credential_bindings.py` provide regression entry points.
 Password regressions in `tests/test_users.py` reopen real SQLite after cancellation
 or failure at the password, revocation and commit boundaries; `tests/test_auth_routes.py`
-checks the current-token exception. `tests/test_attachments.py` covers upload and
+checks real concurrent HTTP password changes, issuance races and the current-token
+exception. `tests/test_account_operations.py` uses driver/lock barriers and real
+SQLite trigger failures for atomic disable, proof invalidation, cancellation and
+restore/issuance ordering. The original same-proof race accepted both changes;
+the regression now requires one success and one conflict and checks subsequent
+login and bearer validity. `tests/test_attachments.py` covers upload and
 download of ASCII, Chinese and emoji filenames at the final byte boundary.
 
 SSO, self-service password recovery, billing and hostile-tenant sandboxing are

@@ -30,6 +30,7 @@ from httpx import ASGITransport, AsyncClient
 
 from server import deps
 from server.agent_manager import AgentManager
+from server.app_agent import app_agent_manager
 from server.applications import (
     ApplicationError,
     ApplicationManager,
@@ -1223,6 +1224,7 @@ async def client(models, apps_root, monkeypatch, db):
 
     agents_mod.set_manager(AgentManager(db))
     singleton_application_manager.bind(session_mgr=session_manager, db=db)
+    app_agent_manager.bind(session_mgr=session_manager, db=db, app_mgr=singleton_application_manager)
     applications_mod.set_manager(singleton_application_manager)
 
     calls: list[tuple[str, str]] = []
@@ -1239,6 +1241,7 @@ async def client(models, apps_root, monkeypatch, db):
         c.sent = calls  # type: ignore[attr-defined]
         yield c
 
+    app_agent_manager.shutdown()
     singleton_application_manager.shutdown()
 
 

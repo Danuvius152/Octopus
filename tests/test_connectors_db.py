@@ -110,6 +110,7 @@ async def test_oauth_authorization_atomically_resolves_identity_and_its_secret(d
             installation_id=candidate, kind="gmail", label=label,
             external_account_id="same-account", secret_encrypted="sealed-" + label,
             scopes=[label], created_at=_now(), token_expires_at=None, user_id=owner["id"],
+            require_custom_definition=False,
         )
 
     first, second = await asyncio.gather(authorize("first-candidate", "first"), authorize("second-candidate", "second"))

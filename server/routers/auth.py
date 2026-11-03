@@ -101,9 +101,9 @@ def verify_setup_proof(credentials: HTTPAuthorizationCredentials | None = Depend
 async def setup(req: SetupRequest, users: UserMgr, _: None = Depends(verify_setup_proof)) -> LoginResponse:
     try:
         user = await users.setup(username=req.username, password=req.password)
+        token = await users.issue_token(user["id"])
     except UserError as error:
         raise HTTPException(error.status_code, error.message) from error
-    token = await users.issue_token(user["id"])
     return LoginResponse(token=token, user_id=user["id"], username=user["username"], is_admin=user["is_admin"])
 
 
@@ -151,10 +151,10 @@ async def register(req: RegisterRequest, users: UserMgr) -> LoginResponse:
             username=req.username,
             password=req.password,
         )
+        token = await users.issue_token(user["id"])
     except UserError as e:
         raise HTTPException(e.status_code, e.message) from e
 
-    token = await users.issue_token(user["id"])
     logger.info("registered: %s", user["username"])
     return LoginResponse(
         token=token,
@@ -183,7 +183,7 @@ async def change_password(
     to take the account over.
     """
     try:
-        await users.authenticate(user["username"], req.current_password)
+        verified_user = await users.authenticate(user["username"], req.current_password)
     except UserError as e:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Current password is wrong"
@@ -192,7 +192,7 @@ async def change_password(
     auth = request.headers.get("authorization") or ""
     keep = token_digest(auth[7:].strip()) if auth.lower().startswith("bearer ") else None
     try:
-        await users.set_password(user["id"], req.new_password, keep_token_hash=keep)
+        await users.change_own_password(verified_user, req.new_password, keep_token_hash=keep)
     except UserError as e:
         raise HTTPException(e.status_code, e.message) from e
 

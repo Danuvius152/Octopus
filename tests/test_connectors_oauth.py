@@ -52,6 +52,12 @@ class NoPkceProvider(FakeProvider):
     pkce = False
 
 
+class FakeConnector:
+    def __init__(self, provider=None):
+        self.oauth = provider or FakeProvider()
+        self.kind = self.oauth.kind
+
+
 # --- helpers ---------------------------------------------------------------
 
 
@@ -80,7 +86,7 @@ def test_verifier_and_state_are_random_and_urlsafe():
 
 def test_start_builds_authorize_url_with_state_and_challenge():
     mgr = ConnectorLoginManager()
-    pl = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
+    pl = mgr.start(connector=FakeConnector(), client_id="cid", redirect_uri="https://app/cb")
     assert pl.kind == "fake"
     assert pl.verifier is not None
     # The composite state login_id:raw_state is carried through the provider.
@@ -92,7 +98,7 @@ def test_start_builds_authorize_url_with_state_and_challenge():
 
 def test_start_without_pkce_has_no_verifier():
     mgr = ConnectorLoginManager()
-    pl = mgr.start(provider=NoPkceProvider(), client_id="cid", redirect_uri="https://app/cb")
+    pl = mgr.start(connector=FakeConnector(NoPkceProvider()), client_id="cid", redirect_uri="https://app/cb")
     assert pl.verifier is None
     # challenge segment is empty
     assert "code_challenge=&" in pl.authorize_url
@@ -100,14 +106,14 @@ def test_start_without_pkce_has_no_verifier():
 
 def test_resolve_callback_success():
     mgr = ConnectorLoginManager()
-    pl = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
+    pl = mgr.start(connector=FakeConnector(), client_id="cid", redirect_uri="https://app/cb")
     resolved = mgr.resolve_callback(f"{pl.login_id}:{pl.state}")
     assert resolved is pl
 
 
 def test_resolve_callback_rejects_bad_state():
     mgr = ConnectorLoginManager()
-    pl = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
+    pl = mgr.start(connector=FakeConnector(), client_id="cid", redirect_uri="https://app/cb")
     with pytest.raises(ConnectorLoginError):
         mgr.resolve_callback(f"{pl.login_id}:tampered")
 
@@ -120,14 +126,14 @@ def test_resolve_callback_rejects_unknown_login():
 
 def test_status_transitions():
     mgr = ConnectorLoginManager()
-    pl = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
+    pl = mgr.start(connector=FakeConnector(), client_id="cid", redirect_uri="https://app/cb")
     assert pl.status == ConnectorLoginState.pending
     mgr.resolve_callback(f"{pl.login_id}:{pl.state}")
     mgr.mark_success(pl.login_id, "inst-1")
     assert pl.status == ConnectorLoginState.success
     assert pl.installation_id == "inst-1"
 
-    pl2 = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
+    pl2 = mgr.start(connector=FakeConnector(), client_id="cid", redirect_uri="https://app/cb")
     mgr.mark_error(pl2.login_id, "boom")
     assert pl2.status == ConnectorLoginState.error and pl2.message == "boom"
 
@@ -135,7 +141,7 @@ def test_status_transitions():
 
 async def test_cancel_preserves_terminal_result():
     mgr = ConnectorLoginManager()
-    pl = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
+    pl = mgr.start(connector=FakeConnector(), client_id="cid", redirect_uri="https://app/cb")
     assert await mgr.cancel(pl.login_id) is pl
     assert pl.status == ConnectorLoginState.cancelled
     mgr.mark_success(pl.login_id, "late-install")
@@ -146,8 +152,8 @@ async def test_cancel_preserves_terminal_result():
 
 def test_expired_logins_are_gc_d():
     mgr = ConnectorLoginManager()
-    pl = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
+    pl = mgr.start(connector=FakeConnector(), client_id="cid", redirect_uri="https://app/cb")
     # Age it past the TTL, then trigger _gc via another start().
     pl.created_at -= 10_000
-    mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
+    mgr.start(connector=FakeConnector(), client_id="cid", redirect_uri="https://app/cb")
     assert mgr.get(pl.login_id) is None

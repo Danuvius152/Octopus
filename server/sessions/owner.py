@@ -92,7 +92,7 @@ class SessionOwner:
         self._idle.set()
         self._commands_drained = asyncio.Event()
         self._commands_drained.set()
-        self.publisher = SessionPublisher(manager._broadcast, self._wake.set)
+        self.publisher = SessionPublisher(manager._broadcast, self._wake.set, self._publication_error)
         self.questions = OwnerQuestions(self)
         self.runtime = OwnerRuntime(self)
         self.task = asyncio.create_task(self._run(), name=f"session-owner-{session.id}")
@@ -281,6 +281,14 @@ class SessionOwner:
         session._delivery_notice_ids.add(notice.delivery_id)
         return True
 
+    @staticmethod
+    def _publication_error(captured: object | None, error: BaseException) -> str:
+        if isinstance(captured, Execution):
+            return captured.format_exception(error)
+        if isinstance(captured, (_NoticeDiagnostic, QuestionPublished, BackendRetirement, IdleEvent)) and captured.backend is not None:
+            return captured.backend.format_exception(error)
+        return exception_diagnostic(error, secrets=(settings.auth_token,))
+
     async def _run(self) -> None:
         try:
             while True:
@@ -290,11 +298,7 @@ class SessionOwner:
                     if isinstance(publication.marker, QuestionPublished):
                         self.questions.published(publication.marker)
                     if publication.error is not None:
-                        captured = publication.marker
-                        detail = (captured.format_exception(publication.error) if isinstance(captured, Execution) else
-                                  captured.backend.format_exception(publication.error)
-                                  if isinstance(captured, (_NoticeDiagnostic, QuestionPublished, BackendRetirement, IdleEvent)) and captured.backend is not None
-                                  else exception_diagnostic(publication.error, secrets=(settings.auth_token,)))
+                        detail = self._publication_error(publication.marker, publication.error)
                         logger.error(
                             "Session notice delivery failed session=%s error=%s\n%s",
                             self.session.id, type(publication.error).__name__,

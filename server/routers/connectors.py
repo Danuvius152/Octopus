@@ -168,7 +168,10 @@ async def set_oauth_client(
 
 @router.delete("/{kind}/oauth-client", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_oauth_client(kind: str, _operator: AdminUser):
-    await _require_manager().clear_client_creds(kind)
+    try:
+        await _require_manager().clear_client_creds(kind)
+    except ConnectorError as error:
+        raise _http_error(error)
 
 
 # --- custom (user-defined) connectors -------------------------------------
@@ -228,7 +231,10 @@ async def oauth_start(
     connector = await mgr.get(req.kind)
     if connector is None:
         raise HTTPException(status_code=404, detail=f"unknown connector: {req.kind}")
-    creds = await mgr.resolve_client_creds(req.kind)
+    try:
+        creds = await mgr.resolve_authorization_creds(connector)
+    except ConnectorError as error:
+        raise _http_error(error)
     if creds is None:
         raise HTTPException(
             status_code=400,
@@ -241,7 +247,7 @@ async def oauth_start(
     # The account is remembered on the pending login here, where the request is
     # authenticated — the provider's redirect below carries no bearer of ours.
     pl = _login_mgr.start(
-        provider=connector.oauth,
+        connector=connector,
         client_id=creds[0],
         redirect_uri=redirect_uri,
         requested_label=req.label,
@@ -274,11 +280,8 @@ async def oauth_callback(
         return _callback_page("Connection failed", "No authorization code returned.")
 
     try:
-        connector = await _require_manager().get(pl.kind)
-        if connector is None:
-            _login_mgr.mark_error(pl.login_id, "connector kind disappeared")
-            return _callback_page("Connection failed", "Connector no longer registered.")
-        creds = await _require_manager().resolve_client_creds(pl.kind)
+        connector = pl.connector
+        creds = await _require_manager().resolve_authorization_creds(connector)
         if creds is None:
             _login_mgr.mark_error(pl.login_id, "OAuth client not configured")
             return _callback_page("Connection failed", "OAuth client not configured.")

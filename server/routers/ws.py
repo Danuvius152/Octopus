@@ -43,7 +43,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
     async def broadcast(msg: dict):
         delivery.offer(msg)
 
-    session_manager.on_broadcast(conn_id, broadcast, user_id)
+    session_manager.on_broadcast(conn_id, broadcast, user_id, required=False)
     delivery.start()
 
     try:

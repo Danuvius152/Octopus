@@ -96,6 +96,7 @@ class _Turn:
     done: asyncio.Event = field(default_factory=asyncio.Event)
     body: LiveReply = field(init=False)
     error: str | None = None
+    error_code: str | None = None
     cost: float | None = None
     consumer_attached: bool = True
 
@@ -137,7 +138,7 @@ class AppAgentManager:
         self.db = db
         self.app_mgr = app_mgr
         self._closing = False
-        session_mgr.on_broadcast(_BUS_KEY, self._on_broadcast)
+        session_mgr.on_broadcast(_BUS_KEY, self._on_broadcast, required=True)
 
     def drain_blockers(self) -> tuple[str, ...]:
         return ("admission, response or original execution",) if self._turns or any(lock.locked() for lock in self._admission_locks.values()) else ()
@@ -160,9 +161,15 @@ class AppAgentManager:
         if turn.observer is not None and turn.observer is not asyncio.current_task():
             turn.observer.cancel()
 
-    def _fail_turn(self, turn: _Turn, message: str) -> None:
+    @staticmethod
+    def _request_recovery(turn: _Turn, code: str) -> dict[str, Any]:
+        return {"code": code, "conversation_id": turn.session_id, "request_id": turn.request_id,
+                "status_url": f"/apps/{turn.app_id}/agent/conversations/{turn.session_id}/requests/{turn.request_id}"}
+
+    def _fail_turn(self, turn: _Turn, message: str, *, code: str | None = None) -> None:
         turn.error = message
-        turn.emit({"type": "error", "message": message})
+        turn.error_code = code
+        turn.emit({"type": "error", "message": message, **(self._request_recovery(turn, code) if code else {})})
         turn.done.set()
 
     async def _observe_completion(self, turn: _Turn, receipt) -> None:
@@ -170,7 +177,8 @@ class AppAgentManager:
         if turn.done.is_set():
             pass  # A response error does not retire the original execution.
         elif completion.notification_state != "delivered":
-            self._fail_turn(turn, completion.reason or "The original request notification could not be delivered")
+            self._fail_turn(turn, completion.reason or "The original request notification could not be delivered",
+                            code="reply_delivery_failed")
         elif completion.state != "completed" or completion.recording_state != "committed":
             self._fail_turn(turn, f"The request ended without a recorded reply ({completion.state})")
         elif completion.outcome is not None and completion.outcome.status != "success":
@@ -301,12 +309,11 @@ class AppAgentManager:
                 "The agent is still working — read the conversation later for "
                 "the answer",
                 status_code=504,
-                recovery={"code": "ask_timeout", "conversation_id": turn.session_id,
-                          "request_id": turn.request_id, "state": "running",
-                          "status_url": f"/apps/{turn.app_id}/agent/conversations/{turn.session_id}/requests/{turn.request_id}"},
+                recovery={**self._request_recovery(turn, "ask_timeout"), "state": "running"},
             )
         if turn.error:
-            raise AppAgentError(turn.error, status_code=502)
+            raise AppAgentError(turn.error, status_code=502,
+                                recovery=self._request_recovery(turn, turn.error_code) if turn.error_code else None)
         return {
             "conversation_id": turn.session_id,
             "request_id": turn.request_id,

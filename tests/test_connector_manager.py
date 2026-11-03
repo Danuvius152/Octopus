@@ -5,6 +5,7 @@ lock that refreshes exactly once under concurrency), and agent enablement."""
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
 from datetime import UTC, datetime
 
@@ -122,6 +123,166 @@ async def mgr(db, provider, clean_registry):
 
 def _token_set(expires_in: float = 3600.0) -> OAuthTokenSet:
     return OAuthTokenSet("at", "rt", time.time() + expires_in, scopes=["s"])
+
+
+@pytest.mark.parametrize("phase", ["provider", "save_lock", "commit"])
+async def test_refresh_waiter_cancellation_keeps_the_original_rotated_result(mgr, db, owner, provider, monkeypatch, phase):
+    installation = await mgr.complete_install(kind="fakekind", token_set=_token_set(1), user_id=owner["id"])
+    entered, release, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    saving, finish_commit = asyncio.Event(), asyncio.Event()
+    refresh, commit = provider.refresh, db.conn.commit
+    lock_held = False
+    initiated = []
+
+    async def controlled_provider(**kwargs):
+        initiated.append(kwargs)
+        entered.set()
+        await release.wait()
+        result = await refresh(**kwargs)
+        returned.set()
+        return result
+
+    async def controlled_commit():
+        if returned.is_set() and phase == "commit":
+            saving.set()
+            await finish_commit.wait()
+        await commit()
+
+    monkeypatch.setattr(provider, "refresh", controlled_provider)
+    monkeypatch.setattr(db.conn, "commit", controlled_commit)
+    waiter = asyncio.create_task(mgr.get_access_token(installation["id"], owner["id"]))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if phase == "save_lock":
+            await db._write_lock.acquire()
+            lock_held = True
+        if phase != "provider":
+            release.set()
+            await asyncio.wait_for(returned.wait(), 2)
+        if phase == "commit":
+            await asyncio.wait_for(saving.wait(), 2)
+        waiter.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        finish_commit.set()
+        if lock_held:
+            db._write_lock.release()
+            lock_held = False
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        token = await mgr.get_access_token(installation["id"], owner["id"])
+        assert token["access_token"] == "refreshed"
+        assert provider.refresh_calls == 1, "A cancelled waiter discarded the original rotation"
+        assert len(initiated) == 1, "A cancelled waiter restarted the original remote request"
+        saved = await db.get_connector_secret(installation["id"])
+        key = await UserManager(db).data_key_for(owner["id"])
+        assert _deserialize_token_set(decrypt(saved, key)).access_token == "refreshed"
+    finally:
+        release.set()
+        finish_commit.set()
+        if lock_held:
+            db._write_lock.release()
+        await asyncio.gather(waiter, return_exceptions=True)
+
+
+@pytest.mark.parametrize("closing", ["db_close", "timeout", "save_failure"])
+async def test_owned_rotation_shutdown_keeps_received_response_and_observes_failure(
+    mgr, provider, tmp_path, monkeypatch, caplog, closing,
+):
+    from server import connector_manager
+    from tests.accounts import create_account
+
+    path = tmp_path / "owned-refresh.db"
+    database = Database(str(path))
+    await database.initialize()
+    manager = ConnectorManager(database)
+    account, _ = await create_account(database)
+    await manager.set_client_creds("fakekind", "cid", "csec")
+    installation = await manager.complete_install(kind="fakekind", token_set=_token_set(1), user_id=account["id"])
+    original = await database.get_connector_secret(installation["id"])
+    if closing == "save_failure":
+        await database.conn.execute(
+            "CREATE TRIGGER refuse_rotation BEFORE INSERT ON connector_installation_secrets "
+            "BEGIN SELECT RAISE(ABORT, 'rotated token save rejected'); END"
+        )
+        await database.conn.commit()
+    entered, release = asyncio.Event(), asyncio.Event()
+    refresh = provider.refresh
+
+    async def controlled(**kwargs):
+        entered.set()
+        await release.wait()
+        return await refresh(**kwargs)
+
+    monkeypatch.setattr(provider, "refresh", controlled)
+    waiter = asyncio.create_task(manager.get_access_token(installation["id"], account["id"]))
+    stopping = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert manager.drain_blockers()
+        if closing == "timeout":
+            monkeypatch.setattr(connector_manager, "_REFRESH_SHUTDOWN_SECONDS", .01)
+            with pytest.raises(TimeoutError, match="have not retired"):
+                await manager.shutdown()
+            assert manager.drain_blockers()
+            assert await database.get_connector_installation(installation["id"])
+        stopping = asyncio.create_task(database.close() if closing == "db_close" else manager.shutdown())
+        await asyncio.sleep(0)  # The actual owner joins the outstanding rotation.
+        assert not stopping.done()
+        release.set()
+        if closing == "save_failure":
+            with pytest.raises(RuntimeError, match="during shutdown") as failed:
+                await asyncio.wait_for(stopping, 2)
+            assert isinstance(failed.value.__cause__, sqlite3.IntegrityError)
+            assert "rotated token save rejected" in caplog.text
+            assert await database.get_connector_secret(installation["id"]) == original
+            assert not (await database.get_connector_installation(installation["id"]))["needs_reconnect"]
+        else:
+            await asyncio.wait_for(stopping, 2)
+        assert not manager.drain_blockers()
+        assert provider.refresh_calls == 1
+    finally:
+        release.set()
+        await asyncio.gather(waiter, *([stopping] if stopping else []), return_exceptions=True)
+        await database.close()
+    if closing != "save_failure":
+        reopened = Database(str(path))
+        await reopened.initialize()
+        try:
+            assert (await ConnectorManager(reopened).get_access_token(installation["id"], account["id"]))["access_token"] == "refreshed"
+            assert provider.refresh_calls == 1
+        finally:
+            await reopened.close()
+
+
+async def test_shared_refresh_still_rejects_another_account(mgr, db, owner, provider, monkeypatch):
+    from tests.accounts import create_account
+
+    other, _ = await create_account(db, username="other-owner")
+    installation = await mgr.complete_install(kind="fakekind", token_set=_token_set(1), user_id=owner["id"])
+    entered, release = asyncio.Event(), asyncio.Event()
+    refresh = provider.refresh
+
+    async def controlled(**kwargs):
+        entered.set()
+        await release.wait()
+        return await refresh(**kwargs)
+
+    monkeypatch.setattr(provider, "refresh", controlled)
+    waiter = asyncio.create_task(mgr.get_access_token(installation["id"], owner["id"]))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        with pytest.raises(ConnectorError, match="not found"):
+            await mgr.get_access_token(installation["id"], other["id"])
+        release.set()
+        assert (await waiter)["access_token"] == "refreshed"
+        assert provider.refresh_calls == 1
+    finally:
+        release.set()
+        await asyncio.gather(waiter, return_exceptions=True)
 
 
 @pytest.mark.parametrize("operation", ["install", "update"])
@@ -262,7 +423,7 @@ async def test_reauthorization_keeps_identity_configuration_and_agent_links(mgr,
     await mgr.update_installation(original["id"], owner["id"], enable_by_default=True,
                                   needs_reconnect=True, last_refresh_error_code="old-error")
     prepared = await mgr.prepare_install(
-        kind="fakekind", user_id=owner["id"], requested_label="First opened",
+        connector=await mgr.get("fakekind"), user_id=owner["id"], requested_label="First opened",
         token_set=OAuthTokenSet("first-token", "first-rt", time.time() + 3600, scopes=["first-scope"]),
     )
     await mgr.complete_install(kind="fakekind", user_id=owner["id"], requested_label="Later opened",

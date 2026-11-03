@@ -134,7 +134,10 @@ async def lifespan(app: FastAPI):
         schedules._db = db
         schedules._runner = schedule_runner
         agents.set_manager(AgentManager(db))
-        connectors.set_manager(ConnectorManager(db))
+        connector_manager = ConnectorManager(db)
+        connectors.set_manager(connector_manager)
+        app.state.connector_manager = connector_manager
+        started.add("connectors")
         applications_router.set_manager(application_manager)
         # Accounts. Bound like the other managers; `deps.current_user` resolves
         # every request's bearer through it (multi-tenancy.md §5.1).
@@ -294,6 +297,9 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
     backend_supervisor.begin_shutdown()
     codex_login_manager.begin_shutdown()
     oauth_login_manager.begin_shutdown()
+    connector_manager = getattr(app.state, "connector_manager", None) if "connectors" in started else None
+    if connector_manager is not None:
+        connector_manager.begin_shutdown()
     if started <= {"sessions", "delegations"}:
         # Close hooks join restored recorders before the session drain budget.
         await asyncio.gather(*(harness.shutdown() for harness in all_harnesses()))
@@ -316,6 +322,8 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
             owners.append((name, stop()))
     owners.append(("Codex login", codex_login_manager.shutdown()))
     owners.append(("OAuth login", oauth_login_manager.shutdown()))
+    if connector_manager is not None:
+        owners.append(("connectors", connector_manager.shutdown()))
     owners.extend((f"{harness.backend} one-shot resources", harness.shutdown()) for harness in all_harnesses())
     results = await asyncio.gather(*(stop for _, stop in owners), return_exceptions=True)
     failures = [(name, result) for (name, _), result in zip(owners, results, strict=True)
@@ -512,6 +520,7 @@ def _installation_blockers(request: Request) -> tuple[str, ...]:
 
     gate = getattr(request.app.state, "installation_admission", None)
     runner = getattr(request.app.state, "schedule_runner", None)
+    connector_manager = getattr(request.app.state, "connector_manager", None)
     db = session_manager.db
     facts = (
         ("requests", () if gate is not None and gate.idle else ("HTTP response or WebSocket input",)),
@@ -527,6 +536,7 @@ def _installation_blockers(request: Request) -> tuple[str, ...]:
         ("app backends", backend_supervisor.drain_blockers()),
         ("login", codex_login_manager.drain_blockers()),
         ("oauth login", oauth_login_manager.drain_blockers()),
+        ("connectors", connector_manager.drain_blockers() if connector_manager is not None else ()),
         ("scheduler", runner.drain_blockers() if runner is not None else ()),
         ("database", db.drain_blockers() if db is not None else ("unavailable",)),
         *((f"harness {harness.backend}", harness.drain_blockers()) for harness in all_harnesses()),
@@ -585,6 +595,9 @@ async def quiesce_installation(request: Request, user: deps.CurrentUser):
             backend_supervisor.begin_shutdown()
             codex_login_manager.begin_shutdown()
             oauth_login_manager.begin_shutdown()
+            connector_manager = getattr(request.app.state, "connector_manager", None)
+            if connector_manager is not None:
+                connector_manager.begin_shutdown()
             # This is a successful handoff receipt, never a sealing intent.
             owner.offline_request = request_id
     except WikiError as error:

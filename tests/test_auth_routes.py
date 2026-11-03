@@ -57,6 +57,96 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def test_concurrent_password_changes_accept_only_one_old_password_proof(client):
+    c, users, _db = client
+    user = await users.create_user(username="archer", password="password1")
+    tokens = [await users.issue_token(user["id"]) for _ in range(2)]
+    passwords = ["first-new-password", "second-new-password"]
+    responses = await asyncio.gather(*(
+        c.post("/api/auth/password", headers=_bearer(token), json={
+            "current_password": "password1", "new_password": password,
+        }) for token, password in zip(tokens, passwords, strict=True)
+    ))
+    assert sorted(response.status_code for response in responses) == [204, 409]
+    winner = next(index for index, response in enumerate(responses) if response.status_code == 204)
+    logged_in = await c.post("/api/auth/login", json={"username": "archer", "password": passwords[winner]})
+    assert logged_in.status_code == 200
+    assert (await c.post("/api/auth/login", json={
+        "username": "archer", "password": passwords[1 - winner],
+    })).status_code == 401
+    assert (await c.get("/api/auth/identity", headers=_bearer(tokens[winner]))).status_code == 200
+    assert (await c.get("/api/auth/identity", headers=_bearer(tokens[1 - winner]))).status_code == 401
+
+
+async def test_admin_disable_restore_does_not_restore_old_bearers(client):
+    c, users, _db = client
+    admin = await users.create_user(username="operator", password="password1", is_admin=True)
+    account = await users.create_user(username="archer", password="password1")
+    headers = _bearer(await users.issue_token(admin["id"]))
+    tokens = [await users.issue_token(account["id"], kind=kind) for kind in ("session", "pat")]
+    for disabled in (True, False):
+        response = await c.post(f"/api/auth/users/{account['id']}/disabled", headers=headers, json={"disabled": disabled})
+        assert response.status_code == 200
+        for token in tokens:
+            assert (await c.get("/api/auth/identity", headers=_bearer(token))).status_code == 401
+    assert (await c.post("/api/auth/login", json={"username": "archer", "password": "password1"})).status_code == 200
+
+
+@pytest.mark.parametrize("change", ["revoke", "disable", "disable_restore"])
+async def test_password_commit_uses_entry_identity_and_current_account_state(client, monkeypatch, change):
+    c, users, db = client
+    user = await users.create_user(username="archer", password="password1")
+    bearer = await users.issue_token(user["id"])
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute, commit = db.conn.execute, db.conn.commit
+    proof_read = False
+
+    async def observed_execute(sql, parameters=()):
+        nonlocal proof_read
+        cursor = await execute(sql, parameters)
+        if "FROM users WHERE username = ?" in sql:
+            proof_read = True
+        return cursor
+
+    async def gated_commit():
+        nonlocal proof_read
+        if proof_read:
+            proof_read = False
+            entered.set()
+            await release.wait()
+        await commit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db.conn, "execute", observed_execute)
+        patch.setattr(db.conn, "commit", gated_commit)
+        changing = asyncio.create_task(c.post("/api/auth/password", headers=_bearer(bearer), json={
+            "current_password": "password1", "new_password": "changed-password",
+        }))
+        mutations = []
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            mutations.append(asyncio.create_task(
+                users.revoke_token(bearer) if change == "revoke" else users.set_disabled(user["id"], True)
+            ))
+            if change == "disable_restore":
+                mutations.append(asyncio.create_task(users.set_disabled(user["id"], False)))
+            await asyncio.sleep(0)  # Queue the real writers before the proof reader returns.
+            release.set()
+            await asyncio.gather(*mutations)
+            response = await changing
+        finally:
+            release.set()
+            await asyncio.gather(changing, *mutations, return_exceptions=True)
+    assert response.status_code == (409 if change == "disable" else 204)
+    assert await users.resolve_token(bearer) is None
+    if change == "disable":
+        await users.set_disabled(user["id"], False)
+    logged_in = await c.post("/api/auth/login", json={
+        "username": "archer", "password": "password1" if change == "disable" else "changed-password",
+    })
+    assert logged_in.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Signing in
 # ---------------------------------------------------------------------------
@@ -274,6 +364,54 @@ async def test_registration_needs_an_invite_and_signs_you_in(client):
             json={"invite_code": code, "username": "pete", "password": "password3"},
         )
     ).status_code == 403
+
+
+@pytest.mark.parametrize("entry", ["setup", "register"])
+async def test_account_disabled_between_creation_and_issuance_returns_explicit_refusal(client, monkeypatch, entry):
+    from server.config import settings
+
+    c, users, db = client
+    payload = {"username": "new-owner", "password": "new-account-password"}
+    if entry == "register":
+        admin = await users.create_user(username="operator", password="password1", is_admin=True)
+        invite = await users.create_invite(created_by=admin["id"])
+        payload["invite_code"] = invite["code"]
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute, commit = db.conn.execute, db.conn.commit
+    created = []
+
+    async def observed_execute(sql, parameters=()):
+        cursor = await execute(sql, parameters)
+        if sql.startswith("INSERT INTO users"):
+            created.append(parameters[0])
+        return cursor
+
+    async def gated_commit():
+        if created and not entered.is_set():
+            entered.set()
+            await release.wait()
+        await commit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db.conn, "execute", observed_execute)
+        patch.setattr(db.conn, "commit", gated_commit)
+        registering = asyncio.create_task(c.post(f"/api/auth/{entry}", json=payload, headers=_bearer(settings.auth_token)))
+        disabling = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            disabling = asyncio.create_task(users.set_disabled(created[0], True))
+            await asyncio.sleep(0)
+            release.set()
+            await disabling
+            response = await registering
+        finally:
+            release.set()
+            await asyncio.gather(registering, *([disabling] if disabling else []), return_exceptions=True)
+    assert response.status_code == 403
+    assert (await db.get_user(created[0]))["disabled_at"]
+    assert await db.list_tokens(created[0]) == []
+    if entry == "register":
+        assert (await db.get_invite(invite["code"]))["used_count"] == 1
 
 
 async def test_retained_invite_cannot_create_the_first_account(client, monkeypatch):

@@ -23,6 +23,7 @@ class ConnectorsMixin(DatabaseBase):
         self, *, installation_id: str, kind: str, label: str,
         secret_encrypted: str, created_at: str, external_account_id: str | None,
         scopes: list[str], token_expires_at: str | None, user_id: str | None,
+        require_custom_definition: bool,
         expected_existing_id: str | None = None,
     ) -> dict[str, Any]:
         """Commit one OAuth authorization, preserving the existing identity.
@@ -34,6 +35,10 @@ class ConnectorsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             if not await owner_is_available(tx, user_id):
                 raise ValueError("Account is unavailable")
+            if require_custom_definition and await tx.fetch_one(
+                "SELECT 1 FROM custom_connectors WHERE kind=?", (kind,),
+            ) is None:
+                raise ValueError("Custom connector definition no longer exists")
             if expected_existing_id is not None:
                 existing = await tx.fetch_one(
                     "SELECT id FROM connector_installations WHERE id=? AND user_id IS ? "
@@ -370,7 +375,13 @@ class ConnectorsMixin(DatabaseBase):
             return [self._row_to_custom(row) for row in rows]
 
     async def delete_custom_connector(self, kind: str) -> bool:
+        """Retire a definition and all local authorization relationships once."""
         async with self.transaction(write=True) as tx:
+            if await tx.fetch_one("SELECT 1 FROM custom_connectors WHERE kind=?", (kind,)) is None:
+                return False
+            # Secret and agent links cascade from installation deletion.
+            await tx.execute("DELETE FROM connector_installations WHERE kind = ?", (kind,))
+            await tx.execute("DELETE FROM connector_oauth_clients WHERE kind = ?", (kind,))
             cursor = await tx.execute(
                 "DELETE FROM custom_connectors WHERE kind = ?", (kind,)
             )

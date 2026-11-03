@@ -36,7 +36,15 @@ completion. A successful `done` requires both an acknowledged business result
 and its delivered notification prefix. Failed or unavailable notification
 ends the app request with an explicit delivery error, preserving any already
 committed transcript/outcome for the original status lookup; it never replays
-the operation. Cancelling an app waiter does not cancel an admitted command.
+the operation. App body delivery is a required subscriber: an ordinary exception
+or callback-raised cancellation fails that original publication. JSON `ask`
+returns HTTP 502 with structured `detail` carrying `code=reply_delivery_failed`,
+`conversation_id`, `request_id` and `status_url`; SSE emits an `error` with the same
+recovery fields and no successful `done`. Already displayed fragments remain
+visible. Poll the original status URL for the committed result; live delivery
+does not reconstruct a successful reply from storage. A legitimately empty answer
+can still succeed. Browser/progress observer failures do not fail body delivery.
+Cancelling an app waiter does not cancel an admitted command.
 Result-recording conflicts and unconfirmed recording remain explicit errors.
 Their messages direct the caller to inspect the original conversation; they do
 not offer a saving retry or establish that the operation had no effects.
@@ -151,6 +159,16 @@ Frontend: the Iterate popover (opens, sends, closes, reports errors, links to
 the build session) and the conversations list.
 E2E: the page has no bottom bar, the popover sends a change request, and the
 app's own conversations never appear in the sidebar.
+
+`tests/test_app_reply_delivery.py` joins the real Owner, Publisher, SQLite,
+JSON/SSE routes and original result lookup. It injects ordinary/cancellation
+failures only in the required body callback, retains normal model events and
+checks explicit errors, saved outcomes, valid empty replies, no replay and
+capacity ownership after caller cancellation or stream disconnection. The old
+path reported success after losing body text; these cases now require a delivery
+error. Shared completion, notification-failure and held-publication regressions
+also retain ordered business delivery, caller cancellation and diagnostics
+redacted with the original execution's credential context.
 
 ## 9. What this defers
 

@@ -149,7 +149,9 @@ async def test_saturated_notifications_refuse_submit_before_acceptance_and_keep_
     assert [row["summary"] for row in manager.dispatch_snapshot(session.id)["items"]] == ["Retry the original identity"]
 
 
-async def test_late_held_publication_uses_its_original_credential(question_host, tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+async def test_late_held_publication_uses_its_original_credential(question_host, tmp_path, monkeypatch, caplog, required, failure_type):
     manager, original, _client, events = question_host
     secret = "originalheldpublicationcredential"
     await manager.db.save_credential(
@@ -159,7 +161,7 @@ async def test_late_held_publication_uses_its_original_credential(question_host,
     )
     session, gate, _identity, _receipt = await held_python(manager, original, tmp_path, monkeypatch, credential="review-held-credential")
     detail = "Original held subscriber transport cancellation"
-    failure, cause = asyncio.CancelledError(f"{detail}; {secret}"), RuntimeError(f"Original held cause: {secret}")
+    failure, cause = failure_type(f"{detail}; {secret}"), RuntimeError(f"Original held cause: {secret}")
     failed = asyncio.Event()
 
     async def cancel_original(event):
@@ -167,7 +169,7 @@ async def test_late_held_publication_uses_its_original_credential(question_host,
             failed.set()
             raise failure from cause
 
-    manager.on_broadcast("held-original-credential", cancel_original)
+    manager.on_broadcast("held-original-credential", cancel_original, required=required)
     with caplog.at_level(logging.ERROR, logger="server"):
         gate.touch()
         await asyncio.wait_for(failed.wait(), 2)

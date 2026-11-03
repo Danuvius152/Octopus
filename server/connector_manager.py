@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 import uuid
@@ -20,14 +21,16 @@ from typing import Any
 
 import httpx
 
+from .aio import complete_cleanup
 from .config import settings
-from .connectors.base import ConnectorInstallation
+from .connectors.base import ConnectorBase, ConnectorInstallation
 from .connectors.custom import CustomConnector, resolve_connector
 from .connectors.errors import ConnectorError, ConnectorTokenError
 from .connectors.grants import GrantDisposition, grant_stamp
 from .connectors.registry import all_connectors, get_connector
 from .crypto import decrypt, encrypt, master_key
 from .database import Database
+from .diagnostics import exception_diagnostic
 from .monitor import Event as _MonEvent
 from .monitor import record as _mon_record
 from .oauth_providers import OAuthTokenSet
@@ -39,6 +42,8 @@ _RESERVED_KINDS = {"oauth", "catalog", "custom"}
 
 # Refresh when the access token expires within this window.
 _REFRESH_SKEW_SECONDS = 300
+_REFRESH_SHUTDOWN_SECONDS = 30.0
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,7 @@ class PreparedInstallation:
     label: str
     user_id: str | None
     secret_key: str = field(repr=False)
+    definition_identity: object | None = field(repr=False)
 
 
 def _serialize_token_set(ts: OAuthTokenSet) -> str:
@@ -95,10 +101,39 @@ class ConnectorManager:
     def __init__(self, db: Database) -> None:
         self.db = db
         self._locks: dict[str | tuple[str | None, str, str], asyncio.Lock] = {}
+        self._token_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._definition_lock = asyncio.Lock()
+        self._definitions: dict[str, object] = {}
+        self._closing = False
+        db.add_close_hook(self.shutdown)
 
-    async def get(self, kind: str):
+    def drain_blockers(self) -> tuple[str, ...]:
+        return tuple(f"connector token operation {iid}" for iid in self._token_tasks)
+
+    def begin_shutdown(self) -> None:
+        self._closing = True
+
+    async def shutdown(self) -> None:
+        """Join owned rotations before DB close, without cancelling their save."""
+        self.begin_shutdown()
+        tasks = tuple(self._token_tasks.values())
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(tasks, timeout=_REFRESH_SHUTDOWN_SECONDS)
+        if pending:
+            raise TimeoutError(f"{len(pending)} connector token operations have not retired")
+        failures = [task.exception() for task in done if not task.cancelled()]
+        unexpected = [error for error in failures if error is not None and not isinstance(error, ConnectorError)]
+        if unexpected:
+            raise RuntimeError("Connector token operation failed during shutdown") from unexpected[0]
+
+    async def get(self, kind: str) -> ConnectorBase | None:
         """A connector by kind — built-in (code) or custom (DB), else None."""
-        return await resolve_connector(self.db, kind)
+        async with self._definition_lock:
+            connector = await resolve_connector(self.db, kind)
+            if isinstance(connector, CustomConnector):
+                connector.definition_identity = self._definitions.setdefault(kind, object())
+            return connector
 
     # --- custom (user-defined) connector definitions ---------------------
 
@@ -123,32 +158,34 @@ class ConnectorManager:
             )
         if get_connector(kind) is not None:
             raise ConnectorError(f"{kind!r} is a built-in connector")
-        if await self.db.get_custom_connector(kind) is not None:
-            raise ConnectorError(f"a custom connector {kind!r} already exists")
-        now = datetime.now(UTC).isoformat()
-        await self.db.save_custom_connector(
-            kind=kind,
-            display_name=display_name.strip() or kind,
-            authorize_url=authorize_url.strip(),
-            token_url=token_url.strip(),
-            scopes=list(scopes),
-            pkce=bool(pkce),
-            api_base=api_base.strip(),
-            now=now,
-        )
-        # Client creds reuse the in-app config store (same as built-ins).
-        await self.set_client_creds(kind, client_id, client_secret)
-        row = await self.db.get_custom_connector(kind)
-        assert row is not None
-        return row
+
+        async def create() -> dict[str, Any]:
+            if await self.db.get_custom_connector(kind) is not None:
+                raise ConnectorError(f"a custom connector {kind!r} already exists")
+            now = datetime.now(UTC).isoformat()
+            await self.db.save_custom_connector(
+                kind=kind, display_name=display_name.strip() or kind,
+                authorize_url=authorize_url.strip(), token_url=token_url.strip(),
+                scopes=list(scopes), pkce=bool(pkce), api_base=api_base.strip(), now=now,
+            )
+            # Client creds reuse the in-app config store (same as built-ins).
+            await self._store_client_creds(kind, client_id, client_secret)
+            row = await self.db.get_custom_connector(kind)
+            assert row is not None
+            return row
+
+        async with self._definition_lock:
+            return await complete_cleanup(create())
 
     async def delete_custom_connector(self, kind: str) -> None:
-        if await self.db.get_custom_connector(kind) is None:
-            raise ConnectorError("custom connector not found")
-        # Tear down everything tied to the kind so nothing is orphaned.
-        await self.db.delete_connector_installations_by_kind(kind)
-        await self.db.delete_connector_oauth_client(kind)
-        await self.db.delete_custom_connector(kind)
+        async def delete() -> None:
+            if not await self.db.delete_custom_connector(kind):
+                raise ConnectorError("custom connector not found")
+            self._definitions.pop(kind, None)
+
+        # Finish the known database outcome and identity retirement together.
+        async with self._definition_lock:
+            await complete_cleanup(delete())
 
     # --- OAuth client credentials (in-app config, DB-first then env) ------
 
@@ -171,15 +208,39 @@ class ConnectorManager:
     async def set_client_creds(
         self, kind: str, client_id: str, client_secret: str
     ) -> None:
-        if await resolve_connector(self.db, kind) is None:
+        connector = await self.get(kind)
+        if connector is None:
             raise ConnectorError(f"unknown connector kind: {kind}")
+        async with self._definition_lock:
+            self._require_definition(connector)
+            await self._store_client_creds(kind, client_id, client_secret)
+
+    async def _store_client_creds(self, kind: str, client_id: str, client_secret: str) -> None:
         now = datetime.now(UTC).isoformat()
         await self.db.set_connector_oauth_client(
             kind, client_id, encrypt(client_secret, master_key()), now
         )
 
     async def clear_client_creds(self, kind: str) -> bool:
-        return await self.db.delete_connector_oauth_client(kind)
+        connector = await self.get(kind)
+        if connector is None:
+            return False
+        async with self._definition_lock:
+            self._require_definition(connector)
+            return await self.db.delete_connector_oauth_client(kind)
+
+    def _require_definition(self, connector: ConnectorBase) -> None:
+        if isinstance(connector, CustomConnector) and (
+            connector.definition_identity is None
+            or self._definitions.get(connector.kind) is not connector.definition_identity
+        ):
+            raise ConnectorError("Custom connector definition was deleted; start a new connection")
+
+    async def resolve_authorization_creds(self, connector: ConnectorBase) -> tuple[str, str] | None:
+        """Capture credentials only while they still belong to this definition."""
+        async with self._definition_lock:
+            self._require_definition(connector)
+            return await self.resolve_client_creds(connector.kind)
 
     async def client_config(self, kind: str, public_base: str) -> dict[str, Any]:
         """Non-secret view of a kind's OAuth client config for the UI: whether
@@ -258,23 +319,26 @@ class ConnectorManager:
         connecting the same GitHub account get one installation each, since the
         tokens are separately theirs.
         """
-        prepared = await self.prepare_install(kind=kind, token_set=token_set, requested_label=requested_label, user_id=user_id)
+        connector = await self.get(kind)
+        if connector is None:
+            raise ConnectorError(f"unknown connector kind: {kind}")
+        prepared = await self.prepare_install(connector=connector, token_set=token_set, requested_label=requested_label, user_id=user_id)
         return await self.persist_install(prepared)
 
     async def prepare_install(
-        self, *, kind: str, token_set: OAuthTokenSet, requested_label: str | None = None,
+        self, *, connector: ConnectorBase, token_set: OAuthTokenSet, requested_label: str | None = None,
         user_id: str | None = None,
     ) -> PreparedInstallation:
-        connector = await resolve_connector(self.db, kind)
-        if connector is None:
-            raise ConnectorError(f"unknown connector kind: {kind}")
+        definition = connector.definition_identity if isinstance(connector, CustomConnector) else None
+        if isinstance(connector, CustomConnector) and definition is None:
+            raise ConnectorError("Custom connector definition identity was not captured")
         await self.require_available_owner(user_id)
         external_id, identity_label = await connector.fetch_external_identity(
             token_set
         )
         label = requested_label or identity_label
         secret_key = await UserManager(self.db).data_key_for(user_id)
-        return PreparedInstallation(kind, token_set, external_id, label, user_id, secret_key)
+        return PreparedInstallation(connector.kind, token_set, external_id, label, user_id, secret_key, definition)
 
     async def require_available_owner(self, user_id: str | None) -> None:
         """Captured login ownership does not authorize a later remote call."""
@@ -305,13 +369,19 @@ class ConnectorManager:
             else None
         )
         iid = existing["id"] if existing is not None else uuid.uuid4().hex[:12]
-        async with self._lock(iid):
+        async with self._lock(iid), self._definition_lock:
+            # No remote I/O, and no wait for an installation lock, holds the
+            # definition owner. Deletion and this commit share its ordering.
+            if (prepared.definition_identity is not None
+                    and self._definitions.get(kind) is not prepared.definition_identity):
+                raise ConnectorError("Custom connector definition was deleted; start a new connection")
             try:
                 return await self.db.authorize_connector_installation(
                     installation_id=iid, kind=kind, label=prepared.label,
                     secret_encrypted=blob, created_at=datetime.now(UTC).isoformat(),
                     external_account_id=external_id or None, scopes=list(token_set.scopes),
                     token_expires_at=token_expires_at, user_id=user_id,
+                    require_custom_definition=prepared.definition_identity is not None,
                     expected_existing_id=existing["id"] if existing is not None else None,
                 )
             except ValueError as exc:
@@ -383,6 +453,48 @@ class ConnectorManager:
     async def get_access_token(
         self, installation_id: str, user_id: str | None = None
     ) -> dict[str, Any]:
+        """Each authorized waiter joins the installation's original owned work."""
+        if self._closing:
+            raise ConnectorTokenError("Connector manager is shutting down", kind="unavailable", code="shutdown")
+        await self._require_token_owner(user_id)
+        inst = await self.db.get_connector_installation(installation_id, user_id)
+        if inst is None or inst.get("user_id") != user_id:
+            raise ConnectorTokenError("connector installation not found", kind="unavailable", code="gone")
+        if self._closing:
+            raise ConnectorTokenError("Connector manager is shutting down", kind="unavailable", code="shutdown")
+        task = self._token_tasks.get(installation_id)
+        if task is None:
+            secrets: list[str] = []
+            task = asyncio.create_task(self._get_access_token(installation_id, user_id, secrets),
+                                       name=f"connector-token-{installation_id}")
+            self._token_tasks[installation_id] = task
+
+            def retired(original: asyncio.Task[dict[str, Any]]) -> None:
+                try:
+                    if original.cancelled():
+                        logger.error("Owned connector token operation was cancelled installation=%s", installation_id)
+                    elif (error := original.exception()) is not None:
+                        logger.error("Connector token operation failed installation=%s\n%s", installation_id,
+                                     exception_diagnostic(error, secrets=tuple(secrets)))
+                finally:
+                    secrets.clear()
+                    if self._token_tasks.get(installation_id) is original:
+                        self._token_tasks.pop(installation_id)
+
+            task.add_done_callback(retired)
+        result = await asyncio.shield(task)
+        await self._require_token_owner(user_id)
+        return result
+
+    async def _require_token_owner(self, user_id: str | None) -> None:
+        try:
+            await self.require_available_owner(user_id)
+        except ConnectorError as error:
+            raise ConnectorTokenError(str(error), kind="unavailable", code="account_unavailable") from error
+
+    async def _get_access_token(
+        self, installation_id: str, user_id: str | None, secrets: list[str],
+    ) -> dict[str, Any]:
         """Resolve a token, endpoint and rejection stamp under one installation lock.
 
         Refresh near expiry; only a proven permanent grant rejection can mark
@@ -396,37 +508,39 @@ class ConnectorManager:
         except ValueError as error:
             raise ConnectorTokenError("Account is unavailable", kind="unavailable", code="account_unavailable") from error
         async with self._lock(installation_id):
-            try:
-                await self.require_available_owner(user_id)
-            except ConnectorError as error:
-                raise ConnectorTokenError(str(error), kind="unavailable", code="account_unavailable") from error
-            inst = await self.db.get_connector_installation(installation_id, user_id)
-            if inst is None or inst.get("user_id") != user_id:
-                raise ConnectorTokenError("connector installation not found", kind="unavailable", code="gone")
-            if inst["needs_reconnect"]:
-                raise ConnectorTokenError("Connector authorization requires reconnecting", kind="reconnect",
-                                          code=inst["last_refresh_error_code"] or "auth_rejected")
-            blob = await self.db.get_connector_secret(installation_id)
-            if blob is None:
-                raise ConnectorTokenError("connector secret missing", kind="unavailable", code="secret_missing")
-            ts = _deserialize_token_set(decrypt(blob, secret_key))
-            connector = await resolve_connector(self.db, inst["kind"])
-            api_base = getattr(connector, "api_base", None)
-            stamp = grant_stamp(inst, blob, api_base)
-
-            near_expiry = (
-                ts.expires_at_epoch
-                and ts.expires_at_epoch - time.time() < _REFRESH_SKEW_SECONDS
-            )
+            # Kind deletion bypasses individual installation locks. Capture the
+            # installation, endpoint and client together before remote I/O, so
+            # a rebuilt kind cannot contribute credentials to an old refresh.
+            async with self._definition_lock:
+                await self._require_token_owner(user_id)
+                inst = await self.db.get_connector_installation(installation_id, user_id)
+                if inst is None or inst.get("user_id") != user_id:
+                    raise ConnectorTokenError("connector installation not found", kind="unavailable", code="gone")
+                if inst["needs_reconnect"]:
+                    raise ConnectorTokenError("Connector authorization requires reconnecting", kind="reconnect",
+                                              code=inst["last_refresh_error_code"] or "auth_rejected")
+                blob = await self.db.get_connector_secret(installation_id)
+                if blob is None:
+                    raise ConnectorTokenError("connector secret missing", kind="unavailable", code="secret_missing")
+                ts = _deserialize_token_set(decrypt(blob, secret_key))
+                secrets.extend(value for value in (ts.access_token, ts.refresh_token) if value)
+                connector = await resolve_connector(self.db, inst["kind"])
+                api_base = getattr(connector, "api_base", None)
+                stamp = grant_stamp(inst, blob, api_base)
+                near_expiry = (
+                    ts.expires_at_epoch
+                    and ts.expires_at_epoch - time.time() < _REFRESH_SKEW_SECONDS
+                )
+                creds = await self.resolve_client_creds(inst["kind"]) if near_expiry and ts.refresh_token else None
             if near_expiry and ts.refresh_token:
                 provider = getattr(connector, "oauth", None)
                 if provider is None:
                     raise ConnectorTokenError(f"no provider for kind {inst['kind']!r}", kind="configuration", code="provider_missing")
-                creds = await self.resolve_client_creds(inst["kind"])
                 if creds is None:
                     raise ConnectorTokenError(
                         f"{inst['kind']} OAuth client is not configured", kind="configuration", code="client_missing"
                     )
+                secrets.append(creds[1])
                 try:
                     new_ts = await provider.refresh(
                         client_id=creds[0],
@@ -450,6 +564,7 @@ class ConnectorManager:
                 if new_ts.refresh_token is None:
                     new_ts.refresh_token = ts.refresh_token
                 ts = new_ts
+                secrets.extend(value for value in (ts.access_token, ts.refresh_token) if value)
                 blob = encrypt(_serialize_token_set(ts), secret_key)
                 await self._save_refresh_result(
                     installation_id,

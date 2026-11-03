@@ -96,6 +96,135 @@ async def _start(client, kind="fakekind", **body):
     )
 
 
+async def _create_custom(client, kind="linear", **overrides):
+    response = await client.post("/api/connectors/custom", json={
+        "kind": kind, "display_name": kind.title(), "authorize_url": "https://provider.test/authorize",
+        "token_url": "https://provider.test/token", "scopes": ["read"], "pkce": True,
+        "api_base": "https://provider.test/api", "client_id": "cid", "client_secret": "csec",
+        **overrides,
+    })
+    assert response.status_code == 201, response.text
+
+
+@pytest.mark.parametrize("stage", ["exchange", "identity"])
+@pytest.mark.parametrize("recreate", [False, True])
+async def test_deleted_custom_definition_rejects_original_callback(client, monkeypatch, stage, recreate):
+    from server.connectors.custom import CustomConnector, GenericOAuthProvider
+
+    await _create_custom(client)
+    started = await _start(client, "linear")
+    assert started.status_code == 201
+    login_id = started.json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def exchange(self, **kwargs):
+        if stage == "exchange":
+            entered.set()
+            await release.wait()
+        return OAuthTokenSet("old-access", "old-refresh", time.time() + 3600)
+
+    async def identity(self, token_set):
+        if stage == "identity":
+            entered.set()
+            await release.wait()
+        return "", "Original connection"
+
+    monkeypatch.setattr(GenericOAuthProvider, "exchange_code", exchange)
+    monkeypatch.setattr(CustomConnector, "fetch_external_identity", identity)
+    callback = asyncio.create_task(client.get("/api/connectors/oauth/callback", params={
+        "code": "original", "state": f"{login_id}:{login.state}",
+    }))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert (await client.delete("/api/connectors/custom/linear")).status_code == 204
+        if recreate:
+            await _create_custom(client)
+        release.set()
+        page = await asyncio.wait_for(callback, 3)
+        assert "Connection failed" in page.text
+        status = await client.get(f"/api/connectors/oauth/status/{login_id}")
+        assert status.json()["status"] == "error" and status.json()["installation_id"] is None
+        assert (await client.get("/api/connectors")).json() == []
+        db = connectors_mod._require_manager().db
+        async with db.transaction(write=False) as tx:
+            assert await tx.fetch_one("SELECT COUNT(*) FROM connector_installation_secrets") == (0,)
+    finally:
+        release.set()
+        await asyncio.gather(callback, return_exceptions=True)
+
+
+async def test_pending_login_keeps_definition_from_before_client_configuration_read(client, monkeypatch):
+    from server.connectors.custom import GenericOAuthProvider
+
+    await _create_custom(client)
+    db = connectors_mod._require_manager().db
+    execute, commit = db.conn.execute, db.conn.commit
+    entered, release = asyncio.Event(), asyncio.Event()
+    reading_client = False
+
+    async def gated_execute(sql, parameters=()):
+        nonlocal reading_client
+        cursor = await execute(sql, parameters)
+        if "FROM connector_oauth_clients WHERE kind = ?" in sql and not entered.is_set():
+            reading_client = True
+        return cursor
+
+    async def gated_commit():
+        if reading_client and not entered.is_set():
+            entered.set()
+            await release.wait()
+        await commit()
+
+    async def exchange(self, **kwargs):
+        return OAuthTokenSet("old-access", "old-refresh", time.time() + 3600)
+
+    monkeypatch.setattr(GenericOAuthProvider, "exchange_code", exchange)
+    with monkeypatch.context() as patch:
+        patch.setattr(db.conn, "execute", gated_execute)
+        patch.setattr(db.conn, "commit", gated_commit)
+        starting = asyncio.create_task(_start(client, "linear"))
+        deleting = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            deleting = asyncio.create_task(client.delete("/api/connectors/custom/linear"))
+            await asyncio.sleep(0)
+            release.set()
+            started, deleted = await asyncio.gather(starting, deleting)
+            assert started.status_code == 201 and deleted.status_code == 204
+        finally:
+            release.set()
+            await asyncio.gather(starting, *([deleting] if deleting else []), return_exceptions=True)
+    await _create_custom(client)
+    login_id = started.json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    page = await client.get("/api/connectors/oauth/callback", params={"code": "old", "state": f"{login_id}:{login.state}"})
+    assert "Connection failed" in page.text
+    assert (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()["status"] == "error"
+    assert (await client.get("/api/connectors")).json() == []
+
+
+async def test_old_callback_cannot_send_rebuilt_client_credentials_to_original_endpoint(client, monkeypatch):
+    from server.connectors.custom import GenericOAuthProvider
+
+    await _create_custom(client)
+    started = await _start(client, "linear")
+    login_id = started.json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    assert (await client.delete("/api/connectors/custom/linear")).status_code == 204
+    await _create_custom(client, token_url="https://replacement.test/token", client_id="replacement-id", client_secret="replacement-secret")
+    calls = []
+
+    async def exchange(self, **kwargs):
+        calls.append((self.token_url, kwargs["client_id"], kwargs["client_secret"]))
+        return OAuthTokenSet("old-access", "old-refresh", time.time() + 3600)
+
+    monkeypatch.setattr(GenericOAuthProvider, "exchange_code", exchange)
+    page = await client.get("/api/connectors/oauth/callback", params={"code": "old", "state": f"{login_id}:{login.state}"})
+    assert "Connection failed" in page.text
+    assert calls == [], "A rejected old login must never send the replacement's secret to its old endpoint"
+
+
 async def _install(client, code="abc"):
     """Configure the OAuth client, then run the full OAuth flow."""
     await _configure(client)

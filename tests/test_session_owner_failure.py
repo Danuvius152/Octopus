@@ -171,7 +171,10 @@ async def test_owner_failure_ends_app_and_question_waits_without_replaying_input
             reply = await asyncio.wait_for(asking, 5)
             if delivery == "ask":
                 assert reply.status_code == 502, reply.text
-                assert "owner" in reply.json()["detail"].lower()
+                detail = reply.json()["detail"]
+                assert "owner" in detail["message"].lower()
+                assert detail["code"] == "reply_delivery_failed"
+                assert detail["request_id"] == request_id and detail["conversation_id"] == session_id
             else:
                 assert reply.status_code == 200, reply.text
                 assert reply.headers["content-type"].startswith("text/event-stream")
@@ -448,8 +451,8 @@ async def test_owner_failure_keeps_a_committed_result_while_its_notification_is_
     published_results = []
     broadcast = manager._broadcast
 
-    async def observe_actual_delivery(event, *, user_id=None):
-        await broadcast(event, user_id=user_id)
+    async def observe_actual_delivery(event, *, user_id=None, format_error=None):
+        await broadcast(event, user_id=user_id, format_error=format_error)
         if event["type"] == "result":
             delivered.set()
 

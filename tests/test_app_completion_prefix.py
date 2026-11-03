@@ -74,7 +74,7 @@ async def test_app_answer_waits_for_the_original_terminal_notification_prefix(
                 raise asyncio.CancelledError("The original App terminal subscriber was cancelled.")
 
     # Register after App: its own result handler has run when this gate holds.
-    manager.on_broadcast("hold-app-terminal-tail", hold_original_terminal)
+    manager.on_broadcast("hold-app-terminal-tail", hold_original_terminal, required=True)
     asking = asyncio.create_task(app_agent.ask(application, message="Return the complete reply."))
     try:
         if cancelled_terminal:

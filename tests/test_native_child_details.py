@@ -43,7 +43,7 @@ async def test_spawn_reference_binds_its_original_child_round_and_survives_retir
     run = session._run.backend
     spawn = {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
         "id": "spawn", "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "completed",
-        "receiverThreadIds": ["child"], "agentsStates": {}, "prompt": "Inspect the file"}}}
+        "senderThreadId": ROOT, "receiverThreadIds": ["child"], "agentsStates": {}, "prompt": "Inspect the file"}}}
     inject(tmp_path, spawn)
     await until(lambda: bool(session._subagents))
     rows = await database.load_messages(session.id)
@@ -82,7 +82,8 @@ async def test_detail_pages_keep_tool_call_and_result_and_reject_other_work_curs
     await start_output(native_runtime)
     def command(phase):
         return {"method": f"item/{phase}", "params": {"threadId": "child", "turnId": "child-turn", "item": {
-            "id": "command", "type": "commandExecution", "command": "true", "status": "completed", "aggregatedOutput": "Saved output", "exitCode": 0}}}
+            "id": "command", "type": "commandExecution", "command": "true", "cwd": str(tmp_path), "commandActions": [],
+            "status": "completed", "aggregatedOutput": "Saved output", "exitCode": 0}}}
     inject(tmp_path, child_start(), command("started"), command("completed"),
            item("child", "child-turn", "answer", "Saved partial"),
            child_start("other", "other-turn"), item("other", "other-turn", "answer", "Private other work"), terminal())

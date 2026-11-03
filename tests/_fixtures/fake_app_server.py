@@ -2,11 +2,15 @@
 
 import json
 import os
+import runpy
 import select
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+# Peers may be embedded with runpy from a different script directory.
+read_frames = runpy.run_path(str(Path(__file__).with_name("jsonl_frames.py")))["read_frames"]
 
 root, mode = Path(sys.argv[1]), sys.argv[2]
 history = root / "native-history.jsonl"
@@ -70,17 +74,20 @@ def frames():
     buffered = b""
     offset = root / "native-injection-offset"
     injected = int(offset.read_text()) if offset.exists() and (root / "native-injections.jsonl").exists() else 0
+
+    def deliver_injections(*, finished=False):
+        nonlocal injected
+        values = read_frames(root / "native-injections.jsonl", finished=finished)
+        for value in values[injected:]:
+            send(value)
+        injected = len(values)
+        offset.write_text(str(injected))
+
     while True:
         if pending_clean and (root / "native-clean-release").exists():
             pending_clean = False
             background_completed()
-        injections = root / "native-injections.jsonl"
-        if injections.exists():
-            values = injections.read_text().splitlines()
-            for value in values[injected:]:
-                send(json.loads(value))
-            injected = len(values)
-            offset.write_text(str(injected))
+        deliver_injections()
         if gated_steer is not None and (root / "native-release-ack").exists():
             identifier, target = gated_steer
             gated_steer = None
@@ -94,6 +101,9 @@ def frames():
                 continue
             chunk = os.read(sys.stdin.fileno(), 65536)
             if not chunk:
+                # Closing the controlling input also ends the injection writer.
+                # A live snapshot's suffix is legal; a final suffix is damage.
+                deliver_injections(finished=True)
                 if created_fork is not None and mode.startswith("fork_untrusted_"):
                     identifier, cwd = created_fork
                     (Path(cwd) / "unexpected-native-work.txt").write_text("Retain this unexpected effect\n")

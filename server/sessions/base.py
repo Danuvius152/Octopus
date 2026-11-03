@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from ..config import settings
 from ..credential_use import CredentialUse
 from ..database import Database
+from ..diagnostics import exception_diagnostic
 from ..harness import (
     HarnessCredential,
     HarnessEvent,
@@ -711,8 +712,8 @@ class SessionManagerBase:
         self._closed_agents: set[str] = set()
         self._agent_operations: dict[str | None, set[asyncio.Future[None]]] = {}
         self._agent_archive_tasks: dict[str, asyncio.Task[None]] = {}
-        # key -> (callback, subscriber user_id or None for internal)
-        self._broadcast_callbacks: dict[str, tuple[Callable, str | None]] = {}
+        # Audience and delivery responsibility are independent registration facts.
+        self._broadcast_callbacks: dict[str, tuple[Callable, str | None, bool]] = {}
         # Business observers receive the same completion value as the receipt;
         # subscriber delivery is an independent fact in that value.
         self._completion_callbacks: dict[str, Callable[[str, RequestCompletion], Coroutine[Any, Any, None]]] = {}
@@ -806,7 +807,7 @@ class SessionManagerBase:
         await self._recover_incomplete_forks()
 
     def on_broadcast(
-        self, key: str, callback: Callable, user_id: str | None = None
+        self, key: str, callback: Callable, user_id: str | None = None, *, required: bool = False,
     ) -> None:
         """Subscribe to the bus.
 
@@ -815,8 +816,11 @@ class SessionManagerBase:
         their job is to react to other people's sessions on the server's
         behalf. A browser connection passes its account and sees only that
         account's frames (multi-tenancy.md §7).
+
+        Required business consumers participate in publication completion;
+        observer failures are logged without invalidating another consumer.
         """
-        self._broadcast_callbacks[key] = (callback, user_id)
+        self._broadcast_callbacks[key] = (callback, user_id, required)
 
     def remove_broadcast(self, key: str) -> None:
         self._broadcast_callbacks.pop(key, None)
@@ -844,7 +848,10 @@ class SessionManagerBase:
                 return session.user_id
         return None
 
-    async def _broadcast(self, message: dict, *, user_id: str | None = None) -> None:
+    async def _broadcast(
+        self, message: dict, *, user_id: str | None = None,
+        format_error: Callable[[BaseException], str] | None = None,
+    ) -> None:
         """Deliver to the subscribers entitled to see it.
 
         Before accounts this was a fan-out to every callback, which with
@@ -854,7 +861,7 @@ class SessionManagerBase:
         """
         audience = self._audience(message, user_id)
         sid = message.get("session_id") or message.get("old_session_id")
-        for cb, subscriber in list(self._broadcast_callbacks.values()):
+        for cb, subscriber, required in list(self._broadcast_callbacks.values()):
             if subscriber is not None and audience is None and isinstance(sid, str):
                 # An await in an earlier callback can cross account adoption.
                 # Unknown session ownership never becomes install-wide access.
@@ -865,10 +872,23 @@ class SessionManagerBase:
                         continue
             if subscriber is not None and audience is not None and subscriber != audience:
                 continue
+            caller = asyncio.current_task()
+            cancellations = caller.cancelling() if caller is not None else 0
             try:
                 await cb(message)
-            except Exception:
-                logger.exception("Broadcast callback error")
+            except (asyncio.CancelledError, Exception) as error:
+                # A subscriber's cancellation is a delivery fact. A new cancel
+                # of the task invoking this bus still belongs to its original
+                # operation (for example Research shutdown), not the observer.
+                if (isinstance(error, asyncio.CancelledError) and caller is not None
+                        and caller.cancelling() > cancellations):
+                    raise
+                if required:
+                    raise
+                else:
+                    detail = (format_error(error) if format_error is not None else
+                              exception_diagnostic(error, secrets=(settings.auth_token,)))
+                    logger.error("Broadcast observer error\n%s", detail)
 
     def list_sessions(self, user_id: str | None = None) -> list[Session]:
         """Every live session, or only one account's (multi-tenancy.md §5).

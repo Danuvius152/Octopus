@@ -122,7 +122,7 @@ class ResearchManager:
         self._job_sem = asyncio.Semaphore(max(1, settings.research_max_concurrent_jobs))
         self._closing = False
         self._shutdown_tasks = None
-        session_mgr.on_broadcast("research.delivery", self._on_delivery_progress)
+        session_mgr.on_broadcast("research.delivery", self._on_delivery_progress, required=False)
 
     def _register_task(self, key: str, task: asyncio.Task, *, on_retired: Callable[[], None] | None = None) -> None:
         """One owner for pipeline and delivery work, retaining failed teardown."""

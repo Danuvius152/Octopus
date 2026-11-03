@@ -26,6 +26,7 @@ from ..oauth_providers import OAuthTokenSet
 
 if TYPE_CHECKING:
     from ..connector_manager import ConnectorManager, PreparedInstallation
+    from .base import ConnectorBase
 
 # --- PKCE / state helpers (RFC 7636) --------------------------------------
 
@@ -105,7 +106,7 @@ class ConnectorLoginState(str, Enum):
 @dataclass
 class PendingLogin:
     login_id: str
-    kind: str
+    connector: ConnectorBase
     redirect_uri: str
     authorize_url: str
     state: str = ""  # raw CSRF state (the random half of the composite)
@@ -121,6 +122,10 @@ class PendingLogin:
     created_at: float = field(default=0.0, repr=False)
     finished_at: float | None = field(default=None, repr=False)
     binding_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    @property
+    def kind(self) -> str:
+        return self.connector.kind
 
 
 _LOGIN_TTL_SECONDS = 15 * 60
@@ -152,13 +157,14 @@ class ConnectorLoginManager:
     def start(
         self,
         *,
-        provider: ConnectorOAuthProvider,
+        connector: ConnectorBase,
         client_id: str,
         redirect_uri: str,
         requested_label: str | None = None,
         user_id: str | None = None,
     ) -> PendingLogin:
         self._gc()
+        provider = connector.oauth
         login_id = _b64url(secrets.token_bytes(9))  # 12 url-safe chars
         raw_state = gen_state()
         verifier = gen_verifier() if provider.pkce else None
@@ -171,7 +177,7 @@ class ConnectorLoginManager:
         )
         pl = PendingLogin(
             login_id=login_id,
-            kind=provider.kind,
+            connector=connector,
             redirect_uri=redirect_uri,
             authorize_url=authorize_url,
             state=raw_state,
@@ -238,7 +244,7 @@ class ConnectorLoginManager:
         if pl.status != ConnectorLoginState.processing:
             raise ConnectorLoginError(f"Connection is {pl.status.value}")
         prepared = await manager.prepare_install(
-            kind=pl.kind, token_set=token_set, requested_label=pl.requested_label, user_id=pl.user_id,
+            connector=pl.connector, token_set=token_set, requested_label=pl.requested_label, user_id=pl.user_id,
         )
         return await complete_cleanup(self._bind_install(pl, manager, prepared))
 

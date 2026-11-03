@@ -92,7 +92,7 @@ async def notification_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
     monkeypatch.setattr(manager, "start_message", observe_submission)
     manager.on_broadcast("observe-original-delegation", observe)
-    manager.on_broadcast("fail-original-delegation-question", fail_original_question)
+    manager.on_broadcast("fail-original-delegation-question", fail_original_question, required=True)
     delegations = DelegationManager()
     delegations.bind(manager, database)
     try:

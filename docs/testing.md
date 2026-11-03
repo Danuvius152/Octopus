@@ -223,6 +223,22 @@ evidence under the reuse policy above.
 - `tests/native_app_server.py` keeps its function-scoped runtime, original Manager,
   SQLite database and cleanup together. `tests/session_runtime.py` owns shared
   dispatcher observations. Import support modules directly, not case modules.
+- `tests/_fixtures/jsonl_frames.py` splits snapshots on byte newlines before UTF-8
+  decoding or JSON parsing. Both the fake peer's injection reader and the wire
+  observer retain an active writer's suffix for later snapshots. Only explicit
+  writer completion rejects an unfinished suffix; complete bad encoding/JSON
+  still fails immediately. The peer's final EOF snapshot delivers newly completed
+  frames and advances the same offset, rather than only validating them.
+  `tests/test_native_protocol_framing.py` controls real append writes and peer
+  subprocess/RPC/pipe barriers, including split UTF-8, multiple frames, exactly-once
+  delivery and EOF, without sleeps or broader timeouts.
+  The chunked-input assertions failed on baseline `07240d1b8fd1` and pass with
+  the shared reader. Evidence was obtained on 2026-11-04 with Python 3.14.4,
+  pytest 9.1.1 on this Linux/WSL installation, using the repository's pinned 0.166
+  schema/peer fixtures and `constraints-python.txt` dependency closure. It uses
+  the hermetic selection without transport overrides or model calls. Reuse
+  requires the same source, dependencies and fixture settings.
+  This proves fixture framing, not native work identity or a product protocol fix.
 - `tests/session_fork_support.py` owns the function-scoped fork source, SQLite
   and HTTP fixture; `tests/session_held_process.py` owns the original live
   process, readers and their teardown for rewind and failed-Owner tests.

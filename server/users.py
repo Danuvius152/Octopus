@@ -340,20 +340,33 @@ class UserManager:
         if user is None:
             raise UserError("No such user", status_code=404)
         validate_password(password, username=user["username"])
-        return await self.db.change_password(
+        revoked = await self.db.change_password(
             user_id, hash_password(password), at=_now(), keep=keep_token_hash
         )
+        if revoked is None:
+            raise UserError("No such user", status_code=404)
+        return revoked
+
+    async def change_own_password(
+        self, verified_user: dict[str, Any], password: str, *, keep_token_hash: str | None = None,
+    ) -> int:
+        """Spend the exact entry password proof while the account is available.
+
+        Later bearer revocation does not withdraw an admitted request. The
+        exclusion below only spares a bearer; it never clears a revocation.
+        """
+        validate_password(password, username=verified_user["username"])
+        revoked = await self.db.change_password(
+            verified_user["id"], hash_password(password), at=_now(), keep=keep_token_hash,
+            expected_password_hash=verified_user["password_hash"],
+        )
+        if revoked is None:
+            raise UserError("Password proof is no longer current or account is unavailable", status_code=409)
+        return revoked
 
     async def set_disabled(self, user_id: str, disabled: bool) -> None:
-        user = await self.db.get_user(user_id)
-        if user is None:
+        if not await self.db.set_user_disabled(user_id, at=_now() if disabled else None):
             raise UserError("No such user", status_code=404)
-        await self.db.update_user_field(
-            user_id, disabled_at=_now() if disabled else None
-        )
-        if disabled:
-            # Disabling has to take effect now, not when the token expires.
-            await self.db.revoke_all_tokens(user_id, at=_now())
 
     # -- bearers ------------------------------------------------------------
 
@@ -368,7 +381,7 @@ class UserManager:
         expires = (
             (datetime.now(UTC) + SESSION_TTL).isoformat() if kind == "session" else None
         )
-        await self.db.store_token(
+        issued = await self.db.store_token(
             token_hash=token_digest(token),
             user_id=user_id,
             kind=kind,
@@ -376,6 +389,8 @@ class UserManager:
             expires_at=expires,
             label=label,
         )
+        if not issued:
+            raise UserError("This account is unavailable", status_code=403)
         return token
 
     async def resolve_token(self, token: str, *, touch: bool = True) -> dict[str, Any] | None:

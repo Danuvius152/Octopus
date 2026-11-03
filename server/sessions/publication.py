@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 _MAX_PUBLICATIONS = 256
@@ -39,9 +40,11 @@ class SessionPublisher:
 
     def __init__(
         self, broadcast: Callable[..., Awaitable[None]], wake_owner: Callable[[], None],
+        format_error: Callable[[object | None, BaseException], str],
     ) -> None:
         self._broadcast = broadcast
         self._wake_owner = wake_owner
+        self._format_error = format_error
         self._entries: deque[tuple[Publication, int]] = deque()
         self._bytes = 0
         self._wake = asyncio.Event()
@@ -112,7 +115,8 @@ class SessionPublisher:
                 await self._wake.wait()
                 continue
             try:
-                await self._broadcast(publication.event, user_id=publication.audience)
+                await self._broadcast(publication.event, user_id=publication.audience,
+                                      format_error=partial(self._format_error, publication.marker))
             except (asyncio.CancelledError, Exception) as error:
                 publication.error = error
             else:

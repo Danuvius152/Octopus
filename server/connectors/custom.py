@@ -135,6 +135,8 @@ class CustomConnector(ConnectorBase):
     is_custom = True
 
     def __init__(self, row: dict[str, Any]) -> None:
+        # Attached by the live ConnectorManager, never reconstructed from slug.
+        self.definition_identity: object | None = None
         self.kind = row["kind"]
         self.display_name = row["display_name"]
         self.api_base = str(row["api_base"]).rstrip("/")

@@ -10,6 +10,7 @@ alive.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -223,7 +224,8 @@ class TestTokens:
 
 
 @pytest.mark.parametrize("interruption", ["password", "commit", "revoke_failure"])
-async def test_password_change_has_one_durable_outcome(tmp_path, monkeypatch, interruption):
+@pytest.mark.parametrize("authority", ["admin", "self"])
+async def test_password_change_has_one_durable_outcome(tmp_path, monkeypatch, interruption, authority):
     path = tmp_path / "password.db"
     db = Database(str(path))
     await db.initialize()
@@ -231,14 +233,19 @@ async def test_password_change_has_one_durable_outcome(tmp_path, monkeypatch, in
     user = await mgr.create_user(username="archer", password="password1")
     here = await mgr.issue_token(user["id"])
     elsewhere = await mgr.issue_token(user["id"])
+    proof = await mgr.authenticate("archer", "password1")
+    if interruption == "revoke_failure":
+        await db.conn.execute(
+            "CREATE TRIGGER refuse_password_revocation BEFORE UPDATE OF revoked_at ON auth_tokens "
+            "BEGIN SELECT RAISE(ABORT, 'revocation rejected'); END"
+        )
+        await db.conn.commit()
     entered, release = asyncio.Event(), asyncio.Event()
     execute, commit = db.conn.execute, db.conn.commit
     password_written = False
 
     async def interrupted_execute(sql, parameters=()):
         nonlocal password_written
-        if sql.startswith("UPDATE auth_tokens SET revoked_at") and interruption == "revoke_failure":
-            raise RuntimeError("revocation rejected")
         cursor = await execute(sql, parameters)
         if sql.startswith("UPDATE users SET password_hash"):
             password_written = True
@@ -256,11 +263,14 @@ async def test_password_change_has_one_durable_outcome(tmp_path, monkeypatch, in
     with monkeypatch.context() as patch:
         patch.setattr(db.conn, "execute", interrupted_execute)
         patch.setattr(db.conn, "commit", interrupted_commit)
-        changing = asyncio.create_task(mgr.set_password(
-            user["id"], "a-better-password", keep_token_hash=token_digest(here)
-        ))
+        operation = (
+            mgr.change_own_password(proof, "a-better-password", keep_token_hash=token_digest(here))
+            if authority == "self" else
+            mgr.set_password(user["id"], "a-better-password", keep_token_hash=token_digest(here))
+        )
+        changing = asyncio.create_task(operation)
         if interruption == "revoke_failure":
-            with pytest.raises(RuntimeError, match="revocation rejected"):
+            with pytest.raises(sqlite3.IntegrityError, match="revocation rejected"):
                 await changing
         else:
             await asyncio.wait_for(entered.wait(), 1)

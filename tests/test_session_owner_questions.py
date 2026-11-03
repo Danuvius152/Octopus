@@ -273,7 +273,7 @@ async def test_http_question_prefix_precedes_the_original_success_receipt(
         if event.get("type") == "result" and failed_terminal:
             raise asyncio.CancelledError("The original terminal subscriber could not finish.")
 
-    manager.on_broadcast("hold-http-question-prefix", hold_original_prefix)
+    manager.on_broadcast("hold-http-question-prefix", hold_original_prefix, required=True)
     receipt = await manager.start_message(session.id, "Ask before continuing", work_id="original-question-work")
     waiting = asyncio.create_task(receipt.wait())
     polling = None

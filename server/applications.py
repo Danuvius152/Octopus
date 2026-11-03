@@ -340,7 +340,7 @@ class ApplicationManager:
         self.session_mgr = session_mgr
         self.db = db
         db.add_close_hook(self._join_deletions)
-        session_mgr.on_broadcast(self.BROADCAST_KEY, self._on_broadcast)
+        session_mgr.on_broadcast(self.BROADCAST_KEY, self._on_broadcast, required=False)
         session_mgr.on_request_complete(self.BROADCAST_KEY, self._on_completion)
 
     def shutdown(self) -> None:

@@ -307,7 +307,7 @@ async def test_runtime_publication_failure_uses_its_original_credential(question
         if event.get("session_id") == session.id and event.get("type") == "assistant_text":
             raise failure from cause
 
-    manager.on_broadcast("original-publication-failure", cancel_original_publication)
+    manager.on_broadcast("original-publication-failure", cancel_original_publication, required=True)
     prompt = "Keep this original input and its committed result when publication fails."
     with caplog.at_level(logging.ERROR, logger="server"):
         receipt = await manager.start_message(session.id, prompt)
