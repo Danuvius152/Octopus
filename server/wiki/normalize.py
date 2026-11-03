@@ -6,7 +6,7 @@ from . import format, material_proof, operations
 from .formats import require_markdown_maintenance
 from .references import path_uri
 from .sections import top_offset
-from .store import WikiError
+from .store import WikiError, read_document_bytes
 
 
 def organize(curation, path, expected_revision, key_note, tags, aliases, relations, sources, actor, reason, fields, task=None, item_doc=None, reuse=False):
@@ -20,7 +20,7 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
         require_markdown_maintenance(source["path"])
         destination = path
         try:
-            text = store.path(path).read_bytes().decode("utf-8")
+            text = read_document_bytes(store.path(path), label=path).decode("utf-8")
         except UnicodeError as exc:
             raise WikiError("Non-UTF-8 originals require encoding review", 422) from exc
         output_revision = expected_revision

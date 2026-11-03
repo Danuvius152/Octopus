@@ -1,7 +1,6 @@
 """History restores validate retained bytes without trusting later blob reads."""
 
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -49,17 +48,16 @@ def test_restore_uses_verified_bytes_when_the_blob_is_replaced_after_read(histor
     document = history.store.read("note.md")
     retained = history.blobs / original["revision"]
     replacement = history.state / "replacement-blob"
-    read_bytes = Path.read_bytes
 
-    def replace_after_read(path):
-        raw = read_bytes(path)
+    def replace_after_read(path, raw):
         if path == retained:
             replacement.write_bytes(b"# Forged\nReplaced after the read.\n")
             replacement.replace(retained)
-        return raw
 
     with monkeypatch.context() as boundary:
-        boundary.setattr(Path, "read_bytes", replace_after_read)
+        from tests.byte_reads import observe_byte_reads
+
+        observe_byte_reads(boundary, after=replace_after_read)
         restored = history.restore(original["change_id"], current["revision"], "after", "human")
 
     assert history.store.path("note.md").read_bytes() == b"# Original\nTrusted words.\n"

@@ -104,6 +104,51 @@ allow/deny policies remain unsupported. Its argv builder rejects ordinary
 conversation use. One-shots keep the tool-free text worker. Neither is a
 fallback for a failed or unknown ordinary request.
 
+### Native MCP configuration
+
+Ordinary App Server inherits the selected credential home's and trusted project's
+native MCP configuration. `_mcp_config_args` supplies per-invocation fields for
+the selected Octopus namespaces without rewriting either file. Native extra
+namespaces may remain discoverable. Same-namespace tables merge recursively;
+an inline namespace table or `mcp_servers={}` is not a reliable replacement.
+
+Before thread start/resume and business input, `config/read(includeLayers=true)`
+checks active native layers against the actual rendered invocation paths.
+Residual transport, identity or tool-set fields such as another transport's
+command/URL, native headers/environment, disabling or filtering selected tools
+produce an actionable preparation failure: rename or remove the conflicting
+native entry, then retry. Native lifecycle policy, including startup/tool
+timeouts, remains native. Default-equivalent enablement, local environment and
+empty deny/environment-forwarding lists are allowed, using effective native
+values where available. Disabled layers are ignored. A native config error
+identifying a selected namespace receives the same conflict diagnosis.
+The guard is a conflict check, not a native configuration parser or a general
+tool allowlist; current tool endpoints still own authorization.
+
+Research's empty MCP table means no Octopus injection; native extra MCP can still
+be visible in the fixed CLI. The leaf remains read-only with no ordinary history
+resume/fork. Claude strict config and the tool-free text API worker have their
+own [mode boundaries](harness-layer.md#instruction-assembly).
+The [0.166.0 observations](../reference/runtime-resource-boundaries-20261103.md#mcp-configuration-and-discovery)
+cover thread-scoped discovery, residual authentication fields and two identities
+using the same native home without config writes.
+
+### Controller history cost
+
+`_latest_checkpoint` scans the active history segment line by line in
+`asyncio.to_thread`; it does not synchronously read the whole file on the event
+loop. Compacted replacement history can still contain a large JSON line.
+Controller, rollback and thread checks remain authoritative on every resume;
+there is no persistent sidecar or mtime/size cache.
+
+The [bounded experiment](../reference/runtime-resource-boundaries-20261103.md#controller-scan-and-native-preparation)
+found no scan bottleneck requiring a cache in its ordinary 1–256 MiB samples.
+Native preparation reached the before-business boundary for 1–50 MiB; 256 MiB
+native resume exceeded the experiment's 512 MiB RSS stop and is not validated at
+that scale. The 20-second RPC timeout is per RPC, not an overall preparation SLA.
+These results do not establish production recovery latency or arbitrary large
+compacted-line safety.
+
 ### Root completion and selected answer
 
 Only the accepted root's real terminal supplies a provider candidate. A final

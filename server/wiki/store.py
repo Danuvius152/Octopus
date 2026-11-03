@@ -36,6 +36,8 @@ from .extract import HTML_BODY_VERSION, SUPPORTED, extract
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
 from .line_coordinates import LineCoordinates
 
+MAX_DOCUMENT_BYTES = 256 * 1024
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -47,6 +49,35 @@ class WikiError(Exception):
         super().__init__(message)
         self.status = status
         self.response = response or {}
+
+
+class DocumentTooLarge(WikiError):
+    def __init__(self, path: str) -> None:
+        super().__init__(
+            f"Wiki text exceeds the {MAX_DOCUMENT_BYTES}-byte document limit: {path}. "
+            "Split the document into smaller files; existing bytes and index are retained.",
+            413, response={"code": "document_too_large", "path": path, "limit_bytes": MAX_DOCUMENT_BYTES},
+        )
+
+
+def require_document_bytes(raw: bytes, path: str) -> bytes:
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        raise DocumentTooLarge(path)
+    return raw
+
+
+def read_document_bytes(path: Path, *, label: str | None = None) -> bytes:
+    """One original handle, bounded even after a zero-size stat or growth."""
+    with path.open("rb") as handle:
+        if os.fstat(handle.fileno()).st_size > MAX_DOCUMENT_BYTES:
+            raise DocumentTooLarge(label or path.name)
+        return require_document_bytes(handle.read(MAX_DOCUMENT_BYTES + 1), label or path.name)
+
+
+def file_revision(path: Path) -> str:
+    """Integrity evidence may hash an oversized original without parsing it."""
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 @dataclass(eq=False)
@@ -672,6 +703,36 @@ class WikiStore:
             db.execute("UPDATE wiki_edges SET status='missing' WHERE target_doc IN (SELECT id FROM document_identities WHERE path IS NULL)")
         db.execute("DELETE FROM managed_notes WHERE path=?", (relative,))
 
+    def record_resource_error(
+        self, db: sqlite3.Connection, relative: str, error: DocumentTooLarge,
+        *, stat: os.stat_result | None = None, finalize: bool = True,
+    ) -> sqlite3.Row:
+        """Retain the last usable projection; no new content revision is known."""
+        stat = stat or self.path(relative).stat()
+        doc_id = self.identity(db, relative, stat)
+        existing = db.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+        metadata = json.loads(existing["metadata"]) if existing is not None else {}
+        metadata |= {"resource_error": "document_too_large", "error": str(error)}
+        signature = f"{stat.st_mtime_ns}:{stat.st_size}:v3"
+        if (existing is not None and existing["quality"] == "error" and existing["signature"] == signature
+                and existing["metadata"] == json.dumps(metadata, ensure_ascii=False)):
+            return existing
+        if existing is not None:
+            db.execute("UPDATE documents SET quality='error',metadata=?,signature=? WHERE id=?",
+                       (json.dumps(metadata, ensure_ascii=False), signature, doc_id))
+        else:
+            db.execute("INSERT INTO documents VALUES(?,?,?,?,'original','','[]','error',?,?)",
+                       (doc_id, relative, "", Path(relative).stem, json.dumps(metadata, ensure_ascii=False), signature))
+            row = db.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+            catalog.index(db, row, metadata)
+            search_index.index(db, row, metadata)
+        db.execute("UPDATE index_state SET epoch=epoch+1 WHERE singleton=1")
+        if finalize:
+            catalog.finish(db)
+        row = db.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+        assert row is not None
+        return row
+
     def _index(self, db: sqlite3.Connection, relative: str, *, raw: bytes | None = None, finalize: bool = True, source_policy=None, prepared=None) -> sqlite3.Row:
         path = self.path(relative)
         if not path.is_file() or path.suffix.lower() not in SUPPORTED:
@@ -679,8 +740,15 @@ class WikiStore:
         stat = path.stat()
         # Excluded PDFs are navigation assets: never load attachment bytes to
         # update the index after an unrelated text save.
-        if raw is None:
-            raw = b"" if path.suffix.lower() == ".pdf" else path.read_bytes()
+        if path.suffix.lower() == ".pdf":
+            raw = b""
+        else:
+            try:
+                if stat.st_size > MAX_DOCUMENT_BYTES:
+                    raise DocumentTooLarge(relative)
+                raw = read_document_bytes(path, label=relative) if raw is None else require_document_bytes(raw, relative)
+            except DocumentTooLarge as error:
+                return self.record_resource_error(db, relative, error, stat=stat, finalize=finalize)
         digest = revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode()) if path.suffix.lower() == ".pdf" else revision(raw)
         doc_id = self.identity(db, relative, stat)
         from . import origins
@@ -706,6 +774,7 @@ class WikiStore:
             and
             existing is not None
             and existing["id"] == doc_id
+            and not previous_metadata.get("resource_error")
             and existing["signature"]
             and existing["revision"] == digest
             and previous_metadata.get("pipeline_version")
@@ -872,6 +941,12 @@ class WikiStore:
         from .history import WikiHistory
 
         with WikiHistory(self).locked():
+            self.refresh()
+            with self.connect() as db:
+                blocked = [row[0] for row in db.execute(
+                    "SELECT path FROM documents WHERE json_extract(metadata,'$.resource_error') IS NOT NULL ORDER BY path LIMIT 5")]
+            if blocked:
+                raise WikiError("Search rebuild retained existing indexes; split oversized documents first: " + ", ".join(blocked), 409)
             with self.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
                 db.execute("DROP TRIGGER IF EXISTS search_section_delete")
@@ -911,8 +986,12 @@ class WikiStore:
         metadata = json.loads(row["metadata"])
         from .sections import managed_metadata
 
+        if metadata.get("resource_error"):
+            raise DocumentTooLarge(row["path"])
         if raw is None:
-            raw = b"" if Path(row["path"]).suffix.lower() == ".pdf" else self.path(row["path"]).read_bytes()
+            raw = b"" if Path(row["path"]).suffix.lower() == ".pdf" else read_document_bytes(self.path(row["path"]), label=row["path"])
+        elif Path(row["path"]).suffix.lower() != ".pdf":
+            require_document_bytes(raw, row["path"])
         managed, stale = managed_metadata(self, row["path"], raw, db=db)
         native_fields = {field: metadata.get(field, []) for field in ("tags", "aliases")}
         metadata |= managed
@@ -940,7 +1019,10 @@ class WikiStore:
                             f"{stat.st_mtime_ns}:{stat.st_size}:v3"
                             != source["signature"]
                         ):
-                            current = revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode()) if file.suffix.lower() == ".pdf" else revision(file.read_bytes())
+                            current = revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode()) if file.suffix.lower() == ".pdf" else revision(read_document_bytes(file, label=source["path"]))
+                    except DocumentTooLarge:
+                        current = None
+                        ref["resource_error"] = "document_too_large"
                     except (OSError, WikiError):
                         current = None
                 if source:
@@ -948,11 +1030,14 @@ class WikiStore:
                     for original in metadata.get("sources", []):
                         if original.get("doc") == source_id:
                             original["path"] = source["path"]
-                ref["status"] = source_confirmations.status(ref["status"], ref.get("revision"), current,
-                    ref if "confirmed_revision" in ref else None)
+                if ref.get("resource_error"):
+                    ref["status"], current = "version_unknown", None
+                else:
+                    ref["status"] = source_confirmations.status(ref["status"], ref.get("revision"), current,
+                        ref if "confirmed_revision" in ref else None)
+                ref["current_revision"] = current
                 if source_confirmations.is_stale(ref):
                     stale = True
-                ref["current_revision"] = current
         return {
             k: row[k] for k in ("id", "path", "revision", "title", "kind", "quality")
         } | {
@@ -966,10 +1051,11 @@ class WikiStore:
         """Index-only projection; it does not grant a content read receipt."""
         with self.connect() if db is None else contextlib.nullcontext(db) as connection:
             refs = catalog.dependencies(connection, row["id"])
+        metadata = self.indexed_metadata(row, db=db)
         return {key: row[key] for key in ("id", "path", "revision", "title", "kind", "quality")} | {
-            "metadata": self.indexed_metadata(row, db=db) | {"source_refs": refs},
+            "metadata": metadata | {"source_refs": refs},
             "pages": json.loads(row["pages"]), "characters": len(row["text"]),
-            "stale": any(source_confirmations.is_stale(ref) for ref in refs),
+            "stale": bool(metadata.get("resource_error")) or any(source_confirmations.is_stale(ref) for ref in refs),
             "freshness": "indexed",
         }
 
@@ -1120,8 +1206,10 @@ class WikiStore:
                 if not self.root.is_dir():
                     raise WikiError("Vault unavailable; existing index retained", 503)
                 raise WikiError("Document not found", 404)
-            raw = b"" if file.suffix.lower() == ".pdf" else file.read_bytes()
+            raw = b"" if file.suffix.lower() == ".pdf" else read_document_bytes(file, label=relative)
             row = self._index(db, relative, raw=raw)
+            if json.loads(row["metadata"]).get("resource_error"):
+                raise DocumentTooLarge(relative)
             if identity is not None and row["id"] != identity["id"]:
                 raise WikiError("Document identity changed during read", 409)
             if expected_revision and expected_revision != row["revision"]:

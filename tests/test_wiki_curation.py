@@ -1,6 +1,7 @@
 """Content decisions, evidence gates, aliases and current link destinations."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from server.wiki.sections import original_text
 from server.wiki.tasks import tasks
 from server.wiki.workflow import BOOTSTRAP, guide, instructions, load_guide, view
 from tests import wiki_api as wiki_api
+from tests.byte_reads import observe_byte_reads
 
 client = wiki_api.client
 
@@ -109,6 +111,42 @@ async def test_new_link_paths_and_anchors_are_checked_against_current_candidate(
     assert "Keep [[old-missing]]." in (root / "Library/note.md").read_text()
     if not accepted:
         assert (root / "Library/note.md").read_text() == original
+
+
+async def test_oversized_anchor_target_is_refused_before_maintenance_effects(client, notes, monkeypatch):
+    from server.wiki import store as storage
+
+    root, _ = notes
+    current = await read(client, "Library/note.md")
+    original = (root / current["path"]).read_bytes()
+    source = root / "Library/source.md"
+    source.write_bytes(b"# Source\n\n## Evidence\n" + b"x" * 1024)
+    monkeypatch.setattr(storage, "MAX_DOCUMENT_BYTES", 1024)
+    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
+    store.refresh()
+    with store.connect() as db:
+        counts = [db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                  for table in ("changes", "operation_receipts", "job_publications")]
+    reads = []
+    read_text = Path.read_text
+
+    def observed_text(path, *args, **kwargs):
+        if path == source:
+            reads.append(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", observed_text)
+    observe_byte_reads(monkeypatch, before=lambda path: reads.append(path) if path == source else None)
+    result = await client.post("/api/wiki/organize", headers=client.headers, json={
+        "path": current["path"], "expected_revision": current["revision"],
+        "key_note": "See [[Library/source#Evidence]].", "reason": "anchor admission",
+    })
+    assert result.status_code == 413, result.text
+    assert not reads
+    assert (root / current["path"]).read_bytes() == original
+    with store.connect() as db:
+        assert [db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in ("changes", "operation_receipts", "job_publications")] == counts
 
 
 async def test_relation_requires_current_cited_read_and_keeps_old_note_read_only(client, notes):

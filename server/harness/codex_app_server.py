@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -133,13 +134,71 @@ def _provider_error_code(error: dict[str, Any]) -> str:
             "serverOverloaded": "server_overloaded"}.get(info if isinstance(info, str) else "", "native_turn_failed")
 
 
+def _mcp_conflict(keys: list[str]) -> NativeProtocolError:
+    return NativeProtocolError(
+        f"Codex native MCP configuration conflicts with Octopus injection: {', '.join(keys)}. "
+        "Rename or remove the conflicting native mcp_servers entry in the credential home or project config, "
+        "then retry. Octopus does not rewrite native configuration."
+    )
+
+
+def _check_mcp_layers(reply: dict[str, Any], overrides: list[str]) -> None:
+    # Inspect only residual fields that change the injected transport, identity
+    # or tool set. Native lifecycle policy (for example timeouts) stays native.
+    # Reuse rendered invocation paths; arrays replace and tables merge.
+    paths = {value.partition("=")[0] for value in overrides if value != "-c"}
+    namespaces = {path.split(".")[1] for path in paths}
+    effect_fields = {
+        "command", "args", "cwd", "url", "environment_id", "env", "env_vars",
+        "bearer_token", "bearer_token_env_var", "http_headers", "env_http_headers",
+        "http_headers_helper", "oauth", "enabled", "enabled_tools", "disabled_tools",
+    }
+    neutral = {"enabled": True, "environment_id": "local", "env_vars": [], "disabled_tools": []}
+    effective = reply.get("config", {}).get("mcp_servers", {})
+
+    def leaves(value: Any, prefix: str):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                yield from leaves(nested, f"{prefix}.{key}")
+        else:
+            yield prefix
+
+    conflicts = set()
+    for layer in reply.get("layers") or []:
+        if layer.get("disabledReason") or layer.get("name", {}).get("type") == "sessionFlags":
+            continue
+        entries = layer.get("config", {}).get("mcp_servers", {})
+        for key in namespaces & entries.keys():
+            for field, value in entries[key].items():
+                if field not in effect_fields:
+                    continue
+                current = effective.get(key, {}).get(field, value)
+                if field in neutral and current == neutral[field]:
+                    continue
+                for path in leaves(value, f"mcp_servers.{key}.{field}"):
+                    if not any(path == override or path.startswith(override + ".") for override in paths):
+                        conflicts.add(path)
+    if conflicts:
+        raise _mcp_conflict(sorted(conflicts))
+
+
 async def initialize_connection(io: HarnessRun, working_dir: str,
-                                request: Callable[..., Awaitable[dict[str, Any]]]) -> dict[str, Any]:
+                                request: Callable[..., Awaitable[dict[str, Any]]],
+                                mcp_overrides: list[str] | None = None) -> dict[str, Any]:
     """Shared native handshake and required configuration, without turn state."""
     await request("initialize", {"clientInfo": {"name": "octopus", "version": "1"},
                                   "capabilities": {"experimentalApi": True}})
     await io.write_control(b'{"method":"initialized"}\n')
-    config = (await request("config/read", {"includeLayers": True, "cwd": working_dir}))["config"]
+    try:
+        reply = await request("config/read", {"includeLayers": True, "cwd": working_dir})
+    except NativeRpcError as error:
+        selected = {value.partition("=")[0].split(".")[1] for value in mcp_overrides or [] if value != "-c"}
+        conflicts = selected & set(re.findall(r"mcp_servers\.([\w-]+)", str(error)))
+        if conflicts:
+            raise _mcp_conflict([f"mcp_servers.{key}" for key in sorted(conflicts)]) from error
+        raise
+    _check_mcp_layers(reply, mcp_overrides or [])
+    config = reply["config"]
     for key, expected in _REQUIRED_FEATURES.items():
         actual: Any = config
         for part in key.split("."):
@@ -546,7 +605,7 @@ class AppServerDriver(RunDriver):
         assert self._input is not None
         request_id = self._input.input_id
         try:
-            config = await initialize_connection(io, context.working_dir, self._request)
+            config = await initialize_connection(io, context.working_dir, self._request, _mcp_config_args(context))
             controller = controller_message(context.system_prompt)
             # Null product overrides select this invocation's native defaults,
             # rather than the settings persisted in the resumed history.

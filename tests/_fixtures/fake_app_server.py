@@ -147,6 +147,11 @@ for line in frames():
             "sleep_tool": False, "multi_agent": True, "multi_agent_v2": {"enabled": True, "wait_agent_enabled": True}}}}
         if (root / "native-config.json").exists():
             result["config"].update(json.loads((root / "native-config.json").read_text()))
+        if (root / "native-config-layers.json").exists():
+            result["layers"] = json.loads((root / "native-config-layers.json").read_text())
+        if (root / "native-config-error.json").exists():
+            send({"id": frame["id"], "error": json.loads((root / "native-config-error.json").read_text())})
+            continue
     if method == "thread/fork":
         identifier = "actual-native-fork"
         copied = root / f"{identifier}.jsonl"

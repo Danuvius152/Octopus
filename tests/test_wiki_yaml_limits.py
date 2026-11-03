@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from server.wiki import bounded_yaml, format
+from server.wiki import store as document_storage
 from server.wiki.store import WikiError, WikiStore
 
 
@@ -47,9 +48,15 @@ def test_invalid_note_is_local_to_its_index_row(tmp_path, source):
         with store.connect() as db:
             row = db.execute("SELECT id,metadata FROM documents WHERE path='bad.md'").fetchone()
             metadata = json.loads(row["metadata"])
-        assert metadata["frontmatter_error"]
-        assert metadata["uid"] == "urn:uuid:" + str(uuid.UUID(row["id"]))
-        assert "portable_uid" not in metadata
+        if len(bad) > document_storage.MAX_DOCUMENT_BYTES:
+            assert metadata["resource_error"] == "document_too_large"
+            with pytest.raises(WikiError) as error:
+                store.read("bad.md")
+            assert error.value.status == 413
+        else:
+            assert metadata["frontmatter_error"]
+            assert metadata["uid"] == "urn:uuid:" + str(uuid.UUID(row["id"]))
+            assert "portable_uid" not in metadata
         assert store.read("good.md")["path"] == "good.md"
         assert (root / "bad.md").read_bytes() == bad
         errors = store.index_state()["index_errors"]

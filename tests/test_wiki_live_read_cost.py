@@ -1,9 +1,9 @@
 """Unchanged reads still verify bytes without rewriting derived facts."""
 
 from contextlib import contextmanager
-from pathlib import Path
 
 from server.wiki.reading import read
+from tests.byte_reads import observe_byte_reads
 from tests.test_wiki_markdown_navigation import store as store
 
 
@@ -12,13 +12,11 @@ def test_unchanged_live_read_checks_bytes_without_identity_material_signature_wr
     path.write_text("# Current\nKeep the actual bytes.\n")
     document = store.read("current.md")
     byte_reads, statements = [], []
-    read_bytes, connect = Path.read_bytes, store.connect
+    connect = store.connect
 
-    def read_current(file):
-        raw = read_bytes(file)
+    def read_current(file, raw):
         if file == path:
             byte_reads.append(len(raw))
-        return raw
 
     @contextmanager
     def traced():
@@ -26,7 +24,7 @@ def test_unchanged_live_read_checks_bytes_without_identity_material_signature_wr
             connection.set_trace_callback(statements.append)
             yield connection
 
-    monkeypatch.setattr(Path, "read_bytes", read_current)
+    observe_byte_reads(monkeypatch, after=read_current)
     monkeypatch.setattr(store, "connect", traced)
     for _ in range(2):
         current = store.read(document["id"])
@@ -44,17 +42,14 @@ def test_location_and_content_share_one_live_read_snapshot(store, monkeypatch):
     path.write_text(original)
     document = store.read("location.md")
     byte_reads = []
-    read_bytes = Path.read_bytes
 
-    def change_after_first_read(file):
-        raw = read_bytes(file)
+    def change_after_first_read(file, raw):
         if file == path:
             byte_reads.append(len(raw))
             if len(byte_reads) == 1:
                 path.write_text(changed)
-        return raw
 
-    monkeypatch.setattr(Path, "read_bytes", change_after_first_read)
+    observe_byte_reads(monkeypatch, after=change_after_first_read)
     result = read(store, document["id"], None, location="#claim")
     assert result["content"] == "## Claim\n\nOriginal condition.\n"
     assert result["revision"] == document["revision"]

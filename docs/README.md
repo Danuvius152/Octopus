@@ -132,6 +132,7 @@
 
 - [Claude CLI 捕获](reference/claude-cli-protocol.md)、[Codex exec 捕获](reference/codex-exec-protocol.md)、[系统提示词观察](reference/cli-system-prompt-notes.md)：历史版本样本，各自指向现行合同。
 - [Codex App Server G0](reference/codex-app-server-g0.md)：区分有限范围通过与完整递归反例，不作为新的实机通过声明。
+- [2026-11-03 MCP 与资源边界](reference/runtime-resource-boundaries-20261103.md)：固定 Codex 的原生配置继承/工具发现、controller 扫描与 native 准备、真实 Wiki Store 成本和 256 KiB 支持政策的证据与限制。
 - [2026-09-25 工程整理](post-mortems/2026-09-25-polish-pass.md)：历史缺陷、测量与因果记录，数值和部署范围属于当时版本。
 - [后台结果管线](post-mortems/2026-05-18-bg-pipeline-hardening.md)：四类历史故障；当时 `server/backends/` 现为 `server/harness/`。
 - [SessionOwner 范围遗漏](post-mortems/2026-10-21-session-owner-scope-creep.md)：遗漏消费者、未收敛接口与错过目标故障的验证。

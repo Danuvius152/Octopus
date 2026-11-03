@@ -23,6 +23,13 @@ terminal preceding round. It can explicitly restore archived history but cannot
 reuse a hard-deleted child. Concurrent independent requests use separate children.
 The two modes share one tool to avoid a redundant model-facing interface.
 
+Dynamic admission already converges at `_require_caller`: initial work and
+follow-ups recheck the original caller at their actual boundaries. They retain
+different child-creation, compare-and-set and rollback preconditions. Request
+formatting also resolves file paths with I/O; it is not a shared pure formatter.
+Keep these rules in their existing entry points rather than introducing another
+validator/formatter service that callers must coordinate.
+
 ### 5.2 Sub-session lifecycle
 
 A delegation child session keeps the ordinary session retention policy:

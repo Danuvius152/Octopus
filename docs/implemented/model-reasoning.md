@@ -72,6 +72,19 @@ Credential refresh, connector loading and other slow preparation happen after
 capture releases the lock. Revoking a credential can still prevent spawn or
 any later frame write; capture grants no continuing authorization.
 
+`resolve_credential_by_id` in [credentials.py](../../server/sessions/credentials.py)
+already serves ordinary sessions, Research, files and Agent operations. It owns
+the account/credential refresh task, shields it from an individual waiter's
+cancellation, conditionally commits refreshed secrets and rechecks authorization
+after waiting. Manager/database shutdown drains those original tasks. An explicit
+invalid binding never falls back to the host login.
+
+Keep these two narrow boundaries: configuration capture owns request values;
+credential resolution owns secret freshness and current authority. A combined
+configuration/credential service would move initialization and drain obligations
+without removing a rule from its existing consumers. Add new settings through
+the existing precedence, validation and capture paths.
+
 ## Runtime metadata and validation
 
 `GET /api/backends/{backend}/models` requires authentication and account scope.

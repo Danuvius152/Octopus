@@ -3,7 +3,6 @@
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
@@ -196,19 +195,18 @@ async def test_reread_retains_the_bytes_of_its_recorded_revision(client, tmp_pat
     jobs.update(job["id"], status="running")
     item = dict(job["items"][0])
     file = root / relative
-    original_read = Path.read_bytes
     external_edits = 0
 
-    def read_then_external_edit(path):
+    def read_then_external_edit(path, raw):
         nonlocal external_edits
-        raw = original_read(path)
         if path == file:
             external_edits += 1
             path.write_text(f"# A\nHuman edit {external_edits}.\n")
-        return raw
 
     with monkeypatch.context() as changes:
-        changes.setattr(Path, "read_bytes", read_then_external_edit)
+        from tests.byte_reads import observe_byte_reads
+
+        observe_byte_reads(changes, after=read_then_external_edit)
         jobs.reread(job["id"], item, "The human editor is active")
 
     candidate = next(

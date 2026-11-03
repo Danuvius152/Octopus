@@ -667,6 +667,11 @@ post-final 多层递归自动闭合。原七项执行扩展按具体行为重基
 登记保留失败清理及关停中的迟到交接。多个集合不自动意味着重复权威，不据此
 引入 ORM、跨域 TaskManager、统一 Job 总线或另一套会话所有者。
 
+Owner 的预算条件同时影响活动计时、timer 唤醒、问题等待的暂停、观测字段和实际
+退休。只提取到期布尔值不会消除这些联动；迁移 `_decide` 则会连同持久结算与重试
+副作用一起迁走。当前没有独立消费者或重复的纯策略需要新接口，因此预算协调
+继续归原 Owner。配置与凭据已有窄入口的取舍见[配置合同](model-reasoning.md#saving-defaults-and-repairing-an-existing-session)。
+
 当前约定在上文维护；需要原讨论、实施顺序或逐批验收时查固定版本：
 
 - [原架构执行计划](https://github.com/Danuvius152/Octopus/blob/cf98ecb75d1aa741c31292977ac9d83e727d366f/docs/plans/minimal-architecture-execution-20261020.md)：Owner/事务/输入/Wiki 架构的取舍、票20和其余批次验收范围。

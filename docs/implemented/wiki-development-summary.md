@@ -21,7 +21,7 @@
 | 不按 AI/人工作者限制维护资格 | 人工改过的文章可以继续纠错；只在当前版本定点修改，不认领作者、不重新生成整篇正文。 |
 | 复用有价值的知识页 | Concept/Topic/Synthesis 可直接支撑适用问题；精确数字、引文、冲突或来源更新再追必要原文，不每问重读全部来源。 |
 | 维护范围明确到对象 | 有依据的 `[[关联]]`、派生反向关系及必要导航入口配套允许；关联不赋予旧页正文重写权。专题正文更新保持指定对象，新知识页按有限创建范围处理。 |
-| Markdown 为本期搜索和新维护范围 | `.md/.markdown` 兼容大小写；非 Markdown 原件和历史保全，已知 HTML/TXT 仍可直接读取；PDF 自动理解未交付。 |
+| Markdown 为本期搜索和新维护范围 | `.md/.markdown` 兼容大小写；非 Markdown 原件和历史保全，支持字节范围内的已知 HTML/TXT 可直接读取；PDF 自动理解未交付。 |
 | 按需要增加知识和技术 | 不为每篇材料强造 Concept，不定期让模型扫描全库所有句子，不无条件上向量、重排或图数据库。 |
 
 <a id="4-当前运行合同"></a>
@@ -156,6 +156,73 @@ Sapphire 的受管 HTTP 操作由 AppMutation/app_bridge 持有完整生命周�
 事务失败、原 key 找回并唤醒、原控制重放及退休证明；入口参数、模型回包预算、
 读取证据、文件恢复与 App bridge 的既有回归继续保留。没有新增持久表、存储根或
 迁移表示，控制收据仍随既有 Wiki 账本保全。
+
+### WikiJobs 与 Worker 的协作
+
+持久 job、grant 与控制事务仍归 WikiJobs/Store；Worker 拥有派发和原执行的协调。
+`JobOwner` 只记录 entered_attempt/retired 等运行事实，不独自写所有 job 状态。
+
+```mermaid
+flowchart LR
+  A[maintenance_admission] --> J[WikiJobs / Store transaction]
+  J -->|commit 后 wake| W[WikiWorker]
+  W -->|执行与持久结算| J
+  C[job_controls] -->|原 attempt 取消与退休| W
+  E[job_execution] -->|读取 executing 与 manager| W
+  V[显式 verify] -->|恢复原 item / 不派新模型| W
+  M[main] -->|恢复后开闸 / stop 与 drain| W
+```
+
+`executing` 与 `cancellations` 各保留一个所有者；跨线程 wake 进入原事件循环。
+恢复先于生产者开闸，cancel 的撤权、持久状态、结算和实际退休分别取证，verify
+继续核验原效果。简单移动 Worker 类仍保留这些双向依赖，不能减少调用方的生命周期
+义务；显式 verify 的临时 Worker 恢复入口也有原 manager 前提。当前保留文件布局，
+不以局部 import、第二 registry 或新协调服务掩盖依赖。
+
+### 文档字节支持与资源拒绝
+
+当前支持的 Markdown/TXT/HTML 文本读取、解析及受控写入统一支持至
+**256 KiB（262144 字节，含边界）**。
+这是保守的产品支持政策，独立于一次返回的字符数；不是实验推导的最大安全值。
+密集 Markdown 在较小样本也比普通 TXT/HTML 昂贵，当前采用共同阈值而非按扩展名
+建立资源保证。[固定版本实验](../reference/runtime-resource-boundaries-20261103.md#wiki-store-cost-and-admission)
+记录方法、现存文件影响、样本与未覆盖边界。PDF 仍排除正文处理，不新增解析器。
+
+Store 的 `read_document_bytes` 在同一打开 handle 上先 fstat 快速拒绝，再最多读
+limit+1 字节；未知大小和读取中增长也受界限约束。`require_document_bytes` 检查
+已提供的 raw，避免内部入口绕过。显式 read/public、来源版本刷新、维护原文、
+新候选及锚点目标共用规则。完整性证明可以流式 hash 超限原文件，不解析其正文；
+原身份/revision 规则不承诺侦测恶意并发同长度重写。
+
+超限时 HTTP 返回 413、`code=document_too_large` 及结构化 path/limit_bytes；MCP
+错误投影保留 status/code/error，路径和限额在 error 文本中。索引同步记录
+逐文档 `quality=error`、metadata.resource_error，并保留原正文、身份、旧 text、
+revision 与 FTS。首次见到的超限文件只产生不可用占位，revision 为空，不能当作
+当前读取证据或维护准入。full/compact 导航显式 stale/resource_error，健康状态为
+partial；其他合规文件仍可索引和读取，维护准入继续遵守原完整健康检查。
+小文档引用超限来源仍可读，但来源为 version_unknown/current_revision=null，
+不能误报 missing，也不能把保留的旧 revision 当作当前来源。
+
+搜索重建先 refresh；仍有资源错误时在删除 FTS 前返回明确 409，保全全部旧搜索
+投影并列出受影响路径。文件缩小后清除资源错误并恢复 quality；即使恢复成原来
+相同 bytes/hash、随后重启，也不能沿旧快路径保留错误。错误状态不授予已退休身份
+重新绑定权限，未知观察区间仍走原批准恢复映射。
+
+History 普通写入、维护候选和 Sapphire save 在文件、变更或发布效果前检查新 bytes；
+当前原文及提交前复核也有界。旧 blob 不截断；restore 超限时拒绝，legacy snapshot
+在首个文件效果前预检**全部当前目标与候选**的预算及 hash，再逐项走原写入复核。
+这保证静态超限不会造成部分恢复；不将跨资源外部并发效果伪装成批量原子事务。
+materials 去重跳过超限候选，不能复用它，也不阻塞合规新材料。
+
+显式文件系统恢复在正文解析前检查预算，稳定超限仍流式核对原 stamp/hash/fence，
+逐文档记录 resource_rejected 并推进 cursor。真实文件变化仍保留 uncertain 语义；
+资源拒绝不能被笼统当作变化。已经接管的外部写入 journal 仍按原承诺完整归档，
+包括旧政策下的 bytes；新准入不能截断旧历史或撤销已经发生的外部效果。本规则
+约束受控正文操作，不是任意 App/agent 文件访问的 OS 沙箱。
+
+资源错误复用既有 quality/error/index_state 与 metadata，不新增表、限额服务或
+worker。账户迁移仍按真实 archive manifest 保全原文件、历史和证明，允许已明确
+标记资源拒绝的旧/空索引，未决写入及身份检查保留，见[搬迁合同](../backup-and-migrate.md#account-export-and-import)。
 
 ### 恢复、存储与性能
 

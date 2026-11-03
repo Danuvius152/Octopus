@@ -104,6 +104,27 @@ WS 集成入口只接收已解析的应用事件、计划失效通知，以及�
 它不是供页面任意灌入快照的公共接口。连接来源身份由 hook 捕获并传入，模块
 核对后才改变列表或触发失败提示、会话补取等副作用。
 
+### 聊天 reset 与延后 fork
+
+[`useSessionFork`](../../web/src/hooks/useSessionFork.ts) 提供 queueFork、cancelFork、
+reset 业务动作，拥有 reset 回执阻挡、唯一 fork watcher、每会话在途操作、重试和
+清理。`sessionStore.pendingForks` 仍是唯一意图事实；hook 只保存原意图的引用及
+临时 timer/请求状态，不建立第二个任务 store。ChatView 继续拥有草稿、附件和滚动；
+Research 提交继续使用现有 `lib/research` 入口，不迁入通用聊天 controller。
+
+每个 fork 请求捕获意图对象。旧 A 的成功、409、硬拒绝或网络错误均不能清除后来的
+B，也不能把 A 的重试次数、退避或自动导航转给 B。只有仍拥有原意图的明确
+`fork_blocked_parent_turn_active` 回执可以有限重试；其他失败不自动重放。成功创建
+仍交给会话列表入口接纳，只有原前台观察持续有效且没有替换意图才自动切换。
+
+reset 只处理开始时捕获的问题和 fork 意图；原观察有效期间阻挡延后 fork，回执或
+观察结束时解除。账户、服务代次或组件观察结束后，旧回执不得向新范围写入展示。
+视图或焦点离开后不再自动导航，但仍可在原账户/服务有效时接纳真实创建到会话列表；
+离开后再返回也不会恢复旧导航资格。卸载注销订阅和 timer，已发 POST 的原意图按
+引用退出，避免重挂后自动重放可能已接纳的请求；后来排队的另一意图保留。
+旧操作的 finally 也只能删除它自己的登记，不能清掉新挂载创建的操作。
+`ChatView.fork.test.tsx` 与 reset 回归覆盖这些交错。
+
 ### WS wire 校验
 
 `wsEvents.decodeWsEvent(unknown)` 是普通事件与 submission/command_receipt 专用回执

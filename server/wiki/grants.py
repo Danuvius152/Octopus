@@ -9,7 +9,7 @@ from pathlib import PurePosixPath
 
 from . import job_items, maintenance_inputs, protocols
 from .formats import is_markdown_maintenance
-from .store import WikiError, asset_reason, revision
+from .store import WikiError, asset_reason, file_revision
 
 TABLES = {
     "wiki_job_grants": """CREATE TABLE wiki_job_grants(
@@ -392,7 +392,7 @@ def check_navigation(db, store, context, path, doc_id=None):
             file = store.path(proof["path"])
             unchanged = (current is not None and current["revision"] == proof["revision"]
                          and current["file_key"] == proof["file_key"] == store.file_key(file.stat())
-                         and str(file) == proof["physical_path"] and revision(file.read_bytes()) == proof["revision"])
+                         and str(file) == proof["physical_path"] and file_revision(file) == proof["revision"])
         except (OSError, WikiError):
             unchanged = False
         if not unchanged:

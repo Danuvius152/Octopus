@@ -13,7 +13,15 @@ from pathlib import Path
 
 from . import job_items, origins, source_bindings
 from .storage import file_effect
-from .store import WikiError, is_maintainable_text, revision
+from .store import (
+    DocumentTooLarge,
+    WikiError,
+    file_revision,
+    is_maintainable_text,
+    read_document_bytes,
+    require_document_bytes,
+    revision,
+)
 
 _owners = threading.local()
 _UNCHANGED = object()
@@ -319,7 +327,7 @@ class WikiHistory:
             ).fetchall()
         for row in pending:
             path = self.store.path(row["path"])
-            current = revision(path.read_bytes()) if path.is_file() else None
+            current = file_revision(path) if path.is_file() else None
             self.status(
                 row["id"],
                 "applied"
@@ -397,6 +405,8 @@ class WikiHistory:
         origin_builder=None,
         source_plan=None,
     ):
+        if raw is not None:
+            require_document_bytes(raw, relative)
         # Consume earlier notifications before attaching/restoring a binding.
         # In particular, a journalled delete must not later retire its successor.
         self.store.synchronize(dirty=False)
@@ -410,7 +420,7 @@ class WikiHistory:
         path = self.store.path(relative)
         if path.exists() and not path.is_file():
             raise WikiError("The target is not a regular file", 409)
-        before = path.read_bytes() if path.is_file() else None
+        before = read_document_bytes(path, label=relative) if path.is_file() else None
         identity = path.stat() if before is not None else None
         current = revision(before) if before is not None else None
         if current != expected_revision:
@@ -458,11 +468,14 @@ class WikiHistory:
             live = None
             try:
                 target = self.store.path(relative)
-                live = target.read_bytes() if target.is_file() else None
+                live = read_document_bytes(target, label=relative) if target.is_file() else None
                 stat = target.stat() if target.exists() else None
                 def fingerprint(value):
                     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns) if value else None
                 unchanged = target == path and live == before and fingerprint(stat) == fingerprint(identity)
+            except DocumentTooLarge:
+                self.status(row["id"], "conflict")
+                raise
             except (OSError, WikiError):
                 unchanged = False
             if not unchanged:
@@ -635,7 +648,7 @@ class WikiHistory:
             digest and not (self.blobs / digest).is_file()
         ):
             raise WikiError("This recovery version has expired or is unavailable", 410)
-        raw = (self.blobs / digest).read_bytes() if digest else None
+        raw = read_document_bytes(self.blobs / digest, label=row["path"]) if digest else None
         if raw is not None and revision(raw) != digest:
             raise WikiError("Recovery content hash mismatch; current document and evidence retained", 409)
         with self.locked():
@@ -707,7 +720,7 @@ class WikiHistory:
                 path = self.store.path(relative)
                 if not history_text(relative) or not path.is_file():
                     continue
-                raw = path.read_bytes()
+                raw = read_document_bytes(path, label=relative)
                 identity = self.store.identity(db, relative, path.stat())
                 owned = db.execute(
                     "SELECT * FROM managed_notes WHERE path=?", (relative,)
@@ -737,6 +750,9 @@ class WikiHistory:
         }
         paths = self.text_paths() if entry["paths"] is None else entry["paths"]
         after = {
+            # This is settlement of an already accepted external mutation,
+            # including pre-policy journals. Preserve its complete original
+            # bytes; new captures and structured writes enforce admission.
             relative: self.store.path(relative).read_bytes()
             for relative in paths
             if history_text(relative) and self.store.path(relative).is_file()
@@ -837,7 +853,7 @@ class WikiHistory:
                         info.get("path") == relative
                         and archive.is_file()
                         and not archive.is_symlink()
-                        and revision(archive.read_bytes()) == old["hash"]
+                        and file_revision(archive) == old["hash"]
                     ):
                         candidates.append(info_file.parent.name)
                 if len(candidates) == 1:
@@ -1011,18 +1027,18 @@ class WikiHistory:
                 if relative not in manifest["files"]:
                     raise WikiError("Path not present in this snapshot", 404)
                 path = self.store.path(relative)
-                current = revision(path.read_bytes()) if path.is_file() else None
+                current = revision(read_document_bytes(path, label=relative)) if path.is_file() else None
                 if current != expected_revisions[relative]:
                     raise WikiError(f"Snapshot restore conflict: {relative}", 409)
                 digest = manifest["files"][relative]
-                if (
-                    not (self.blobs / digest).is_file()
-                    or revision((self.blobs / digest).read_bytes()) != digest
-                ):
+                if not (self.blobs / digest).is_file():
+                    raise WikiError("Snapshot recovery bytes are unavailable", 410)
+                candidate = read_document_bytes(self.blobs / digest, label=relative)
+                if revision(candidate) != digest:
                     raise WikiError("Snapshot recovery bytes are unavailable", 410)
             results = []
             for relative in paths:
-                raw = (self.blobs / manifest["files"][relative]).read_bytes()
+                raw = read_document_bytes(self.blobs / manifest["files"][relative], label=relative)
                 results.append(
                     self.write_locked(
                         relative,

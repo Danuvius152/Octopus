@@ -596,6 +596,11 @@ export function AgentFormPage({
                       </p>
                     )}
                   </div>
+                  <p className="text-xs text-gray-700">
+                    {backend === "codex"
+                      ? "These switches select Octopus connectors. Codex can also load native MCP servers from its own configuration."
+                      : "These switches select Octopus connectors. Claude uses the MCP configuration supplied for this invocation."}
+                  </p>
                 </div>
               </div>
 

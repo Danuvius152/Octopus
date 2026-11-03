@@ -35,7 +35,7 @@ beforeEach(() => {
   useSessionStore.getState().setToken("");
   useSessionStore.getState().setToken("synthetic-token");
   useSessionStore.setState({
-  token: "synthetic-token", activeSessionId: parent.id, activeAgentId: "agent",
+  token: "synthetic-token", activeSessionId: parent.id, activeAgentId: "agent", mainView: "chat",
   sessions: [parent], archivedSessions: [], agents: [], credentials: [], backendModels: {},
   messages: {}, streamingText: {}, lastAppliedSeq: {}, oldestSeq: {}, hasMoreMessages: {}, wikiJobs: {},
   pendingQuestions: {}, closedQuestionIds: {}, subagents: {},
@@ -275,6 +275,63 @@ it.each(["missing", "unavailable"])("waits for a confirmed queue before forking 
   expect(useSessionStore.getState().pendingForks.parent).toBeDefined();
   act(() => handleWsMessage({ type: "dispatch_state", session_id: parent.id, dispatch_state: dispatch("old-service") }));
   await waitFor(() => expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("/parent/duplicate")));
+});
+
+it.each(["success", "busy", "refusal", "network"])("an old fork %s cannot consume a replacement intent", async (outcome) => {
+  const posts: { label: string; resolve: (response: Response) => void; reject: (error: Error) => void }[] = [];
+  vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+    if (url.endsWith("/duplicate")) return new Promise<Response>((resolve, reject) => {
+      posts.push({ label: JSON.parse(String(init?.body)).label, resolve, reject });
+    });
+    if (url.includes("/submissions")) return Promise.resolve(Response.json({ items: [] }));
+    return Promise.resolve(Response.json([]));
+  });
+  mount();
+  const command = (label: string) => {
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: `/fork ${label}` } });
+    fireEvent.click(document.querySelector<HTMLButtonElement>(".btn-send")!);
+  };
+  command("A");
+  await waitFor(() => expect(posts).toHaveLength(1));
+  command("B");
+  const replacement = useSessionStore.getState().pendingForks.parent;
+  await act(async () => {
+    if (outcome === "network") posts[0].reject(new TypeError("Old network failure"));
+    else posts[0].resolve(outcome === "success" ? Response.json(child) : Response.json({ detail: {
+      reason: outcome === "busy" ? "fork_blocked_parent_turn_active" : "refused", message: "Old refusal",
+    } }, { status: outcome === "busy" ? 409 : 503 }));
+  });
+  // The replacement starts without inheriting A's 800ms retry timer. It stays
+  // pending while its own receipt is held, even when A really created a child.
+  expect(posts.map((post) => post.label)).toEqual(["A", "B"]);
+  expect(useSessionStore.getState().pendingForks.parent).toBe(replacement);
+  expect(useSessionStore.getState().activeSessionId).toBe(parent.id);
+  expect(useSessionStore.getState().messages.parent.some((row) => row.is_error)).toBe(false);
+});
+
+it.each(["service", "account", "unmount", "focus-return"])("a fork receipt after %s cannot navigate or replay the old command", async (boundary) => {
+  let finish!: (response: Response) => void;
+  const fetcher = mockSessionFetch(async () => new Promise<Response>((resolve) => { finish = resolve; }));
+  const view = mount();
+  await launch("duplicate");
+  await waitFor(() => expect(finish).toBeTypeOf("function"));
+  act(() => {
+    if (boundary === "service") useSessionStore.getState().applyDispatchState(parent.id, dispatch("replacement-service"));
+    if (boundary === "account") {
+      useSessionStore.getState().setToken("replacement-account");
+      useSessionStore.setState({ sessions: [parent], activeSessionId: parent.id });
+    }
+    if (boundary === "focus-return") {
+      useSessionStore.getState().setActiveSessionId("other");
+      useSessionStore.getState().setActiveSessionId(parent.id);
+    }
+  });
+  if (boundary === "unmount") { view.unmount(); mount(); }
+  await act(async () => finish(Response.json(child)));
+  expect(useSessionStore.getState().activeSessionId).toBe(parent.id);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(useSessionStore.getState().pendingForks.parent).toBeUndefined();
+  expect(useSessionStore.getState().sessions.some((row) => row.id === child.id)).toBe(boundary === "focus-return");
 });
 
 it.each(["archive", "duplicate", "background duplicate"])("discards %s side effects when the account changes after list acceptance", async (mode) => {

@@ -209,6 +209,7 @@ boundaries to verification without maintaining a second per-file inventory.
 | History, creation uncertainty and file attribution | [Fork](implemented/session-fork.md), [rewind](implemented/session-rewind.md), [storage](implemented/current-storage-format.md), [backup](backup-and-migrate.md); fork/preservation tests and the live old/native-history cases |
 | Read/WS/reconnect lifecycle | [Frontend reads](implemented/frontend-list-reconciliation.md); colocated store/transcript/component tests and offline browser fixtures |
 | Wiki HTTP, maintenance and database teardown | [Wiki](implemented/wiki-development-summary.md); `test_wiki_test_runtime.py` and affected API/job tests |
+| Wiki document resource policy | The [document contract](implemented/wiki-development-summary.md#文档字节支持与资源拒绝); `test_wiki_document_budget.py`, API/curation/history/recovery regressions cover bounded reads, refusal before effects, stale index/source projections and recovery |
 | Background work and installation drain | [BG](implemented/background-tasks.md), [installation](implemented/installation-lifecycle.md); affected BG/service/handoff tests |
 
 A controlled peer or browser fixture proves the boundary it actually exercises.
@@ -233,6 +234,10 @@ evidence under the reuse policy above.
   for the HTTP account. Teardown through `db.close()` drains turns, joins Owners
   and only then closes storage. Frontend WS lifecycle tests reuse
   [`Socket`](../web/src/test-support/socket.ts) with explicit callback ordering.
+- `tests/byte_reads.py` observes binary `read()` on actual file handles, retaining
+  fileno/context behavior and explicit before/after barriers. Use the actual I/O
+  boundary when checking source-version consistency, replacement, byte cost or
+  history locks; observing only `Path.read_bytes` misses bounded readers.
 - Ordinary App Server has no transport opt-in. `OCTOPUS_CODEX_APP_SERVER_BINARY`
   must resolve to the [pinned binary](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume).
   Live exec-origin history is seeded only by an external test CLI, then resumed
@@ -248,6 +253,15 @@ evidence under the reuse policy above.
   grant. The pinned local HTTP 503 probe is fault injection, not an upstream
   outage; capacity or media-generation observations prove only their observed
   stages. Saved artifact, row and file effects remain independently verifiable.
+
+### Optional resource experiments
+
+The [2026-11-03 resource and MCP experiments](reference/runtime-resource-boundaries-20261103.md)
+are optional, fixed-version observations, outside default gates. Their recipes
+use synthetic files and isolated native homes; configuration/discovery probes do
+not send model input. Repeating measurements requires explicit resource stop
+conditions. Small boundary/correctness regressions remain in the hermetic suite;
+this does not add a permanent benchmark platform or resume paused Wiki evals.
 
 ### Math-rendering compatibility
 

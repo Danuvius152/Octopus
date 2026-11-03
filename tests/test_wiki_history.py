@@ -50,6 +50,32 @@ def legacy_snapshot(history, files):
     return manifest
 
 
+@pytest.mark.parametrize("current_b,restored_b", [
+    (b"current B", b"x" * 129),
+    (b"x" * 129, b"restored B"),
+])
+def test_snapshot_size_admission_precedes_every_selected_file_effect(history, monkeypatch, current_b, restored_b):
+    from server.wiki import store as storage
+
+    first = history.write("a.md", b"current A", None, "human", "create")
+    second = history.write("b.md", current_b, None, "human", "create")
+    manifest = legacy_snapshot(history, {"a.md": b"restored A", "b.md": restored_b})
+    with history.store.connect() as db:
+        counts = [db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                  for table in ("changes", "operation_receipts", "job_publications")]
+    monkeypatch.setattr(storage, "MAX_DOCUMENT_BYTES", 128)
+    with pytest.raises(WikiError) as error:
+        history.restore_snapshot(manifest["id"], ["a.md", "b.md"],
+                                 {"a.md": first["revision"], "b.md": second["revision"]})
+    assert error.value.status == 413
+    assert history.store.path("a.md").read_bytes() == b"current A"
+    assert history.store.path("b.md").read_bytes() == current_b
+    with history.store.connect() as db:
+        assert [db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in ("changes", "operation_receipts", "job_publications")] == counts
+    assert (history.blobs / manifest["files"]["b.md"]).read_bytes() == restored_b
+
+
 def test_retention_distinct_versions_repeated_hashes_and_30_day_boundary(history):
     now = datetime.now(UTC)
     current = None
@@ -239,18 +265,18 @@ def test_gc_and_restore_blob_read_share_the_same_lock(history, monkeypatch):
         threading.Event(),
         threading.Event(),
     )
-    original_read = Path.read_bytes
+    original_open = Path.open
 
-    def paused(path):
+    def paused(path, *args, **kwargs):
         if (
             path == history.blobs / receipt["revision"]
             and threading.current_thread().name == "restore-test"
         ):
             entered.set()
             assert release.wait(5)
-        return original_read(path)
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", paused)
+    monkeypatch.setattr(Path, "open", paused)
     errors = []
 
     def restore():

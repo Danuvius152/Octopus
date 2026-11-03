@@ -5,7 +5,13 @@ import json
 from . import material_proof, origins
 from .formats import is_markdown_maintenance
 from .sections import original_text
-from .store import WikiError, asset_reason, revision
+from .store import (
+    WikiError,
+    asset_reason,
+    read_document_bytes,
+    require_document_bytes,
+    revision,
+)
 
 
 def initialize(db):
@@ -73,6 +79,7 @@ def index(db, row, raw):
 
 def find(store, raw, *, markdown_only=False):
     """Caller holds the writer lock. Recheck candidate bytes before reusing."""
+    require_document_bytes(raw, "submitted material")
     store.synchronize()
     found = _find_current(store, raw, markdown_only=markdown_only)
     if found is not None:
@@ -96,7 +103,7 @@ def _find_current(store, raw, *, markdown_only):
         try:
             with store.connect() as db:
                 row = store._index(db, path)
-                live = store.path(path).read_bytes()
+                live = read_document_bytes(store.path(path), label=path)
                 if row["id"] != candidate["doc_id"] or revision(live) != row["revision"]:
                     continue
                 owned = db.execute(
@@ -104,7 +111,7 @@ def _find_current(store, raw, *, markdown_only):
                 ).fetchone()
                 matches = current_material(db, row, live, owned[0] if owned else None) == raw
         except (FileNotFoundError, WikiError) as exc:
-            if isinstance(exc, WikiError) and exc.status != 404:
+            if isinstance(exc, WikiError) and exc.status not in {404, 413}:
                 raise
             continue
         if matches:

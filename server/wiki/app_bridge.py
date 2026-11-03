@@ -15,7 +15,7 @@ from ..aio import complete_cleanup
 from .history import WikiHistory, atomic, history_text, sync_directory
 from .registry import registry
 from .storage import file_effect
-from .store import WikiError
+from .store import WikiError, read_document_bytes, require_document_bytes
 
 _pending: dict[asyncio.Task, str | None] = {}
 _preparations: dict[asyncio.Task, str | None] = {}
@@ -184,6 +184,7 @@ class AppMutation:
         relative = body.get("path")
         content = body.get("content")
         if isinstance(relative, str) and isinstance(content, str):
+            require_document_bytes(content.encode(), relative)
             path = self.history.store.path(relative)
 
             def record_conflict():
@@ -192,7 +193,7 @@ class AppMutation:
                         self._require_journal()
                     return self.history.record(
                         relative,
-                        path.read_bytes() if path.is_file() else None,
+                        read_document_bytes(path, label=relative) if path.is_file() else None,
                         content.encode(),
                         self.actor,
                         "Sapphire save revision conflict",
@@ -414,6 +415,8 @@ async def _begin(app_row, method, endpoint, query, body=b""):
                             paths.append(relative)
                 if paths == []:
                     return None, payload
+                if endpoint == "save" and isinstance(payload.get("content"), str):
+                    require_document_bytes(payload["content"].encode(), payload["path"])
                 entry = {
                     "id": uuid.uuid4().hex,
                     "version": 2,

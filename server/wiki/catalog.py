@@ -103,12 +103,13 @@ def resolve_edges(db, row, metadata):
 
 def dependencies(db, doc_id):
     result = []
-    rows = db.execute("SELECT e.*,d.path,d.revision FROM wiki_edges e LEFT JOIN documents d ON d.id=e.target_doc WHERE e.source_doc=? AND e.relation='derived_from' ORDER BY e.ordinal", (doc_id,)).fetchall()
+    rows = db.execute("SELECT e.*,d.path,d.revision,json_extract(d.metadata,'$.resource_error') AS resource_error FROM wiki_edges e LEFT JOIN documents d ON d.id=e.target_doc WHERE e.source_doc=? AND e.relation='derived_from' ORDER BY e.ordinal", (doc_id,)).fetchall()
     confirmations = source_confirmations.read(db, [doc_id]) if rows else {}
     for row in rows:
         confirmation = confirmations.get((doc_id, row["ordinal"]))
         status = source_confirmations.status(row["status"], row["recorded_revision"], row["revision"], confirmation)
-        result.append({"doc": row["target_doc"], "path": row["path"], "resource": row["resource"], "id": row["label"], "revision": row["recorded_revision"], "current_revision": row["revision"], "location": row["location"], "status": status, **(confirmation or {})})
+        resource = {"resource_error": row["resource_error"]} if row["resource_error"] else {}
+        result.append({"doc": row["target_doc"], "path": row["path"], "resource": row["resource"], "id": row["label"], "revision": row["recorded_revision"], "current_revision": None if resource else row["revision"], "location": row["location"], "status": "version_unknown" if resource else status, **(confirmation or {}), **resource})
     return result
 
 

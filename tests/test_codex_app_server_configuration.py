@@ -12,6 +12,65 @@ from tests.native_app_server import native_runtime as native_runtime
 from tests.session_runtime import wait_dispatch_idle
 
 
+@pytest.mark.parametrize("native,accepted", [
+    ({"url": "http://old.invalid/mcp"}, True),
+    ({"enabled": True}, True),
+    ({"startup_timeout_sec": 20, "tool_timeout_sec": 45}, True),
+    ({"environment_id": "local", "env_vars": [], "disabled_tools": [], "required": True}, True),
+    ({"http_headers": {"Authorization": "synthetic-old-identity"}}, False),
+    ({"env_http_headers": {"X-Identity": "OLD_IDENTITY"}}, False),
+    ({"env": {"OLD_IDENTITY": "synthetic-old-identity"}}, False),
+    ({"command": "old-binary", "args": ["old-server"]}, False),
+    ({"environment_id": "another-environment"}, False),
+    ({"enabled": False}, False),
+    ({"enabled_tools": ["a_different_tool"]}, False),
+    ({"disabled_tools": ["a_selected_tool"]}, False),
+])
+async def test_selected_mcp_distinguishes_native_policy_from_injection_conflicts(native_runtime, tmp_path, native, accepted):
+    manager, database, session, _, _, _ = native_runtime
+    await AgentManager(database).update_agent(session.agent_id, user_id=session.user_id, mcp_servers=["ask"])
+    (tmp_path / "native-config-layers.json").write_text(json.dumps([
+        {"name": {"type": "user", "file": "synthetic/config.toml"}, "config": {"mcp_servers": {"ask": native}}},
+        {"name": {"type": "project", "file": "untrusted/config.toml"}, "disabledReason": "untrusted", "config": {"mcp_servers": {"ask": {"enabled": False}}}},
+    ]))
+    await submit_client_message(manager, session.id, "Use the selected tools", [], "mcp", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    status = await submission_status(manager, session.id, "mcp")
+    assert status["outcome"]["status"] == ("success" if accepted else "failed")
+    assert (tmp_path / "native-business.jsonl").exists() == accepted
+    if not accepted:
+        assert status["execution"]["native_inputs"][0]["state"] == "not_sent"
+        assert "mcp_servers.ask" in status["outcome"]["message"]
+        assert "Rename or remove" in status["outcome"]["message"]
+
+
+async def test_native_effective_enablement_wins_over_a_lower_disabled_layer(native_runtime, tmp_path):
+    manager, database, session, _, _, _ = native_runtime
+    await AgentManager(database).update_agent(session.agent_id, user_id=session.user_id, mcp_servers=["ask"])
+    (tmp_path / "native-config.json").write_text(json.dumps({"mcp_servers": {"ask": {"enabled": True}}}))
+    (tmp_path / "native-config-layers.json").write_text(json.dumps([
+        {"name": {"type": "project"}, "config": {"mcp_servers": {"ask": {"enabled": True}}}},
+        {"name": {"type": "user"}, "config": {"mcp_servers": {"ask": {"enabled": False}}}},
+    ]))
+    await submit_client_message(manager, session.id, "Use effective native configuration", [], "enabled", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    assert (await submission_status(manager, session.id, "enabled"))["outcome"]["status"] == "success"
+    assert (tmp_path / "native-business.jsonl").exists()
+
+
+async def test_invalid_selected_native_mcp_configuration_has_an_actionable_refusal(native_runtime, tmp_path):
+    manager, _, session, _, _, _ = native_runtime
+    (tmp_path / "native-config-error.json").write_text(json.dumps({"code": -32603,
+        "message": "invalid configuration: url is not supported for stdio\nin `mcp_servers.ask`\n"}))
+    await submit_client_message(manager, session.id, "Keep this unsent", [], "conflict", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    status = await submission_status(manager, session.id, "conflict")
+    assert status["outcome"]["status"] == "failed"
+    assert "Rename or remove" in status["outcome"]["message"]
+    assert status["execution"]["native_inputs"][0]["state"] == "not_sent"
+    assert not (tmp_path / "native-business.jsonl").exists()
+
+
 @pytest.mark.parametrize("collaboration", [{"mode": "plan", "settings": {}}, {"mode": "future", "settings": {}}, None])
 async def test_incompatible_resume_is_refused_before_business_input(native_runtime, tmp_path, collaboration):
     manager, database, session, _, starts, _ = native_runtime

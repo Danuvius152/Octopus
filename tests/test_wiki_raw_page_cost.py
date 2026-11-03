@@ -1,7 +1,6 @@
 """Same-revision raw pages preserve coordinates, authorization and read coverage."""
 
 import json
-from pathlib import Path
 from time import perf_counter
 
 import pytest
@@ -26,7 +25,7 @@ def test_locator_page_does_not_copy_omitted_body_but_still_checks_current_bytes(
     curation = WikiCuration(store)
     current = curation.blocks("current.md", limit=1)
     copied, byte_reads = [], []
-    snapshot, read_bytes = raw_blocks.snapshot, Path.read_bytes
+    snapshot = raw_blocks.snapshot
 
     class ObservedText(str):
         def __getitem__(self, key):
@@ -41,14 +40,14 @@ def test_locator_page_does_not_copy_omitted_body_but_still_checks_current_bytes(
         value = snapshot(*args, **kwargs)
         return replace(value, original_text=ObservedText(value.original_text))
 
-    def observed_bytes(file):
-        content = read_bytes(file)
+    def observed_bytes(file, content):
         if file == path:
             byte_reads.append(len(content))
-        return content
 
     monkeypatch.setattr(raw_blocks, "snapshot", observed_snapshot)
-    monkeypatch.setattr(Path, "read_bytes", observed_bytes)
+    from tests.byte_reads import observe_byte_reads
+
+    observe_byte_reads(monkeypatch, after=observed_bytes)
     result = curation.blocks(current["id"], view="locators", expected_revision=current["revision"], limit=100)
     assert result["blocks"] and all("content" not in part for part in result["blocks"])
     assert byte_reads == [len(text.encode())]

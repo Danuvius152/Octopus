@@ -33,6 +33,32 @@ async def stage(client, result, wanted):
     raise AssertionError("Recovery did not reach its bounded stage")
 
 
+async def test_recovery_records_an_oversized_file_without_reopening_uncertainty(uncertain, monkeypatch):
+    from server.wiki import store as storage
+
+    client, root, _, _, _ = uncertain
+    monkeypatch.setattr(storage, "MAX_DOCUMENT_BYTES", 128)
+    oversized = root / "Library/oversized.md"
+    oversized.write_bytes(b"x" * 129)
+    read_bytes = Path.read_bytes
+
+    def no_unbounded_body(path):
+        assert path != oversized, "Recovery must reject before loading the whole original body"
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", no_unbounded_body)
+    result = await plan(client)
+    await approve(client, result)
+    completed = await finish(client, result)
+    assert completed["phase"] == "complete"
+    read = await client.get("/api/wiki/read", headers=client.headers, params={"doc": "Library/oversized.md"})
+    assert read.status_code == 413, read.text
+    healthy = await client.get("/api/wiki/read", headers=client.headers, params={"doc": "Library/note.md"})
+    assert healthy.status_code == 200, healthy.text
+    assert healthy.json()["index_status"] == "partial"
+    assert read_bytes(oversized) == b"x" * 129
+
+
 @pytest.mark.parametrize("complete", [False, True])
 async def test_recovery_receivers_keep_service_health_through_registration_replacement(uncertain, complete):
     client, root, _, original, _ = uncertain

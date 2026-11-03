@@ -59,6 +59,8 @@ def compact(store, row, hit=None, terms=(), *, origin: int = 0):
         "matched_fields": matched if hit else ["identity"], "sections": sections,
         "matched_section_count": len(hit["sections"]) if hit else 0,
         "snippet": snippet[:240], "snippet_start": snippet_start,
+        **({"resource_error": metadata["resource_error"], "error": metadata.get("error"), "stale": True}
+           if metadata.get("resource_error") else {}),
     }
 
 

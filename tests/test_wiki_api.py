@@ -1726,6 +1726,26 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
                 "/api/wiki/read", params={"doc": "note.md"}, headers=client.headers
             )
         ).json()
+        from server.wiki import registry
+        from server.wiki import store as document_storage
+
+        owner = (await wiki_api.session_manager.db.get_agent(config["curator_agent_id"]))["user_id"]
+        store = registry.store(owner)
+        with store.connect() as db:
+            counts = [db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                      for table in ("changes", "operation_receipts", "job_publications")]
+        with monkeypatch.context() as budget:
+            budget.setattr(document_storage, "MAX_DOCUMENT_BYTES", 128)
+            refused = await client.post(
+                "/apps/sapphire/api/save", params={"vault": "obv"}, headers=client.headers,
+                json={"path": "note.md", "content": "x" * 129, "revision": original["revision"]},
+            )
+            assert refused.status_code == 413, refused.text
+            assert (vault / "note.md").read_text() == original["content"]
+            assert not (store.state / "external-change.json").exists()
+            with store.connect() as db:
+                assert [db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                        for table in ("changes", "operation_receipts", "job_publications")] == counts
         saved = await client.post(
             "/apps/sapphire/api/save",
             params={"vault": "obv"},

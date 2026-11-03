@@ -13,7 +13,7 @@ from .history import WikiHistory
 from .links import anchor_exists, source_span
 from .references import local_references, path_uri, source_reference
 from .sections import original_text, region, top_offset
-from .store import WikiError, revision
+from .store import WikiError, read_document_bytes, require_document_bytes, revision
 
 
 def _legacy_trace(text, base, offset, previous, additions):
@@ -126,7 +126,7 @@ class WikiCuration:
                         if not file.is_file():
                             raise WikiError(f"New local link target disappeared: {reference.raw_resource}", 409)
                         if reference.fragment:
-                            target_text = file.read_text(encoding="utf-8-sig")
+                            target_text = read_document_bytes(file, label=target["path"]).decode("utf-8-sig")
                     if reference.fragment and not anchor_exists(target_text, reference.fragment, parsed=parsed if resolved.target == overlay["id"] else None):
                         raise WikiError(f"New local anchor does not exist: {reference.raw_resource}", 422)
                     continue
@@ -178,7 +178,7 @@ class WikiCuration:
                 raise
             with self.history.locked():
                 target = self.store.path(path)
-                raw = target.read_bytes() if target.is_file() else None
+                raw = read_document_bytes(target, label=path) if target.is_file() else None
                 operation = {
                     "path": path,
                     "expected_revision": expected_revision,
@@ -225,7 +225,7 @@ class WikiCuration:
             owned = db.execute("SELECT * FROM managed_notes WHERE path=?", (path,)).fetchone()
         pending = {entry["doc"]: entry for entry in linked if entry["doc"] not in existing}
         try:
-            text = self.store.path(path).read_bytes().decode("utf-8")
+            text = read_document_bytes(self.store.path(path), label=path).decode("utf-8")
         except UnicodeError as exc:
             raise WikiError("Non-UTF-8 originals require encoding review", 422) from exc
         trace = Trace(text)
@@ -281,7 +281,7 @@ class WikiCuration:
                 if not relationship["explanation"].strip():
                     raise WikiError("A relation needs a concrete explanation", 422)
             try:
-                base = self.store.path(path).read_bytes().decode("utf-8")
+                base = read_document_bytes(self.store.path(path), label=path).decode("utf-8")
             except UnicodeError:
                 raise WikiError("Non-UTF-8 Markdown requires encoding review", 422)
             with self.store.connect() as db:
@@ -415,6 +415,7 @@ class WikiCuration:
 
     def publish(self, path, content, kind, sources, expected_revision, actor, reason, task=None, frontmatter_patch=None, tags=None, aliases=None, item_doc=None, reservation_id=None):
         require_markdown_maintenance(path)
+        require_document_bytes(content.encode(), path)
         if (
             not path.startswith(("Library/", "Wiki/"))
             or Path(path).suffix.lower() != ".md"
@@ -439,7 +440,7 @@ class WikiCuration:
                 existing = self.store.path(path)
                 row = self.history.record(
                     path,
-                    existing.read_bytes() if existing.is_file() else None,
+                    read_document_bytes(existing, label=path) if existing.is_file() else None,
                     content.encode(),
                     actor,
                     reason + "; source conflict",
@@ -481,7 +482,7 @@ class WikiCuration:
                         tasks.require_source_read(task, self.store, source)
             current = self.blocks(path)
             if current["revision"] != expected_revision:
-                raw = self.store.path(path).read_bytes()
+                raw = read_document_bytes(self.store.path(path), label=path)
                 row = self.history.record(
                     path,
                     raw,

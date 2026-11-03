@@ -1,10 +1,9 @@
 """A direct read returns body and dependency evidence from one version."""
 
-from pathlib import Path
-
 import pytest
 
 from server.wiki.store import WikiError, revision
+from tests.byte_reads import observe_byte_reads
 from tests.test_wiki_source_bindings import history as history
 from tests.test_wiki_source_bindings import source
 
@@ -36,16 +35,14 @@ def test_first_read_after_external_edit_does_not_mix_new_body_with_old_sources(h
     history.write("consumer.md", source(recorded=a["revision"]), None, "human", "create")
     updated = source("b.md", recorded=b["revision"])
     target = history.store.path("consumer.md")
-    read_bytes = Path.read_bytes
     edited = []
 
     def edit_at_body_read(path):
         if path == target and not edited:
             target.write_bytes(updated)
             edited.append(True)
-        return read_bytes(path)
 
-    monkeypatch.setattr(Path, "read_bytes", edit_at_body_read)
+    observe_byte_reads(monkeypatch, before=edit_at_body_read)
     snapshot = history.store.read_snapshot("consumer.md", start=start, length=length)
     document, raw = snapshot.document, snapshot.raw
     assert edited == [True]

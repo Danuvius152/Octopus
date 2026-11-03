@@ -102,6 +102,15 @@ current transport for the original fork strategy.
 
 ### Prepare and export
 
+Wiki document resource refusal does not make the original file disposable.
+Archives retain oversized originals, historical blobs and identity/source facts.
+Verification may accept an explicitly marked `document_too_large` projection with
+an old or empty revision; the archive manifest still verifies the actual file
+bytes independently. Unmarked content mismatches, identity conflicts and pending
+write evidence retain their existing checks. Import does not reinterpret a stale
+index as current evidence or truncate a blob to meet the
+[document policy](implemented/wiki-development-summary.md#文档字节支持与资源拒绝).
+
 Use the **same Octopus build** for both commands and retain it with the archive.
 The archive fingerprints the installed Python implementation; a different
 implementation is refused. The interface supports configured paths under one

@@ -56,5 +56,5 @@ def status(policy, recorded, current, confirmation=None):
 
 def is_stale(reference):
     """A missing source invalidates both original and subsequently checked evidence."""
-    return reference["status"] == "changed" or (reference["status"] == "missing"
+    return bool(reference.get("resource_error")) or reference["status"] == "changed" or (reference["status"] == "missing"
         and bool(reference.get("confirmed_revision") or reference.get("revision")))

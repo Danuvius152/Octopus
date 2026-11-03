@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sqlite3
@@ -12,8 +11,9 @@ from pathlib import Path
 
 from ..storage_verification import _reader, verify_wiki
 from . import job_events, protocols
+from . import store as document_storage
 from .event_inbox import read_state
-from .store import WikiStore
+from .store import WikiStore, file_revision
 
 
 def _within(root: Path, name: str) -> Path:
@@ -33,9 +33,13 @@ def _stable(db: sqlite3.Connection, registration: dict, root: Path, state: Path,
                or db.execute("SELECT 1 FROM wiki_job_state WHERE settlement_phase='pending' LIMIT 1").fetchone())
     if pending or (state / "external-change.json").exists() or (state / "external-change.json").is_symlink():
         raise ValueError("Wiki has unfinished writes or filesystem reception; settle them on the source before exporting")
-    for row in db.execute("SELECT path,revision FROM documents"):
+    for row in db.execute("SELECT path,revision,json_extract(metadata,'$.resource_error') FROM documents"):
         path = _within(root, row[0])
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != row[1]:
+        # This projection explicitly has no accepted current revision. Archive
+        # manifests verify the actual bytes independently; don't make a retained
+        # oversized original or an empty error projection unportable.
+        rejected = path.is_file() and row[2] == "document_too_large" and path.stat().st_size > document_storage.MAX_DOCUMENT_BYTES
+        if not path.is_file() or (not rejected and file_revision(path) != row[1]):
             raise ValueError("Wiki content requires source reconciliation before exporting")
     if source_identity:
         for path, key in db.execute("SELECT path,file_key FROM document_identities WHERE path IS NOT NULL"):
@@ -49,7 +53,7 @@ def _stable(db: sqlite3.Connection, registration: dict, root: Path, state: Path,
                 if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
                     raise ValueError("Wiki history contains an invalid blob identity")
                 blob = state / "blobs" / digest
-                if not blob.is_file() or hashlib.sha256(blob.read_bytes()).hexdigest() != digest:
+                if not blob.is_file() or file_revision(blob) != digest:
                     raise ValueError("Wiki history contains a missing or corrupted retained blob")
 
 

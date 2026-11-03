@@ -26,7 +26,7 @@ from .event_inbox import EventInbox
 from .events import FileChanges, VaultEvents
 from .extract import SUPPORTED, extract
 from .history import WikiHistory, atomic
-from .store import WikiError, WikiStore, revision
+from .store import DocumentTooLarge, WikiError, WikiStore, read_document_bytes, revision
 
 logger = logging.getLogger(__name__)
 
@@ -442,15 +442,20 @@ class RecoveryManager:
         raw = b""
         if path.suffix.lower() == ".pdf":
             digest = revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode())
-        elif body:
-            raw = path.read_bytes()
-            digest = revision(raw)
         else:
-            sha = hashlib.sha256()
-            with path.open("rb") as source:
-                while block := source.read(1024 * 1024):
-                    sha.update(block)
-            digest = sha.hexdigest()
+            if body:
+                try:
+                    raw = read_document_bytes(path, label=relative)
+                except DocumentTooLarge:
+                    raw = None  # Known resource refusal, not a missing or changed file.
+            if body and raw is not None:
+                digest = revision(raw)
+            else:
+                sha = hashlib.sha256()
+                with path.open("rb") as source:
+                    while block := source.read(1024 * 1024):
+                        sha.update(block)
+                digest = sha.hexdigest()
         after = path.stat(follow_symlinks=False)
         if stamp != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns, after.st_size):
             raise WikiError("Recovery file changed while observed; create a new plan", 409)
@@ -677,6 +682,8 @@ class RecoveryManager:
         observed, raw = self._file(h.metadata.root, entry["path"], body=True)
         if any(observed[key] != entry[key] for key in ("revision", "file_key", "stamp")):
             raise WikiError("Recovery output changed after mapping", 409)
+        if raw is None:
+            return None, {"resource_error": DocumentTooLarge(entry["path"])}
         try:
             extracted = extract(raw, Path(entry["path"]).suffix.lower())
         except Exception as exc:
@@ -721,7 +728,11 @@ class RecoveryManager:
                     stat = (h.metadata.root / entry["path"]).stat()
                     if list((stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)) != entry["stamp"]:
                         raise WikiError("Filesystem recovery file changed before indexing", 409)
-                    store._index(db, entry["path"], raw=raw, prepared=prepared)
+                    if "resource_error" in prepared:
+                        store.record_resource_error(db, entry["path"], prepared["resource_error"], stat=stat)
+                        ledger.audit(db, current["id"], current["generation"], "resource_rejected", {"path": entry["path"], "code": "document_too_large"})
+                    else:
+                        store._index(db, entry["path"], raw=raw, prepared=prepared)
                 else:
                     ledger.audit(db, current["id"], current["generation"], "pending_after_cutoff", {"path": entry["path"]})
                 ledger.update(db, current, phase="rebuilding", rebuild_cursor=index + 1)

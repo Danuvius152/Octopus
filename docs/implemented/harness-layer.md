@@ -36,6 +36,20 @@ settings. A profile renders that context into its protocol. MCP entries retain
 namespace, transport and identity; changing a namespace changes model-visible
 tool names. Connector and built-in tools share this assembly path.
 
+MCP configuration is specific to each execution mode:
+
+| Mode | Configuration boundary |
+| --- | --- |
+| Claude ordinary interaction | Selected invocation config with `--strict-mcp-config`; native extra MCP entries are not inherited. |
+| Codex ordinary App Server | Per-invocation field overrides; native home/project entries can remain visible. Detected selected-namespace conflicts fail preparation before business input. |
+| Codex Research exec leaf | No Octopus MCP injection or ordinary resume/fork; `mcp_servers={}` does not prove native entries were removed. |
+| Text worker | API request uses `tools=[]` and `tool_choice="none"`; it does not launch an ordinary CLI host. |
+
+The [Codex contract](codex-backend.md#native-mcp-configuration) owns merge and
+conflict details; [fixed-version experiments](../reference/runtime-resource-boundaries-20261103.md)
+separate effective config from actual thread tool discovery. Tool visibility
+does not grant an Octopus effect: each endpoint still verifies its current scope.
+
 `compose_system_prompt` combines framework tool guidance, saved Agent persona,
 connector instructions and the profile-selected memory blurb. Framework guidance
 describes Octopus tool/runtime behavior; persona describes the role; project
