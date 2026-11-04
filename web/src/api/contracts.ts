@@ -2048,6 +2048,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/questions/{question_id}/result": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Question Result
+         * @description Observe the original committed resolution without polling or resubmitting.
+         */
+        get: operations["question_result_api_sessions__session_id__questions__question_id__result_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/questions/{question_id}": {
         parameters: {
             query?: never;
@@ -4937,6 +4957,8 @@ export interface components {
             interaction_policy?: ("human" | "unattended") | null;
             /** Wait Mode */
             wait_mode?: ("blocking" | "optional" | "mcp") | null;
+            /** Snoozed */
+            snoozed?: boolean | null;
         };
         /**
          * PinOrderRequest
@@ -10248,6 +10270,42 @@ export interface operations {
                 "application/json": components["schemas"]["SubmitAnswerRequest"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    question_result_api_sessions__session_id__questions__question_id__result_get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                question_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

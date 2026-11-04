@@ -146,8 +146,13 @@ async def test_cancelled_mcp_call_closes_its_question_while_original_turn_is_ali
                             assert await manager.db.load_messages(session.id)
                             monkeypatch.setattr(original.waiters_released, "wait", released)
                             await call.finish("cancelled")
+                            # The production owner failed closed above. After
+                            # asserting its retained blockers, release only this
+                            # isolated fixture's repaired resource for teardown.
+                            owner.questions.mcp_calls.pop(call.id)
                         else:
                             await asyncio.gather(call.task, return_exceptions=True)
+                            await asyncio.wait_for(call.consumed.wait(), 2)
                             assert call.error is None and call.id not in owner.questions.mcp_calls
                     finally:
                         release.set()
@@ -206,6 +211,7 @@ async def test_mcp_cancellation_cannot_interrupt_cleanup_already_started_by_comm
             assert not done and call.error is None
             release.set()
             await asyncio.gather(call.task, return_exceptions=True)
+            await asyncio.wait_for(call.consumed.wait(), 2)
             assert call.error is None and call.id not in owner.questions.mcp_calls
             assert not owner.failed and backend.is_alive()
             rows = await manager.db.load_messages(session.id)
@@ -258,3 +264,5 @@ async def test_archive_cannot_retire_original_owner_before_failed_mcp_cleanup_is
                 await asyncio.gather(archive, return_exceptions=True)
             monkeypatch.setattr(pending.waiters_released, "wait", released)
             await call.finish("cancelled")
+            # The failed owner cannot acknowledge this test-only repair.
+            owner.questions.mcp_calls.pop(call.id)

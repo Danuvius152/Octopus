@@ -66,7 +66,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                 continue
 
             msg_type = data.get("type")
-            if msg_type in ("interrupt", "answer_question"):
+            if msg_type in ("interrupt", "answer_question", "snooze_question"):
                 command_id = data.get("client_command_id")
                 if not isinstance(command_id, str) or not command_id or len(command_id) > 128:
                     delivery.offer({"type": "error", "session_id": data.get("session_id"),

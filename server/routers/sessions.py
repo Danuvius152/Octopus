@@ -210,7 +210,7 @@ async def import_session(
             PendingQuestionInfo(
                 question_id=q.question_id, questions=q.questions, deadline=q.deadline,
                 request_id=q.request_id, attempt_id=q.attempt_id,
-                interaction_policy=q.interaction_policy, wait_mode=q.wait_mode,
+                interaction_policy=q.interaction_policy, wait_mode=q.wait_mode, snoozed=q.snoozed,
             )
             for q in session_manager.get_pending_questions(s.id)
             if q.answer_target == "human"
@@ -398,7 +398,7 @@ async def get_session(
                 PendingQuestionInfo(
                     question_id=q.question_id, questions=q.questions, deadline=q.deadline,
                     request_id=q.request_id, attempt_id=q.attempt_id,
-                    interaction_policy=q.interaction_policy, wait_mode=q.wait_mode,
+                    interaction_policy=q.interaction_policy, wait_mode=q.wait_mode, snoozed=q.snoozed,
                 )
                 for q in session_manager.get_pending_questions(s.id)
                 if q.answer_target == "human"

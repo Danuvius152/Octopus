@@ -101,9 +101,10 @@ it("keeps omitted task patch fields and applies explicit nullable clears", () =>
 it("renders and answers a producer's free-text question without an options list", async () => {
   handleWsMessage({ type: "question_request", session_id: "s", question_id: "form", questions: [{ question: "Which directory?" }] });
   const onSubmit = vi.fn();
-  render(<QuestionPrompt question={useSessionStore.getState().pendingQuestions.s[0]} onSubmit={onSubmit} />);
+  render(<QuestionPrompt sessionId="s" question={useSessionStore.getState().pendingQuestions.s[0]} onSubmit={onSubmit} />);
   expect(screen.getByText("Which directory?")).toBeVisible();
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "/work" } });
   fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-  await waitFor(() => expect(onSubmit).toHaveBeenCalledWith("form", [{ text: "/work", selected: undefined }]));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledWith("form", [{ text: "/work", selected: undefined }],
+    expect.objectContaining({ clientCommandId: expect.any(String), requestId: null, attemptId: null })));
 });

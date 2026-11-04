@@ -210,6 +210,9 @@ boundaries to verification without maintaining a second per-file inventory.
 | Read/WS/reconnect lifecycle | [Frontend reads](implemented/frontend-list-reconciliation.md); colocated store/transcript/component tests and offline browser fixtures |
 | Socket identity, session deletion and drafts | [Account delivery](implemented/multi-tenancy.md#websocket-delivery), [list confirmation](implemented/frontend-list-reconciliation.md#会话列表与跨重连写入确认); `test_ws_delivery.py` uses mounted sockets/SQLite barriers, and `session-deletion.spec.ts` exercises actual REST deletion through two live sockets and pages |
 | MCP call cancellation and original command/waiter retirement | [Question ownership](implemented/architecture-contract.md#mcp-question-retirement); `test_mcp_question_cancellation.py` uses real mounted FastMCP cancellation, delayed CreateQuestion admission/receipt, communication-failure cleanup followed by cancellation, waiter-release barriers and failed-cleanup shutdown; `test_ask_mcp.py` retains actual transport error/408 behavior |
+| Exact cancelled input gap and completed-root presentation | `test_mcp_input_completion.py` joins the mounted SDK, original Owner/Run, persistence and real App/build/delegation/schedule/Wiki consumers; missing metadata, associated child effects, reader cutoff and held waiter release remain blocking. Native completion/results and UI message tests cover the same outcome and loaded answer references. |
+| Page question drafts and active-interaction pause | `QuestionLifecycle.test.tsx`, `QuestionPrompt.test.tsx` and `test_question_resolution.py` retain original submission identity through remount, unknown receipts and later edits; `question-interaction.spec.ts` uses actual Tab/Shift+Tab, pointer and programmatic focus. `test_work_interaction_policy.py` owns deadline, pause and hard-cap adjudication. |
+| App response timeout and served client | `test_app_response_recovery.py` exercises original JSON/SSE/status and authenticated module routes; `web/tests/appAgentClient.test.ts` consumes the same served source, including chunking, aborted/error reads, exact status identity and product base URLs. The native live module includes an actual App build using the runtime client brief. |
 | Work interaction policy and missing decisions | [Original-work policy](implemented/architecture-contract.md#原工作交互策略与等待), [parent opportunity](implemented/agent-collaboration.md#unattended-questions); `test_work_interaction_policy.py` covers real admission/returns, native wire and controlled question clocks; unattended parent/domain tests retain actual receipts, parent Stop before/after solver admission, schedule consumption, Wiki effects and failure causes |
 | Wiki HTTP, maintenance and database teardown | [Wiki](implemented/wiki-development-summary.md); `test_wiki_test_runtime.py` and affected API/job tests |
 | Wiki document resource policy | The [document contract](implemented/wiki-development-summary.md#文档字节支持与资源拒绝); `test_wiki_document_budget.py`, API/curation/history/recovery regressions cover bounded reads, refusal before effects, stale index/source projections and recovery |
@@ -367,6 +370,37 @@ attempts; no new login or refresh was performed. Human blocking/idle suspension
 remains controlled true-frame/clock evidence, with the live Default-mode scope
 described above. These results validate this change, without establishing a
 deployment or claiming closure of tickets 15–20.
+
+### Question draft, input cleanup and App recovery verification
+
+The remaining question changes were independently reviewed from baseline
+`0f1570877be4e2ed5903377fe93955c454f43906`; Vera accepted the final code/document
+patch `af4c3666811a7de835a8cb08cc16338e5214bdaa9beb2113923d65f07f02435c`
+with no remaining Standards or Spec defects. Mounted MCP cancellation tests
+retain original Owner consumption and waiter barriers, exact native association,
+associated child-effect and reader-cutoff counterexamples, and actual App/build,
+delegation, schedule, Research and Wiki consumers. Page tests retain original
+answer/continuation identities across unmount and edits; real browser gestures
+distinguish Tab/Shift+Tab and pointer entry from programmatic focus.
+
+The complete commit-gate run passed eight gates and 6,906 backend tests; its only
+backend failure was the missing structural audit entry for the authenticated
+client module. The complete route audit and App recovery follow-up passed all
+22 cases. The final SDK source passed 14 JS cases, lint and types. These affected
+results compose with the unchanged passing full-suite evidence. The offline
+browser run passed 114 cases and failed one paused-dispatch reconnect assertion;
+the unchanged two-test module subsequently passed, including five repetitions
+of both tests. The initial failure remains unexplained; no sleeps, skips or
+relaxed assertions were introduced or claimed as its fix.
+
+All 21 selected live Codex cases then passed, including an App built from the
+actual runtime client brief, and both Codex browser cases passed. The successful
+network audit fixed the current conversation's existing login and observed no
+authentication-domain attempts. An earlier background run inherited the
+service's different default login, skipped all live cases and failed browser
+authentication; those are retained failed setup evidence, not product passes.
+The selected login was reused without reauthentication or refresh. These are
+verification results; deployment requires its separate publication receipts.
 
 ### App, login and delegation ownership regressions
 

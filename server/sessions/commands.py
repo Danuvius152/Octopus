@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..question_resolution import UNKNOWN_SOURCE, AnswerSource, QuestionAnswerInvalid
-from .owner_questions import AnswerQuestion
+from .owner_questions import AnswerQuestion, SnoozeQuestion
 
 if TYPE_CHECKING:
     from . import SessionManager
@@ -73,9 +73,10 @@ async def _process_owned_command(manager: SessionManager, session: Session, data
     if owner is not None and owner.control_conflicts(data):
         return {**response, "code": "command_conflict", "message": "Command identity is owned by a different in-flight operation"}
     stale = {**response, "code": "stale_command", "message": "The execution target changed. Refresh this conversation before trying again."}
-    if operation not in ("interrupt", "answer_question"):
+    if operation not in ("interrupt", "answer_question", "snooze_question"):
         result = {**response, "code": "invalid_command", "message": "Unsupported command"}
-    elif manager.get_session(sid) is not session or "request_id" not in data or "attempt_id" not in data:
+    elif (manager.get_session(sid) is not session or "request_id" not in data or "attempt_id" not in data
+          or "generation" in data and data["generation"] != manager.dispatch_snapshot(sid)["generation"]):
         result = stale
     elif operation == "interrupt":
         if not current_interrupt(manager, session, data, user_id):
@@ -93,7 +94,9 @@ async def _process_owned_command(manager: SessionManager, session: Session, data
             result = stale
         else:
             try:
-                ok = await manager._session_owners[id(session)].questions.handle(AnswerQuestion(pending.question_id, answers, source))
+                question_command = (SnoozeQuestion(pending.question_id, source) if operation == "snooze_question" else
+                                    AnswerQuestion(pending.question_id, answers, source, command_id))
+                ok = await manager._session_owners[id(session)].questions.handle(question_command)
             except QuestionAnswerInvalid as error:
                 result = {**response, "code": "invalid_command", "message": str(error)}
             else:

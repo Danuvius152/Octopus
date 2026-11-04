@@ -135,9 +135,12 @@
 - [2026-11-03 MCP 与资源边界](reference/runtime-resource-boundaries-20261103.md)：固定 Codex 的原生配置继承/工具发现、controller 扫描与 native 准备、真实 Wiki Store 成本和 256 KiB 支持政策的证据与限制。
 - [2026-09-25 工程整理](post-mortems/2026-09-25-polish-pass.md)：历史缺陷、测量与因果记录，数值和部署范围属于当时版本。
 - [后台结果管线](post-mortems/2026-05-18-bg-pipeline-hardening.md)：四类历史故障；当时 `server/backends/` 现为 `server/harness/`。
-- [SessionOwner 范围遗漏](post-mortems/2026-10-21-session-owner-scope-creep.md)：遗漏消费者、未收敛接口与错过目标故障的验证。
-- [账户 setup 退役](post-mortems/2026-10-24-account-setup-retirement.md)：身份夹具、冷恢复假设及验证范围。
-- [OAuth 连续修复](post-mortems/2026-11-03-oauth-repeated-boundary-bugs.md)：近一个月登录、刷新、绑定、取消与 UI 的责任断点及回归经验。
-- [/research 连续修改](post-mortems/2026-11-04-research-completion-boundaries.md)：叶子证据、报告与处理、取消与退休、首次创建及原身份恢复的反例、回归入口与适用边界。
+- [SessionOwner 范围遗漏](post-mortems/session-owner-scope-creep.md)：遗漏消费者、未收敛接口与错过目标故障的验证；补记原调用清理、页面草稿与完成分类。
+- [会话／委派的三个完成点](post-mortems/session-delegation-completion-boundaries.md)：子任务结束、返回接纳与父执行处理分别取证等待；保留多子返回、工作轮复用、收束竞争与 ACK 未知的反例。
+- [账户 setup 退役](post-mortems/account-setup-retirement.md)：身份夹具、冷恢复假设及验证范围。
+- [OAuth 连续修复](post-mortems/oauth-repeated-boundary-bugs.md)：登录、刷新、绑定、取消与 UI 的责任断点；补记原登录发布、只读 status 与退休责任。
+- [/research 连续修改](post-mortems/research-completion-boundaries.md)：叶子证据、报告与处理、取消与退休、首次创建及原身份恢复；补充原生完成分类与报告处理的组合反例。
+- [/wiki 证据与范围](post-mortems/wiki-evidence-scope-recovery.md)：意图与权限、原文与终稿证据、来源复核、阅读覆盖及成本验证；明确冷读义务与未测量风险。
+- [Wiki 任务效果、派发与观察](post-mortems/wiki-effects-dispatch-and-observation.md)：原执行结算、派发交接与旧聊天当前观察；原生输入取消收窄仍不能替代效果 receipt。
 
 需要回读已退出的历史正文时，使用固定快照：[旧工程路线](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/plans/engineering-runtime-roadmap.md)、[旧架构候选](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/review/architecture/architecture-review-20261101.html)、[Wiki 修复](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md)、[2026-10-25 关闭的仓库审查](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/review-20261023.md)、[搬迁审查](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/migration-scope-and-portability-20261023.md)。这些快照只证明各自版本与范围。

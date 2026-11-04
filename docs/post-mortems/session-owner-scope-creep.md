@@ -2,6 +2,9 @@
 
 状态：已收束。交付通过了固定候选验收，但票面边界和验证方式不成立。
 
+本文保留 10 月 21 日交付的因果和当时的纠偏建议。后续消费者暴露的责任边界及
+这些建议今天的适用范围，见[11 月 4 日后续观察](#后续观察2026-11-04基线-0f15708)。
+
 ## 摘要
 
 一次原本只写“命令和 I/O 回报进入一个 owner”的交付，实际扩到了完成回执、通知送达、
@@ -120,7 +123,8 @@ delegation、WS/UI、archive 等多个消费者都被卷了进来。完成结果
 
 ## 防护措施
 
-以下规则应作为下一次 owner 相邻切分的票面合同；没有合同，不切票。
+以下是当时针对 owner 相邻切分的票面纠偏建议；今天的适用范围见后续观察，
+不将“每张票”“接口冻结”或固定变化次数扩成所有任务的通用门禁。
 
 1. **Contract 块。** 每张票必须写：拥有的事实、每个事实的唯一 writer/提交点、读者和
    消费者、失败/未知路径、旧路径删除、明确不做（out of scope）。只写“命令进入一个
@@ -153,6 +157,68 @@ delegation、WS/UI、archive 等多个消费者都被卷了进来。完成结果
 - 边界变化两次就停。继续吸收只会把票面变成一张没有边界的实现清单。
 - 票面是合同，不是起点。合同里要写“不做什么”，否则相邻事实会以“顺手”为名进来。
 - 迟到的边界由每个消费者和每个测试买单；越晚发现，回归成本和错误信心越高。
+
+## 后续观察（2026-11-04，基线 0f15708）
+
+以下核查固定在 `0f1570877be4e2ed5903377fe93955c454f43906`，依据实现、历史差异
+与回归源码，没有据此取得新的生产事故记录，也未重新运行产品、模型或发布验收。
+后续修改进一步说明：**已经拥有启动、状态或进程，不自动拥有新控制操作、等待者
+退出后的提交，以及仍在使用原资源的消费者。**
+
+| 消费者与节点 | 推翻旧解释的反例 | 现有责任与回归观察 |
+| --- | --- | --- |
+| App：`7449f12`、`b8e0f32` 至 `07b83bf` | 原 backend 进程正确运行，但请求仍在读慢 body，或已返回 StreamingResponse、ASGI 还未开始消费。仅查 handler task 会把仍被使用的实例视为空闲 | BackendUse 从读 body 前保有原 port/process，到 response/client 清理及后续转交；LRU、idle、delete、drain 消费同一责任。[请求寿命回归](../../tests/test_app_request_lifetime.py)检查慢 body、未迭代响应、header 失败及 close 失败 |
+| Schedule：`4f1418d` | PATCH 的 SQL 已 commit，HTTP／MCP waiter 取消，内存 trigger 尚未注册。已有 registration lock 不会自动完成 DB→trigger 交接 | control 在首次 DB 等待前登记并 shield，按当前持久定义重建 trigger；shutdown 先 join control。[真实 DB 控制回归](../../tests/test_schedules.py)、[shutdown 交错](../../tests/test_scheduler.py)检查提交后取消和未结束注册 |
+| Connector：`324a913` | provider 已返回轮转 token，但调用 get_access_token 的 waiter 在保存前取消。安装锁只能协调竞争，不能保有操作寿命 | manager 保有原 token task 到保存和退休；[轮转回归](../../tests/test_connector_manager.py)检查原响应不丢失，具体分类及定义替换见 [OAuth 后续补记](oauth-repeated-boundary-bugs.md#后续补记2026-11-04基线-0f15708) |
+| Research：`4f1418d` | pipeline 已有 owner，但取消事务提交后 waiter 消失，原 pipeline 还没有收到信号 | 独立 control 覆盖取消提交和原任务信号，pipeline 继续负责 leaf 退休；完整因果见 [Research 复盘](research-completion-boundaries.md#4-取消事务成功后停止原执行仍有独立责任) |
+
+App 的修复链中，早期 reader／进程组退出、删除前 retiring 和后来的 BackendUse
+是逐步补齐的不同责任。`bbadc28` 将 STARTING 和未确认退休的对象也计入容量，避免
+跨 App 生命周期锁嵌套；`b8e0f32` 在删除前持久记录 retiring，确认原 writer／backend
+退休再删文件，停止失败保留目录。`fd7ab9c` 又在等待前捕获原 port/process，防止原
+请求发给同端口的替代进程。`07b83bf` 补齐从 body 到 response/client 清理及 202 后续
+消费者的寿命。[固定基线的 BackendUse](https://github.com/Danuvius152/Octopus/blob/0f1570877be4e2ed5903377fe93955c454f43906/server/app_backends.py#L130-L219)
+保留活动请求及未确认清理的原 use；[原 response close](https://github.com/Danuvius152/Octopus/blob/0f1570877be4e2ed5903377fe93955c454f43906/server/app_proxy.py#L14-L51)
+独立保有关闭任务，因为 HTTPX 的 is_closed 可能先于实际 stream cleanup 完成。
+返回响应对象、关闭标记与资源实际退休不能共用一个完成信号。
+
+Scheduler 的定义保存、trigger 注册与某次 fire 接纳也分别有提交点。注册失败须保留
+原 schedule id，重建该身份的投影，不能诱导再 create；删除未来 trigger 不等于取消
+已经接纳的 fire。当前实现见[控制操作快照](https://github.com/Danuvius152/Octopus/blob/0f1570877be4e2ed5903377fe93955c454f43906/server/scheduler.py#L358-L415)，
+完整范围由[计划合同](../implemented/scheduled-runs.md)持有。per-fire history、停机
+catch-up 等产品范围不能仅因不在当前实现中就改写为本次故障。
+
+由这些新证据回看原建议，“共同接口先冻结”应理解为：先用能暴露不同需求的真实
+消费者验证共同语义，再批量迁移；不是先建无调用者的抽象，或拒绝消费者提供新
+反例。BG、Research、Delegation 可以共享返回接纳，正文准备、业务结果和重试节奏
+仍由各来源负责，当前规则见[公共返回接管](../implemented/architecture-contract.md#公共返回接管)。
+
+当前开发范围以[根规则的 Scope and completion](../../AGENTS.md#scope-and-completion)
+为准。普通局部修改不强制建计划、切票，也不要求每次修改后重复全量门禁；提交
+和发布仍遵所属规则，并复用仍有效证据。第一次发现新 writer 就可能需要重看
+责任，两次纯命名调整也不需要重开设计。这里的“停”是先修正模型再继续实现，
+不自动要求再向用户确认。按受影响行为验证，达到授权的完成条件即收束。
+
+## 后续核对：原问题与真实消费者
+
+后续整改再次提供了同类反例：MCP SDK 已回复取消，原建题回执或 REST waiter 仍可能
+没有退出；问题卡卸载后，答案或续答提交的回执仍可能到达。前者由原 Owner 保有
+调用直到实际 runner 清理结束并被消费，后者由页面草稿保管原问题、提交身份及提交
+快照。未知原生关联不能成为提前释放资源的理由；接纳后继续编辑也不能被旧回执清空。
+
+完成分类还需要区分“模型已完成”和“必要效果已确认”。已有有效根终态时不再套用
+缺终态解释；只有精确关联且完成本地清理的纯输入取消，可以不让其单独缺项阻断
+合法成功。原始缺项仍保留，其他写入、旧 attempt 故障和领域附加门槛继续有效。
+App 的有限响应等待结束也只结束观察，通过原 request 查询结果，不再提交一次工作。
+
+[原调用与组合消费者回归](../../tests/test_mcp_input_completion.py)把 mounted MCP
+取消、受控 App Server、Owner/SQLite 及 App、委派、Research、Wiki、Schedule
+放在同一条证据链中。委派完成后查询通知曾仍早于接纳，验收因而改等原持久回执；
+业务完成没有被提升为通知完成。页面回归还分别验证了丢弃续答预览后普通发送可用、
+坏输出引用不显示“已保存”，见
+[问题生命周期](../../web/src/components/QuestionLifecycle.test.tsx)与
+[结果展示](../../web/src/components/MessageBubble.test.tsx)。这些新增反例说明，应沿
+真实消费者收口责任，不能用“已有 owner”或“有一个通过数”停止调查。
 
 ## 关联
 

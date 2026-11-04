@@ -26,6 +26,7 @@ import {
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
 import { NativeSubagentCard, SubagentCard } from "./SubagentCard";
 import { projectToolCall, readRuntimeMetadata } from "../lib/toolIdentity";
+import { questionClosure } from "../lib/questionPresentation";
 import { requestSource } from "../lib/injectedTurns";
 
 // Marker the backend prepends to the synthesized user message it
@@ -34,7 +35,7 @@ import { requestSource } from "../lib/injectedTurns";
 // Source of truth: server/bg_tasks.py render_delivery_prompt.
 const BG_TASK_RESULT_PREFIX = "[bg-task-result]";
 
-import { normalizeMessage } from "../lib/turnOutcome";
+import { normalizeMessage, presentOutcome } from "../lib/turnOutcome";
 
 interface MessageBubbleProps {
   message: Message;
@@ -59,26 +60,27 @@ interface MessageBubbleProps {
   restoreInputDisabled?: boolean;
 }
 
-function OutcomeResult({ message, onRestoreInput, restoreInputDisabled }: Pick<MessageBubbleProps, "message" | "onRestoreInput" | "restoreInputDisabled">) {
-  const outcome = normalizeMessage(message).outcome!;
-  const labels = { success: "Done", failed: "Failed", interrupted: "Interrupted", unknown: "Ended · outcome not recorded" };
-  const retries = Object.values(outcome.recovery).reduce((sum, count) => sum + count, 0);
+function OutcomeResult({ message, sessionId, onRestoreInput, restoreInputDisabled }: Pick<MessageBubbleProps, "message" | "sessionId" | "onRestoreInput" | "restoreInputDisabled">) {
+  const transcript = useSessionStore((state) => state.messages[sessionId]);
+  const { outcome, label, primary, recoveries, outputSaved, recordingNote } = presentOutcome(message, transcript);
   return <div className="msg msg-system flex flex-col items-center gap-1 py-1">
     <span className={`result-badge rounded-full px-3 py-1 font-mono text-[11px] uppercase tracking-wider ${
       outcome.status === "failed" ? "bg-danger-bg text-destructive" : "bg-gray-100 text-gray-700"
     }`}>
-      {labels[outcome.status]}{message.cost != null ? ` · $${message.cost.toFixed(4)}` : ""}
+      {label}{message.cost != null ? ` · $${message.cost.toFixed(4)}` : ""}
     </span>
-    {retries > 0 && <span className="text-xs text-muted-foreground">{retries} {retries === 1 ? "recovery" : "recoveries"}</span>}
-    {outcome.recording_integrity === "incomplete" && <>
-      {outcome.native_status && <span className="text-xs text-muted-foreground">Native: {outcome.native_status}</span>}
-      <div className="max-w-[85%] text-sm text-destructive">
-        {outcome.recording_issues?.native_final_missing ? "A declared final answer is missing from the saved transcript." :
-          outcome.final_answer?.message_seqs?.length ? "The answer was saved; completion records are incomplete." :
-            "Completion records are incomplete."}
-      </div>
-    </>}
-    {outcome.message && <div className="max-w-[85%] whitespace-pre-wrap break-words text-sm">{outcome.message}</div>}
+    {primary && <div className="max-w-[85%] whitespace-pre-wrap break-words text-sm">{primary}</div>}
+    {(outcome.native_status || recordingNote || recoveries > 0 || outputSaved) &&
+      <details className="max-w-[85%] text-xs text-muted-foreground">
+        <summary className="cursor-pointer">Completion details</summary>
+        {recoveries > 0 && <p>{recoveries} {recoveries === 1 ? "recovery" : "recoveries"}</p>}
+        {outcome.native_status && <p>Native: {outcome.native_status}</p>}
+        {outputSaved && <p>Model output was saved.</p>}
+        {recordingNote && <p>{recordingNote}</p>}
+        {outcome.recording_issues && Object.keys(outcome.recording_issues).length > 0 &&
+          <pre className="whitespace-pre-wrap break-all">{JSON.stringify(outcome.recording_issues, null, 2)}</pre>}
+        {outcome.recording_locations?.length ? <pre className="whitespace-pre-wrap break-all">{JSON.stringify(outcome.recording_locations, null, 2)}</pre> : null}
+      </details>}
     {outcome.code === "attachment_unavailable" && Boolean(message.tool_input?.rejected_input) && onRestoreInput &&
       <button type="button" className="text-sm text-primary underline" disabled={restoreInputDisabled}
         onClick={onRestoreInput}>Restore draft and re-upload files</button>}
@@ -306,14 +308,18 @@ export function MessageBubble({
       );
 
     case "question_request":
+    case "question_snoozed":
       return null; // handled by QuestionPrompt
 
-    case "question_closed":
+    case "question_closed": {
+      const { primary, detail } = questionClosure(message);
       return (
         <div className="msg msg-question-closed px-4 py-2 text-xs text-muted-foreground">
-          {message.content}
+          {primary}
+          {detail && detail !== primary && <details><summary>Original closure details</summary><p>{detail}</p></details>}
         </div>
       );
+    }
 
     case "question_answer": {
       const resolution = message.tool_input?.question_resolution as
@@ -336,7 +342,7 @@ export function MessageBubble({
     }
 
     case "result":
-      return <OutcomeResult message={message} onRestoreInput={onRestoreInput} restoreInputDisabled={restoreInputDisabled} />;
+      return <OutcomeResult message={message} sessionId={sessionId} onRestoreInput={onRestoreInput} restoreInputDisabled={restoreInputDisabled} />;
 
     case "recovery":
       return <RecoveryMessage message={message} />;

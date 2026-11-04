@@ -50,6 +50,15 @@ reconstruct them. Live question callbacks and reply authority are not
 persisted or restored. Backup and transfer scope remains with
 [account portability](../backup-and-migrate.md#account-export-and-import).
 
+The same resolution may include the submitting `client_command_id`; missing
+legacy correlation stays unknown. Human native optional snooze uses an ordinary
+persisted `question_snoozed` event and its seq, with the pending-question JSON
+projection retaining the cleared deadline and snoozed flag. Bounded original
+attempt input-cleanup facts can appear in outcome diagnostics; they do not
+restore a callable MCP request or prove provider consumption. Page question
+drafts remain volatile. These additions use existing message/outcome JSON, add
+no import object, storage root, DDL or marker, and require no historical backfill.
+
 Original input/work `KnowledgeContext` JSON also carries nullable
 `interaction_policy` (`human` or `unattended`), inherited through existing child
 and return bindings. Missing legacy fields remain `None`; there is no origin-

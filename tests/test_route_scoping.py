@@ -88,6 +88,9 @@ UNSCOPED_BY_DESIGN: dict[tuple[str, str], str] = {
     ("PATCH", "/apps/{app_id}/api/{path}"): "scoped by `_viewer`",
     ("DELETE", "/apps/{app_id}/api/{path}"): "scoped by `_viewer`",
     ("GET", "/apps/{app_id}/agent/agents"): "scoped by `_viewer`",
+    ("GET", "/apps/{app_id}/agent/client.js"): (
+        "scoped by `_application_for_request`: app token or account lookup, with current owner availability"
+    ),
     ("GET", "/apps/{app_id}/wiki/{operation}"): "scoped by `_app_for_agent_api` and the registered wiki app binding",
     ("POST", "/apps/{app_id}/wiki/{operation}"): "scoped by `_app_for_agent_api` and the registered wiki app binding",
     ("PUT", "/apps/{app_id}/wiki/{operation}"): "scoped by `_app_for_agent_api` and the registered wiki app binding",

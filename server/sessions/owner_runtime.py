@@ -843,10 +843,6 @@ class OwnerRuntime:
             recording_issues=dict(settlement.protocol_issues),
             recording_locations=list(settlement.protocol_locations),
         )
-        if settlement.protocol_issues:
-            note = "Some backend protocol records could not be read. Execution was not repeated; the transcript may be incomplete."
-            outcome.message = f"{outcome.message}\n{note}" if outcome.message else note
-
         settlement.outcome = outcome
         settlement.stored = MessageContent(
             role=MessageRole.system, type="result", content=outcome.model_dump(),
@@ -876,7 +872,7 @@ class OwnerRuntime:
             for key in ("credential_id", "backend"):
                 if key in metadata:
                     event[key] = metadata[key]
-        if rejected_input is not None:
+        if settlement.stored.tool_input is not None:
             event["tool_input"] = settlement.stored.tool_input
         settlement.event = event
         if defer_recording:
@@ -999,13 +995,14 @@ class OwnerRuntime:
         self.changed()
         return True
 
-    async def _end_questions(self, execution: Execution, reason: str = "attempt_ended") -> None:
+    async def _end_questions(self, execution: Execution, reason: str | None = None) -> None:
         attempt = execution.attempt
         if attempt is not None:
+            captured = tuple(question for question in self.owner.session._questions.values()
+                             if question.attempt_id == attempt.attempt_id)
             await self.owner.questions.handle(EndQuestionAttempt(
-                attempt.attempt_id, reason,
-                tuple(question for question in self.owner.session._questions.values()
-                      if question.attempt_id == attempt.attempt_id),
+                attempt.attempt_id, reason or (self.owner.questions.closure_reason(captured[0]) if captured else "attempt_ended"),
+                captured,
             ))
 
     def retire(self, backend: HarnessRun, reason: str) -> asyncio.Task[None]:
@@ -1698,7 +1695,7 @@ class OwnerRuntime:
                 execution.reader.task.cancel()
             execution.stream_ended = True
             execution.phase = "retire"
-        await self._end_questions(execution)
+        await self._end_questions(execution, "hard_cap" if reason[0] == "overall" else "idle_timeout")
 
     async def _consume_runtime(self, execution: Execution, *, consume_events: bool = True) -> None:
         session, manager, attempt = self.owner.session, self.owner.manager, execution.attempt
@@ -1795,6 +1792,8 @@ class OwnerRuntime:
     async def _decide(self, execution: Execution) -> None:
         session, manager, turn, attempt = self.owner.session, self.owner.manager, execution.turn, execution.attempt
         assert turn is not None and attempt is not None
+        if self.owner.questions.mcp_calls:
+            return
         settlement = execution.settlement
         if attempt.conversation_id is not None:
             turn.continuation_id = attempt.conversation_id
@@ -1818,7 +1817,9 @@ class OwnerRuntime:
             return
         detail = decision.events[-1] if decision.events else {}
         issues = {**settlement.protocol_issues, **getattr(attempt.backend, "protocol_issues", {})}
-        recording_failed = (bool(issues) if getattr(attempt.backend, "captures_retirement_output", False)
+        from .mcp_questions import resolved_input_gap
+        input_only = not settlement.protocol_issues and resolved_input_gap(attempt)
+        recording_failed = (bool(issues) and not input_only if getattr(attempt.backend, "captures_retirement_output", False)
                             else bool(issues.get("fatal_protocol_error")))
         failed = attempt.failed or attempt.timeout is not None or recording_failed
         reason = detail.get("message")
@@ -1826,7 +1827,18 @@ class OwnerRuntime:
         if failed and raw:
             reason = f"{reason}\n{raw}" if reason else raw
         if failed and not reason:
-            reason = "Backend ended without a terminal result; process diagnostics are available in the server log"
+            if attempt.result is None:
+                reason = "Backend ended without a terminal result; process diagnostics are available in the server log"
+            elif attempt.result.error_code == "native_turn_interrupted":
+                reason = "The backend interrupted the model turn."
+            elif recording_failed and not attempt.result.is_error:
+                reason = ("The model turn completed, but declared final output was not confirmed in the saved transcript."
+                          if issues.get("native_final_missing") else
+                          "The model turn completed, but required tool results were not confirmed."
+                          if issues.get("native_collection_incomplete") else
+                          "The model turn completed, but required protocol records could not be validated.")
+            else:
+                reason = "The backend reported a failed terminal result."
         status: Literal["success", "failed", "interrupted"] = "failed" if failed else "success"
         if (attempt.result is not None and attempt.result.error_code == "native_turn_interrupted"
                 and attempt.timeout is None and not getattr(attempt.backend, "collection_preceded_terminal", False)):
@@ -1843,7 +1855,9 @@ class OwnerRuntime:
         assert attempt is not None
         for kind, count in getattr(attempt.backend, "protocol_issues", {}).items():
             settlement.protocol_issues[kind] = settlement.protocol_issues.get(kind, 0) + count
-        settlement.protocol_locations.extend({**location, "attempt_id": attempt.attempt_id}
+        from .mcp_questions import input_gap_receipts
+        settlement.protocol_locations.extend({**location, "attempt_id": attempt.attempt_id,
+            **({"local_input_cleanup": proofs} if (proofs := input_gap_receipts(attempt, location)) else {})}
             for location in getattr(attempt.backend, "protocol_locations", [])[:max(0, 8 - len(settlement.protocol_locations))])
 
     async def _overall_expired(self, execution: Execution) -> bool:
@@ -1947,6 +1961,11 @@ class OwnerRuntime:
     def _confirm_retired(self, execution: Execution) -> bool:
         if execution.retired.done():
             return True
+        # Every registry entry is a resource of this original Session Owner.
+        # Unknown native association denies the business exemption; it cannot
+        # make a still-owned runner disappear from execution retirement.
+        if self.owner.questions.mcp_calls:
+            return False
         if execution.attempt is not None and getattr(execution.attempt.backend, "has_question_events", False):
             self.owner.wake()
             return False

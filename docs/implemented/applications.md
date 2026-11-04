@@ -193,6 +193,12 @@ ownership, static serving and optional foreground backend/install scripts. A
 follow-up build reuses the conversation. The source prompt is authoritative;
 documentation does not maintain a second copy of runtime instructions.
 
+The brief directs new App clients to the authenticated host-provided
+`agent/client.js` module and its original-request recovery contract. It supplies
+an inline module example rather than requiring each App to implement SSE or
+retry logic; installed applications are not rewritten. The API, timeout receipt
+and client behavior live in [App Agent access](app-agent-access.md).
+
 The application view provides reload/open/archive controls, backend status,
 application conversations and an Iterate popover with the development-session
 link. The iframe does not replace ordinary chat state; chat remains mounted

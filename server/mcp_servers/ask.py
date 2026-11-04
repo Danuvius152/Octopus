@@ -108,6 +108,7 @@ async def ask_user(questions: list[dict[str, Any]], ctx: Context) -> str:
         "metadata": metadata.model_dump(by_alias=True, exclude_none=True) if metadata is not None else None,
     })
     call.task = asyncio.create_task(_run_call(call, questions), name=f"mcp-question-{call.id}")
+    call.task.add_done_callback(lambda _: call.owner.wake())
     manager._own_task(call.task)
     try:
         return await asyncio.shield(call.task)

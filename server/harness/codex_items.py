@@ -41,7 +41,7 @@ def completion_required(item: dict[str, Any]) -> bool:
 @dataclass
 class ItemObservation:
     kind: str
-    start: tuple[bool, str | None] | None = None
+    start: tuple[bool, str | None, str | None] | None = None
     complete: str | None = None
 
     @property
@@ -52,9 +52,13 @@ class ItemObservation:
     def operation(self) -> str | None:
         return self.start[1] if self.start else None
 
+    @property
+    def server(self) -> str | None:
+        return self.start[2] if self.start else None
+
     @classmethod
     def started(cls, item: dict[str, Any]) -> ItemObservation:
-        return cls(item["type"], (completion_required(item), item.get("tool")))
+        return cls(item["type"], (completion_required(item), item.get("tool"), item.get("server")))
 
 
 def observation_frame(obj: dict[str, Any]) -> dict[str, Any]:

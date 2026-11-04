@@ -253,7 +253,7 @@ export function applySessionSnapshot(
   const snapshotHigh = typeof detail.next_message_seq === "number"
     ? detail.next_message_seq - 1 : Math.max(-1, ...snapshotMessages.map((message) => message.seq ?? -1));
   const newerRequests = new Set((store.messages[sessionId] || []).filter((message) =>
-    message.type === "question_request" && typeof message.seq === "number" && message.seq > snapshotHigh
+    (message.type === "question_request" || message.type === "question_snoozed") && typeof message.seq === "number" && message.seq > snapshotHigh
   ).map((message) => message.tool_use_id));
   // The transcript already retains newer WS rows; their live forms must
   // survive the same older snapshot. A generation change clears live state
@@ -262,6 +262,16 @@ export function applySessionSnapshot(
     newerRequests.has(question.question_id));
   const pending = new Map([...(detail.pending_questions as PendingQuestion[] || []), ...newerPending]
     .map((question) => [question.question_id, question]));
+  // A persisted interaction can arrive after this snapshot's read even when
+  // the original request row was already included. Its seq protects the same
+  // question projection; no browser timer or independent version resets it.
+  for (const message of store.messages[sessionId] || []) {
+    if (message.type !== "question_snoozed" || typeof message.seq !== "number" || message.seq <= snapshotHigh) continue;
+    const question = pending.get(message.tool_use_id ?? ""), projection = message.tool_input;
+    if (question && projection?.request_id === question.request_id && projection?.attempt_id === question.attempt_id) {
+      pending.set(question.question_id, { ...question, deadline: null, snoozed: true });
+    }
+  }
   if (!advanceOnly) store.setPendingQuestions(sessionId, [...pending.values()]);
   store.setSubagents(sessionId, (detail.subagents as SubagentRun[]) || [], start.subagents[sessionId] || {}, advanceOnly);
   return applied;

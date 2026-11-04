@@ -2,13 +2,15 @@
 
 Four interlocking bugs were hitting the `mcp__bg__run` →
 `deliver_bg_result` → `claude` CLI path. All four are now fixed.
-This doc is the post-mortem and the map to the code.
+This is the historical post-mortem; the fixes, test counts and timings below
+describe that delivery, not the current installation's verification.
 
 > **Path note (post-refactor):** this is a dated record. The `server/backends/*`
 > modules it cites (e.g. `subprocess_jsonl.py`) were later folded into the
-> harness layer and now live under `server/harness/` (`run.py`); the other
-> modules named here — `large_prompts.py`, `bg_tasks.py`, `session_manager.py` —
-> are unchanged. The fixes and rationale still stand.
+> harness layer under `server/harness/` (`run.py`). Session execution and
+> return admission subsequently moved into `server/sessions/`; the historical
+> method names below are not a current call map. See the current follow-up at
+> the end of this report.
 
 ## 1. E2BIG on bg-task-result delivery
 
@@ -150,3 +152,30 @@ memory; we just stop crashing on legitimately big lines.
   now the authoritative reference for the premature-exit bug;
   in-tree pointers (code comments + neighbouring docs) were
   redirected here.
+
+## Current follow-up (2026-11-04)
+
+The original failure modes still explain why byte limits, exact input identity
+and actual cleanup matter. Their present owners have changed:
+
+- Large argv prompts spill under the verified account's
+  `large-prompts/<session>/` root. Native Codex sends input over its protocol,
+  so the argv workaround is not a universal input rule. Original spill files
+  can remain referenced after session deletion and are retained without proof
+  that those references ended; deletion no longer implies spill cleanup.
+- BG returns use the session's receipt-first `admit_return` operation. A lost
+  acknowledgment queries the original input rather than repeating shell work.
+  The BG result, return admission and model processing remain separate facts.
+- Premature-exit recovery is backend-specific. A valid native root terminal
+  with a missing tool result is diagnosed as incomplete recording, not as a
+  missing terminal and not as permission to run the request again. An exact,
+  locally retired pure-input cancellation can explain only its own native gap;
+  it cannot discharge an unknown write or a still-owned runner.
+
+Current behavior belongs to [background tasks](../implemented/background-tasks.md),
+[input and retirement](../implemented/architecture-contract.md#输入完成与资源退休)
+and [Codex](../implemented/codex-backend.md). The original process and prompt
+regressions remain useful; the mounted-input and consumer cases in
+[test_mcp_input_completion.py](../../tests/test_mcp_input_completion.py) exercise
+the later distinction. Neither a tool response nor a test summary proves
+provider consumption or resource retirement.

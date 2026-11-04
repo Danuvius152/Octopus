@@ -37,7 +37,7 @@ function App() {
 }
 
 function AuthenticatedApp() {
-  const { sendMessage, interrupt, answerQuestion } =
+  const { sendMessage, interrupt, answerQuestion, snoozeQuestion } =
     useWebSocket();
   // Re-asked when the bearer changes, which includes claiming the install.
   const token = useSessionStore((s) => s.token);
@@ -153,6 +153,7 @@ function AuthenticatedApp() {
             sendMessage={sendMessage}
             interrupt={interrupt}
             answerQuestion={answerQuestion}
+            snoozeQuestion={snoozeQuestion}
             connected={connected}
             onToggleSidebar={toggleSidebar}
             onOpenSchedules={() =>

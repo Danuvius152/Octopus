@@ -1138,13 +1138,20 @@ class AppServerDriver(RunDriver):
     def connection_closed(self) -> None:
         self._questions.clear()
         if self._input is not None and self._input.state == "accepted" and self._io is not None:
-            missing = [key[2] for key, value in self._items.items()
-                       if key[:2] == (self._input.thread_id, self._input.turn_id) and value.required and value.complete is None
+            gaps = [(key, value) for key, value in self._items.items()
+                       if value.required and value.complete is None
                        and not (value.kind == "collabAgentToolCall" and value.operation == "wait" and self._terminal == "interrupted")]
+            missing = [key[2] for key, _ in gaps if key[:2] == (self._input.thread_id, self._input.turn_id)]
             if missing:
                 detail = ("Native result records are unavailable; effects may be unknown" if self._terminal == "interrupted"
                           or self._io.native_end_reason in {"parent_stop", "parent_timeout"} else "Native root items did not complete")
-                self._io.fail_stream("native_collection_incomplete", f"{detail}: {missing}")
+                self._io.fail_stream("native_collection_incomplete", f"{detail}: {missing}", context={
+                    "origin": "required_items", "missing_total": len(gaps),
+                    "root_thread_id": self._input.thread_id, "root_turn_id": self._input.turn_id,
+                    "missing_items": [{"thread_id": key[0], "turn_id": key[1], "item_id": key[2],
+                                       "type": value.kind, "server": value.server, "tool": value.operation}
+                                      for key, value in gaps[:8]],
+                })
         protected = {identifier for identifier, evidence in self._steers.items() if evidence.state in {"accepted", "rejected"}}
         if self._input and self._input.rpc_id:
             if self._input.state in {"accepted", "rejected"}:

@@ -32,6 +32,15 @@ class QuestionsMixin(SessionManagerBase):
             raise ValueError("Original MCP question session is unavailable")
         owner = self._question_owner(session)
         call = McpQuestionCall(owner, scope, deepcopy(identity))
+        execution = owner.runtime.current
+        if (execution is not None and execution.attempt is not None
+                and execution.attempt.backend.run_lease_id == scope.run_lease_id
+                and execution.request.work_id == scope.work_id and session.user_id == scope.user_id):
+            call.attempt = execution.attempt
+            call.request_id = execution.request.request_id
+            root = execution.attempt.backend.active_turn
+            if root is not None and root.attempt_id == execution.attempt.attempt_id:
+                call.root = (root.thread_id, root.turn_id)
         owner.questions.mcp_calls[call.id] = call
         return call
 
@@ -41,7 +50,17 @@ class QuestionsMixin(SessionManagerBase):
             call.cancel()
         await asyncio.gather(*(asyncio.shield(call.task) for call in calls if call.task is not None), return_exceptions=True)
         for call in calls:
-            if call.error is not None or call.id in call.owner.questions.mcp_calls:
+            if call.error is None and not call.owner.task.done():
+                # Task completion wakes the original Owner; its consumption is
+                # a separate fact from asyncio.gather returning.
+                call.owner.wake()
+                consumed = asyncio.create_task(call.consumed.wait())
+                try:
+                    await asyncio.wait({consumed, call.owner.task}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    consumed.cancel()
+                    await asyncio.gather(consumed, return_exceptions=True)
+            if call.error is not None or not call.consumed.is_set():
                 raise RuntimeError(f"Original MCP question call {call.id} cleanup is unconfirmed") from call.error
 
     def _question_owner(self, session: Session, *, internal: bool = False) -> SessionOwner:

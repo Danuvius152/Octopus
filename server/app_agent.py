@@ -69,6 +69,7 @@ _IDLE_POLL_SECONDS = 0.02
 # long read); a hung one shouldn't pin a connection forever. The turn itself
 # keeps running — the app can read the answer from the transcript later.
 ASK_TIMEOUT_SECONDS = 300.0
+_STATUS_READ_TIMEOUT_SECONDS = 5.0
 
 # Bus key, mirroring DelegationManager's single keyed subscription.
 _BUS_KEY = "app_agent"
@@ -165,6 +166,19 @@ class AppAgentManager:
     def _request_recovery(turn: _Turn, code: str) -> dict[str, Any]:
         return {"code": code, "conversation_id": turn.session_id, "request_id": turn.request_id,
                 "status_url": f"/apps/{turn.app_id}/agent/conversations/{turn.session_id}/requests/{turn.request_id}"}
+
+    async def _response_wait_recovery(self, turn: _Turn) -> dict[str, Any]:
+        """A response ends observation; only original owner/storage facts supply its state."""
+        recovery = {**self._request_recovery(turn, "response_wait_timeout"), "operation_terminal": False}
+        try:
+            async with asyncio.timeout(_STATUS_READ_TIMEOUT_SECONDS):
+                observed = await self.get_request_status(turn.app_id, turn.session_id, turn.request_id)
+        except Exception as error:
+            logger.warning("App response wait ended; original status observation failed app=%s session=%s request=%s error_type=%s",
+                           turn.app_id, turn.session_id, turn.request_id, type(error).__name__, exc_info=True)
+            return {**recovery, "state": "unknown", "waiting_for_input": False,
+                    "observation_error": "Original request status could not be confirmed. Query the same status URL later."}
+        return {**recovery, **observed}
 
     def _fail_turn(self, turn: _Turn, message: str, *, code: str | None = None) -> None:
         turn.error = message
@@ -302,10 +316,9 @@ class AppAgentManager:
             await asyncio.wait_for(turn.done.wait(), timeout=ASK_TIMEOUT_SECONDS)
         except TimeoutError:
             raise AppAgentError(
-                "The agent is still working — read the conversation later for "
-                "the answer",
+                "This response wait ended. Query the original request for its current result; no operation was repeated.",
                 status_code=504,
-                recovery={**self._request_recovery(turn, "ask_timeout"), "state": "running"},
+                recovery=await self._response_wait_recovery(turn),
             )
         if turn.error:
             raise AppAgentError(turn.error, status_code=502,
@@ -327,16 +340,24 @@ class AppAgentManager:
         if saved.outcome is not None:
             return {**result, "state": "completed" if saved.outcome.status == "success" else "failed",
                     "outcome": saved.outcome.model_dump(exclude_unset=True),
-                    "reply": saved.reply_text() if saved.outcome.final_answer is not None else "\n\n".join(saved.fragments), "cost": saved.cost}
-        current = session._run.request
-        if current is not None and current.request_id == request_id:
-            return {**result, "state": "running"}
-        if any(item.request_id == request_id for item in session._pending_queue):
-            return {**result, "state": "queued"}
-        turn = self._turns.get(conversation_id)
-        if turn is not None and turn.request_id == request_id and not turn.done.is_set():
-            return {**result, "state": "running"}
-        return {**result, "state": "unknown", "message": "No confirmed outcome is available. Do not blindly resubmit the operation."}
+                    "reply": saved.reply_text() if saved.outcome.final_answer is not None else "\n\n".join(saved.fragments),
+                    "cost": saved.cost, "waiting_for_input": False}
+        manager = self._require_session_mgr()
+        owner = manager._session_owners.get(id(session))
+        if owner is not None and not owner.failed and not owner.task.done():
+            execution = owner.runtime.current
+            if execution is not None and execution.request.request_id == request_id:
+                attempt = execution.attempt
+                waiting = attempt is not None and any(
+                    question.request_id == request_id and question.attempt_id == attempt.attempt_id and question.answer_target == "human"
+                    for question in manager.get_pending_questions(session.id))
+                return {**result, "state": "running", "waiting_for_input": waiting}
+            if any(item.request_id == request_id for item in session._pending_queue):
+                return {**result, "state": "queued", "waiting_for_input": False}
+        # App turn/request fields retain capacity/retirement responsibility even
+        # after owner failure. They cannot independently prove live execution.
+        return {**result, "state": "unknown", "waiting_for_input": False,
+                "message": "No confirmed outcome is available. Do not blindly resubmit the operation."}
 
     async def stream_turn(self, turn: _Turn) -> AsyncIterator[dict[str, Any]]:
         """A turn already started, delivered as it happens (§2 — the SSE
@@ -361,7 +382,8 @@ class AppAgentManager:
                 except TimeoutError:
                     yield {
                         "type": "error",
-                        "message": "the agent stopped responding",
+                        "message": "This response wait ended. Query the original request for its current result; no operation was repeated.",
+                        **await self._response_wait_recovery(turn),
                     }
                     return
                 yield event
@@ -703,7 +725,7 @@ class AppAgentManager:
             # business and may quote the user's files.
             turn.emit({"type": "tool", "name": msg.get("tool") or ""})
             return
-        if kind == "question_request":
+        if kind in ("question_request", "question_snoozed"):
             if msg.get("answer_target", "human") != "human":
                 return
             turn.emit(
@@ -712,7 +734,7 @@ class AppAgentManager:
                     "question_id": msg.get("question_id"),
                     "questions": msg.get("questions") or [],
                     "deadline": msg.get("deadline"), "interaction_policy": msg.get("interaction_policy"),
-                    "wait_mode": msg.get("wait_mode"),
+                    "wait_mode": msg.get("wait_mode"), "snoozed": msg.get("snoozed"),
                 }
             )
             return

@@ -233,7 +233,8 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         type: "question_request",
         tool_name: "AskUserQuestion",
         tool_input: { questions, deadline: data.deadline ?? null,
-          interaction_policy: data.interaction_policy, wait_mode: data.wait_mode },
+          request_id: data.request_id, attempt_id: data.attempt_id,
+          interaction_policy: data.interaction_policy, wait_mode: data.wait_mode, snoozed: data.snoozed },
         tool_use_id: questionId,
       });
       addPendingQuestion(sessionId, {
@@ -242,8 +243,17 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         deadline: data.deadline,
         request_id: data.request_id,
         attempt_id: data.attempt_id,
-        interaction_policy: data.interaction_policy, wait_mode: data.wait_mode,
+        interaction_policy: data.interaction_policy, wait_mode: data.wait_mode, snoozed: data.snoozed,
       });
+      break;
+    }
+
+    case "question_snoozed": {
+      addMessage(sessionId, { role: "system", type: "question_snoozed", tool_use_id: data.question_id,
+        tool_input: { request_id: data.request_id, attempt_id: data.attempt_id, deadline: data.deadline, snoozed: data.snoozed } });
+      const original = getState().pendingQuestions[sessionId]?.find((question) => question.question_id === data.question_id &&
+        question.request_id === data.request_id && question.attempt_id === data.attempt_id);
+      if (original) addPendingQuestion(sessionId, { ...original, deadline: data.deadline, snoozed: data.snoozed });
       break;
     }
 
@@ -777,7 +787,7 @@ export function useWebSocket() {
     const operation = String(data.type);
     let id: string;
     try {
-      id = newSubmissionId();
+      id = typeof data.client_command_id === "string" ? data.client_command_id : newSubmissionId();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Secure randomness is unavailable.";
       // A local failed notice has no wire identity and cannot be replayed.
@@ -834,19 +844,35 @@ export function useWebSocket() {
     (
       sessionId: string,
       questionId: string,
-      answers: { selected?: string[]; text?: string }[]
+      answers: { selected?: string[]; text?: string }[],
+      target?: import("../lib/submission").QuestionCommandTarget
     ) => {
+      if (target && (target.accountGeneration !== getState().accountGeneration || target.generation !== getState().dispatchGeneration)) {
+        return Promise.resolve({ accepted: false, code: "stale_command", message: "The original question identity changed. Check its receipt before continuing." });
+      }
       const question = getState().pendingQuestions[sessionId]?.find((q) => q.question_id === questionId);
       return sendCommand({
         type: "answer_question",
         session_id: sessionId,
         question_id: questionId,
         answers,
-        request_id: question?.request_id ?? null, attempt_id: question?.attempt_id ?? null,
+        request_id: target ? target.requestId : question?.request_id ?? null,
+        attempt_id: target ? target.attemptId : question?.attempt_id ?? null,
+        ...(target ? { client_command_id: target.clientCommandId, generation: target.generation } : {}),
       });
     },
     [sendCommand]
   );
 
-  return { send, sendMessage, interrupt, answerQuestion };
+  const snoozeQuestion = useCallback((sessionId: string, questionId: string,
+    target: import("../lib/submission").QuestionCommandTarget) => {
+    if (target.accountGeneration !== getState().accountGeneration || target.generation !== getState().dispatchGeneration) {
+      return Promise.resolve({ accepted: false, message: "The original question identity changed." });
+    }
+    return sendCommand({ type: "snooze_question", session_id: sessionId, question_id: questionId,
+      client_command_id: target.clientCommandId, generation: target.generation,
+      request_id: target.requestId, attempt_id: target.attemptId });
+  }, [sendCommand]);
+
+  return { send, sendMessage, interrupt, answerQuestion, snoozeQuestion };
 }

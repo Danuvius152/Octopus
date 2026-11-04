@@ -19,6 +19,7 @@ from ..question_resolution import (
     SYSTEM_SOURCE,
     AnswerSource,
     format_answers,
+    question_close_text,
     structured_answers,
     validate_answers,
 )
@@ -60,6 +61,13 @@ class AnswerQuestion:
     question_id: str
     answers: object  # OwnerQuestions validates the raw answer before using it.
     source: AnswerSource = AnswerSource()
+    client_command_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SnoozeQuestion:
+    question_id: str
+    source: AnswerSource
 
 
 @dataclass(frozen=True)
@@ -101,7 +109,7 @@ class CloseSessionQuestions:
 
 
 QuestionCommand = (CreateQuestion | RegisterNativeQuestion | AnswerQuestion | CloseQuestion | CaptureQuestion
-                   | AttachQuestionParent | BeginQuestionAttempt | EndQuestionAttempt | CloseSessionQuestions)
+                   | SnoozeQuestion | AttachQuestionParent | BeginQuestionAttempt | EndQuestionAttempt | CloseSessionQuestions)
 QuestionResult = bool | PendingQuestion | None
 
 
@@ -110,11 +118,13 @@ def question_command_bytes(command: QuestionCommand) -> int:
     if isinstance(command, (CreateQuestion, RegisterNativeQuestion)):
         payload: object = command.questions
     elif isinstance(command, AnswerQuestion):
-        payload = (command.question_id, command.answers, command.source.details())
+        payload = (command.question_id, command.answers, command.source.details(), command.client_command_id)
     elif isinstance(command, CloseQuestion):
         payload = (command.question_id, command.reason, command.source.details())
     elif isinstance(command, CaptureQuestion):
         payload = command.question_id
+    elif isinstance(command, SnoozeQuestion):
+        payload = (command.question_id, command.source.details())
     elif isinstance(command, AttachQuestionParent):
         payload = (command.question_id, command.parent_session_id, command.receipt.request_id)
     elif isinstance(command, BeginQuestionAttempt):
@@ -128,7 +138,7 @@ def question_command_bytes(command: QuestionCommand) -> int:
 
 @dataclass
 class QuestionNotification:
-    """One of the question's two original, ordered notification slots."""
+    """One of the question's bounded, ordered notification slots."""
 
     event: dict[str, Any]
     order: int
@@ -160,6 +170,19 @@ class OwnerQuestions:
         self._notice_order = 0
         self.mcp_calls: dict[str, McpQuestionCall] = {}
 
+    def consume_mcp_calls(self) -> None:
+        """Only Owner retires registry entries after runner and waiter cleanup."""
+        if asyncio.current_task() is not self.owner.task:
+            raise RuntimeError("Only the original Session owner may consume MCP cleanup")
+        for identifier, call in tuple(self.mcp_calls.items()):
+            if not call.cleanup_complete or call.error is not None or call.task is None or not call.task.done():
+                continue
+            receipt = call.cleanup_receipt()
+            if receipt is not None and call.attempt is not None and len(call.attempt.input_cleanup) < 8:
+                call.attempt.input_cleanup.append(receipt)
+            del self.mcp_calls[identifier]
+            call.consumed.set()
+
     async def handle(self, command: QuestionCommand) -> QuestionResult:
         if isinstance(command, (CreateQuestion, RegisterNativeQuestion)):
             return await self._create(command)
@@ -175,12 +198,16 @@ class OwnerQuestions:
                 return False
             answers = validate_answers(pending.questions, command.answers)
             if not pending.is_current(self.owner.session._run.question_attempt_id):
-                await self._close(pending, "attempt_ended")
+                await self._close(pending, self.closure_reason(pending))
                 return False
             if await self._expire(pending):
                 return False
             return await self._answer(pending, format_answers(pending.questions, answers), auto=False,
-                source=command.source, answers=structured_answers(pending.questions, answers))
+                source=command.source, answers=structured_answers(pending.questions, answers),
+                client_command_id=command.client_command_id)
+        if isinstance(command, SnoozeQuestion):
+            pending = self.owner.session._questions.get(command.question_id)
+            return await self._snooze(pending, command.source) if pending is not None else False
         if isinstance(command, CloseQuestion):
             pending = self.owner.session._questions.get(command.question_id)
             return await self._close(pending, command.reason, source=command.source) if pending is not None else False
@@ -197,7 +224,7 @@ class OwnerQuestions:
             pending = self.owner.session._questions.get(command.question_id)
             if pending is not None and pending.state == "pending":
                 if not pending.is_current(self.owner.session._run.question_attempt_id):
-                    await self._close(pending, "attempt_ended")
+                    await self._close(pending, self.closure_reason(pending))
                 else:
                     await self._expire(pending)
             return pending if pending is not None and pending.state != "closed" else None
@@ -225,6 +252,29 @@ class OwnerQuestions:
 
     def _owned(self, pending: PendingQuestion) -> bool:
         return self.owner.session._questions.get(pending.question_id) is pending
+
+    def closure_reason(self, pending: PendingQuestion) -> str:
+        """Explain the original wait's observed end without replacing its result."""
+        session, backend = self.owner.session, pending.backend
+        if pending.attempt_id != session._run.question_attempt_id:
+            return "attempt_ended"
+        tripped = (session._run.question_watchdog or {}).get("tripped")
+        if tripped:
+            return "hard_cap" if tripped[0] == "overall" else "idle_timeout"
+        if backend is not None and backend.captures_retirement_output:
+            if backend.native_end_reason in {"user_stop", "parent_stop"}:
+                return "interrupted"
+            if backend.native_end_reason == "service_shutdown":
+                return "service_shutdown"
+            status = backend.native_terminal_status
+            if status in {"completed", "failed", "interrupted"}:
+                return {"completed": "execution_completed", "failed": "execution_failed",
+                        "interrupted": "native_interrupted"}[status]
+            if pending.native_ref is not None and backend.question_admission_open and not backend.question_open(pending.native_ref):
+                return "native_resolved"
+            if backend.native_end_reason == "parent_error":
+                return "execution_failed"
+        return "attempt_ended"
 
     async def _create(self, command: CreateQuestion | RegisterNativeQuestion) -> PendingQuestion | None:
 
@@ -267,6 +317,8 @@ class OwnerQuestions:
             "blocking" if native_ref is not None and native_ref.blocking else "optional" if native_ref else "mcp")
         if interaction_policy == "human" and wait_mode == "blocking":
             timeout = 0
+        elif interaction_policy == "human" and wait_mode == "optional":
+            timeout = 120
         answer_target: Literal["human", "parent", "none"] = "human"
         if interaction_policy == "unattended":
             request = session._run.request
@@ -283,12 +335,14 @@ class OwnerQuestions:
                 session._run.backend if isinstance(session._run.backend, HarnessRun) else None,
             native_ref=command.event.native_question if isinstance(command, RegisterNativeQuestion) and command.event else None,
             interaction_policy=interaction_policy, wait_mode=wait_mode,
+            snoozed=False if interaction_policy == "human" and wait_mode == "optional" else None,
             answer_target=answer_target,
         )
         details: dict[str, Any] = {
             "questions": pending.questions, "deadline": pending.deadline,
             "request_id": pending.request_id, "attempt_id": pending.attempt_id, "work_id": pending.work_id,
             "interaction_policy": pending.interaction_policy, "wait_mode": pending.wait_mode,
+            "snoozed": pending.snoozed,
             "answer_target": pending.answer_target,
         }
         if pending.native_ref is not None:
@@ -310,7 +364,7 @@ class OwnerQuestions:
         if isinstance(command, CreateQuestion) or pending.native_ref is not None:
             message = MessageContent(role=MessageRole.assistant, type="question_request",
                                      tool_name="AskUserQuestion", tool_use_id=question_id, tool_input=details)
-            await self._persist(pending, message, event, request=True)
+            await self._persist(pending, message, event, kind="request")
         if pending.expires_at is not None:
             pending.timer = asyncio.create_task(
                 asyncio.sleep(max(0.0, pending.expires_at - time.monotonic())),
@@ -320,13 +374,14 @@ class OwnerQuestions:
             # the callback neither mutates it nor starts an enqueue task.
             pending.timer.add_done_callback(lambda _done: self.owner.wake())
         if pending.backend is not None and pending.backend.captures_retirement_output and not pending.is_current(session._run.question_attempt_id):
-            await self._close(pending, "attempt_ended")
+            await self._close(pending, self.closure_reason(pending))
         elif pending.answer_target == "none":
             await self._close(pending, "needs_input")
         return pending
 
     async def _persist(
-        self, pending: PendingQuestion, message: MessageContent, event: dict[str, Any], *, request: bool = False,
+        self, pending: PendingQuestion, message: MessageContent, event: dict[str, Any], *,
+        kind: Literal["request", "snooze", "resolution"] = "resolution",
     ) -> None:
         manager, session = self.owner.manager, self.owner.session
         try:
@@ -338,11 +393,45 @@ class OwnerQuestions:
         manager._tag_persisted(event, seq, message)
         self._notice_order += 1
         notice = QuestionNotification(event, self._notice_order, pending.backend or session._run.backend)
-        if request:
+        if kind == "request":
             pending.request_publication = notice
+        elif kind == "snooze":
+            pending.snooze_publication = notice
         else:
             pending.publication = notice
         self.flush_notifications()
+
+    async def _snooze(self, pending: PendingQuestion, source: AnswerSource) -> bool:
+        session = self.owner.session
+        if (not self._owned(pending) or pending.state != "pending" or pending.interaction_policy != "human"
+                or pending.wait_mode != "optional" or source.kind != "account" or source.user_id != session.user_id):
+            return False
+        if not pending.is_current(session._run.question_attempt_id):
+            await self._close(pending, self.closure_reason(pending))
+            return False
+        if await self._expire(pending):
+            return False
+        if pending.snoozed:
+            return True
+        # One original interaction claim removes the effective deadline as
+        # well as its wakeup, so all reads and later answers see the same fact.
+        pending.snoozed = True
+        pending.deadline = None
+        pending.expires_at = None
+        timer, pending.timer = pending.timer, None
+        if timer is not None and not timer.done():
+            timer.cancel()
+        if session._run.question_watchdog is not None:
+            session._run.question_watchdog.setdefault("waiting_questions", set()).add(pending.question_id)
+        details = {"request_id": pending.request_id, "attempt_id": pending.attempt_id,
+                   "deadline": None, "snoozed": True, "interaction_policy": pending.interaction_policy,
+                   "wait_mode": pending.wait_mode}
+        message = MessageContent(role=MessageRole.system, type="question_snoozed", tool_use_id=pending.question_id,
+            content="Automatic question expiry paused while you answer.", tool_input=details)
+        event = {"type": "question_snoozed", "session_id": session.id, "question_id": pending.question_id,
+                 "questions": pending.questions, **details}
+        await self._persist(pending, message, event, kind="snooze")
+        return True
 
     async def _end(self, captured: tuple[PendingQuestion, ...], attempt_id: str | None, reason: str) -> None:
         session = self.owner.session
@@ -382,7 +471,8 @@ class OwnerQuestions:
                 "disposition": disposition, "source": source.details(), "answers": answers}
 
     async def _answer(self, pending: PendingQuestion, answer: str, *, auto: bool,
-                      source: AnswerSource = SYSTEM_SOURCE, answers: list[dict[str, Any]] | None = None) -> bool:
+                      source: AnswerSource = SYSTEM_SOURCE, answers: list[dict[str, Any]] | None = None,
+                      client_command_id: str | None = None) -> bool:
         if pending.native_ref is not None:
             assert pending.backend is not None
             retained = sum(len(json.dumps([record.questions, record.answer], ensure_ascii=True).encode())
@@ -396,6 +486,9 @@ class OwnerQuestions:
         message = MessageContent(role=MessageRole.user, type="question_answer",
             tool_use_id=pending.question_id, content=answer,
             tool_input={"question_resolution": self._resolution(pending, "expired" if auto else "answered", source, answers=answers)})
+        if client_command_id is not None:
+            assert message.tool_input is not None
+            message.tool_input["question_resolution"]["client_command_id"] = client_command_id
         event: dict[str, Any] = {
             "type": "question_answer", "session_id": self.owner.session.id,
             "question_id": pending.question_id, "content": answer, "tool_input": message.tool_input,
@@ -405,7 +498,9 @@ class OwnerQuestions:
         await self._persist(pending, message, event)
         if pending.native_ref is not None:
             assert pending.backend is not None
-            pending.backend.reply_question(pending.native_ref, answers)
+            # A system expiry records an empty answer list, while the native
+            # adapter's unanswered response is None (wire answers={}).
+            pending.backend.reply_question(pending.native_ref, None if auto else answers)
         pending.answer = answer
         pending.resolution = message.tool_input["question_resolution"] if message.tool_input else None
         pending.ready.set()
@@ -414,7 +509,7 @@ class OwnerQuestions:
     async def _close(self, pending: PendingQuestion, reason: str, *, source: AnswerSource = SYSTEM_SOURCE) -> bool:
         if not self._claim(pending, "closed"):
             return False
-        human = f"Question closed: {reason.replace('_', ' ')}. No answer was received."
+        human = question_close_text(reason)
         if reason == "needs_input":
             human = ("This unattended work needs a user decision. No answer or new authorization was received. "
                      "Report the completed work and missing decision, stop dependent steps, and continue only independent authorized work. "
@@ -443,8 +538,9 @@ class OwnerQuestions:
                 or time.monotonic() < pending.expires_at):
             return False
         if not pending.is_current(self.owner.session._run.question_attempt_id):
-            return await self._close(pending, "attempt_ended")
-        return await self._answer(pending, self.owner.manager.AUTO_ANSWER_TEXT, auto=True)
+            return await self._close(pending, self.closure_reason(pending))
+        return await self._answer(pending, self.owner.manager.AUTO_ANSWER_TEXT, auto=True,
+            answers=[] if pending.interaction_policy == "human" and pending.wait_mode == "optional" else None)
 
     async def deadlines(self) -> None:
         backend = self.owner.session._run.backend
@@ -461,7 +557,7 @@ class OwnerQuestions:
         for pending in tuple(self.owner.session._questions.values()):
             if (pending.backend is not None and pending.backend.captures_retirement_output
                     and pending.state == "pending" and not pending.is_current(self.owner.session._run.question_attempt_id)):
-                await self._close(pending, "attempt_ended")
+                await self._close(pending, self.closure_reason(pending))
                 self.owner.wake()
                 return
         for pending in tuple(self.owner.session._questions.values()):
@@ -485,20 +581,20 @@ class OwnerQuestions:
     def has_waiting_notifications(self) -> bool:
         return any(notice is not None and notice.publication is None
                    for pending in self.owner.session._questions.values()
-                   for notice in (pending.request_publication, pending.publication))
+                   for notice in pending.notifications)
 
     def capture_prefix(self, request_id: str) -> tuple[QuestionNotification, ...]:
         """The original request's finite notifications, derived from its records."""
         return tuple(notice for pending in self.owner.session._questions.values()
                      if pending.request_id == request_id
-                     for notice in (pending.request_publication, pending.publication)
+                     for notice in pending.notifications
                      if notice is not None)
 
     def flush_notifications(self) -> None:
         waiting = sorted(
             ((notice.order, pending, notice)
              for pending in self.owner.session._questions.values()
-             for notice in (pending.request_publication, pending.publication)
+             for notice in pending.notifications
              if notice is not None and notice.publication is None),
             key=lambda item: item[0],
         )
@@ -516,6 +612,8 @@ class OwnerQuestions:
                 self._retain_prefix(marker.record)
             if marker.record.request_publication is marker.notification:
                 marker.record.request_publication = None
+            if marker.record.snooze_publication is marker.notification:
+                marker.record.snooze_publication = None
             if marker.record.publication is marker.notification:
                 marker.record.publication = None
             self._retire_if_finished(marker.record)
@@ -527,7 +625,7 @@ class OwnerQuestions:
         if (settlement is None or pending.request_id != settlement.request_id
                 or settlement.request_id not in session._request_completions):
             return
-        for notice in (pending.request_publication, pending.publication):
+        for notice in pending.notifications:
             if notice is not None and (
                 not notice.completed or (notice.publication is not None and notice.publication.error is not None)
             ) and all(previous is not notice for previous in settlement.question_prefix):
@@ -536,5 +634,5 @@ class OwnerQuestions:
     def _retire_if_finished(self, pending: PendingQuestion) -> None:
         if (pending.retirement_requested and self._owned(pending)
                 and all(notice is None or notice.completed
-                        for notice in (pending.request_publication, pending.publication))):
+                        for notice in pending.notifications)):
             self.owner.session._questions.pop(pending.question_id)

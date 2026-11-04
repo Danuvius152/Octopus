@@ -1,29 +1,68 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { IconHelpCircle } from "@tabler/icons-react";
 import type { PendingQuestion } from "../stores/sessionStore";
-import type { SubmissionReply } from "../lib/submission";
+import { newSubmissionId, type QuestionCommandTarget, type SubmissionReply } from "../lib/submission";
+import { useSessionStore } from "../stores/sessionStore";
+import { beginQuestionTransmission, finishQuestionTransmission, questionDraftKey, saveQuestionDraft, type AnswerPayload } from "../lib/questionDrafts";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
-export interface AnswerPayload {
-  selected?: string[];
-  text?: string;
-}
+export type { AnswerPayload } from "../lib/questionDrafts";
 
 interface Props {
   question: PendingQuestion;
+  sessionId: string;
   agentLabel?: string;
-  onSubmit: (questionId: string, answers: AnswerPayload[]) => void | Promise<SubmissionReply>;
+  onSubmit: (questionId: string, answers: AnswerPayload[], target: QuestionCommandTarget) => void | Promise<SubmissionReply>;
+  onSnooze?: (questionId: string, target: QuestionCommandTarget) => void | Promise<SubmissionReply>;
 }
 
-export function QuestionPrompt({ question, onSubmit, agentLabel = "Agent" }: Props) {
-  const [submitting, setSubmitting] = useState(false);
+export function QuestionPrompt({ question, sessionId, onSubmit, onSnooze, agentLabel = "Agent" }: Props) {
+  const [error, setError] = useState("");
   // For each sub-question, hold either selected option labels or a free-text
   // "Other" answer. `selected` is an array even for single-select so the
   // submit serializer is uniform.
-  const [answers, setAnswers] = useState<AnswerPayload[]>(() =>
-    question.questions.map(() => ({ selected: [] }))
-  );
+  const accountGeneration = useSessionStore((state) => state.accountGeneration);
+  const key = questionDraftKey(accountGeneration, sessionId, question);
+  const requestedSnooze = useRef<string | null>(null);
+  const tabPressed = useRef(false);
+  const [now, setNow] = useState(Date.now);
+  const optional = question.interaction_policy === "human" && question.wait_mode === "optional";
+  const deadline = question.deadline ? Date.parse(question.deadline) : NaN;
+  useEffect(() => {
+    if (!optional || !Number.isFinite(deadline) || question.snoozed) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [optional, deadline, question.snoozed]);
+  const requestSnooze = useCallback(() => {
+    if (!optional || question.snoozed || !onSnooze || requestedSnooze.current === key) return;
+    requestedSnooze.current = key;
+    const state = useSessionStore.getState();
+    try {
+      const target = { clientCommandId: newSubmissionId(), accountGeneration, generation: state.dispatchGeneration,
+        requestId: question.request_id ?? null, attemptId: question.attempt_id ?? null };
+      void Promise.resolve(onSnooze(question.question_id, target)).then((reply) => {
+        if (!reply?.accepted) setError("Pausing automatic expiry was not confirmed. The displayed deadline still comes from the server.");
+      }).catch(() => setError("Pausing automatic expiry was not confirmed."));
+    } catch (failure) { setError(String(failure)); }
+  }, [accountGeneration, key, onSnooze, optional, question]);
+  useEffect(() => {
+    const down = (event: KeyboardEvent) => { tabPressed.current = event.key === "Tab"; };
+    const up = () => { tabPressed.current = false; };
+    document.addEventListener("keydown", down, true);
+    document.addEventListener("keyup", up, true);
+    window.addEventListener("blur", up);
+    return () => {
+      document.removeEventListener("keydown", down, true);
+      document.removeEventListener("keyup", up, true);
+      window.removeEventListener("blur", up);
+    };
+  }, []);
+  const draft = useSessionStore((state) => state.questionDrafts[key]);
+  const answers = draft?.answers ?? question.questions.map(() => ({ selected: [] }));
+  const setAnswers = (update: (previous: AnswerPayload[]) => AnswerPayload[]) => {
+    saveQuestionDraft({ ...draft, sessionId, accountGeneration, question, answers: update(answers) });
+  };
 
   const setSelected = (i: number, labels: string[]) => {
     setAnswers((prev) => {
@@ -53,20 +92,44 @@ export function QuestionPrompt({ question, onSubmit, agentLabel = "Agent" }: Pro
   });
 
   const handleSubmit = async () => {
-    if (!canSubmit || submitting) return;
-    setSubmitting(true);
-    try { await onSubmit(question.question_id, answers); }
-    finally { setSubmitting(false); }
+    if (!canSubmit) return;
+    let id: string;
+    try { id = newSubmissionId(); }
+    catch (failure) { setError(String(failure)); return; }
+    if (!beginQuestionTransmission(key, { kind: "answer", id, answers, state: "pending" })) return;
+    const state = useSessionStore.getState();
+    try {
+      finishQuestionTransmission(key, id, await onSubmit(question.question_id, answers, {
+        clientCommandId: id, accountGeneration, generation: state.dispatchGeneration,
+        requestId: question.request_id ?? null, attemptId: question.attempt_id ?? null,
+      }));
+    } catch {
+      finishQuestionTransmission(key, id, { accepted: false, state: "unknown", message: "Answer acceptance was not confirmed." });
+    }
   };
 
+  const submitting = draft?.transmission?.state === "pending";
+  const uncertain = draft?.transmission?.state === "unknown";
+
   return (
-    <div className="msg msg-question rounded-lg border-[0.7px] border-primary/30 bg-card overflow-hidden">
+    <div className="msg msg-question rounded-lg border-[0.7px] border-primary/30 bg-card overflow-hidden"
+      onPointerDownCapture={requestSnooze} onKeyDownCapture={requestSnooze}
+      onFocusCapture={() => { if (tabPressed.current) requestSnooze(); }}>
       <div className="question-header flex items-center gap-2.5 px-3 py-2 bg-primary-50 text-sm text-foreground">
         <IconHelpCircle size={18} className="text-primary shrink-0" />
         <strong>{agentLabel} is asking</strong>
       </div>
       {question.interaction_policy === "human" && question.wait_mode === "blocking" &&
         <p className="px-3 pt-2 text-sm text-muted-foreground">Waiting for your answer · no automatic question deadline</p>}
+      {question.wait_mode === "mcp" && <p className="px-3 pt-2 text-sm text-muted-foreground">
+        {question.deadline ? `MCP compatibility deadline: ${question.deadline}` : "MCP compatibility question · automatic deadline disabled"}
+      </p>}
+      {optional && <p className="px-3 pt-2 text-sm text-muted-foreground">
+        {question.snoozed ? "Automatic expiry paused · waiting for your answer" : Number.isFinite(deadline)
+          ? now < deadline - 60_000 ? "Optional question · the countdown starts after the initial grace period"
+            : `Automatic unanswered response in ${Math.max(0, Math.ceil((deadline - now) / 1000))}s`
+          : "Optional question · automatic expiry is unknown"}
+      </p>}
       <div className="question-body px-3 py-3 space-y-5">
         {question.questions.map((q, i) => {
           const multi = !!q.multiSelect;
@@ -98,11 +161,12 @@ export function QuestionPrompt({ question, onSubmit, agentLabel = "Agent" }: Pro
                         type={multi ? "checkbox" : "radio"}
                         name={inputName}
                         checked={isSelected}
-                        onChange={() =>
-                          multi
+                        onChange={() => {
+                          requestSnooze();
+                          return multi
                             ? toggleMulti(i, opt.label)
-                            : setSelected(i, [opt.label])
-                        }
+                            : setSelected(i, [opt.label]);
+                        }}
                         className="mt-0.5 accent-primary"
                       />
                       <div className="min-w-0 flex-1">
@@ -124,17 +188,18 @@ export function QuestionPrompt({ question, onSubmit, agentLabel = "Agent" }: Pro
                 className="question-other text-sm"
                 placeholder="Or type your own answer…"
                 value={answers[i]?.text || ""}
-                onChange={(e) => setText(i, e.target.value)}
+                onChange={(e) => { requestSnooze(); setText(i, e.target.value); }}
               />
             </div>
           );
         })}
       </div>
       <div className="question-actions flex justify-end gap-2 px-3 py-2 border-t border-border">
+        {error && <p role="alert">{error}</p>}
         <Button
           className="btn btn-approve"
           onClick={handleSubmit}
-          disabled={!canSubmit || submitting}
+          disabled={!canSubmit || submitting || uncertain}
         >
           {submitting ? "Confirming…" : "Submit"}
         </Button>

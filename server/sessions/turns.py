@@ -1235,7 +1235,9 @@ class TurnsMixin(SessionManagerBase):
             collection = getattr(attempt.backend, "collection_error", None)
             detail = safe_diagnostic(collection.content if collection else attempt.error_text)
             return _Decision.stop({"code": "protocol_failed", "message":
-                "Backend protocol ownership could not be established; execution stopped."
+                ("The model turn completed, but required protocol records could not be validated."
+                 if attempt.result is not None and not attempt.result.is_error else
+                 "Backend protocol ownership could not be established; execution stopped.")
                 + (f" {detail}" if detail else "")})
         ended_at = (attempt.backend.admission_closed_at
                     if getattr(attempt.backend, "captures_retirement_output", False) else None)
@@ -1254,8 +1256,11 @@ class TurnsMixin(SessionManagerBase):
         if auth is not None:
             return auth
 
+        from .mcp_questions import resolved_input_gap
         if getattr(attempt.backend, "protocol_issues", None) and (
                 attempt.failed or getattr(attempt.backend, "captures_retirement_output", False)):
+            if not turn.settlement.protocol_issues and resolved_input_gap(attempt):
+                return _Decision.stop({"code": "input_cancelled_recording_gap"})
             return _Decision.stop({"code": "protocol_incomplete"})
 
         if attempt.failed:

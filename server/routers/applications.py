@@ -19,6 +19,7 @@ import json
 import mimetypes
 import os
 from collections.abc import AsyncIterator
+from importlib.resources import files
 from urllib.parse import unquote, urlencode
 
 import httpx
@@ -465,6 +466,13 @@ class BackendStreamingResponse(StreamingResponse):
 
 def _agent_error(e: AppAgentError) -> HTTPException:
     return HTTPException(e.status_code, {"message": e.message, **e.recovery} if e.recovery else e.message)
+
+
+@static_router.get("/apps/{app_id}/agent/client.js", include_in_schema=False)
+async def app_agent_client(request: Request, app_id: str):
+    await _application_for_request(request, app_id)
+    return Response(files("server").joinpath("app_agent_client.js").read_text(encoding="utf-8"),
+                    media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
 
 @static_router.get("/apps/{app_id}/agent/conversations/{conversation_id}/requests/{request_id}")

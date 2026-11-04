@@ -109,7 +109,7 @@ WS 集成入口只接收已解析的应用事件、计划失效通知，以及�
 [`useSessionFork`](../../web/src/hooks/useSessionFork.ts) 提供 queueFork、cancelFork、
 reset 业务动作，拥有 reset 回执阻挡、唯一 fork watcher、每会话在途操作、重试和
 清理。`sessionStore.pendingForks` 仍是唯一意图事实；hook 只保存原意图的引用及
-临时 timer/请求状态，不建立第二个任务 store。ChatView 继续拥有草稿、附件和滚动；
+临时 timer/请求状态，不建立第二个任务 store。ChatView 继续拥有普通输入草稿、附件和滚动；
 Research 提交继续使用现有 `lib/research` 入口，不迁入通用聊天 controller。
 
 每个 fork 请求捕获意图对象。旧 A 的成功、409、硬拒绝或网络错误均不能清除后来的
@@ -556,6 +556,28 @@ dispose 后旧回执不触发当前读取。`/schedule` 的成功提示使用同
 `useWebSocket.lists.test.tsx`、模型修改、侧栏归档/重连和
 `hydrateSession.test.ts`，以及 `scheduleList.test.ts` 的迟到写回执与确认失败矩阵。
 生产调用方的直接整表覆盖已移除；协调不承诺无通知、无刷新触发时自行发现变化。
+
+## 页面问题草稿与原回执
+
+`sessionStore.questionDrafts` 按账户、session、request、attempt、question 保管页面
+易失草稿，包括原表单和答案；切换会话、表单卸载和断线不丢弃。刷新页面没有持久
+草稿保证。换账户/token 或确认删除会话会清理原草稿，迟到回执不能将它复活。
+
+答案发送前，页面登记原 `client_command_id` 和不可变提交快照；迟到接纳只清该
+快照，不抹去发送后的新编辑。unknown 时按原问题只读查询持久结算；旧结果缺少
+命令关联、缺记录或查询失败都保留不确定性，不自动重答。
+已关闭题目的草稿可由用户预览到空输入框，并显式发送为新消息；发送前登记原
+continuation 的 `client_request_id`。该消息回执未知时查询原 submission，不能
+生成另一身份重发。丢弃预览或切换会话后，旧预览标记不阻挡普通显式输入。
+
+暂停只由有用户操作依据的 pointer、keydown、change 或 Tab/Shift+Tab 焦点进入
+触发；程序 `.focus()` 和仅发送消息不触发。客户端发送原身份，Owner 唯一裁定。
+暂停事件按原持久 seq 合并，旧 HTTP snapshot 不恢复已经清除的期限。
+
+完成展示读取原 outcome；根 completed 但必要工具结果缺失时说明工具结果未确认，
+不另称缺少根终态。工具自身的显式失败留在工具卡。只有已加载的原正文行完整
+匹配 request/attempt、根 thread/turn、final 阶段、item 和有序 seq，才显示正文
+已保存；引用形状本身不足以证明。历史缺少关闭原因时使用中性说明，不猜测超时。
 
 ## 能力边界与交付状态
 

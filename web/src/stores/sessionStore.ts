@@ -4,6 +4,7 @@ import { agentRequestIsCurrent, beginAgentRequest, canApplyAgent, endAgentReques
 import { withPinOrder } from "../lib/sidebarPins";
 import { unreadList, type ListReadState } from "../lib/listState";
 import type { ControlCommandStatus } from "../lib/submission";
+import type { QuestionDraft } from "../lib/questionDrafts";
 import { normalizeMessage, type MessageInput } from "../lib/turnOutcome";
 import { readActiveAttempt, readDispatchState, type ActiveAttempt, type DispatchState } from "../lib/sessionDispatch";
 import { nativeItemKey } from "../lib/nativeOutput";
@@ -124,6 +125,7 @@ export interface PendingQuestion {
   attempt_id?: string | null;
   interaction_policy?: "human" | "unattended" | null;
   wait_mode?: "blocking" | "optional" | "mcp" | null;
+  snoozed?: boolean | null;
 }
 
 /** Return `map` without `key`, or `map` itself when the key isn't there.
@@ -375,6 +377,7 @@ interface SessionStore {
 
   // Active AskUserQuestion prompts waiting for the user's answer.
   pendingQuestions: Record<string, PendingQuestion[]>;
+  questionDrafts: Record<string, QuestionDraft>;
   closedQuestionIds: Record<string, Record<string, true>>;
   setPendingQuestions: (sessionId: string, qs: PendingQuestion[]) => void;
   addPendingQuestion: (sessionId: string, q: PendingQuestion) => void;
@@ -726,6 +729,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     viewer: s.viewer?.sessionId === id ? null : s.viewer,
     messages: dropKey(s.messages, id), pendingQuestions: dropKey(s.pendingQuestions, id),
     closedQuestionIds: dropKey(s.closedQuestionIds, id), pendingForks: dropKey(s.pendingForks, id),
+    questionDrafts: Object.fromEntries(Object.entries(s.questionDrafts).filter(([, draft]) => draft.sessionId !== id)),
     streamingText: dropKey(s.streamingText, id), streamingItems: dropKey(s.streamingItems, id),
     subagents: dropKey(s.subagents, id), dispatchStates: dropKey(s.dispatchStates, id),
     dispatchUnavailable: dropKey(s.dispatchUnavailable, id), sessionMembership: dropKey(s.sessionMembership, id),
@@ -1015,6 +1019,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }),
 
   pendingQuestions: {},
+  questionDrafts: {},
   closedQuestionIds: {},
   setPendingQuestions: (sessionId, qs) =>
     set((s) => {

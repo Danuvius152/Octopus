@@ -263,6 +263,7 @@ class PendingQuestion:
     ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     timer: asyncio.Task[None] | None = field(default=None, repr=False)
     request_publication: QuestionNotification | None = field(default=None, repr=False)
+    snooze_publication: QuestionNotification | None = field(default=None, repr=False)
     publication: QuestionNotification | None = field(default=None, repr=False)
     retirement_requested: bool = False
     backend: HarnessRun | None = field(default=None, repr=False)
@@ -270,10 +271,16 @@ class PendingQuestion:
     resolution: dict[str, Any] | None = None
     interaction_policy: Literal["human", "unattended"] | None = None
     wait_mode: Literal["blocking", "optional", "mcp"] = "mcp"
+    snoozed: bool | None = None
     answer_target: Literal["human", "parent", "none"] = "human"
     parent_receipt: SubmissionReceipt | None = field(default=None, repr=False)
     waiters: int = 0
     waiters_released: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+
+    @property
+    def notifications(self) -> tuple[QuestionNotification | None, ...]:
+        """The original bounded request, interaction and resolution slots."""
+        return self.request_publication, self.snooze_publication, self.publication
 
     def is_current(self, attempt_id: str | None) -> bool:
         """Read original attempt eligibility; callers own state and expiry."""

@@ -2,6 +2,9 @@
 
 状态：历史复盘。下列缺陷已有对应修复，仍存边界单独列出；不代表所有 OAuth 问题已关闭或当前部署已验收。
 
+阅读提示：正文保留 `6ab383a` 时的历史判断；Connector refresh 的旧剩余项已由
+[11 月 4 日补记](#后续补记2026-11-04基线-0f15708)关闭，不能直接作为今天的修复待办。
+
 ## 摘要
 
 近一个月，OAuth 相关修复从调用账户、重授权目标，延伸到刷新、首次绑定、取消、数据库
@@ -32,8 +35,8 @@
 
 证据来自提交前后代码、现行合同和回归测试源码。本文没有生产事故日志或外部供应商
 复现回执，不能据此声称出现过实际账户接管、凭据泄露、生产数据损坏，或归因于供应商
-近期变更。本次是代码与历史调查，没有重跑产品套件或发起真实 OAuth 登录；文中测试名
-说明覆盖了什么，不构成该版本本轮执行通过的声明。
+近期变更。原调查只核对代码与历史，没有重跑产品套件或发起真实 OAuth 登录；
+文中测试名说明相应版本的覆盖范围，不构成当前版本执行通过的声明。
 
 ## 时间线
 
@@ -200,7 +203,7 @@ Codex 还有单独的进程输出、设备码准备、授权窗口、文件发�
 
 ## 仍存边界与关联
 
-截至上述基线，以下内容不能被本复盘当成已经关闭的历史缺陷：
+截至上述基线，以下内容不能被本复盘当成已经关闭的历史缺陷；后续修复见文末补记：
 
 - **Connector refresh 分类仍未对齐模型凭据刷新。**
   `ConnectorManager.get_access_token` 仍把 provider/transport 异常广泛标为
@@ -223,10 +226,49 @@ Codex 还有单独的进程输出、设备码准备、授权窗口、文件发�
 - [Connector manager](../../server/connector_manager.py)、
   [callback 与取消](../../server/routers/connectors.py)、[绑定事务](../../server/db/connectors.py)、
   [设备登录](../../server/codex_login.py)。
-- [SessionOwner 范围失控复盘](2026-10-21-session-owner-scope-creep.md)：同样需要检查
+- [SessionOwner 范围失控复盘](session-owner-scope-creep.md)：同样需要检查
   责任连续性；本次额外暴露首次身份、认证来源与跨链路保证不能外推的问题。
 
 复查历史可运行 `git show <上表提交> -- <相关路径>`；其中
 `git show 9599150^:server/oauth_login.py`、
 `git show 9599150^:server/routers/credentials.py` 及对应旧测试，能直接重建
 “manager 已成功、router 仍在提交”的责任断点。
+
+## 后续补记（2026-11-04，基线 0f15708）
+
+本节固定在 `0f1570877be4e2ed5903377fe93955c454f43906`，不改写原文的事故时间线。
+原“Connector refresh 分类仍未对齐”描述的是 `6ab383a`，以下后续保证已经进入该基线：
+
+| 提交 | 已补齐的责任 | 证据与回归入口 |
+| --- | --- | --- |
+| [a660fcc](https://github.com/Danuvius152/Octopus/commit/a660fccf3a1298b5da89079195301454363bb374) | 保留 HTTP/status/error 分类；429、5xx 及 transport 失败不自动标记重连；400／401 且明确 invalid_grant 才走相应永久拒绝。资源拒绝按原 grant stamp 条件写回，迟到拒绝不污染新授权 | [错误分类](../../server/connectors/errors.py)、[授权快照](../../server/connectors/grants.py)、[分类回归](../../tests/test_connector_grant_failures.py) |
+| [324a913](https://github.com/Danuvius152/Octopus/commit/324a913aa959a4664fc016c6e339ee42b1f3b32c) | manager 保有原 refresh 到 provider 结果保存及退休，shield waiter 并在 shutdown join；custom definition 删除／同名重建不能向旧操作提供新配置 | [refresh owner](../../server/connector_manager.py)、[取消与轮转回归](../../tests/test_connector_manager.py)、[定义替换回归](../../tests/test_connector_custom_lifecycle.py) |
+| [07b83bf](https://github.com/Danuvius152/Octopus/commit/07b83bf2fed2e1d88ca1e782eafe384e86988355) | 原登录任务保有 CLI、正式 auth 文件／凭据事务发布和清理；status 只读原结果，同目标占用直到原进程组及 staging 清理确认；不能倒推旧版本早已有这些责任 | [凭据发布合同](../implemented/harness-credential-reauth.md)、[登录合同](../implemented/harness-layer.md) |
+
+例如 `test_refresh_waiter_cancellation_keeps_the_original_rotated_result` 在原操作不同
+阶段取消 waiter，检查同一轮转结果仍能保存；
+`test_refresh_captures_original_endpoint_and_client_before_definition_replacement`
+在远端等待期间替换定义，检查旧操作仍使用原配置。这比“refresh 只调用一次”更接近
+真实保证：一次外部操作、正确的原授权与完整的后续提交必须同时成立。
+
+Codex 的相邻反例也已进入[原登录回归](../../tests/test_codex_login.py)：
+`test_original_login_publishes_without_any_status_observer` 验证无人轮询仍完成发布；
+`test_original_commit_survives_observer_cancellation_and_orders_later_deletion`
+在真实提交等待中取消观察者，仍只由原 committer 完成并与后续删除排序；
+`test_committed_login_retains_target_and_success_until_failed_staging_cleanup_is_confirmed`
+保留历史成功及真实清理占用，重试只补原清理，不再发布。发布前撤权、未知 COMMIT
+和旧 auth 文件保全仍按所属合同分别处理，不能从一次 `rc=0` 或 success 文字外推。
+
+因此，原分类缺口及上述 owner／定义替换缺口不再作为当前未完成项。当前行为由
+[Connector 合同](../implemented/connectors.md)和上述 Harness 合同维护，
+[账户计划](../plans/multi-tenancy-gaps.md)也已将旧分类项列为已处理。浏览器绑定、
+远端撤销与跨进程 pending 恢复仍按原适用边界分别判断；源码与回归入口的补记
+不能代替真实供应商登录或当前安装的部署验收。
+
+2026-11-05 的实机验收又暴露了观察对象选错的例子：后台任务继承服务的默认
+`CODEX_HOME`，与正在正常对话的凭据绑定不同。默认旧登录返回 token_expired，
+不能据此要求当前账户重新授权。核对原进程及 agent 绑定、显式传入当前既有
+目录后，最小模型调用、21 项 Codex 实机和两项浏览器验收通过，成功轮次没有
+认证域请求。只读接口 200 只能作为诊断线索；真实模型与网络审计才补齐该次
+验证。此处修正的是测试启动输入，不是宣称 OAuth 或远端撤销问题已消失；
+本机验证的目录选择规则归[本机测试](../local-wsl.md#本机测试)。

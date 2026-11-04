@@ -32,6 +32,38 @@ from tests.session_runtime import wait_dispatch_idle
 native_runtime = native_tests.native_runtime
 
 
+@pytest.mark.parametrize("tool_ended", [False, True])
+async def test_root_completion_distinguishes_explicit_tool_failure_from_missing_tool_result(native_runtime, tmp_path, tool_ended):
+    manager, database, session, _, starts, events = native_runtime
+    receipt = await start_output(native_runtime)
+    tool = {"id": "original-call", "type": "mcpToolCall", "server": "connector", "tool": "write",
+            "arguments": {}, "status": "inProgress"}
+    frames = [{"method": "item/started", "params": {"threadId": ROOT, "turnId": "turn-1", "item": tool}}]
+    if tool_ended:
+        frames.append({"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1",
+            "item": {**tool, "status": "failed", "error": {"message": "The connector rejected the operation"}}}})
+    inject(tmp_path, *frames, item(ROOT, "turn-1", "final", "The final model output"), terminal())
+    await wait_dispatch_idle(manager, session.id)
+    result = await database.read_session_result(session.id, receipt["request_id"])
+    assert result.outcome.native_status == "completed"
+    assert result.outcome.status == ("success" if tool_ended else "failed")
+    assert result.fragments == ("The final model output",)
+    live, = [event for event in events if event.get("terminal")]
+    saved, = [row for row in await database.load_messages(session.id) if row["type"] == "result"]
+    assert saved["is_error"] == live["is_error"] == (not tool_ended)
+    assert saved["content"] == live["content"] == result.outcome.model_dump()
+    assert live["tool_input"]["attempt_context"] == saved["tool_input"]["attempt_context"]
+    if tool_ended:
+        errors = [row for row in await database.load_messages(session.id) if row["type"] == "tool_result" and row["is_error"]]
+        assert len(errors) == 1 and errors[0]["tool_use_id"] == "original-call"
+    else:
+        assert "model turn completed" in result.outcome.message.lower()
+        assert "tool results" in result.outcome.message.lower()
+        assert "without a terminal" not in result.outcome.message.lower()
+        assert result.outcome.recording_integrity == "incomplete"
+    assert len(starts) == 1
+
+
 @pytest.mark.parametrize("snapshot,field,bad", [
     ({"type": "fileChange", "status": "completed", "changes": []}, "changes", "truncated"),
     ({"type": "commandExecution", "status": "completed", "command": "true", "cwd": "/tmp", "commandActions": []}, "command", {}),

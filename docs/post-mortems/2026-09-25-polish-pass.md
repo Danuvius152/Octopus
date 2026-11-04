@@ -614,3 +614,22 @@ rewrite buys nothing until it is in sight.
 30 days of collected data first), a message-retention policy for `octopus.db`
 (product data, so a user decision rather than cleanup), e2e in an automated gate,
 and splitting `ChatView.tsx`.
+
+## Follow-up for the current fork (2026-11-04)
+
+The report's measurements and deployment remain historical. In particular,
+the deferred async rewrite above is no longer a description of every tool:
+the long-waiting `ask.user` now uses an async transport so cancellation can
+join its original creation, question resolution and REST waiter without
+occupying a synchronous worker. This change addresses a concrete lifetime
+contract; it does not require converting every short tool or claim a new
+throughput measurement.
+
+The native result path also separates provider completion, business outcome,
+recording, notification and resource retirement. A completed model turn may
+still have unknown tool effects; a locally saved answer does not prove that
+the provider consumed it. These distinctions and the corresponding consumer
+regressions are covered in the [SessionOwner follow-up](session-owner-scope-creep.md#后续核对原问题与真实消费者)
+and [current execution contract](../implemented/architecture-contract.md#输入完成与资源退休).
+Current check selections, including the now-enforced mypy codes and separate
+offline/live tiers, belong to [testing](../testing.md), not the counts above.

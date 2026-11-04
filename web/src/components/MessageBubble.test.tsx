@@ -15,6 +15,60 @@ import { useSessionStore } from "../stores/sessionStore";
 
 afterEach(cleanup);
 
+it.each(["missing", "other-request", "other-attempt", "commentary", "other-root"])(
+  "does not claim saved output for an unconfirmed %s reference", (damage) => {
+    const metadata = { request_id: damage === "other-request" ? "other" : "r", attempt_id: damage === "other-attempt" ? "other" : "a",
+      native: { thread_id: damage === "other-root" ? "other" : "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn",
+        item_id: "final", phase: damage === "commentary" ? "commentary" : "final_answer" } };
+    useSessionStore.setState({ messages: { evidence: damage === "missing" ? [] : [{ seq: 1, role: "assistant", type: "text",
+      content: "Collected text", runtime_metadata: metadata }] } });
+    const view = render(<MessageBubble sessionId="evidence" message={{ role: "system", type: "result", seq: 2,
+      tool_input: { attempt_context: { request_id: "r", attempt_id: "a" } }, outcome: {
+        request_id: "r", status: "success", native_status: "completed", recovery: {},
+        final_answer: { thread_id: "root", turn_id: "turn", message_seqs: [1] },
+      } }} />);
+    fireEvent.click(view.getByText("Completion details"));
+    expect(view.queryByText("Model output was saved.")).not.toBeInTheDocument();
+  },
+);
+
+it("uses a neutral explanation for an unknown historical question closure", () => {
+  const view = render(<MessageBubble sessionId="legacy-question" message={{ role: "system", type: "question_closed",
+    content: "Legacy transport detail", tool_input: { reason: "unknown_legacy_reason" } }} />);
+  expect(view.getByText("The original question is closed.")).toBeVisible();
+  expect(view.getByText("Legacy transport detail")).not.toBeVisible();
+  fireEvent.click(view.getByText("Original closure details"));
+  expect(view.getByText("Legacy transport detail")).toBeVisible();
+});
+
+it.each(["live", "history"])("shows one canonical primary cause and keeps saved-output evidence in %s details", async (path) => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const { normalizeMessage } = await import("../lib/turnOutcome");
+  const cause = "The model turn completed, but required tool results were not confirmed.";
+  const content = { kind: "outcome", request_id: "primary", status: "failed", message: cause,
+    native_status: "completed", recovery: {}, recording_integrity: "incomplete",
+    recording_issues: { native_collection_incomplete: 1 }, recording_locations: [{ kind: "native_collection_incomplete", line: 7 }],
+    final_answer: { thread_id: "root", turn_id: "turn", message_seqs: [1] } };
+  const tool_input = { attempt_context: { request_id: "primary", attempt_id: "attempt" } };
+  useSessionStore.setState({ messages: { primary: [{ role: "assistant", type: "text", seq: 1, content: "Saved final", runtime_metadata: {
+    request_id: "primary", attempt_id: "attempt", native: { thread_id: "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn",
+      item_id: "final", phase: "final_answer" },
+  } }] }, lastAppliedSeq: {} });
+  handleWsMessage({ type: "result", session_id: "primary", seq: 2, terminal: true, is_error: true, content, tool_input });
+  const message = path === "live" ? useSessionStore.getState().messages.primary[1] :
+    normalizeMessage({ role: "system", type: "result", seq: 2, is_error: true, content, tool_input });
+  expect(message.outcome?.recording_locations).toEqual(content.recording_locations);
+  const view = render(<MessageBubble sessionId="primary" message={message} />);
+  expect(view.getAllByText(cause)).toHaveLength(1);
+  expect(view.getByText(cause)).toBeVisible();
+  expect(view.queryByText("The answer was saved; completion records are incomplete.")).not.toBeInTheDocument();
+  expect(view.getByText("Native: completed")).not.toBeVisible();
+  fireEvent.click(view.getByText("Completion details"));
+  expect(view.getByText("Native: completed")).toBeVisible();
+  expect(view.getByText("Model output was saved.")).toBeVisible();
+  expect(view.queryByText("Done")).not.toBeInTheDocument();
+});
+
 it.each(["live", "history"])("keeps native status and missing-final evidence in %s results", async (path) => {
   const { handleWsMessage } = await import("../hooks/useWebSocket");
   const { normalizeMessage } = await import("../lib/turnOutcome");

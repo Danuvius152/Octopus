@@ -300,6 +300,7 @@ class SessionOwner:
         try:
             while True:
                 self._wake.clear()
+                self.questions.consume_mcp_calls()
                 failed_call = next((call for call in self.questions.mcp_calls.values() if call.error is not None), None)
                 if failed_call is not None:
                     raise RuntimeError(f"Original MCP question call {failed_call.id} cleanup is unconfirmed") from failed_call.error

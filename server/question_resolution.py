@@ -29,6 +29,28 @@ UNKNOWN_SOURCE = AnswerSource()
 SYSTEM_SOURCE = AnswerSource("system")
 
 
+def question_close_text(reason: str) -> str:
+    descriptions = {
+        "cancelled": "The original question call ended.",
+        "communication_failure": "Question communication failed.",
+        "interrupted": "Question closed: interrupted.",
+        "service_shutdown": "The service is shutting down; the question is closed.",
+        "hard_cap": "The whole-turn time limit was reached; the question is closed.",
+        "idle_timeout": "The execution activity deadline was reached; the question is closed.",
+        "native_resolved": "The provider resolved the original question.",
+        "native_interrupted": "The provider interrupted the model turn; the question is closed.",
+        "execution_completed": "The model turn completed; the question is closed.",
+        "execution_failed": "The model execution failed; the question is closed.",
+        "attempt_ended": "The original question attempt ended.",
+        "response_overflow": "The question response exceeded capacity; the question is closed.",
+        "deleted": "The original conversation was deleted.",
+        "archived": "The original conversation was archived.",
+        "reset": "The original conversation was reset.",
+    }
+    description = descriptions.get(reason)
+    return f"{description} No answer was received." if description else "The original question is closed."
+
+
 def validate_answers(questions: list[dict[str, Any]], answers: Any) -> list[dict[str, Any]]:
     """Pure validation against the saved form, before disposition is claimed."""
     if not isinstance(answers, list) or len(answers) != len(questions):

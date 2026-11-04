@@ -163,7 +163,13 @@ original observation identity for finite late items, questions and input proof;
 it never reopens execution or routes collection through Claude's live idle scope.
 EOF or the collection cutoff ends that responsibility. Raw drain only releases
 descriptors. Missing complete root items, malformed necessary records or overflow
-prevent success; a cancelled helper need not have produced an answer.
+normally prevent success; a cancelled helper need not have produced an answer.
+The only pure-input exception requires the original Owner's exact, consumed MCP
+cancellation/cleanup receipt on the same attempt. It cannot excuse reader cutoff,
+another associated effect gap, a missing identity or an already selected failure.
+The original required-items diagnostic retains its origin and full observed gap
+count; raw integrity stays incomplete and no completed item is fabricated. See
+[original-call retirement](architecture-contract.md#mcp-question-retirement).
 
 Completion obligations follow pinned producer provenance. Uncommitted sampling
 Message/Reasoning and proven Core WebSearch observations may be abandoned with
@@ -298,8 +304,11 @@ returns `success:false` with explanatory `contentItems`; an unknown request
 returns MethodNotFound and fails the original stream. It cannot hang forever or
 silently approve. `isBlocking` supplies native waiting evidence. Combined with
 the original work's human policy, true disables the question deadline and pauses
-idle; false retains optional-question expiry. The overall cap and Stop remain
-effective. The G0 Default-mode native-question capability emits false in the
+idle; false gives a known human question a 120-second creation deadline. The UI
+shows the final 60 seconds; active interaction can ask the original Owner to
+snooze, clearing that effective deadline and pausing idle after adjudication.
+Unknown legacy policy and MCP deadlines retain their own rules. The overall cap,
+Stop and original-call closure remain effective. The G0 Default-mode native-question capability emits false in the
 live smoke; it proves original-connection optional delivery, while explicit true
 frames exercise blocking/idle suspension in the controlled native protocol tests.
 

@@ -202,6 +202,23 @@ CLI `config/read` 与 thread override 均确认
 [条件失效合同](../implemented/harness-credential-reauth.md#4-run-loop-wiring-serversessionsturnspy)
 的保守分支，而不从当前 auth.json 反推历史采用。
 
+## 同锁版 MCP 调用身份观察
+
+2026-11-04 使用上述 SHA256 的 0.166.0 binary、隔离 `CODEX_HOME`、loopback
+Responses SSE 与真实 StreamableHTTP MCP ask 服务，在 exec 探针中分别关闭和打开
+`executed_tool_call_metadata`，两种设置都实际收到带关联字段的 tools/call。
+随后 App Server 探针在关闭该标志时观察到 MCP `_meta.callId`
+等于原生 `mcpToolCall.id`；`itemId` 是另一项 provider output-item 身份，不能
+拿来替代 callId。`x-codex-turn-metadata` 提供原 thread_id、turn_id 和
+codex_version，与 MCP 的 threadId 一起核对原根。
+
+探针使用合成 API key，无登录；外网由拒绝代理阻断，启动时外部探测未成为协议
+证据。为直接观察 MCP 调用，实验局部关闭 CodeMode；这不证明外层 CodeMode
+调用可按名字关联内部 ask。首次使用不受支持的 flat function 格式只列举工具，
+未发生 MCP 调用，已排除在有效证据外。该观察支持
+[原调用窄关联](../implemented/architecture-contract.md#mcp-question-retirement)，
+不证明 provider 消费、本地退休或真实模型任务成功。
+
 ## 证据定位与边界
 
 当次审计材料位于 `~/.cache/octopus-tests/codex-app-server-g0-base-20261101/`：

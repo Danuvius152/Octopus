@@ -183,6 +183,28 @@ async def submit_answer(
     return {"ok": True}
 
 
+@router.get("/{session_id}/questions/{question_id}/result")
+async def question_result(
+    session_manager: SessionMgr, session_id: str, question_id: str,
+    user_id: ScopeUser = None, _: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """Observe the original committed resolution without polling or resubmitting."""
+    if not await session_manager.session_belongs_to(session_id, user_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    try:
+        result = await session_manager.input_database().get_question_result(session_id, question_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Original question resolution is unknown") from exc
+    if result is not None:
+        return {"state": "resolved", **result}
+    pending = next((record for record in session_manager.get_pending_questions(session_id)
+                    if record.question_id == question_id), None)
+    if pending is not None:
+        return {"state": "pending", "question_id": question_id,
+                "request_id": pending.request_id, "attempt_id": pending.attempt_id}
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "Original question resolution is unknown")
+
+
 @router.delete("/{session_id}/questions/{question_id}")
 async def close_question(
     session_manager: SessionMgr,

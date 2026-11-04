@@ -8,6 +8,7 @@ from server.question_resolution import AnswerSource
 from server.sessions.client_submissions import submit_client_message
 from tests import native_app_server as native_tests
 from tests.native_app_server import (
+    ROOT,
     inject,
     item,
     question_request,
@@ -17,6 +18,23 @@ from tests.native_app_server import (
     wire_frames,
 )
 from tests.session_runtime import wait_dispatch_idle
+
+
+async def test_native_resolved_closes_the_original_form_with_its_own_reason(native_runtime, tmp_path):
+    manager, database, session, _mode, _starts, events = native_runtime
+    await start_output(native_runtime)
+    inject(tmp_path, question_request("original-resolved"))
+    await until(lambda: manager.get_pending_questions(session.id))
+    original, = manager.get_pending_questions(session.id)
+    inject(tmp_path, {"method": "serverRequest/resolved", "params": {
+        "threadId": ROOT, "requestId": original.native_ref.server_request_id}})
+    await until(lambda: any(event["type"] == "question_closed" for event in events))
+    closed = next(event for event in events if event["type"] == "question_closed")
+    assert closed["question_id"] == original.question_id and closed["reason"] == "native_resolved"
+    result = await database.get_question_result(session.id, original.question_id)
+    assert result["reason"] == "native_resolved"
+    inject(tmp_path, terminal())
+    await wait_dispatch_idle(manager, session.id)
 
 native_runtime = native_tests.native_runtime
 
@@ -175,9 +193,10 @@ async def test_terminal_is_read_while_input_proof_commit_waits(native_runtime, t
         release.set()
 
 
-async def test_native_question_and_terminal_advance_behind_full_publication(native_runtime, tmp_path):
+@pytest.mark.parametrize("waiting", ["blocking", "snoozed"])
+async def test_native_question_and_terminal_advance_behind_full_publication(native_runtime, tmp_path, waiting):
     from tests.native_app_server import item
-    manager, database, session, mode, _, _ = native_runtime
+    manager, database, session, mode, _, events = native_runtime
     mode[0] = "control_output"
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -194,10 +213,16 @@ async def test_native_question_and_terminal_advance_behind_full_publication(nati
         inject(tmp_path, item("exact-native-thread", "turn-1", "prefix", "x" * (1024 * 1024 + 1)))
         await asyncio.wait_for(entered.wait(), 3)
         inject(tmp_path, {"id": 0, "method": "item/tool/requestUserInput", "params": {
-            "threadId": "exact-native-thread", "turnId": "turn-1", "itemId": "ask", "isBlocking": True,
+            "threadId": "exact-native-thread", "turnId": "turn-1", "itemId": "ask", "isBlocking": waiting == "blocking",
             "questions": [{"id": "q", "header": "Choice", "question": "Still answer?"}]}})
         await until(lambda: manager.get_pending_questions(session.id))
         question = manager.get_pending_questions(session.id)[0]
+        if waiting == "snoozed":
+            from server.sessions.commands import process_command
+            assert (await process_command(manager, {
+                "type": "snooze_question", "session_id": session.id, "client_command_id": "snooze-full-publisher",
+                "question_id": question.question_id, "request_id": question.request_id, "attempt_id": question.attempt_id,
+            }, session.user_id, source=AnswerSource("account", user_id=session.user_id)))["accepted"]
         assert await manager.answer_question(session.id, question.question_id, [{"text": "yes"}])
         await until(lambda: any(frame.get("id") == 0 and "result" in frame for frame in wire_frames(tmp_path)))
         inject(tmp_path, terminal())
@@ -209,6 +234,9 @@ async def test_native_question_and_terminal_advance_behind_full_publication(nati
     await wait_dispatch_idle(manager, session.id)
     rows = await database.load_messages(session.id)
     assert [row["type"] for row in rows].count("question_answer") == 1
+    assert [event["type"] for event in events if event.get("question_id") == question.question_id] == (
+        ["question_request", "question_snoozed", "question_answer"] if waiting == "snoozed" else
+        ["question_request", "question_answer"])
 
 
 @pytest.mark.parametrize("method,result", [

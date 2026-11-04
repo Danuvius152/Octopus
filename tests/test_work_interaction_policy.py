@@ -21,6 +21,108 @@ from tests.session_runtime import wait_dispatch_idle
 from tests.test_research_session_return import returning_research as returning_research
 
 
+async def test_human_native_optional_uses_creation_deadline_and_system_expiry_once(native_runtime, tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from server.sessions import owner_questions
+
+    manager, database, session, _mode, _starts, _events = native_runtime
+    monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", 1800)
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    await start_output(native_runtime)
+    request = question_request("optional-expiry")
+    request["params"]["isBlocking"] = False
+    inject(tmp_path, request)
+    await until(lambda: manager.get_pending_questions(session.id))
+    original, = manager.get_pending_questions(session.id)
+    saved, = [row for row in await database.load_messages(session.id) if row["type"] == "question_request"]
+    created = datetime.fromisoformat(saved["created_at"])
+    assert 119 <= (datetime.fromisoformat(original.deadline) - created).total_seconds() <= 121
+    clock = owner_questions.time.monotonic
+    monkeypatch.setattr(owner_questions, "time", SimpleNamespace(monotonic=lambda: clock() + 121))
+    assert not await manager.answer_question(session.id, original.question_id, [{"text": "too late"}])
+    assert not await manager.answer_question(session.id, original.question_id, [{"text": "duplicate"}])
+    await until(lambda: any(frame.get("id") == "optional-expiry" for frame in wire_frames(tmp_path)))
+    response, = [frame for frame in wire_frames(tmp_path) if frame.get("id") == "optional-expiry"]
+    assert response["result"]["answers"] == {}
+    resolutions = [row for row in await database.load_messages(session.id) if row["type"] == "question_answer"]
+    assert len(resolutions) == 1
+    fact = resolutions[0]["tool_input"]["question_resolution"]
+    assert fact["disposition"] == "expired" and fact["source"] == {"kind": "system"} and fact["answers"] == []
+    inject(tmp_path, terminal())
+    await wait_dispatch_idle(manager, session.id)
+
+
+async def test_optional_snooze_survives_original_deadline_and_is_published_once(native_runtime, tmp_path, monkeypatch):
+    from server.question_resolution import AnswerSource
+    from server.sessions import owner_questions
+    from server.sessions.commands import process_command
+
+    manager, database, session, _mode, _starts, events = native_runtime
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    await start_output(native_runtime)
+    request = question_request("snooze")
+    request["params"]["isBlocking"] = False
+    inject(tmp_path, request)
+    await until(lambda: manager.get_pending_questions(session.id))
+    original, = manager.get_pending_questions(session.id)
+    command = {"type": "snooze_question", "session_id": session.id, "client_command_id": "first-focus",
+               "question_id": original.question_id, "request_id": original.request_id, "attempt_id": original.attempt_id,
+               "generation": manager.dispatch_snapshot(session.id)["generation"]}
+    source = AnswerSource("account", user_id=session.user_id)
+    assert (await process_command(manager, command, session.user_id, source=source))["accepted"]
+    assert (await process_command(manager, {**command, "client_command_id": "other-page"}, session.user_id, source=source))["accepted"]
+    clock = owner_questions.time.monotonic
+    monkeypatch.setattr(owner_questions, "time", SimpleNamespace(monotonic=lambda: clock() + 121))
+    assert manager.get_pending_questions(session.id) == (original,)
+    assert original.deadline is None and original.expires_at is None
+    await until(lambda: any(event["type"] == "question_snoozed" for event in events))
+    published, = [event for event in events if event["type"] == "question_snoozed"]
+    assert published["snoozed"] is True and published["deadline"] is None
+    assert published["request_id"] == original.request_id and published["attempt_id"] == original.attempt_id
+    assert await manager.answer_question(session.id, original.question_id, [{"text": "Still answerable"}])
+    await until(lambda: any(frame.get("id") == "snooze" for frame in wire_frames(tmp_path)))
+    saved, = [row for row in await database.load_messages(session.id) if row["type"] == "question_snoozed"]
+    assert saved["tool_input"]["snoozed"] is True
+    inject(tmp_path, terminal())
+    await wait_dispatch_idle(manager, session.id)
+
+
+@pytest.mark.parametrize("rejected", ["expired", "wrong-attempt", "machine-source"])
+async def test_optional_snooze_cannot_reverse_expiry_or_change_its_original_authority(native_runtime, tmp_path, monkeypatch, rejected):
+    from server.question_resolution import AnswerSource
+    from server.sessions import owner_questions
+    from server.sessions.commands import process_command
+
+    manager, database, session, _mode, _starts, events = native_runtime
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    await start_output(native_runtime)
+    request = question_request("snooze-refused")
+    request["params"]["isBlocking"] = False
+    inject(tmp_path, request)
+    await until(lambda: manager.get_pending_questions(session.id))
+    original, = manager.get_pending_questions(session.id)
+    if rejected == "expired":
+        clock = owner_questions.time.monotonic
+        monkeypatch.setattr(owner_questions, "time", SimpleNamespace(monotonic=lambda: clock() + 121))
+    response = await process_command(manager, {
+        "type": "snooze_question", "session_id": session.id, "client_command_id": "refused-snooze",
+        "question_id": original.question_id, "request_id": original.request_id,
+        "attempt_id": "another-attempt" if rejected == "wrong-attempt" else original.attempt_id,
+        "generation": manager.dispatch_snapshot(session.id)["generation"],
+    }, session.user_id, source=AnswerSource("agent" if rejected == "machine-source" else "account", user_id=session.user_id))
+    assert not response["accepted"]
+    assert not [event for event in events if event["type"] == "question_snoozed"]
+    if rejected == "expired":
+        result = await database.get_question_result(session.id, original.question_id)
+        assert result["resolution"]["disposition"] == "expired" and result["resolution"]["answers"] == []
+    else:
+        assert manager.get_pending_questions(session.id) == (original,)
+        assert original.deadline is not None
+    inject(tmp_path, terminal())
+    await wait_dispatch_idle(manager, session.id)
+
+
 async def test_human_native_blocking_keeps_original_call_past_question_and_idle_limits(native_runtime, tmp_path, monkeypatch):
     manager, database, session, _mode, starts, _events = native_runtime
     monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", .03)
@@ -52,27 +154,43 @@ async def test_human_native_blocking_keeps_original_call_past_question_and_idle_
 
 
 @pytest.mark.parametrize("ending", ["stop", "execution-end", "hard-cap"])
-async def test_human_blocking_wait_preserves_original_execution_endings(native_runtime, tmp_path, monkeypatch, ending):
+@pytest.mark.parametrize("waiting", ["blocking", "snoozed"])
+async def test_human_blocking_wait_preserves_original_execution_endings(native_runtime, tmp_path, monkeypatch, ending, waiting):
     manager, database, session, _mode, starts, _events = native_runtime
     monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", .03)
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
-    monkeypatch.setattr(settings, "turn_max_seconds", 0)
+    monkeypatch.setattr(settings, "turn_max_seconds", 3600 if ending == "hard-cap" else 0)
     receipt = await start_output(native_runtime)
-    inject(tmp_path, question_request(f"ending-{ending}"))
+    request = question_request(f"ending-{ending}")
+    request["params"]["isBlocking"] = waiting == "blocking"
+    inject(tmp_path, request)
     await until(lambda: manager.get_pending_questions(session.id))
     original, = manager.get_pending_questions(session.id)
+    if waiting == "snoozed":
+        from server.question_resolution import AnswerSource
+        from server.sessions.commands import process_command
+        assert (await process_command(manager, {
+            "type": "snooze_question", "session_id": session.id, "client_command_id": "snooze-ending",
+            "question_id": original.question_id, "request_id": original.request_id, "attempt_id": original.attempt_id,
+        }, session.user_id, source=AnswerSource("account", user_id=session.user_id)))["accepted"]
     if ending == "stop":
         await manager.interrupt(session.id)
     elif ending == "execution-end":
         inject(tmp_path, terminal())
     else:
-        # Arm only after native preparation. The original whole-turn start,
-        # rather than time since the answer, remains the hard-cap origin.
-        monkeypatch.setattr(settings, "turn_max_seconds", .03)
-        manager._session_owners[id(session)].wake()
+        from server.sessions import owner_runtime
+        from tests.native_app_server import item
+        # Advance the original configured whole-turn budget. A real native
+        # observation wakes/rearms its deadline; changing settings after the
+        # owner became idle would instead test unsupported hot reconfiguration.
+        clock = owner_runtime.time.monotonic
+        monkeypatch.setattr(owner_runtime, "time", SimpleNamespace(monotonic=lambda: clock() + 3601))
+        inject(tmp_path, item("exact-native-thread", "turn-1", "cap-observation", "Output before the overall limit"))
     await wait_dispatch_idle(manager, session.id)
     assert not manager.get_pending_questions(session.id)
     assert not await manager.answer_question(session.id, original.question_id, [{"text": "late"}])
+    closed, = [row for row in await database.load_messages(session.id) if row["type"] == "question_closed"]
+    assert closed["tool_input"]["reason"] == {"stop": "interrupted", "execution-end": "execution_completed", "hard-cap": "hard_cap"}[ending]
     result = await database.read_session_result(session.id, receipt["request_id"])
     if ending == "hard-cap":
         assert result.outcome.code == "turn_timeout"

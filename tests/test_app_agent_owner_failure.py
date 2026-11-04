@@ -72,6 +72,8 @@ async def test_failed_owner_receipt_keeps_app_counted_until_original_backend_ret
         assert "owner" in response.value.message.lower()
         assert aam._turns.get(turn.session_id) is turn
         assert aam.list_conversations(row["id"])[0]["running"]
+        status = await aam.get_request_status(row["id"], turn.session_id, turn.request_id)
+        assert status["state"] == "unknown" and status["waiting_for_input"] is False
         assert turn.observer is not None and not turn.observer.done()
         with pytest.raises(AppAgentError) as refused:
             await aam.begin_turn(row, message="Still over the execution cap")

@@ -12,6 +12,7 @@
 /apps/{app_id}/agent/conversations/{cid}         DELETE forget a thread
 /apps/{app_id}/agent/ask                         POST   one question, one answer (JSON)
 /apps/{app_id}/agent/chat                        POST   the same turn, streamed (SSE)
+/apps/{app_id}/agent/client.js                   GET    authenticated host client module
 ```
 
 It sits under `/apps/{id}/` for the same reason the backend proxy does: the
@@ -20,10 +21,16 @@ and no CORS. `ask` and `chat` are the same operation with two deliveries —
 a backend script wants one JSON blob, a chat UI wants tokens as they land.
 
 Successful replies and the initial SSE conversation event include `request_id`.
-An `ask` timeout returns HTTP 504 with structured `detail` containing
-`conversation_id`, `request_id`, `state` and `status_url`, including on a first
-call without a conversation ID. Poll that original request instead of resubmitting
-the operation. After a restart, an unavailable outcome is explicitly `unknown`.
+An `ask` response timeout returns HTTP 504 with structured `detail` containing
+`code=response_wait_timeout`, `conversation_id`, `request_id`, `status_url` and
+`operation_terminal=false`, including on a first call without a conversation ID.
+SSE returns the same recovery fields in an error event. The server observes the
+original status for at most five seconds: a result already committed can be
+reported even if live notification failed, while lookup failure or a bad answer
+reference keeps the timeout receipt and an observation error. A response timeout
+does not declare that the business operation failed or start another operation.
+Query that original request instead of resubmitting it. After a restart, an
+unavailable outcome is explicitly `unknown`.
 SSE events carry request/attempt identities; a `reset` event clears text from an
 abandoned attempt. Legacy replies retain their completed attempt's text blocks.
 For App Server, `progress` carries root commentary/deltas, `message` carries
@@ -77,6 +84,58 @@ product conversation. Invalid/missing refs return an explicit error, including
 HTTP 409 on historical lookup, without borrowing other text. A valid empty
 selection returns an empty reply. Live ask/SSE retains attempt resets and requires
 delivered notifications. Legacy records cannot prove every lost body row.
+
+Without a saved outcome, `running` and `queued` require the original live,
+nonfailed Owner and its current execution or queue entry. A retained App turn or
+run request can still hold capacity during cleanup but cannot establish running.
+`waiting_for_input` reads only the current human question matching that request
+and attempt. This status read neither expires a question nor acquires answer
+authority; another request's question does not count.
+
+## Original-request recovery client
+
+Apps can import the host module from an inline module in their entrypoint:
+
+```html
+<script type="module">
+  import { createAgentClient } from "./agent/client.js";
+  const client = createAgentClient();
+  // Call only on an explicit user action, using the normal chat request body.
+  async function send(body) {
+    try {
+      return await client.chat(body, { onEvent: (event) => console.log(event) });
+    } catch (error) {
+      if (error.receipt?.request_id) showCheckStatus(error.receipt);
+      throw error;
+    }
+  }
+  function showCheckStatus(receipt) {
+    const button = document.createElement("button");
+    button.textContent = "Check status";
+    button.onclick = async () => console.log(await client.status(receipt));
+    document.body.append(button);
+  }
+</script>
+```
+
+`ask` and `chat` send one POST. On `response_wait_timeout` they perform at most
+one GET, bounded to ten seconds, and return the original receipt with an
+`observation` or `observation_error`; an unfinished observation remains available
+for an explicit later `status(receipt)`. They never loop or resend the POST.
+The SSE parser handles chunked UTF-8 and LF/CR/CRLF frames, cancels and releases
+its reader before the timeout lookup, and preserves the original identity on
+EOF, network failure or abort after `conversation`. Such exceptions carry
+`error.receipt` with `operation_terminal=false`; an immutable abort reason is
+retained as `cause`. Failure before receiving identity cannot invent one.
+
+Backend consumers can pass `baseUrl: process.env.OCTOPUS_AGENT_API` and
+`headers: { Authorization: "Bearer " + process.env.OCTOPUS_APP_TOKEN }` to
+`createAgentClient`; the supplied base works with or without a trailing slash.
+The default base is relative to the served module. Recovery URLs must identify
+the same application/conversation/request; status responses must confirm the
+original conversation/request. The authenticated module is served with no-store
+from the packaged source also exercised by the JS tests. It needs no package
+publication and does not migrate installed Apps.
 
 ## 3. A conversation is a session
 

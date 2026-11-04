@@ -8,6 +8,15 @@ export interface SubmissionReply {
   execution?: import("../api").ClientSubmissionStatus["execution"];
 }
 
+/** Captured before sending; a later view cannot retarget the answer. */
+export interface QuestionCommandTarget {
+  clientCommandId: string;
+  accountGeneration: number;
+  generation: string | null;
+  requestId: string | null;
+  attemptId: string | null;
+}
+
 export interface ControlCommandStatus {
   id: string;
   sessionId: string;

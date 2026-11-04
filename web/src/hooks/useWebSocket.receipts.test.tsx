@@ -88,6 +88,35 @@ it("clears a confirmed answer without leaving a dismissible notice", async () =>
   expect(screen.queryByLabelText("Command confirmations")).toBeNull();
 });
 
+it("consumes the original snooze receipt without inventing a paused question projection", async () => {
+  const { result } = renderHook(useWebSocket);
+  const socket = Socket.instances[0];
+  const pending = result.current.snoozeQuestion("s", "q", { clientCommandId: "pause-original",
+    accountGeneration: useSessionStore.getState().accountGeneration, generation: "g", requestId: "r", attemptId: "a" });
+  expect(useSessionStore.getState().controlCommands["pause-original"].state).toBe("pending");
+  act(() => socket.onmessage?.({ data: JSON.stringify({ type: "command_receipt", operation: "snooze_question", session_id: "s",
+    client_command_id: "pause-original", accepted: true }) }));
+  expect(useSessionStore.getState().controlCommands["pause-original"]).toBeUndefined();
+  expect((await pending).accepted).toBe(true);
+  expect(useSessionStore.getState().pendingQuestions.s).toBeUndefined();
+});
+
+it("sends the answer owner's captured identity and rejects it after an identity change", async () => {
+  const { result } = renderHook(useWebSocket);
+  const target = { clientCommandId: "draft-command", accountGeneration: useSessionStore.getState().accountGeneration,
+    generation: "g", requestId: "original-request", attemptId: "original-attempt" };
+  const pending = result.current.answerQuestion("s", "question", [{ text: "once" }], target);
+  const socket = Socket.instances[0];
+  expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({ client_command_id: "draft-command",
+    request_id: "original-request", attempt_id: "original-attempt", generation: "g" });
+  act(() => socket.onmessage?.({ data: JSON.stringify({ type: "command_receipt", operation: "answer_question", session_id: "s",
+    client_command_id: target.clientCommandId, accepted: true }) }));
+  expect((await pending).accepted).toBe(true);
+  act(() => useSessionStore.getState().setToken("another-account"));
+  expect((await result.current.answerQuestion("s", "question", [{ text: "stale" }], target)).accepted).toBe(false);
+  expect(socket.send).toHaveBeenCalledTimes(1);
+});
+
 it.each(["failed", "unknown"])("keeps a %s answer notice for review", async (state) => {
   const { result } = renderHook(useWebSocket);
   const socket = Socket.instances[0];

@@ -44,6 +44,7 @@ build-backend = "setuptools.build_meta"
 octopus = "server.cli:main"
 
 [tool.setuptools.package-data]
+"server" = ["app_agent_client.js"]
 "server.wiki" = ["prompts/*.md"]
 
 [tool.setuptools.packages.find]

@@ -94,6 +94,8 @@ const outcome: Guard<Pick<Dto["TurnOutcome"], "kind" | "request_id" | "status" |
   message: maybeText, code: maybeText, provider_code: maybeText,
   recovery: optional(countMap), final_answer: optional(nullable(finalAnswer)),
   native_status: optional(nullable(oneOf("completed", "failed", "interrupted"))),
+  recording_integrity: optional(oneOf("complete", "incomplete")), recording_issues: optional(countMap),
+  recording_locations: optional(array(record)),
 });
 const recovery = fields({ kind: oneOf("recovery"), request_id: id, phase: oneOf("diagnostic", "retrying", "recovered"),
   code: text, message: text, attempt: optional(nullable(integer)), maximum: optional(nullable(integer)), delay: maybeNumber });
@@ -110,7 +112,7 @@ function event<const K extends string, const S extends Rules>(type: K, rules: S)
 const definitions = [
   event("submission", { ...inSession, client_request_id: id, accepted: boolean, message: maybeText, code: maybeText,
     state: optional(nullable(oneOf("unknown"))), execution: optional(execution) }),
-  event("command_receipt", { ...inSession, client_command_id: id, operation: oneOf("interrupt", "answer_question"),
+  event("command_receipt", { ...inSession, client_command_id: id, operation: oneOf("interrupt", "answer_question", "snooze_question"),
     accepted: boolean, message: maybeText, code: maybeText }),
   event("attempt_started", { ...inSession, request_id: id, attempt_id: id }),
   event("dispatch_state", { ...inSession, dispatch_state: dispatch }),
@@ -128,7 +130,9 @@ const definitions = [
   event("tool_use", { ...inSession, tool: id, input: nullable(record), tool_use_id: maybeText }),
   event("tool_result", { ...inSession, output: optional(legacyOr(record)), tool_use_id: maybeText, is_error: optional(boolean) }),
   event("question_request", { ...inSession, question_id: id, questions: array(question), deadline: maybeText,
-    interaction_policy: optional(nullable(oneOf("human", "unattended"))), wait_mode: optional(nullable(oneOf("blocking", "optional", "mcp"))) }),
+    interaction_policy: optional(nullable(oneOf("human", "unattended"))), wait_mode: optional(nullable(oneOf("blocking", "optional", "mcp"))),
+    snoozed: optional(nullable(boolean)) }),
+  event("question_snoozed", { ...inSession, question_id: id, deadline: nullable(text), snoozed: boolean }),
   event("question_answer", { ...inSession, question_id: id, content: text }),
   event("question_closed", { ...inSession, question_id: id, message: text, reason: maybeText }),
   event("status", { ...inSession, status: oneOf("idle", "running") }),

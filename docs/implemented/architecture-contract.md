@@ -76,8 +76,9 @@ App Server 的根 terminal 是 provider 候选。一个 attempt 只接纳一个�
 terminal 后，Run 同步冻结 target、问题回答和工具准入，启动原有界退休；同一
 reader 仍以原 connection/request/attempt/work 和 native 身份采集完整晚事件，
 不转入 Claude held/idle，也不恢复 grant。EOF、原采集截止和真实退出分别取证；
-raw drain 不证明完整 item 已保存。按锁版 producer 核定的实际工具结果缺口不能
-成功；可放弃的 sampling/维护观察与 delta 不自动形成完成债务。来源与类型的
+raw drain 不证明完整 item 已保存。按锁版 producer 核定的实际效果结果缺口不能
+成功；准确取消并清理的纯输入只适用下文原调用窄例外。可放弃的 sampling/维护
+观察与 delta 不自动形成完成债务。来源与类型的
 具体规则归 [Codex 完成合同](codex-backend.md#root-completion-and-selected-answer)，
 未承诺采集或取消前从未产生的 child 答案不成为成功依赖。
 
@@ -90,6 +91,11 @@ status 独立。选定后的 Stop 不改写原结论，仍暂停派发和关闭�
 provider 终态与收集失败分流，native interrupted 保留主结论并单列记录缺口；
 若原收集失败先触发清理，其后 interrupted 不覆盖先前失败。summary 只约束明确
 completed final，待原保存管道结束后核原行和 refs，不补正文或另建结果副本。
+
+根 completed 而必要工具结果未确认时，canonical 失败说明保留这个区别，不再
+追加“缺少终态”的通用段落；原 Stop、provider 或整体上限原因继续优先。已完整
+记录的工具失败留在工具卡，不自行制造协议收尾失败。诊断位置、重试和采集缺口
+沿原 outcome 的结构化字段供实时与历史展示，浏览器不再重新裁定业务状态。
 
 原生根失败携带的错误正文、provider 错误结构和原 request/attempt/native 来源
 沿既有 recovery 诊断消息保存，位于 terminal 之前。即使 Stop 或 start 等待失败
@@ -248,7 +254,11 @@ pending/attempt，先纯校验原表单，再不让出地检查 current/到期�
 延续已有的文字 strip 转换。父代理入口只做题目 ID/位置转换，不再持另一份校验规则。
 
 原消息 `tool_input.question_resolution` 保存 version 1、question/request/attempt/
-work、处置、来源及答案。答案沿原 `question_index`、标签与可辨明的 `option_index`
+work、处置、来源及答案；客户端提交还保存原 `client_command_id`。认证只读入口
+`GET /api/sessions/{sid}/questions/{qid}/result` 可读取已退休问题的原持久结算，
+不触发到期或恢复回答权。客户端只按完整问题身份和原命令关联自己的提交；
+缺记录、旧记录缺关联、认证失败或不可达均不能证明答案未被接纳。
+答案沿原 `question_index`、标签与可辨明的 `option_index`
 关联表单，保留多选顺序与自定义文字，不生成 provider ID。处置区分 answered、
 expired、closed；显式关闭保留 `question_closed` 和 reason，系统到期指导不伪装
 成表单答案。旧结构和来源缺失保持未知，content 仍是旧 MCP/展示使用的文本投影。
@@ -272,8 +282,16 @@ human，不以 `session.origin`、机器消息来源或浏览器在线状态改�
 
 human 的原生 blocking 问题不设问题期限，并暂停对应 idle 等待；Stop、原调用
 resolved、执行结束、真实故障及包含等待时间的整体上限仍生效。MCP 保留默认
-1800 秒、配置 0 禁用问题期限；原生非 blocking 和旧未知策略保留其兼容期限。
-Web/App、两种 session detail、实时事件及历史共用原问题的策略和 wait_mode。
+1800 秒、配置 0 禁用问题期限。human 原生 optional 问题由原 Owner 在建题时设定
+120 秒绝对期限；页面前 60 秒不显示倒计时，后 60 秒显示剩余时间。浏览器不执行
+自动回答。旧未知策略保留兼容期限。
+
+用户在表单内主动操作可发送原 `SnoozeQuestion`；原 Owner 先裁定是否已经到期，
+成功时清除有效期限及 timer，并将原题加入 idle 等待暂停范围。该操作幂等，
+不换题、不延长整体上限，也不屏蔽 Stop、resolved 或真实故障。原记录以有界
+独立暂停通知槽保留交付责任，持久 `question_snoozed` 事件的 seq 保护较新投影
+不被旧 snapshot 覆盖。Web/App、两种 session detail、实时事件及历史共用原问题
+的策略、wait_mode 和暂停投影。
 
 unattended 不创建长期人工表单：根问题立即以 `needs_input` 关闭，保存原问题及
 缺失决定，不生成用户选择或授权。子工作可先将题目交给真实父关系；一次实际
@@ -304,6 +322,18 @@ REST waiter 的 finally 释放，随后传播取消。`ready` 只证明唤醒，
 既有 owner/writer failure 出口传播，不能因 task 回调移除而假成功。
 runner 一旦进入取消或通信失败清理，既有 cancelled 标记阻止后到取消再次打断
 创建回执、关闭持久化或 waiter 释放；真正清理失败仍保留原故障事实。
+
+runner 完成不自行删除登记。原 Owner 在确认实际 task done 和清理成功后消费该
+call，留下原 attempt 内有界的精确清理凭证并确认 consumed；shutdown join 同时
+等待这两个事实。公共退休边界也检查仍登记的 call，包含 Stop 和已选故障路径，
+不能提前确认 execution retired 或释放 App 槽位。
+
+原生根 completed 且唯一采集问题是准确关联、已取消并完成本地清理的纯 ask 输入
+缺项时，原 attempt 可采用窄成功裁定。凭证必须匹配原 scope、request/attempt、
+thread/turn 和真实 MCP callId，不能按工具名字推断。任何已观察的关联效果缺项、
+reader 截断、其他故障或缺少精确关联仍阻断。原生 incomplete 诊断保留，不伪造
+item.completed；本地清理和接纳仍不证明 provider 消费。领域消费者继续核验其
+自己的产物、发布或父子交接凭证。
 
 结构化 GET 兼容提供原已保存 resolution 和可读文本；普通 GET 的关闭 404 语义
 保留。单次 408、一个 poll 取消或浏览器断线不取消原工具调用。未知 qid、认证
@@ -768,7 +798,7 @@ Owner 的预算条件同时影响活动计时、timer 唤醒、问题等待的�
 
 - [原架构执行计划](https://github.com/Danuvius152/Octopus/blob/cf98ecb75d1aa741c31292977ac9d83e727d366f/docs/plans/minimal-architecture-execution-20261020.md)：Owner/事务/输入/Wiki 架构的取舍、票20和其余批次验收范围。
 - [原账户简化与搬迁计划](https://github.com/Danuvius152/Octopus/blob/cf98ecb75d1aa741c31292977ac9d83e727d366f/docs/plans/architecture-simplification-20261023.md)：接口退出、存储政策取代关系、搬迁专项验收与当时的发布缺口。
-- [Owner 范围失控复盘](../post-mortems/2026-10-21-session-owner-scope-creep.md)、[开户退役复盘](../post-mortems/2026-10-24-account-setup-retirement.md)：保留触发条件、原因及可复用的回归经验。
+- [Owner 范围失控复盘](../post-mortems/session-owner-scope-creep.md)、[开户退役复盘](../post-mortems/account-setup-retirement.md)：保留触发条件、原因及可复用的回归经验。
 
 这些证据限定于其记录版本。本文不复制旧“尚未实施/待发布”状态，也不从历史
 验收推导今天的生产版本；本机发布按实际配置和回执核验。

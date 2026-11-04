@@ -1,7 +1,8 @@
 # 08/09 开户与旧接管退役：身份夹具迁移和门禁反复（2026-10-24）
 
-状态：已完成开发、验证和独立审查，提交为 `87ce64787cd4a446802c18207de1e28dcebdaee3`。
-截至该提交的验收记录，未推送或发布，也未清理生产资料。
+状态：历史复盘。该次开发、验证和独立审查的提交为
+`87ce64787cd4a446802c18207de1e28dcebdaee3`。“未推送或发布”是当次验收记录，
+不描述当前安装；本篇也不授权清理生产资料。
 
 ## 摘要
 
@@ -216,4 +217,4 @@ receipt/ACK、进程退役、重复中断和不重放断言继续保留。没有
   `09-progress.md`、`08-09-post-gate.md`、r4–r9 progress、
   `08-09-r9-final-gates.json` 和 `08-09-acceptance.md`。
 - 验证与文档操作规则：[AGENTS.md](../../AGENTS.md#verification)。
-- 相关经验：[SessionOwner 合并交付的范围失控](2026-10-21-session-owner-scope-creep.md)。
+- 相关经验：[SessionOwner 合并交付的范围失控](session-owner-scope-creep.md)。

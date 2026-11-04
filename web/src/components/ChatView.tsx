@@ -45,6 +45,8 @@ import { OctopusLogo } from "./OctopusLogo";
 import { CredentialPicker } from "./CredentialPicker";
 import { PageHeader } from "./PageHeader";
 import { QuestionPrompt, type AnswerPayload } from "./QuestionPrompt";
+import { QuestionDraftRecovery } from "./QuestionDraftRecovery";
+import { beginQuestionTransmission, finishQuestionTransmission } from "../lib/questionDrafts";
 import {
   SlashCommandMenu,
   buildRememberPrompt,
@@ -56,7 +58,7 @@ import { useSessionFork } from "../hooks/useSessionFork";
 import { observeOlderMessages } from "../lib/transcript";
 import { selectSession } from "../lib/selectSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
-import { newSubmissionId, type SubmissionReply } from "../lib/submission";
+import { newSubmissionId, type QuestionCommandTarget, type SubmissionReply } from "../lib/submission";
 import { MAX_ATTACHMENTS_PER_MESSAGE, useDraftAttachments, type PendingAttachment } from "../hooks/useDraftAttachments";
 
 const EMPTY_MESSAGES: Message[] = [];
@@ -87,8 +89,10 @@ interface Props {
   answerQuestion: (
     sessionId: string,
     questionId: string,
-    answers: AnswerPayload[]
+    answers: AnswerPayload[],
+    target?: QuestionCommandTarget
   ) => void | Promise<SubmissionReply>;
+  snoozeQuestion?: (sessionId: string, questionId: string, target: QuestionCommandTarget) => void | Promise<SubmissionReply>;
   connected: boolean;
   onToggleSidebar: () => void;
   // Open the all-agents Schedules overview (App owns the dialog). Used by the
@@ -119,6 +123,7 @@ export function ChatView({
   sendMessage,
   interrupt,
   answerQuestion,
+  snoozeQuestion,
   connected,
   onToggleSidebar,
   onOpenSchedules,
@@ -127,6 +132,7 @@ export function ChatView({
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [restoredInput, setRestoredInput] = useState<{ sessionId: string; clientId: string } | null>(null);
+  const [restoredQuestion, setRestoredQuestion] = useState<{ sessionId: string; key: string } | null>(null);
   const [requiredAttachmentCount, setRequiredAttachmentCount] = useState(0);
   const submittedDrafts = useRef(new Map<string, { sessionId: string; text: string; attachments: PendingAttachment[] }>());
   const [submissionError, setSubmissionError] = useState("");
@@ -170,6 +176,7 @@ export function ChatView({
       }
       setRejectedDrafts((drafts) => drafts.filter((draft) => sessionId && draft.sessionId !== sessionId));
       setRestoredInput((draft) => draft && sessionId && draft.sessionId !== sessionId ? draft : null);
+      setRestoredQuestion((draft) => draft && sessionId && draft.sessionId !== sessionId ? draft : null);
       if (!sessionId || sessionId === activeSessionId) {
         setInput(""); clearAttachments(); setRequiredAttachmentCount(0); setSubmissionError(""); setHistory(HISTORY_IDLE);
       }
@@ -385,9 +392,11 @@ export function ChatView({
           return (
             <QuestionPrompt
               question={pending}
+              sessionId={activeSessionId}
               agentLabel={agentLabel}
-              onSubmit={(id, answers) =>
-                answerQuestion(activeSessionId, id, answers)
+              onSnooze={snoozeQuestion ? (id, target) => snoozeQuestion(activeSessionId, id, target) : undefined}
+              onSubmit={(id, answers, target) =>
+                answerQuestion(activeSessionId, id, answers, target)
               }
             />
           );
@@ -403,6 +412,9 @@ export function ChatView({
               <strong>{agentLabel} asked</strong>
               {msg.tool_input?.interaction_policy === "human" && msg.tool_input?.wait_mode === "blocking" &&
                 <span>Human blocking question · no automatic question deadline</span>}
+              {msg.tool_input?.interaction_policy === "human" && msg.tool_input?.wait_mode === "optional" &&
+                <span>Human optional question</span>}
+              {typeof msg.tool_input?.deadline === "string" && <span>Original question deadline: {msg.tool_input.deadline}</span>}
             </div>
             <div className="question-body px-3 pb-3 space-y-1">
               {questions.map((q, i) => (
@@ -431,6 +443,7 @@ export function ChatView({
     [
       activeSessionId,
       answerQuestion,
+      snoozeQuestion,
       pendingQuestions,
       restoreRejectedInput,
       input.length,
@@ -608,6 +621,25 @@ export function ChatView({
       setSubmissionError(error instanceof Error ? error.message : "Secure randomness is unavailable.");
       return;
     }
+    const original = restoredQuestion?.sessionId === activeSessionId
+      ? useSessionStore.getState().questionDrafts[restoredQuestion.key] : undefined;
+    if (restoredQuestion && original) {
+      if (!beginQuestionTransmission(restoredQuestion.key,
+        { kind: "continuation", id: draftId, answers: original.answers, content,
+          attachments: pendingAttachments.filter((attachment) => attachment.status === "ready"), state: "pending" })) {
+        setSubmissionError("Check the original question receipt before sending this continuation. Your text was kept.");
+        return;
+      }
+      const key = restoredQuestion.key;
+      const submission = Promise.resolve().then<void | SubmissionReply>(() => sendMessage(activeSessionId, content,
+        readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined, undefined, draftId));
+      setInput(""); setRestoredQuestion(null); setRestoredInput(null); setHistory(HISTORY_IDLE);
+      clearAttachments(); setRequiredAttachmentCount(0); setSubmissionError("");
+      void Promise.resolve(submission).then((reply) => finishQuestionTransmission(key, draftId, reply))
+        .catch(() => finishQuestionTransmission(key, draftId, { accepted: false, state: "unknown" }));
+      return;
+    }
+    setRestoredQuestion(null);
     setSubmissionError("");
     const draft = {
       id: draftId, sessionId: activeSessionId, text: input,
@@ -1281,6 +1313,13 @@ export function ChatView({
 
   const savedDrafts = <div className="shrink-0 max-h-72 overflow-auto px-6">
           {submissionError && <p role="alert" className="mb-2 text-sm text-destructive">{submissionError}</p>}
+          {activeSessionId && <QuestionDraftRecovery sessionId={activeSessionId}
+            composerOccupied={input.length > 0 || pendingAttachments.length > 0 || isArchived}
+            onContinue={(key, content, attachments) => {
+              setInput(content); setRestoredQuestion({ key, sessionId: activeSessionId });
+              restoreAttachments(attachments);
+              setRestoredInput(null); setHistory(HISTORY_IDLE); textareaRef.current?.focus();
+            }} />}
           {rejectedDrafts.map((draft) => (
             <div key={draft.id} role="alert" className="mb-2 rounded-md border border-destructive/40 p-3 text-sm">
               <p>{draft.reason}</p>

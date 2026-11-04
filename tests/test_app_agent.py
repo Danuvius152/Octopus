@@ -525,7 +525,9 @@ async def test_ask_that_outlives_its_wait_says_where_the_answer_went(
     assert e.value.status_code == 504
     assert e.value.recovery["conversation_id"] == turns.prompts[-1][0]
     assert e.value.recovery["request_id"]
-    assert e.value.recovery["state"] == "running"
+    # This fake retains a receipt/capacity slot but starts no real Owner.
+    assert e.value.recovery["state"] == "unknown"
+    assert e.value.recovery["operation_terminal"] is False
     assert e.value.recovery["status_url"].endswith(e.value.recovery["request_id"])
     # The socket stopped waiting, but the admitted execution still owns its cap.
     turn = aam._turns[e.value.recovery["conversation_id"]]
@@ -733,7 +735,8 @@ async def test_http_first_timeout_returns_app_scoped_original_request_status(cli
     response = await client.post(f"/apps/{a['id']}/agent/ask", headers=scoped, json={"message": "first ask"})
     assert response.status_code == 504
     recovery = response.json()["detail"]
-    assert recovery["code"] == "ask_timeout" and recovery["request_id"] and recovery["conversation_id"]
+    assert recovery["code"] == "response_wait_timeout" and recovery["request_id"] and recovery["conversation_id"]
+    assert recovery["operation_terminal"] is False
     admitted = len(client.turns.prompts)
     status = await client.get(recovery["status_url"], headers=scoped)
     assert status.status_code == 200 and status.json()["request_id"] == recovery["request_id"]

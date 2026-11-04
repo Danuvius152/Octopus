@@ -13,6 +13,25 @@ from tests.test_question_lifecycle import QUESTIONS
 from tests.test_question_lifecycle import question_host as question_host
 
 
+async def test_answer_receipt_is_recoverable_by_original_command_after_question_retirement(question_host):
+    manager, session, client, _ = question_host
+    qid = await manager.create_pending_question(session.id, QUESTIONS)
+    url = f"/api/sessions/{session.id}/questions/{qid}/result"
+    pending = await client.get(url)
+    assert pending.status_code == 200 and pending.json()["state"] == "pending"
+    command = {"type": "answer_question", "session_id": session.id, "client_command_id": "lost-answer-ack",
+               "request_id": None, "attempt_id": None, "question_id": qid, "answers": [{"selected": ["A"]}]}
+    assert (await process_command(manager, command, session.user_id))["accepted"]
+    # Retire the live question; a missing pending record is not the receipt.
+    await manager.interrupt(session.id)
+    result = await client.get(url)
+    assert result.status_code == 200
+    assert result.json()["state"] == "resolved"
+    assert result.json()["resolution"]["client_command_id"] == "lost-answer-ack"
+    assert result.json()["resolution"]["disposition"] == "answered"
+    assert (await client.get(f"/api/sessions/{session.id}/questions/missing/result")).status_code == 404
+
+
 @pytest.mark.parametrize("entry", ["http", "ws"])
 @pytest.mark.parametrize("answers", [[], [{}], [{"selected": ["missing"]}],
     [{"selected": ["A", "A"]}], [{"selected": ["A", "B"]}],

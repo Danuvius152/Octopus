@@ -12,6 +12,7 @@ export interface TurnOutcome {
   native_status?: "completed" | "failed" | "interrupted" | null;
   recording_integrity?: "complete" | "incomplete";
   recording_issues?: Record<string, number>;
+  recording_locations?: Record<string, unknown>[];
 }
 
 export interface TurnRecovery {
@@ -51,6 +52,8 @@ export function normalizeMessage(message: MessageInput): Message {
       native_status: data.native_status as TurnOutcome["native_status"],
       recording_integrity: data.recording_integrity as TurnOutcome["recording_integrity"],
       recording_issues: data.recording_issues as TurnOutcome["recording_issues"],
+      recording_locations: Array.isArray(data.recording_locations)
+        ? data.recording_locations.filter((value) => value && typeof value === "object" && !Array.isArray(value)).slice(0, 8) : undefined,
     };
     return { ...message, content: outcome.message, outcome };
   }
@@ -66,4 +69,31 @@ export function normalizeMessage(message: MessageInput): Message {
     return { ...message, content: recovery.message, recovery };
   }
   return { ...message, content: text(message.content) };
+}
+
+/** Read-only presentation of the recorded conclusion; native status never reclassifies it. */
+export function presentOutcome(message: Message, transcript: readonly Message[] = []) {
+  const outcome = normalizeMessage(message).outcome!;
+  const labels = { success: "Done", failed: "Failed", interrupted: "Interrupted", unknown: "Ended · outcome not recorded" };
+  const answer = outcome.final_answer, refs = answer?.message_seqs;
+  const context = record(message.tool_input?.attempt_context);
+  const rows = new Map(transcript.map((row) => [row.seq, row]));
+  const saved = typeof message.seq === "number" && typeof answer?.thread_id === "string" && answer.thread_id.length > 0
+    && typeof answer.turn_id === "string" && answer.turn_id.length > 0 && Array.isArray(refs) && refs.length > 0
+    && context.request_id === outcome.request_id && typeof context.attempt_id === "string" && context.attempt_id.length > 0
+    && refs.every((seq, index) => {
+      const row = rows.get(seq), metadata = row?.runtime_metadata, native = metadata?.native;
+      return Number.isSafeInteger(seq) && seq >= 0 && seq < message.seq! && (index === 0 || seq > refs[index - 1])
+          && row?.role === "assistant" && row.type === "text" && typeof row.content === "string"
+          && metadata?.request_id === outcome.request_id && metadata?.attempt_id === context.attempt_id
+          && native?.thread_id === answer.thread_id && native.root_thread_id === answer.thread_id
+          && native.turn_id === answer.turn_id && native.root_turn_id === answer.turn_id
+          && Boolean(native.item_id) && native.phase === "final_answer";
+    }) && !outcome.recording_issues?.native_final_missing;
+  return { outcome, label: labels[outcome.status], primary: outcome.message,
+    recoveries: Object.values(outcome.recovery).reduce((sum, count) => sum + count, 0),
+    outputSaved: saved,
+    recordingNote: outcome.recording_integrity === "incomplete"
+      ? outcome.recording_issues?.native_final_missing ? "A declared final answer is missing from the saved transcript."
+        : "Completion records are incomplete; the original gaps remain available below." : undefined };
 }

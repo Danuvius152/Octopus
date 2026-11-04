@@ -1119,7 +1119,7 @@ class HarnessRun:
             self._event_changed.clear()
             await self._event_changed.wait()
 
-    def fail_stream(self, code: str, detail: str) -> None:
+    def fail_stream(self, code: str, detail: str, *, context: dict[str, Any] | None = None) -> None:
         """One reliable failure slot outside the bounded accepted prefix.
 
         A saturated queue cannot carry its own failure notification. Consumers
@@ -1131,7 +1131,7 @@ class HarnessRun:
             # is evidence, not permission to replace that earlier failure.
             self.collection_preceded_terminal = self.native_terminal_status is None
             self._stream_failure = HarnessEvent(type="collection_error", is_error=True, error_code=code, content=detail)
-            self._note_protocol_issue(code, detail)
+            self._note_protocol_issue(code, detail, context=context)
         self.retire(reason="parent_error")
 
     def _close_stream(self) -> None:
@@ -1270,12 +1270,13 @@ class HarnessRun:
         if out.end_of_stream and not self._driver.multiplexed:
             self._close_stream()
 
-    def _note_protocol_issue(self, kind: str, line: str = "", *, error: Exception | None = None) -> None:
+    def _note_protocol_issue(self, kind: str, line: str = "", *, error: Exception | None = None,
+                             context: dict[str, Any] | None = None) -> None:
         self.protocol_issues[kind] = self.protocol_issues.get(kind, 0) + 1
         if len(self.protocol_locations) < 8:
             self.protocol_locations.append({"kind": kind, "line": self._stdout_line_number,
                                             "characters": len(line),
-                                            "sha256": hashlib.sha256(line.encode()).hexdigest()})
+                                            "sha256": hashlib.sha256(line.encode()).hexdigest(), **(context or {})})
         request_id, attempt_id = self._tool_context or (None, None)
         logger.warning("Harness protocol issue provider=%s run=%s request=%s attempt=%s kind=%s line=%s characters=%s error_type=%s content=%s%s",
                        self._profile.backend, self.run_lease_id, request_id, attempt_id,

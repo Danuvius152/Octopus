@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from server import monitor
+from server.agent_manager import AgentManager
+from server.applications import ApplicationManager
 from server.attachments import save_upload
 from server.config import settings
 from server.database import Database
@@ -57,6 +59,43 @@ async def live_run(manager, session, prompt):
 async def assert_retired(receipt):
     states = await receipt.execution.wait_resources()
     assert states and all(state == "proven" for state in states), states
+
+
+async def test_live_app_build_uses_the_host_client_and_retains_original_request_recovery(live_product, tmp_path, monkeypatch):
+    manager, database, original, _ = live_product
+    monkeypatch.setattr(settings, "applications_dir", str(tmp_path / "apps"))
+    await AgentManager(database).update_agent(original.agent_id, user_id=original.user_id, backend="codex")
+    apps = ApplicationManager()
+    apps.bind(session_mgr=manager, db=database)
+    session = None
+    try:
+        app = await apps.create_application(name="Original request recovery", agent_id=original.agent_id,
+            description="Build a small static agent chat page with one input, Send, and an output pane. "
+                        "Use the existing host client instead of writing a streaming parser. "
+                        "If this response wait ends, retain the original request receipt and offer an explicit Check status button; "
+                        "never automatically submit the operation again. Write only index.html with an inline ES module. "
+                        "Do not run the page, call the agent, install dependencies, use network or create helpers.")
+        session = manager.get_session(app["session_id"])
+        await manager.await_session_execution(session.id, timeout=240)
+        rows = await database.load_messages(session.id)
+        result, = [row for row in rows if row["type"] == "result"]
+        assert result["content"]["status"] == "success", result
+        # Driver retirement and the App completion consumer are independent.
+        async with asyncio.timeout(15):
+            while (current := await database.get_application(app["id"]))["status"] == "building":
+                await asyncio.sleep(.01)
+        assert current["status"] == "ready", current
+        body = (Path(app["app_dir"]) / app["entrypoint"]).read_text()
+        assert "agent/client.js" in body and "createAgentClient" in body
+        assert ".chat(" in body or ".ask(" in body
+        assert ".status(" in body
+        assert "request_id" in body and "conversation_id" in body
+        assert "EventSource(" not in body and "getReader(" not in body
+    finally:
+        if session is not None:
+            await manager.interrupt(session.id)
+            await manager.await_session_execution(session.id, timeout=15)
+        apps.shutdown()
 
 
 async def test_live_native_image_generation_preserves_the_original_local_path(live_product):

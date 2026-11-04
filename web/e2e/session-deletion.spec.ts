@@ -28,6 +28,19 @@ test("confirmed REST deletion removes a selected session from both online pages"
   };
   try {
     await open(page); await open(second);
+    const asked = await request.post(`${api}/sessions/${session.id}/questions`, {
+      headers, data: { questions: [{ question: "Keep each page's unfinished answer?" }] },
+    });
+    expect(asked.status()).toBe(201);
+    const question = await asked.json() as { question_id: string };
+    for (const browser of [page, second]) {
+      await browser.getByPlaceholder("Or type your own answer…").fill("Private unfinished answer draft");
+    }
+    expect((await request.delete(`${api}/sessions/${session.id}/questions/${question.question_id}`, { headers })).ok()).toBeTruthy();
+    for (const browser of [page, second]) {
+      await expect(browser.getByText("This question closed. Your saved input is kept here.")).toBeVisible();
+      await expect(browser.getByRole("button", { name: "Continue as new message" })).toBeDisabled();
+    }
     const deleted = await request.delete(`${api}/sessions/${session.id}`, { headers });
     expect(deleted.status()).toBe(204);
     for (const browser of [page, second]) {
@@ -35,6 +48,7 @@ test("confirmed REST deletion removes a selected session from both online pages"
       await expect(browser.locator(".session-item", { hasText: session.name })).toHaveCount(0);
       await expect(browser.locator(".chat-empty")).toContainText("Pick a session from the sidebar");
       await expect(browser.locator(".chat-input-bar textarea")).toHaveCount(0);
+      await expect(browser.getByRole("button", { name: "Continue as new message" })).toHaveCount(0);
       await expect(browser.locator(".conn-status.on")).toBeVisible();
       await browser.reload();
       await expect(browser.locator(".session-item", { hasText: session.name })).toHaveCount(0);

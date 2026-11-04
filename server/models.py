@@ -276,6 +276,7 @@ class PendingQuestionInfo(BaseModel):
     attempt_id: str | None = None
     interaction_policy: Literal["human", "unattended"] | None = None
     wait_mode: Literal["blocking", "optional", "mcp"] | None = None
+    snoozed: bool | None = None
 
 
 class DispatchQueueItem(BaseModel):

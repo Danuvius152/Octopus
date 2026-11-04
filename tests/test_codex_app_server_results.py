@@ -24,6 +24,57 @@ from tests.session_runtime import wait_dispatch_idle
 native_runtime = native_tests.native_runtime
 
 
+@pytest.mark.parametrize("tool_ended", [False, True])
+async def test_native_app_stream_status_and_history_keep_the_original_tool_outcome(native_runtime, tmp_path, monkeypatch, tool_ended):
+    manager, database, session, mode, starts, _events = native_runtime
+    mode[0] = "control_output"
+    monkeypatch.setattr(settings, "applications_dir", str(tmp_path / "apps"))
+    await AgentManager(database).update_agent(session.agent_id, user_id=session.user_id, backend="codex")
+    apps = ApplicationManager()
+    apps.bind(session_mgr=manager, db=database)
+    app_agent = AppAgentManager()
+    app_agent.bind(session_mgr=manager, db=database, app_mgr=apps)
+    app_dir = tmp_path / "apps" / "original-outcome"
+    app_dir.mkdir(parents=True)
+    await database.save_application(app_id="original-outcome", name="Original outcome", agent_id=session.agent_id,
+        app_dir=str(app_dir), entrypoint="index.html", status="ready", created_at="now", updated_at="now", user_id=session.user_id)
+    app_row = await database.get_application("original-outcome")
+    starts.clear()  # Static agent configuration inspection is not an execution.
+
+    async def collect(turn):
+        return [event async for event in app_agent.stream_turn(turn)]
+
+    try:
+        turn = await app_agent.begin_turn(app_row, message="Try the operation once")
+        consuming = asyncio.create_task(collect(turn))
+        original = manager.get_session(turn.session_id)
+        await until(lambda: original._run.backend is not None and original._run.backend.active_turn is not None)
+        tool = {"id": "connector-call", "type": "mcpToolCall", "server": "connector", "tool": "write",
+                "arguments": {}, "status": "inProgress"}
+        frames = [{"method": "item/started", "params": {"threadId": ROOT, "turnId": "turn-1", "item": tool}}]
+        if tool_ended:
+            frames.append({"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
+                **tool, "status": "failed", "error": {"message": "The operation was refused"}}}})
+        inject(tmp_path, *frames, item(ROOT, "turn-1", "final", "Saved model output"), terminal())
+        stream = await asyncio.wait_for(consuming, 4)
+        await wait_dispatch_idle(manager, original.id)
+        saved = await database.read_session_result(original.id, turn.request_id)
+        status = await app_agent.get_request_status(app_row["id"], original.id, turn.request_id)
+        assert saved.outcome.status == ("success" if tool_ended else "failed")
+        assert status["state"] == ("completed" if tool_ended else "failed")
+        assert status["outcome"]["status"] == saved.outcome.status
+        assert status["reply"] == "Saved model output"
+        assert [event["type"] for event in stream if event["type"] in {"error", "done"}] == ["done" if tool_ended else "error"]
+        if not tool_ended:
+            assert "model turn completed" in stream[-1]["message"].lower()
+        history = await app_agent.get_conversation(app_row["id"], original.id)
+        assert [row["text"] for row in history["messages"] if row["role"] == "assistant"] == ["Saved model output"]
+        assert len(starts) == 1
+    finally:
+        app_agent.shutdown()
+        apps.shutdown()
+
+
 def answer_frames(turn_id="turn-1"):
     commentary = item(ROOT, "turn-1", "progress", "Root progress")
     commentary["params"]["item"]["phase"] = "commentary"

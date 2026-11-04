@@ -11,6 +11,7 @@ from ..harness import Harness, HarnessCredential, HarnessEvent, HarnessRun
 from ..models import FinalAnswerRef, MessageContent, TurnOutcome
 
 if TYPE_CHECKING:
+    from .mcp_questions import InputCleanup
     from .owner_questions import QuestionNotification
 
 
@@ -61,6 +62,8 @@ class _Attempt:
     credential: HarnessCredential | None = None
     result: HarnessEvent | None = None
     final_answer: FinalAnswerRef | None = None
+    # Consumed by this original Owner only after the actual MCP runner exits.
+    input_cleanup: list[InputCleanup] = field(default_factory=list)
     saw_tool_use: bool = False
     # Observed on this attempt, rather than inherited from an earlier request.
     conversation_id: str | None = None

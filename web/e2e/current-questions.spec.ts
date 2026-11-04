@@ -33,7 +33,7 @@ test("current questions submit complete answers and keep answered and cancelled 
   };
   const form = page.locator(".msg-question:not(.msg-question-done)");
   const answerText = "Q: Which destination?\nA: Harbor\n\nQ: Which transport?\nA: Train";
-  const closedText = "Question closed: cancelled. No answer was received.";
+  const closedText = "The original question call ended. No answer was received.";
 
   try {
     await page.goto("/");
