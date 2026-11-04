@@ -6,7 +6,7 @@ import { useSessionStore } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
 
 beforeEach(() => useSessionStore.setState({
-  token: "token-a", wikiJobs: {}, wikiJobDirty: {}, activeSessionId: "original", dispatchGeneration: "service-a",
+  token: "token-a", wikiJobs: {}, wikiJobDirty: {}, wikiJobReadErrors: {}, activeSessionId: "original", dispatchGeneration: "service-a",
   dispatchStates: {}, retiredDispatchGenerations: [], messages: {}, lastAppliedSeq: { original: 9 },
 }));
 afterEach(() => vi.unstubAllGlobals());
@@ -25,6 +25,16 @@ it("never replaces a newer completed version with a delayed running snapshot", (
   useSessionStore.getState().mergeWikiJobs("original", [wikiJob({ state_version: 4, status: "running" })]);
   expect(useSessionStore.getState().wikiJobs.original[0].status).toBe("completed");
   expect(useSessionStore.getState().wikiJobs.original).toHaveLength(1);
+});
+
+it("updates current availability independently of version while retaining the newest saved facts", () => {
+  const store = useSessionStore.getState();
+  store.mergeWikiJobs("original", [wikiJob({ state_version: 5, current_state: "available" })]);
+  store.mergeWikiJobs("original", [wikiJob({ state_version: 3, status: "queued", current_state: "unavailable" })]);
+  expect(useSessionStore.getState().wikiJobs.original[0])
+    .toMatchObject({ state_version: 5, status: "running", current_state: "unavailable" });
+  store.mergeWikiJobs("original", [wikiJob({ state_version: 5, current_state: "available" })]);
+  expect(useSessionStore.getState().wikiJobs.original[0].current_state).toBe("available");
 });
 
 it.each(["account", "service", "initial-null-generation"])("rejects a late response after %s changes", async (change) => {
@@ -67,6 +77,7 @@ it("sends the displayed attempt and vault once, then reports a stale control", a
     : new Response(JSON.stringify([wikiJob({ state_version: 3, attempt: 2 })])));
   vi.stubGlobal("fetch", fetcher);
   await expect(controlWikiJob("original", wikiJob(), "cancel")).rejects.toThrow("task changed");
+  await refreshWikiJobs("original");
   const post = fetcher.mock.calls.find(([url]) => String(url).includes("/cancel"));
   expect(JSON.parse((post as unknown as [string, RequestInit])[1].body as string)).toEqual({ expected_attempt: 1, expected_vault_id: "vault-1" });
   expect(fetcher.mock.calls.filter(([url]) => String(url).includes("/cancel"))).toHaveLength(1);
@@ -144,10 +155,15 @@ it("recovers a failed control refresh using GET without repeating the POST", asy
       ? [wikiJob({ status: "cancelled", state_version: 2, settlement_phase: "confirmed" })] : []);
   });
   vi.stubGlobal("fetch", fetcher);
-  await expect(controlWikiJob("original", wikiJob(), "cancel")).rejects.toThrow("503");
+  const result = await controlWikiJob("original", wikiJob(), "cancel");
+  expect(result.state).toBe("accepted");
+  if (result.state !== "accepted") throw new Error("Expected original POST receipt");
+  expect(await result.refresh).toBe(false);
+  expect(useSessionStore.getState().wikiJobReadErrors.original).toContain("503");
   expect(useSessionStore.getState().wikiJobs.original[0].status).toBe("running");
   await refreshWikiJobs("original");
   expect(useSessionStore.getState().wikiJobs.original[0].status).toBe("cancelled");
+  expect(useSessionStore.getState().wikiJobReadErrors.original).toBeUndefined();
   expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
 
@@ -163,4 +179,16 @@ it("refreshes a cached card beyond the first page after missing its terminal not
   await reconcileWikiJobs("original");
   expect(useSessionStore.getState().wikiJobs.original.find((card) => card.job_id === old.job_id)?.status).toBe("completed");
   expect(fetcher.mock.calls.some(([url]) => String(url).includes("job_id=old-job") && String(url).includes("vault_id=historical-vault"))).toBe(true);
+});
+
+it("rechecks completed cards beyond the first page for a retry owned by another entry", async () => {
+  const old = wikiJob({ job_id: "old-completed", status: "completed", attempt: 1, state_version: 3 });
+  useSessionStore.getState().mergeWikiJobs("original", [old]);
+  const firstPage = Array.from({ length: 30 }, (_, index) => wikiJob({ job_id: `new-${index}`, status: "completed" }));
+  const fetcher = vi.fn(async (url: string) => Response.json(String(url).includes("job_id=old-completed")
+    ? [{ ...old, state_version: 6, attempt: 2, status: "running" }] : firstPage));
+  vi.stubGlobal("fetch", fetcher);
+  await reconcileWikiJobs("original");
+  expect(useSessionStore.getState().wikiJobs.original.find((card) => card.job_id === old.job_id))
+    .toMatchObject({ attempt: 2, state_version: 6, status: "running" });
 });

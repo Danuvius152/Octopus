@@ -633,14 +633,11 @@ class LifecycleMixin(SessionManagerBase):
         # Schedules are agent-owned, so ownership needs no repoint.
         # But a schedule created from this session (origin_session_id == old.id)
         # should follow the live successor thread, otherwise its runs fall back
-        # to throwaway sessions. Move them onto `new`, then re-register the live
-        # jobs so the next fire targets the successor, not the archived
-        # session.
+        # to throwaway sessions. Fires read the current DB origin; registration
+        # holds only the schedule ID, so changing origin must not reset cadence
+        # or hand this original archive's work to a closing Runner.
         if self.db:
-            repointed = await self.db.repoint_schedules_origin(old.id, new.id)
-            if self._schedule_runner is not None:
-                for row in repointed:
-                    await self._schedule_runner.reschedule(row)
+            await self.db.repoint_schedules_origin(old.id, new.id)
 
         await self._broadcast(
             {

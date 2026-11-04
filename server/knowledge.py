@@ -58,10 +58,14 @@ class OwnedTaskContext:
     return_binding: AdmittedRequest
 
 
+class RequestingWorkClosedError(ValueError):
+    """The original caller closed before its dependent write could commit."""
+
+
 def require_open(request: AdmittedRequest | None) -> None:
     """A captured caller may retire its run, but may not publish after closure."""
     if request is not None and not work_is_open(request.work_id):
-        raise ValueError("The original requesting work is closed")
+        raise RequestingWorkClosedError("The original requesting work is closed")
 
 
 def admit(*, session_id: str, request_id: str, user_id: str | None,

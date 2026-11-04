@@ -54,6 +54,14 @@ creates a work round without an actual child turn. A wait retains the original
 work it observed, so its late response cannot complete a newer turn or rewrite
 the child's creation parent. None of these facts proves parent consumption.
 
+Binding updates that same pending work object in place: its card identity stays
+stable while its actual turn and source provenance become known. A captured wait
+therefore converges with direct child-terminal evidence on the original work,
+including a wait that finished before binding. A second turn remains a distinct
+work; neither a late old wait nor duplicate terminal evidence completes it. The
+existing single output writer owns these updates, without a second completion
+ledger or lock.
+
 The Claude parser keeps a `task_id → (tool_use_id, name)` map for the life of
 the run, because `task_updated` arrives with only a `task_id` — the one event
 that can't identify itself.
@@ -252,6 +260,14 @@ App Server regressions in `tests/test_codex_app_server_output.py` and
 `tests/test_codex_app_server_questions.py` cover multi-receiver/multi-turn
 identities, stale waits, mailbox-only interaction, late items, real process-group
 retirement, cache eviction and output overflow before/after child terminal.
+The pending → wait-start → child-bind → wait-complete regression uses complete
+framed stdio through Run, Owner and SQLite, without a direct child terminal; it
+checks the same saved card, child provenance and the unchanged selected root
+answer. `tests/test_native_work_identity.py` adds old-wait/new-turn isolation and
+duplicate-evidence boundaries. These controlled cases prove the internal identity
+invariant, not reachability of this ordering in the pinned live provider; the
+[version reference](../reference/codex-app-server-g0.md#pending-child-work-identity-evidence)
+keeps that evidence boundary.
 The nested fixture replays selected original G0-Base frames; it is not a fresh
 live-provider run. Frontend source-adjacent tests and
 `web/e2e/native-output.spec.ts` cover partial interleaving, sparse windows,

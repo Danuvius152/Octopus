@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -32,8 +31,6 @@ from ..schedule_ai import (
 )
 from ..schedule_targets import ScheduleTargetError, resolve_schedule_target
 from ..sessions import SessionManager
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 
@@ -78,25 +75,6 @@ def to_schedule_info(row: dict) -> ScheduleInfo:
             "next_run_at": next_run_at,
         }
     )
-
-
-async def _broadcast_change() -> None:
-    """Tell every open client the schedule list moved.
-
-    A browser refetches after its own edit, so this exists for the changes it
-    didn't make: another tab, and — the reason it was added — an agent setting
-    a schedule for itself mid-conversation. The payload is deliberately empty;
-    one code path reloads the list however it changed.
-    """
-    # The singleton rather than a request's: this also runs under
-    # `create_schedule_for_agent`, which non-request callers use — the same rule
-    # every non-router module follows (deps.py).
-    from ..session_manager import session_manager
-
-    try:
-        await session_manager._broadcast({"type": "schedules_changed"})
-    except Exception:  # pragma: no cover - a dead socket must not fail a write
-        logger.debug("schedules_changed broadcast failed", exc_info=True)
 
 
 def schedule_edit(request: Request, session_manager: SessionManager, prompt: str, *,
@@ -192,7 +170,7 @@ async def create_schedule_for_agent(
         "knowledge_context": encode(knowledge_context),
     }
     try:
-        await _get_db().save_schedule(
+        await _get_runner().create(
             schedule_id=schedule_id,
             agent_id=agent_id,
             name=name,
@@ -210,8 +188,6 @@ async def create_schedule_for_agent(
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    await _get_runner().add(row)
-    await _broadcast_change()
     return row
 
 
@@ -226,12 +202,10 @@ async def apply_schedule_edit(existing: dict, req: UpdateScheduleRequest,
         return existing
     await validate_schedule_enabling(existing, updates)
     try:
-        await _get_db().update_schedule(existing["id"], expected=existing, request=edit, **updates)
+        await _get_runner().update(existing, updates, request=edit)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     existing = {**existing, **updates}
-    await _get_runner().reschedule(existing)
-    await _broadcast_change()
     return existing
 
 
@@ -370,9 +344,7 @@ async def delete_schedule(
     rows = await _get_db().load_schedules(user_id)
     if not any(r["id"] == schedule_id for r in rows):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Schedule not found")
-    await _get_runner().remove(schedule_id)
-    await _get_db().delete_schedule(schedule_id)
-    await _broadcast_change()
+    await _get_runner().delete(schedule_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -511,6 +483,4 @@ async def delete_session_schedule(
 ):
     agent_id = _session_agent_id(session_manager, session_id, user_id)
     await _owned_row(schedule_id, agent_id)
-    await _get_runner().remove(schedule_id)
-    await _get_db().delete_schedule(schedule_id)
-    await _broadcast_change()
+    await _get_runner().delete(schedule_id)

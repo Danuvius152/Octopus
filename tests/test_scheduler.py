@@ -122,10 +122,204 @@ async def test_scheduler_shutdown_closes_admission_before_awaiting(setup):
     runner.begin_shutdown()
 
     with pytest.raises(RuntimeError, match="shutting down"):
-        await runner.add((await db.load_schedules())[0])
+        await runner.reconcile((await db.load_schedules())[0]["id"])
     with pytest.raises(RuntimeError, match="shutting down"):
         await runner.initialize()
     await runner.shutdown()
+
+
+@pytest.mark.parametrize("refusal", ["definition", "closed_work"])
+async def test_shutdown_accepts_a_rolled_back_definition_refusal(setup, refusal):
+    import uuid
+
+    from server.db.schedules import ScheduleChangedError
+    from server.knowledge import AdmittedRequest
+    from server.mcp_identity import close_work
+
+    _mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    await save_schedule(db, schedule_id="conflicting-edit", agent_id=agent["id"],
+                        name="original", prompt="check", interval_seconds=3600,
+                        created_at="2026-01-01T00:00:00+00:00")
+    await runner.initialize(paused=True)
+    original = await db.get_schedule_definition("conflicting-edit")
+    work_id = uuid.uuid4().hex
+    context = for_account(session_id="requesting-session", request_id="edit", user_id=agent["user_id"], prompt="check")
+    request = AdmittedRequest(context.origin, context, work_id)
+    async with db.transaction(write=True) as tx:
+        if refusal == "definition":
+            await tx.execute("DELETE FROM schedules WHERE id=?", ("conflicting-edit",))
+        edit = asyncio.create_task(runner.update(original, {"interval_seconds": 7200}, request=request))
+        async with asyncio.timeout(3):
+            while not runner._control_tasks:
+                await asyncio.sleep(0)
+        runner.begin_shutdown()
+        if refusal == "closed_work":
+            close_work(work_id)
+    with pytest.raises(ScheduleChangedError if refusal == "definition" else ValueError):
+        await edit
+    await runner.shutdown()
+    assert not runner.drain_blockers()
+    assert await db.get_schedule_definition("conflicting-edit") == (None if refusal == "definition" else original)
+    assert db.health.cause is None
+
+
+@pytest.mark.parametrize("phase", ["write", "registration"])
+async def test_shutdown_retains_non_domain_control_failures(setup, monkeypatch, phase):
+    from server.scheduler import ScheduleRegistrationError
+
+    _mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    await save_schedule(db, schedule_id="failed-control", agent_id=agent["id"],
+                        name="original", prompt="check", interval_seconds=3600,
+                        created_at="2026-01-01T00:00:00+00:00")
+    await runner.initialize(paused=True)
+    original = await db.get_schedule_definition("failed-control")
+    written, release = asyncio.Event(), asyncio.Event()
+    update = db.update_schedule
+
+    async def held_write(*args, **kwargs):
+        await update(*args, **kwargs)
+        written.set()
+        await release.wait()
+        if phase == "write":
+            raise OSError("write confirmation failed")
+
+    def failed_registration(*args, **kwargs):
+        raise ValueError("invalid registration")
+
+    monkeypatch.setattr(db, "update_schedule", held_write)
+    if phase == "registration":
+        monkeypatch.setattr(runner._scheduler, "add_job", failed_registration)
+    edit = asyncio.create_task(runner.update(original, {"interval_seconds": 7200}))
+    try:
+        await asyncio.wait_for(written.wait(), 3)
+        runner.begin_shutdown()
+    finally:
+        release.set()
+    with pytest.raises(OSError if phase == "write" else ScheduleRegistrationError):
+        await edit
+    with pytest.raises(ExceptionGroup, match="cleanup failed"):
+        await runner.shutdown()
+    assert await db.get_schedule_definition("failed-control") == {**original, "interval_seconds": 7200}
+    assert len(runner._shutdown_controls) == 1
+    assert runner._shutdown_controls[0].exception() is not None
+
+
+@pytest.mark.parametrize("operation", ["edit", "create", "delete"])
+async def test_shutdown_retains_admitted_control_until_registration_finishes(setup, operation):
+    mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    fields = dict(schedule_id="owned-control", agent_id=agent["id"], name="owned", prompt="check",
+                  interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00")
+    await save_schedule(db, **fields)
+    await runner.initialize(paused=True)
+    row = await db.get_schedule_definition("owned-control")
+    await runner._registration_lock.acquire()
+    if operation == "create":
+        fields.update(schedule_id="owned-create", knowledge_context=row["knowledge_context"])
+        change = runner.create(**fields)
+        identifier = "owned-create"
+    else:
+        identifier = "owned-control"
+        change = runner.delete(identifier) if operation == "delete" else runner.update(row, {"interval_seconds": 7200})
+    waiter = asyncio.create_task(change)
+    try:
+        async with asyncio.timeout(3):
+            while True:
+                current = await db.get_schedule_definition(identifier)
+                if (operation == "delete" and current is None or operation == "create" and current is not None
+                        or operation == "edit" and current["interval_seconds"] == 7200):
+                    break
+                await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        runner.begin_shutdown()
+        with pytest.raises(TimeoutError, match="control retirement unconfirmed"):
+            await runner.shutdown(timeout=.01)
+        assert runner._scheduler.running, "A pending control still needs the original scheduler"
+        assert any(identifier in blocker for blocker in runner.drain_blockers())
+        with pytest.raises(RuntimeError, match="shutting down"):
+            await runner.delete(identifier)
+    finally:
+        runner._registration_lock.release()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await runner.shutdown()
+    assert not runner.drain_blockers()
+    restored = ScheduleRunner(mgr, db)
+    try:
+        await restored.initialize(paused=True)
+        job = restored._scheduler.get_job(identifier)
+        if operation == "delete":
+            assert job is None
+        else:
+            assert job.trigger.interval.total_seconds() == (7200 if operation == "edit" else 3600)
+    finally:
+        await restored.shutdown()
+
+
+async def test_delete_is_owned_before_waiting_for_the_database_lock(setup):
+    _mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    await save_schedule(db, schedule_id="delete-owned", agent_id=agent["id"], name="owned", prompt="check",
+                        interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00")
+    await runner.initialize(paused=True)
+    async with db._write_lock:
+        waiter = asyncio.create_task(runner.delete("delete-owned"))
+        async with asyncio.timeout(3):
+            while not runner.drain_blockers():
+                await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        # Deleting a trigger before obtaining authority to delete the definition
+        # would leave the durable plan enabled if its waiter disappeared here.
+        assert runner._scheduler.get_job("delete-owned") is not None
+        async with runner._registration_lock:
+            pass
+    async with asyncio.timeout(3):
+        while await db.get_schedule_definition("delete-owned") is not None:
+            await asyncio.sleep(0)
+    async with runner._registration_lock:
+        assert runner._scheduler.get_job("delete-owned") is None
+
+
+async def test_runner_restart_rebuilds_from_reopened_persistent_definitions(tmp_path):
+    path = tmp_path / "schedules.db"
+    db = Database(str(path))
+    await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
+    manager = SessionManager()
+    await manager.initialize(db)
+    runner = ScheduleRunner(manager, db)
+    agent = await db.get_system_agent()
+    context = for_account(session_id="definition", request_id="definition", user_id=agent["user_id"], prompt="check")
+    await runner.initialize(paused=True)
+    try:
+        for identifier in ("retained", "disabled", "deleted"):
+            await runner.create(identifier, agent_id=agent["id"], name=identifier, prompt="check",
+                                interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00",
+                                knowledge_context=encode(context))
+        await runner.update(await db.get_schedule_definition("retained"), {"interval_seconds": 7200})
+        await runner.update(await db.get_schedule_definition("disabled"), {"enabled": False})
+        await runner.delete("deleted")
+    finally:
+        await runner.shutdown()
+        await db.close()
+    restored_db = Database(str(path))
+    await restored_db.initialize()
+    restored_manager = SessionManager()
+    await restored_manager.initialize(restored_db)
+    restored = ScheduleRunner(restored_manager, restored_db)
+    try:
+        await restored.initialize(paused=True)
+        assert restored._scheduler.get_job("retained").trigger.interval.total_seconds() == 7200
+        assert restored._scheduler.get_job("disabled") is None
+        assert restored._scheduler.get_job("deleted") is None
+    finally:
+        await restored.shutdown()
+        await restored_db.close()
 
 
 @pytest.mark.asyncio
@@ -192,7 +386,10 @@ async def test_scheduler_shutdown_propagates_callback_cleanup_failure(setup):
 
 @pytest.mark.asyncio
 async def test_removing_schedule_preserves_its_already_running_callback(setup):
-    _mgr, _db, runner = setup
+    _mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    await save_schedule(db, schedule_id="removed-schedule", agent_id=agent["id"], name="active", prompt="check",
+                        interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00")
     started = asyncio.Event()
     release = asyncio.Event()
     retired = asyncio.Event()
@@ -210,10 +407,11 @@ async def test_removing_schedule_preserves_its_already_running_callback(setup):
             retired.set()
 
     await runner.initialize()
-    runner._scheduler.add_job(callback, "interval", seconds=0.02, id="removed-schedule")
+    runner._scheduler.add_job(callback, "interval", seconds=0.02, id="removed-schedule", replace_existing=True)
     try:
         await asyncio.wait_for(started.wait(), timeout=5)
-        await runner.remove("removed-schedule")
+        await runner.delete("removed-schedule")
+        assert await db.get_schedule_definition("removed-schedule") is None
         await asyncio.sleep(0)
         assert not was_cancelled
         assert not retired.is_set()
@@ -404,7 +602,7 @@ async def test_add_job_captures_only_schedule_identity(setup):
         origin_session_id="origin-abc",
     )
     row = (await db.load_schedules())[0]
-    await runner.add(row)
+    await runner.reconcile(row["id"])
 
     job = runner._scheduler.get_job("sch3")
     assert job is not None
@@ -430,7 +628,7 @@ async def test_cron_schedule_registers_cron_trigger(setup):
         recurrence_label="Every day at 9:00 AM",
     )
     row = (await db.load_schedules())[0]
-    await runner.add(row)
+    await runner.reconcile(row["id"])
 
     job = runner._scheduler.get_job("cron1")
     assert job is not None
@@ -490,7 +688,7 @@ async def test_run_at_schedule_registers_date_trigger(setup):
         recurrence_label="Once on Jan 15 at 9:00 AM",
     )
     row = (await db.load_schedules())[0]
-    await runner.add(row)
+    await runner.reconcile(row["id"])
 
     job = runner._scheduler.get_job("once1")
     assert job is not None

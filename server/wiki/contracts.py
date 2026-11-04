@@ -123,6 +123,8 @@ class JobCard(JobSnapshot):
     subscriber_id: str
     origin_request_id: str
     received_at: str
+    # This read's authority/availability is independent of the job version.
+    current_state: Literal["available", "unavailable"] = "unavailable"
 
 
 class JobItemDetail(BaseModel):

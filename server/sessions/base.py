@@ -725,9 +725,8 @@ class SessionManagerBase:
         # session manager doesn't take a hard dependency on the
         # notifiers package's import surface.
         self._notifier_manager: Any = None
-        # Likewise wired in by main.py — the ScheduleRunner. Used to
-        # re-register jobs when archiving a session repoints the schedules
-        # anchored to it. Opaque: we only call `.reschedule(row)`.
+        # Likewise wired in by main.py — the ScheduleRunner suspends/restores
+        # agent-owned triggers with the agent's lifecycle.
         self._schedule_runner: Any = None
 
     def set_notifier_manager(self, mgr: Any) -> None:

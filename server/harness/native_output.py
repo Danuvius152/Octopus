@@ -176,15 +176,20 @@ class NativeOutput:
             key = thread, identifier
             work = self._work.get(key)
             if work is None:
-                prior_pending = self._pending.pop(thread, None)
+                work = self._pending.pop(thread, None)
                 source = self.source(thread, identifier)
-                update = SubagentUpdate(task_id=thread, card_id=json.dumps([self.request_id, self.attempt_id, thread, identifier]),
-                    native_thread_id=thread, native_turn_id=identifier, parent_thread_id=self.parents.get(thread),
-                    name=self.names.get(thread, ""))
-                if prior_pending is not None:
-                    update = replace(prior_pending.update, native_turn_id=identifier,
-                        status="running" if prior_pending.update.status in {"running", "unknown"} else prior_pending.update.status)
-                work = self._work[key] = _Work(update, source)
+                if work is None:
+                    work = _Work(SubagentUpdate(task_id=thread,
+                        card_id=json.dumps([self.request_id, self.attempt_id, thread, identifier]),
+                        native_thread_id=thread, native_turn_id=identifier, parent_thread_id=self.parents.get(thread),
+                        name=self.names.get(thread, "")), source)
+                else:
+                    # A wait may already hold this pending work. Bind the same
+                    # object so its eventual result reaches this original turn.
+                    work.update = replace(work.update, native_turn_id=identifier,
+                        status="running" if work.update.status in {"running", "unknown"} else work.update.status)
+                    work.source = source
+                self._work[key] = work
                 self._current[thread] = identifier
             if method == "turn/completed":
                 status = {"completed": "completed", "failed": "failed", "interrupted": "interrupted"}.get(turn.get("status", ""))

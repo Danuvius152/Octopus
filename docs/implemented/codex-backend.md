@@ -315,7 +315,9 @@ Typed request/attempt/native provenance survives complete messages, tools,
 deltas, WS, history and snapshot cards. Root resume identity remains unchanged
 by child work. Main chat projects root output; child cards show collected text
 and actual known work status. A mailbox interaction or completed start tool is
-not a completed child turn. Root success can coexist with residual helper
+not a completed child turn. Pending child work binds in place so an already
+captured wait still refers to its original work after the actual turn is known;
+it cannot settle a later turn of that child. Root success can coexist with residual helper
 interruption after proven retirement. The
 [native output contract](native-subagents.md) owns work identities, display
 windows, bounded caches and late-item semantics.

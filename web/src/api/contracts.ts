@@ -4346,6 +4346,12 @@ export interface components {
             origin_request_id: string;
             /** Received At */
             received_at: string;
+            /**
+             * Current State
+             * @default unavailable
+             * @enum {string}
+             */
+            current_state: "available" | "unavailable";
         };
         /** JobControlRequest */
         JobControlRequest: {

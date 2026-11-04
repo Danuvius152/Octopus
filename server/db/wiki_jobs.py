@@ -67,7 +67,10 @@ class WikiJobsMixin(DatabaseBase):
         self, session_id: str, user_id: str | None, *, offset: int = 0, limit: int = 30,
         job_id: str | None = None, vault_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Select the newest committed version, including for archived chats."""
+        """Discover original observations and their latest received summaries.
+
+        Current job facts are read separately under present Wiki authority.
+        """
         async with self.transaction(write=False) as tx:
             if offset < 0 or not 1 <= limit <= 100:
                 raise ValueError("Invalid Wiki card pagination")

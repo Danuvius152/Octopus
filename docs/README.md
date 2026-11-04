@@ -72,7 +72,7 @@
 | [会话回退：分支与安全文件还原](implemented/session-rewind.md) | implemented | 在用户消息前分支，重放保留前缀并按选择还原可归属文件改动。 |
 | [侧栏置顶：可见性、排序与提醒](implemented/sidebar-pins.md) | implemented | 置顶独立于归档，选择和详情刷新在原位置更新会话。 |
 | [共享 Wiki：当前契约与设计理由](implemented/wiki-development-summary.md) | implemented | 当前检索、维护、权限、效果证据及恢复边界；后续产品范围单列。 |
-| [前端列表：读取、推送与操作回执契约](implemented/frontend-list-reconciliation.md) | implemented | 应用、计划及会话列表各有统一业务入口，保留排序、身份和重连边界。 |
+| [前端列表：读取、推送与操作回执契约](implemented/frontend-list-reconciliation.md) | implemented | 应用、计划、会话及 Wiki 任务观察各有业务入口，保留排序、身份和重连边界。 |
 | [原生 Research：流水线、报告与返回归属](implemented/native-deep-research.md) | implemented | 有界原生 leaf，分别记录报告完成、后续处理与资源退休。 |
 | [原生子任务：观测、卡片与详情](implemented/native-subagents.md) | implemented | 原生 helper 观测、App Server 工作卡片与只读已保存详情，含原资源寿命内晚事件。 |
 | [后台任务：命令结果、返回与资源退休](implemented/background-tasks.md) | implemented | 独立命令身份、持久接纳、有界输出、超时取消及原来源返回。 |

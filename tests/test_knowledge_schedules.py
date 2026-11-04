@@ -308,32 +308,88 @@ async def test_maintenance_only_edit_keeps_the_definitions_source_contract(plan_
     assert "do not make new web requests" in contract.trusted_request
 
 
-async def test_delayed_registration_cannot_restore_an_already_disabled_plan(plan_runtime, monkeypatch):
+@pytest.mark.parametrize("state", ["disabled", "deleted"])
+async def test_delayed_registration_cannot_restore_an_already_disabled_plan(plan_runtime, state):
     manager, runner, parent, _starts, api = plan_runtime
     created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers,
                              json={"prompt": "Human task", "interval_seconds": 3600})
     schedule_id = created.json()["id"]
     url = f"/api/schedules/{schedule_id}"
-    entered, release = asyncio.Event(), asyncio.Event()
-    reschedule = runner.reschedule
-
-    async def delayed_registration(row):
-        if row["name"] == "delayed registration":
-            entered.set()
-            await release.wait()
-        await reschedule(row)
-
-    monkeypatch.setattr(runner, "reschedule", delayed_registration)
+    await runner._registration_lock.acquire()
     old = asyncio.create_task(api.patch(url, headers=api.headers, json={"name": "delayed registration"}))
+    newer = None
     try:
-        await asyncio.wait_for(entered.wait(), 5)
-        disabled = await api.patch(url, headers=api.headers, json={"enabled": False, "wiki_mode": "read", "name": "New definition"})
-        assert disabled.status_code == 200
+        async with asyncio.timeout(3):
+            while (await manager.db.get_schedule_definition(schedule_id))["name"] != "delayed registration":
+                await asyncio.sleep(0)
+        newer = asyncio.create_task(
+            api.delete(url, headers=api.headers) if state == "deleted" else
+            api.patch(url, headers=api.headers, json={"enabled": False, "wiki_mode": "read", "name": "New definition"}),
+        )
+        async with asyncio.timeout(3):
+            while True:
+                row = await manager.db.get_schedule_definition(schedule_id)
+                if row is None or not row["enabled"]:
+                    break
+                await asyncio.sleep(0)
     finally:
-        release.set()
+        runner._registration_lock.release()
+    assert (await newer).status_code == (204 if state == "deleted" else 200)
     assert (await old).status_code == 200
-    assert (await manager.db.load_schedules())[0]["enabled"] is False
+    row = await manager.db.get_schedule_definition(schedule_id)
+    assert row is None if state == "deleted" else row["enabled"] is False
     assert runner.next_run_at(schedule_id) is None
+
+
+@pytest.mark.parametrize("operation", ["create", "edit", "enable", "disable", "delete"])
+async def test_mcp_control_keeps_registration_after_its_http_waiter_cancels(plan_runtime, tmp_path, operation):
+    manager, runner, parent, starts, api = plan_runtime
+    await runner.initialize(paused=True)
+    base = f"/api/sessions/{parent.id}/schedules"
+    body = {"prompt": "Human task", "interval_seconds": 3600}
+    if operation != "create":
+        created = await api.post(base, headers=api.headers, json=body)
+        assert created.status_code == 201
+        identifier = created.json()["id"]
+        if operation == "enable":
+            assert (await api.patch(f"{base}/{identifier}", headers=api.headers, json={"enabled": False})).status_code == 200
+    receipt, headers = await live_caller(manager, parent, starts)
+    await runner._registration_lock.acquire()
+    if operation == "create":
+        request = api.post(base, headers=headers, json=body)
+    elif operation == "delete":
+        request = api.delete(f"{base}/{identifier}", headers=headers)
+    else:
+        updates = {"interval_seconds": 7200} if operation == "edit" else {"enabled": operation == "enable"}
+        request = api.patch(f"{base}/{identifier}", headers=headers, json=updates)
+    waiter = asyncio.create_task(request)
+    try:
+        async with asyncio.timeout(3):
+            while True:
+                rows = await manager.db.load_schedules()
+                if operation == "create" and rows:
+                    identifier = rows[0]["id"]
+                    break
+                if operation == "delete" and not rows:
+                    break
+                if operation not in {"create", "delete"} and all(rows[0][key] == value for key, value in updates.items()):
+                    break
+                await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+    finally:
+        runner._registration_lock.release()
+        (tmp_path / "release").touch()
+        await asyncio.gather(waiter, return_exceptions=True)
+    async with runner._registration_lock:
+        job = runner._scheduler.get_job(identifier)
+        if operation in {"delete", "disable"}:
+            assert job is None
+        else:
+            assert job.trigger.interval.total_seconds() == (7200 if operation == "edit" else 3600)
+    assert (await receipt.wait()).outcome.status == "success"
+    await manager.await_session_execution(parent.id)
 
 
 @pytest.mark.parametrize("in_session", [False, True])

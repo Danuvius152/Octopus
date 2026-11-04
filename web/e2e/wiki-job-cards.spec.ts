@@ -180,3 +180,90 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
     await request.delete(`${API}/sessions/${session.id}`, { headers });
   }
 });
+
+for (const phase of ["headers", "body"] as const) {
+  for (const recovery of ["timeout", "reconnect"] as const) {
+    test(`Wiki accepted control survives stalled ${phase} and recovers by ${recovery}`, async ({ page, request }) => {
+      const created = await request.post(`${API}/sessions`, {
+        headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: `Wiki ${phase} ${recovery}` },
+      });
+      expect(created.ok()).toBeTruthy();
+      const session = await created.json();
+      const fixture = `${API}/_e2e/wiki-cards/${session.id}`;
+      const prepared = await request.post(fixture, { headers });
+      expect(prepared.ok(), await prepared.text()).toBeTruthy();
+      const scope = await prepared.json();
+      let jobId: string | undefined;
+      const sockets: WebSocketRoute[] = [];
+      const readsOnConnection: number[] = [];
+      let posts = 0;
+      const isCards = (url: string) => new URL(url).pathname === `/api/sessions/${session.id}/wiki-jobs`;
+      await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => { sockets.push(socket); socket.connectToServer(); });
+      page.on("request", (value) => {
+        if (isCards(value.url())) readsOnConnection.push(sockets.length);
+        if (jobId && value.url().endsWith(`/wiki/jobs/${jobId}/cancel`) && value.method() === "POST") posts++;
+      });
+      try {
+        const submitted = await request.post(`${API}/wiki/maintain`, {
+          headers: { Authorization: `Bearer ${scope.token}` },
+          data: { idempotency_key: `${phase}-${recovery}`, paths: ["note.md"], scope: "HTTP recovery evidence" },
+        });
+        expect(submitted.ok(), await submitted.text()).toBeTruthy();
+        jobId = (await submitted.json()).id;
+        expect((await request.post(`${fixture}/deliver`, { headers })).ok()).toBeTruthy();
+        await page.goto("/");
+        await enterAccountCredentials(page);
+        await openSession(page, session.name);
+        const card = page.locator(`[data-wiki-job="${jobId}"]`);
+        await expect(card).toHaveAttribute("data-status", "queued");
+        await page.waitForLoadState("networkidle");
+        const generation = (await (await request.get(`${API}/sessions/${session.id}`, { headers })).json()).dispatch_state.generation;
+        expect(typeof generation).toBe("string");
+        await page.clock.install();
+        expect((await request.post(`${fixture}/read-fault`, { headers, data: { phase } })).ok()).toBeTruthy();
+        const bodyHeaders = phase === "body" ? page.waitForResponse((value) => isCards(value.url()), { timeout: 5_000 }) : null;
+        const accepted = page.waitForResponse((value) => value.url().endsWith(`/wiki/jobs/${jobId}/cancel`));
+        await card.getByRole("button", { name: "Cancel maintenance" }).click();
+        const response = await accepted;
+        expect(response.ok()).toBeTruthy();
+        expect(response.request().postDataJSON()).toEqual({ expected_attempt: 0, expected_vault_id: scope.vault_id });
+        await expect(card.getByText("Cancellation request accepted for attempt 0.")).toBeVisible();
+        await expect.poll(async () => (await (await request.get(`${fixture}/read-fault`, { headers })).json()).entered).toBe(phase);
+        if (bodyHeaders) {
+          // Browser received actual HTTP 200 headers, but response.json() is
+          // has only one byte; the outer ASGI barrier holds the rest of JSON.
+          expect((await bodyHeaders).status()).toBe(200);
+        }
+        await expect(card).toHaveAttribute("data-status", "queued");
+        const before = readsOnConnection.length;
+        if (recovery === "timeout") {
+          await page.clock.fastForward(30_001);
+          await expect(page.getByText(/State refresh failed:.*timed out/)).toBeVisible();
+          await expect(card.getByText("Cancellation request accepted for attempt 0.")).toBeVisible();
+          await page.getByRole("button", { name: "Refresh task state" }).click();
+        } else {
+          sockets.at(-1)!.close();
+          await expect(page.locator(".conn-status.on")).toHaveCount(0);
+          await page.clock.fastForward(3_001);
+          await expect(page.locator(".conn-status.on")).toBeVisible();
+          await expect.poll(() => readsOnConnection.some((connection) => connection >= 2)).toBe(true);
+        }
+        await expect(card).toHaveAttribute("data-status", "cancelled");
+        expect(readsOnConnection.length).toBeGreaterThan(before);
+        expect((await (await request.get(`${API}/sessions/${session.id}`, { headers })).json()).dispatch_state.generation).toBe(generation);
+        expect(posts).toBe(1);
+        expect((await (await request.get(`${API}/wiki/jobs/${jobId}`, { headers })).json()).status).toBe("cancelled");
+        // Release the original held response only after its replacement won.
+        expect((await request.post(`${fixture}/read-fault`, { headers, data: { phase: null } })).ok()).toBeTruthy();
+        await expect(card).toHaveAttribute("data-status", "cancelled");
+        await expect(card.getByText("Cancellation request accepted for attempt 0.")).toBeVisible();
+        expect(posts).toBe(1);
+      } finally {
+        await request.post(`${fixture}/read-fault`, { headers, data: { phase: null } });
+        if (jobId) await request.post(`${API}/wiki/jobs/${jobId}/cancel`, { headers });
+        expect((await request.delete(fixture, { headers })).ok()).toBeTruthy();
+        await request.delete(`${API}/sessions/${session.id}`, { headers });
+      }
+    });
+  }
+}

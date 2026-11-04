@@ -87,8 +87,13 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   Completion, cancellation, failure and interruption share one guarded
   `running`-to-terminal transaction. Completion requires the report file and
   its directory entry to be synced before committing the completed row.
-  A winning cancellation interrupts live work; cancellation after completion
-  returns the completed job and preserves its delivery. The card consumes this
+  A cancellation control captures the original pipeline and takes ownership
+  before its first database wait. It survives cancellation of its HTTP waiter;
+  repeated calls join the same control while it remains active. A cancelled row,
+  including an already committed cancellation, signals that captured pipeline
+  at most once rather than looking up a later replacement. The pipeline still
+  owns actual leaf/fetch retirement. Cancellation after completion returns the
+  completed job and preserves its report and delivery. The card consumes this
   response directly through its existing state merge. A boot sweep marks running jobs
   `interrupted`; v1 does NOT resume mid-pipeline.
 
@@ -162,17 +167,24 @@ SessionManager admission, SQLite receipts and a controlled report generator in
 `test_research_manager.py` and `test_source_return_owner_failure.py`.
 
 Pipeline owners and report-delivery observers share one task registry and one
-registration entry. `wait_for_idle()` joins both phases without closing admission;
+registration entry. Cancellation controls have a separate retained registry so
+shutdown cannot interrupt their transaction or notification by signalling them
+as pipelines. `wait_for_idle()` joins all these phases without closing admission;
 a completed report alone does not mean its follow-up receipt has settled. Done
 callbacks release only the registration they still own. Observation failures
 remain visible to draining and shutdown instead of disappearing after logging.
-Shutdown closes admission, captures the original registry once and cancels each
-live owner at most once. A timeout preserves that snapshot for a later join,
+Shutdown closes admission, captures both registries once and cancels each
+live pipeline/delivery owner at most once, leaving cancellation controls to finish.
+A shared deadline bounds their join. A timeout preserves that snapshot for a later join,
 including cancellation cleanup still writing an unknown delivery result. Observers
 handed off by a shielded original pipeline during shutdown join that
 same snapshot and settle unknown without replaying the accepted request. Request
 to job/session routing and exact-version browser confirmation remain separate
-facts; neither is a second task registry or a prerequisite for business delivery.
+facts; neither is another execution owner or a prerequisite for business delivery.
+An ordinary missing-job refusal preserves its caller's error without poisoning
+shutdown; an unexpected control failure or cancellation remains visible as
+unconfirmed cleanup. `test_research_manager.py` exercises real UPDATE/COMMIT
+barriers, repeated cancellation, shutdown/rejoin and original subprocess exit.
 
 A web leaf needs a successful provider terminal. Parseable text followed by
 EOF without that terminal remains diagnostic material and supplies neither

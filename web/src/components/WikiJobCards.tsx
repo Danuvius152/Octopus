@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { IconBook, IconCheck, IconAlertTriangle } from "@tabler/icons-react";
 import type { WikiJobCard } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
-import { controlWikiJob, isWikiJobComplete, reconcileWikiJobs, refreshWikiJobs } from "../lib/wikiJobs";
+import { controlWikiJob, isWikiJobComplete, reconcileWikiJobs, refreshWikiJobs, retireWikiJobs, wikiControlGuard, wikiReadGuard } from "../lib/wikiJobs";
 import { WikiJobDetails } from "./WikiJobDetails";
 
 const LABELS: Record<string, string> = {
@@ -12,30 +12,44 @@ const LABELS: Record<string, string> = {
 };
 
 function Card({ card, sessionId }: { card: WikiJobCard; sessionId: string }) {
+  const mainView = useSessionStore((state) => state.mainView);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [receipt, setReceipt] = useState("");
   const [details, setDetails] = useState(false);
-  const [unavailable, setUnavailable] = useState(false);
-  useEffect(() => { setUnavailable(false); }, [card.state_version]);
+  const [detailsUnavailable, setUnavailable] = useState(false);
+  const currentUnavailable = card.current_state === "unavailable";
+  const unavailable = currentUnavailable || detailsUnavailable;
+  useEffect(() => { setUnavailable(false); }, [card.state_version, card.current_state]);
+  useEffect(() => { setBusy(false); }, [mainView]);
   const unsettled = ["pending", "attention", "unconfirmed"].includes(card.settlement_phase);
   const cancel = ["queued", "running", "interrupted"].includes(card.status);
   const act = async (action: "cancel" | "retry") => {
+    const current = wikiControlGuard();
     setBusy(true);
     setError("");
-    try { await controlWikiJob(sessionId, card, action); }
-    catch (failure) { setError(failure instanceof Error ? failure.message : "Wiki maintenance is unavailable."); }
-    finally { setBusy(false); }
+    setReceipt("");
+    try {
+      const result = await controlWikiJob(sessionId, card, action);
+      if (result.state === "accepted" && current()) {
+        setReceipt(result.message);
+        await result.refresh;
+      }
+    }
+    catch (failure) { if (current()) setError(failure instanceof Error ? failure.message : "Wiki maintenance is unavailable."); }
+    finally { if (current()) setBusy(false); }
   };
-  return <article data-wiki-job={card.job_id} data-status={card.status}
+  return <article data-wiki-job={card.job_id} data-status={currentUnavailable ? "unavailable" : card.status}
     className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm">
     <div className="flex items-start gap-2">
       <IconBook size={16} className="mt-0.5 shrink-0 text-primary" />
       <div className="min-w-0 flex-1">
-        <div className="font-medium">Wiki maintenance · {LABELS[card.status] ?? card.status}</div>
+        <div className="font-medium">Wiki maintenance · {currentUnavailable ? "Current state unavailable" : LABELS[card.status] ?? card.status}</div>
+        {currentUnavailable && <p className="text-xs text-muted-foreground">Saved state: {LABELS[card.status] ?? card.status}</p>}
         {card.scope && <p className="line-clamp-2 text-muted-foreground" title={card.scope}>{card.scope}{card.scope_truncated ? "…" : ""}</p>}
       </div>
-      {card.status === "completed" ? <IconCheck size={16} className="text-emerald-600" />
-        : ["failed", "completed_with_attention", "attention"].includes(card.status) && <IconAlertTriangle size={16} className="text-destructive" />}
+      {!currentUnavailable && (card.status === "completed" ? <IconCheck size={16} className="text-emerald-600" />
+        : ["failed", "completed_with_attention", "attention"].includes(card.status) && <IconAlertTriangle size={16} className="text-destructive" />)}
     </div>
     <p className="mt-1 text-xs text-muted-foreground">
       {card.progress.completed}/{card.progress.total} items completed
@@ -60,50 +74,68 @@ function Card({ card, sessionId }: { card: WikiJobCard; sessionId: string }) {
       {cancel && !unavailable && <button type="button" disabled={busy} onClick={() => void act("cancel")} className="text-destructive disabled:opacity-50">Cancel maintenance</button>}
       {!details && !unavailable && <button type="button" onClick={() => setDetails(true)} className="text-primary">Task details</button>}
     </div>
-    {unavailable && <p role="status" className="mt-1 text-xs">Task details are unavailable. The saved summary remains here.</p>}
+    {unavailable && <p role="status" className="mt-1 text-xs">{currentUnavailable
+      ? "Current task state is unavailable. The saved summary remains here."
+      : "Task details are unavailable. The saved summary remains here."}</p>}
     {details && !unavailable && <WikiJobDetails card={card} sessionId={sessionId} close={() => setDetails(false)} setUnavailable={setUnavailable} />}
+    {receipt && <p role="status" className="mt-1 text-xs">{receipt}</p>}
     {error && <p role="alert" className="mt-1 text-xs text-destructive">{error}</p>}
   </article>;
 }
 
 export function WikiJobCards({ sessionId }: { sessionId: string }) {
   const token = useSessionStore((state) => state.token);
+  const account = useSessionStore((state) => state.accountGeneration);
+  const activeSession = useSessionStore((state) => state.activeSessionId);
+  const mainView = useSessionStore((state) => state.mainView);
   const generation = useSessionStore((state) => state.dispatchGeneration);
   const connected = useSessionStore((state) => state.connected);
   const cards = useSessionStore((state) => state.wikiJobs[sessionId]);
+  const refreshError = useSessionStore((state) => state.wikiJobReadErrors[sessionId]);
+  const view = useRef<AbortController | null>(null);
   const [error, setError] = useState("");
   const [offset, setOffset] = useState(0);
   const [more, setMore] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [refresh, setRefresh] = useState(0);
   const [showCompleted, setShowCompleted] = useState(false);
   useEffect(() => {
     let active = true;
-    void reconcileWikiJobs(sessionId).then((count) => {
+    const controller = new AbortController();
+    view.current = controller;
+    setLoading(false); setOffset(0); setMore(false); setError("");
+    if (mainView !== "chat") return () => { controller.abort(); };
+    const observation = reconcileWikiJobs(sessionId);
+    void observation.then((count) => {
       if (active) { setOffset(count); setMore(count === 30); setError(""); }
-    }).catch((failure) => {
-      if (active) setError(failure instanceof Error ? failure.message : "Could not load Wiki maintenance.");
-    });
-    return () => { active = false; };
-  }, [sessionId, token, generation, connected]);
+    }).catch(() => {});
+    return () => { active = false; controller.abort(); retireWikiJobs(sessionId, observation); };
+  }, [sessionId, token, account, activeSession, mainView, generation, connected, refresh]);
   const loadMore = async () => {
+    const current = wikiReadGuard();
+    const signal = view.current?.signal;
     setLoading(true);
     try {
-      const count = await refreshWikiJobs(sessionId, offset);
+      const count = await refreshWikiJobs(sessionId, offset, signal);
+      if (!current() || signal?.aborted) return;
       setOffset(offset + count); setMore(count === 30); setError("");
-    } catch (failure) { setError(failure instanceof Error ? failure.message : "Could not load Wiki maintenance."); }
-    finally { setLoading(false); }
+    } catch (failure) { if (current() && !signal?.aborted) setError(failure instanceof Error ? failure.message : "Could not load Wiki maintenance."); }
+    finally { if (current() && !signal?.aborted) setLoading(false); }
   };
-  if (!cards?.length && !error) return null;
+  if (!cards?.length && !error && !refreshError) return null;
   const completed = cards?.filter(isWikiJobComplete) ?? [];
   return <section aria-label="Wiki maintenance tasks" className="max-h-64 overflow-y-auto space-y-2 pb-2">
-    {cards?.filter((card) => !isWikiJobComplete(card)).map((card) => <Card key={`${generation}/${card.vault_id}/${card.job_id}`} card={card} sessionId={sessionId} />)}
+    {cards?.filter((card) => !isWikiJobComplete(card)).map((card) => <Card key={`${sessionId}/${generation}/${card.vault_id}/${card.job_id}`} card={card} sessionId={sessionId} />)}
     {completed.length > 0 && <>
       <button type="button" aria-expanded={showCompleted} onClick={() => setShowCompleted(!showCompleted)} className="text-xs text-muted-foreground">
         Completed maintenance ({completed.length} loaded)
       </button>
-      {showCompleted && completed.map((card) => <Card key={`${generation}/${card.vault_id}/${card.job_id}`} card={card} sessionId={sessionId} />)}
+      {showCompleted && completed.map((card) => <Card key={`${sessionId}/${generation}/${card.vault_id}/${card.job_id}`} card={card} sessionId={sessionId} />)}
     </>}
     {more && <button type="button" disabled={loading} onClick={() => void loadMore()} className="text-xs text-primary">More maintenance tasks</button>}
+    {refreshError && <p role="status" className="text-xs text-destructive">State refresh failed: {refreshError}{" "}
+      <button type="button" onClick={() => setRefresh((value) => value + 1)} className="text-primary">Refresh task state</button>
+    </p>}
     {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
   </section>;
 }

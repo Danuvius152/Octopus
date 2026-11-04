@@ -109,6 +109,17 @@ exactly like the tool having failed. The payload is deliberately empty:
 one code path, whether the change came from this browser, another tab, or
 an agent.
 
+The Runner owns this notification with the definition write and trigger
+reconciliation, so losing the caller does not lose the change. Registration
+failure returns HTTP 503 with `code=schedule_registration_unconfirmed`, the
+original `schedule_id` and a string `detail` explaining that configuration may
+already be saved. The MCP error preserves that identity and instruction. Read
+the original schedule before another change; repeating creation can duplicate
+the definition. A successful definition control does not prove a fire ran or
+that an earlier execution retired. The
+[Runner contract](scheduled-runs.md#definition-controls-and-shutdown) owns the
+ordering and shutdown boundary.
+
 ## 7. On by default
 
 `schedule` joins `ask`, `bg`, `ask_agent` and `research` in the default

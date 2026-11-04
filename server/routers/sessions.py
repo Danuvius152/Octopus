@@ -238,8 +238,12 @@ async def wiki_jobs(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     if (job_id is None) != (vault_id is None):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Supply both Wiki job and vault identities")
-    return await session_manager.db.wiki_job_cards(session_id, user_id, offset=offset, limit=limit,
-                                                  job_id=job_id, vault_id=vault_id)
+    from ..mcp_identity import verify
+    from ..wiki.job_observation import current_cards
+
+    cards = await session_manager.db.wiki_job_cards(session_id, user_id, offset=offset, limit=limit,
+                                                    job_id=job_id, vault_id=vault_id)
+    return await current_cards(user_id, cards, verify(_))
 
 
 @router.post("/{session_id}/submissions", response_model=ClientSubmissionStatus | ClientSubmissionRefusal,

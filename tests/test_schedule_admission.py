@@ -195,7 +195,7 @@ async def test_archive_closes_creation_restore_and_existing_session_sends(domain
     archived = await manager.create_session(agent["id"])
     await manager.archive_session(archived.id, replace=False)
     await save(db, agent)
-    await runner.add((await db.load_schedules())[0])
+    await runner.reconcile((await db.load_schedules())[0]["id"])
     entered, release = asyncio.Event(), asyncio.Event()
     evict = manager.evict_agent_sessions
 

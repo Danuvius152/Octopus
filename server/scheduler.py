@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.jobstores.base import JobLookupError
@@ -11,21 +12,33 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-from .knowledge import decode_context
+from .knowledge import RequestingWorkClosedError, decode_context
 from .models import SessionStatus
 from .schedule_ai import cron_trigger
 from .schedule_targets import ScheduleTargetError, resolve_schedule_target
 
 if TYPE_CHECKING:
     from server.database import Database
+    from server.knowledge import AdmittedRequest
     from server.session_manager import SessionManager
     from server.sessions.submission import SubmissionReceipt
 
+from .db.schedules import ScheduleChangedError
 from .monitor import Event as _MonEvent
 from .monitor import record as _mon_record
 
 logger = logging.getLogger(__name__)
 
+
+class ScheduleRegistrationError(RuntimeError):
+    """The definition write completed, but its trigger was not confirmed."""
+
+    def __init__(self, schedule_id: str) -> None:
+        self.schedule_id = schedule_id
+        super().__init__(
+            f"Schedule {schedule_id}: configuration may have been saved; registration is unconfirmed. "
+            "Read this schedule's current state before making another change; do not repeat creation."
+        )
 
 
 class ScheduleRunner:
@@ -36,6 +49,8 @@ class ScheduleRunner:
         self._db = db
         self._closing = False
         self._registration_lock = asyncio.Lock()
+        self._control_tasks: set[asyncio.Task[None]] = set()
+        self._shutdown_controls: tuple[asyncio.Task[None], ...] = ()
         self._shutdown_tasks: tuple[asyncio.Future, ...] | None = None
         self._session_mgr.set_schedule_runner(self)
 
@@ -101,8 +116,7 @@ class ScheduleRunner:
         await sweep()
 
     def _add_job(self, row: dict, *, not_before: datetime | None = None) -> None:
-        if self._closing:
-            raise RuntimeError("ScheduleRunner is shutting down")
+        # Already admitted controls can finish while new launches are closed.
         # Recurrence priority: run_at (one-time) > cron > interval.
         common = dict(id=row["id"], args=[row["id"]], replace_existing=True)
         if row.get("run_at"):
@@ -341,16 +355,60 @@ class ScheduleRunner:
             or self._session_mgr.session_is_executing(session)
         )
 
-    async def add(self, row: dict) -> None:
-        # A prepared HTTP edit can be overtaken before registration. Fetch
-        # the committed definition while this runner owns registration order.
-        # No SQL transaction remains open while validating the target.
-        async with self._registration_lock:
-            await self._register(row["id"])
+    async def create(self, schedule_id: str, **definition: Any) -> None:
+        await self._change(schedule_id, lambda: self._db.save_schedule(schedule_id=schedule_id, **definition))
 
-    async def _register(self, schedule_id: str) -> None:
+    async def update(self, existing: dict, updates: dict, *, request: AdmittedRequest | None = None) -> None:
+        await self._change(existing["id"], lambda: self._db.update_schedule(
+            existing["id"], expected=existing, request=request, **updates,
+        ))
+
+    async def delete(self, schedule_id: str) -> None:
+        await self._change(schedule_id, lambda: self._db.delete_schedule(schedule_id))
+
+    async def _change(self, schedule_id: str, write: Callable[[], Awaitable[None]] | None = None) -> None:
+        """Take ownership before the first DB/registration wait, until convergence.
+
+        Each edit is a distinct operation. Cancelling a waiter cannot cancel an
+        admitted definition write or lose the subsequent trigger update.
+        """
         if self._closing:
             raise RuntimeError("ScheduleRunner is shutting down")
+
+        async def finish() -> None:
+            if write is not None:
+                await write()
+            try:
+                async with self._registration_lock:
+                    await self._register(schedule_id)
+            except Exception as exc:
+                raise ScheduleRegistrationError(schedule_id) from exc
+            if write is not None:
+                try:
+                    await self._session_mgr._broadcast({"type": "schedules_changed"})
+                except Exception:
+                    logger.debug("schedules_changed broadcast failed", exc_info=True)
+
+        task = asyncio.create_task(finish(), name=f"schedule-control-{schedule_id}")
+        self._control_tasks.add(task)
+
+        def retired(original: asyncio.Task[None]) -> None:
+            if original.cancelled():
+                logger.error("Owned schedule control cancelled schedule=%s", schedule_id)
+            elif (error := original.exception()) is not None and not isinstance(error, (ScheduleChangedError, RequestingWorkClosedError)):
+                logger.error("Schedule control failed schedule=%s", schedule_id, exc_info=error)
+            self._control_tasks.discard(original)
+
+        task.add_done_callback(retired)
+        await asyncio.shield(task)
+
+    async def reconcile(self, schedule_id: str) -> None:
+        """Rebuild only this identity's trigger from its current definition."""
+        await self._change(schedule_id)
+
+    async def _register(self, schedule_id: str) -> None:
+        # The DB definition is authoritative even when a later edit/deletion
+        # overtook this operation. No SQL transaction spans target validation.
         current = await self._db.get_schedule_definition(schedule_id)
         self._remove_job(schedule_id)
         if current is not None and current["enabled"] and await self._target_is_active(current):
@@ -367,10 +425,6 @@ class ScheduleRunner:
             # No job registered — a disabled schedule never had one, and
             # removing twice is how delete-after-disable arrives here.
             pass
-
-    async def reschedule(self, row: dict) -> None:
-        async with self._registration_lock:
-            await self._register(row["id"])
 
     async def _target_is_active(self, row: dict) -> bool:
         try:
@@ -402,46 +456,56 @@ class ScheduleRunner:
     async def restore_agent(self, agent_id: str) -> None:
         for row in await self._db.load_schedules():
             if row["agent_id"] == agent_id:
-                await self.reschedule(row)
+                await self.reconcile(row["id"])
 
     def drain_blockers(self) -> tuple[str, ...]:
         callbacks = (*getattr(self._executor, "_pending_futures", ()), *(self._shutdown_tasks or ()))
+        controls = tuple(task.get_name() for task in self._control_tasks if not task.done())
         if self._registration_lock.locked() or any(not task.done() for task in callbacks):
-            return ("registration or dispatched callback",)
-        return ()
+            return (*controls, "registration or dispatched callback")
+        return controls
 
     def begin_shutdown(self) -> None:
-        """Stop launches and capture APScheduler's existing callback owner.
-
-        AsyncIOScheduler posts shutdown onto the loop, and its executor clears
-        the future set before cancelled callbacks finish their finally blocks.
-        Capture that set first so shutdown can join the same callbacks.
-        """
+        """Close admission/fires while admitted controls keep their scheduler."""
         if self._closing:
             return
         self._closing = True
+        self._shutdown_controls = tuple(self._control_tasks)
         self._shutdown_tasks = tuple(getattr(self._executor, "_pending_futures", ()))
         if self._scheduler.running:
             self._scheduler.pause()
-            self._scheduler.shutdown(wait=False)
 
     async def shutdown(self, *, timeout: float = 5.0) -> None:
-        """Join callbacks within the shutdown bound; keep uncertain owners."""
+        """Join controls and callbacks within one bound; keep uncertain owners."""
         self.begin_shutdown()
+        deadline = asyncio.get_running_loop().time() + timeout
+        errors: list[Exception] = []
+        if self._shutdown_controls:
+            controls_done, controls_pending = await asyncio.wait(
+                self._shutdown_controls, timeout=max(0, deadline - asyncio.get_running_loop().time()),
+            )
+            if controls_pending:
+                raise TimeoutError(f"scheduler control retirement unconfirmed: {', '.join(task.get_name() for task in controls_pending)}")
+            for task in controls_done:
+                if task.cancelled():
+                    raise RuntimeError(f"scheduler control was cancelled: {task.get_name()}")
+                if isinstance(error := task.exception(), Exception) and not isinstance(error, (ScheduleChangedError, RequestingWorkClosedError)):
+                    errors.append(error)
+        if self._scheduler.running:
+            self._scheduler.shutdown(wait=False)
         # APScheduler's posted shutdown also retires its timer and job stores.
         await asyncio.sleep(0)
         tasks = self._shutdown_tasks or ()
-        if not tasks:
-            return
-        done, pending = await asyncio.wait(tasks, timeout=timeout)
-        if pending:
-            raise TimeoutError(f"scheduler shutdown retirement unconfirmed: {len(pending)} callback(s)")
-        errors: list[Exception] = []
-        for task in done:
-            if task.cancelled():
+        callbacks_done, callbacks_pending = await asyncio.wait(
+            tasks, timeout=max(0, deadline - asyncio.get_running_loop().time()),
+        ) if tasks else (set(), set())
+        if callbacks_pending:
+            raise TimeoutError(f"scheduler shutdown retirement unconfirmed: {len(callbacks_pending)} callback(s)")
+        for callback in callbacks_done:
+            if callback.cancelled():
                 continue
             # run_coroutine_job converts callback failures into job events.
-            for event in task.result():
+            for event in callback.result():
                 error = getattr(event, "exception", None)
                 if isinstance(error, Exception):
                     errors.append(error)

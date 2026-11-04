@@ -110,6 +110,8 @@ class ResearchManager:
         self.session_mgr: SessionManager | None = None
         self.db: Database | None = None
         self._tasks: dict[str, asyncio.Task] = {}
+        # Cancellation controls must survive shutdown's signals to pipelines.
+        self._cancel_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._contexts: dict[str, OwnedTaskContext] = {}
         self._job_sem: asyncio.Semaphore | None = None
         self._closing = False
@@ -124,31 +126,42 @@ class ResearchManager:
         self._shutdown_tasks = None
         session_mgr.on_broadcast("research.delivery", self._on_delivery_progress, required=False)
 
-    def _register_task(self, key: str, task: asyncio.Task, *, on_retired: Callable[[], None] | None = None) -> None:
-        """One owner for pipeline and delivery work, retaining failed teardown."""
-        self._tasks[key] = task
+    def _register_task(self, key: str, task: asyncio.Task, *, on_retired: Callable[[], None] | None = None,
+                       cancellation: bool = False) -> None:
+        """Retain original work through cleanup, with controls kept unsignalled."""
+        registry = self._cancel_tasks if cancellation else self._tasks
+        registry[key] = task
+        shutdown_key = f"cancel:{key}" if cancellation else key
         if self._shutdown_tasks is not None:
             # A shielded original pipeline may hand off its accepted receipt
             # after shutdown captured it. This is the same cleanup responsibility.
-            self._shutdown_tasks[key] = task
+            self._shutdown_tasks[shutdown_key] = task
         def finished(done: asyncio.Task) -> None:
             error = None if done.cancelled() else done.exception()
-            if error is not None:
-                logger.error("research %s cleanup failed", key, exc_info=error)
-            elif self._tasks.get(key) is done:
-                self._tasks.pop(key)
+            if cancellation and done.cancelled():
+                logger.error("research cancellation control unexpectedly cancelled job=%s", key)
+            elif error is not None and not (cancellation and isinstance(error, ResearchError)):
+                logger.error("research %s cleanup failed", shutdown_key, exc_info=error)
+            elif registry.get(key) is done:
+                registry.pop(key)
                 if on_retired is not None:
                     on_retired()
         task.add_done_callback(finished)
 
     async def wait_for_idle(self) -> None:
-        """Drain current pipelines and the delivery observers they create.
+        """Drain current controls, pipelines and their delivery observers.
 
         This does not close admission. Cancelling a waiter never cancels the
         original research or receipt observation.
         """
-        while self._tasks:
-            await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._tasks.values())))
+        while self._tasks or self._cancel_tasks:
+            tasks = (*self._tasks.values(), *self._cancel_tasks.values())
+            results = await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+            if any(task.cancelled() for task in self._cancel_tasks.values()):
+                raise RuntimeError("Research cancellation control retirement is unconfirmed")
+            for result in results:
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                    raise result
 
     async def recover_interrupted(self, *, previous_writers_retired: bool = False) -> int:
         """Before admission opens, observe original identities without dispatch.
@@ -568,14 +581,26 @@ class ResearchManager:
     async def cancel(self, job_id: str) -> dict[str, Any]:
         if self.db is None:
             raise ResearchError("ResearchManager not bound", status_code=500)
+        control = self._cancel_tasks.get(job_id)
+        if control is None:
+            if self._closing:
+                raise ResearchError("ResearchManager is shutting down", status_code=503)
+            # Capture the original pipeline before any DB wait. A late control
+            # must never signal a replacement registered under the same key.
+            original = self._tasks.get(job_id)
+            control = asyncio.create_task(self._cancel_job(job_id, original), name=f"research-cancel-{job_id}")
+            self._register_task(job_id, control, cancellation=True)
+        return await asyncio.shield(control)
+
+    async def _cancel_job(self, job_id: str, original: asyncio.Task | None) -> dict[str, Any]:
+        assert self.db is not None
         won, row = await self.db.confirm_research_outcome(
             job_id, "cancelled", completed_at=_now(), error="cancelled by user",
         )
         if row is None:
             raise ResearchError(f"research job {job_id} not found", status_code=404)
-        task = self._tasks.get(job_id)
-        if won and task and not task.done() and not task.cancelling():
-            task.cancel()  # reaps in-flight leaves via CancelledError
+        if row["status"] == "cancelled" and original and not original.done() and not original.cancelling():
+            original.cancel()  # reaps in-flight leaves via CancelledError
         if won:
             await self._publish_failed(row)
         return row
@@ -584,17 +609,19 @@ class ResearchManager:
 
     def drain_blockers(self) -> tuple[str, ...]:
         # Failed teardown tasks remain owned until their original cleanup is confirmed.
-        return ("pipeline, return delivery or cleanup",) if self._tasks else ()
+        return (("pipeline, return delivery or cleanup",) if self._tasks else ()) + tuple(
+            f"cancellation control {job_id}" for job_id in self._cancel_tasks
+        )
 
     def begin_shutdown(self) -> None:
         """Close admission and signal the jobs this manager already owns."""
         if self._closing:
             return
         self._closing = True
-        self._shutdown_tasks = dict(self._tasks)
+        self._shutdown_tasks = {**self._tasks, **{f"cancel:{key}": task for key, task in self._cancel_tasks.items()}}
         if self.session_mgr is not None:
             self.session_mgr.remove_broadcast("research.delivery")
-        for task in self._shutdown_tasks.values():
+        for task in self._tasks.values():
             if not task.done() and not task.cancelling():
                 task.cancel()
 
@@ -612,8 +639,12 @@ class ResearchManager:
                 raise TimeoutError(f"research shutdown retirement unconfirmed: {jobs}")
             if all(task.done() for task in tasks.values()):
                 break
-        for task in tasks.values():
+        for key, task in tasks.items():
+            if key.startswith("cancel:") and task.cancelled():
+                raise RuntimeError(f"Research cancellation control retirement is unconfirmed: {key}")
             if not task.cancelled():
+                if key.startswith("cancel:") and isinstance(task.exception(), ResearchError):
+                    continue  # A missing job is a domain refusal, not failed cleanup.
                 task.result()
 
     def _write_report(self, job_id: str, report: str, user_id: str | None) -> str | None:

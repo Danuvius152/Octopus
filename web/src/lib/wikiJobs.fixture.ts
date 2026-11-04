@@ -9,6 +9,6 @@ export function wikiJob(overrides: Partial<WikiJobCard> = {}): WikiJobCard {
     outcome_refs: [], outcome_count: 0, outcome_refs_truncated: false,
     effects: { recorded: 0, applied: 0, index_pending: 0 }, recording_pending: 0,
     error: null, error_truncated: false, created_at: "2026-10-18T12:00:00Z", updated_at: "2026-10-18T12:00:00Z",
-    received_at: "2026-10-18T12:00:00Z", ...overrides,
+    received_at: "2026-10-18T12:00:00Z", current_state: "available", ...overrides,
   };
 }

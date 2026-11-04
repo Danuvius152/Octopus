@@ -352,6 +352,7 @@ interface SessionStore {
   setDispatchUnavailable: (sessionId: string, unavailable: boolean,
     start?: DispatchReadStart) => void;
   wikiJobs: Record<string, WikiJobCard[]>;
+  wikiJobReadErrors: Record<string, string>;
   wikiJobDirty: Record<string, Record<string, Pick<WikiJobCard, "job_id" | "vault_id" | "state_version">>>;
   invalidateWikiJob: (sessionId: string, target: Pick<WikiJobCard, "job_id" | "vault_id" | "state_version">) => void;
   mergeWikiJobs: (sessionId: string, cards: WikiJobCard[]) => void;
@@ -912,6 +913,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     })),
 
   wikiJobs: {},
+  wikiJobReadErrors: {},
   wikiJobDirty: {},
   invalidateWikiJob: (sessionId, target) => set((state) => {
     const key = `${target.vault_id}/${target.job_id}`;
@@ -930,6 +932,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const previous = values.get(key);
       if (!previous || card.state_version > previous.state_version) {
         values.set(key, card);
+        changed = true;
+      } else if (card.current_state !== undefined && card.current_state !== previous.current_state
+          && (card.current_state === "unavailable" || card.state_version === previous.state_version)) {
+        // Permissions/registration can change without changing the job. A
+        // retained summary may be older than facts this browser already read.
+        values.set(key, { ...previous, current_state: card.current_state });
         changed = true;
       }
       if (dirty[key] && card.state_version >= dirty[key].state_version) {

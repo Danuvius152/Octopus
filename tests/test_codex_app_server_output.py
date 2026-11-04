@@ -42,6 +42,38 @@ async def test_root_and_child_same_item_survive_storage_and_ws(native_runtime, t
     assert session.claude_session_id == ROOT
 
 
+async def test_wait_captured_before_child_binding_finishes_the_original_saved_card(native_runtime, tmp_path):
+    manager, database, session, _, _, events = native_runtime
+    receipt = await start_output(native_runtime)
+    spawn = {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
+        "id": "spawn-pending", "type": "subAgentActivity", "kind": "started", "agentThreadId": "child",
+        "agentPath": "/root/helper"}}}
+    wait = {"method": "item/started", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
+        "id": "pending-wait", "type": "collabAgentToolCall", "tool": "wait", "status": "inProgress",
+        "receiverThreadIds": ["child"], "senderThreadId": ROOT, "agentsStates": {}}}}
+    wait_end = {"method": "item/completed", "params": {**wait["params"], "item": {
+        **wait["params"]["item"], "status": "completed", "agentsStates": {"child": {"status": "completed"}}}}}
+    inject(tmp_path, spawn, wait)
+    await until(lambda: any(event.get("type") == "tool_use" and
+        (event.get("runtime_metadata") or {}).get("native", {}).get("item_id") == "pending-wait" for event in events))
+    pending_card = next(iter(session._subagents.values())).card_id
+    # No direct child terminal: the original wait is the completion evidence.
+    inject(tmp_path, child_start(), item("child", "child-turn", "child-answer", "Helper answer"), wait_end,
+           item(ROOT, "turn-1", "root-answer", "Root answer after helper wait"), terminal())
+    await wait_dispatch_idle(manager, session.id)
+    rows = await database.load_messages(session.id)
+    statuses = [row for row in rows if row["type"] == "native_subagent"]
+    assert {row["tool_input"]["card_id"] for row in statuses} == {pending_card}
+    final = statuses[-1]
+    assert (final["tool_input"]["status"], final["tool_input"]["native_turn_id"]) == ("completed", "child-turn")
+    assert final["runtime_metadata"]["native"]["thread_id"] == "child"
+    assert final["runtime_metadata"]["native"]["turn_id"] == "child-turn"
+    assert final["runtime_metadata"]["request_id"] == receipt["request_id"]
+    saved = await database.read_session_result(session.id, receipt["request_id"])
+    assert saved.outcome.status == "success" and saved.fragments == ("Root answer after helper wait",)
+    assert len([row for row in rows if row["content"] == "Helper answer"]) == 1
+
+
 async def test_root_terminal_retains_late_child_items_and_distinct_helper_outcomes(native_runtime, tmp_path):
     manager, database, session, _, _, _ = native_runtime
     receipt = await start_output(native_runtime)

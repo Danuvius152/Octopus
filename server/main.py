@@ -65,7 +65,7 @@ from .routers import delegations as delegations_router
 from .routers import monitor as monitor_router
 from .routers import research as research_router
 from .routers import wiki as wiki_router
-from .scheduler import ScheduleRunner
+from .scheduler import ScheduleRegistrationError, ScheduleRunner
 from .service_health import ServiceHealth
 from .service_installation import InstallationOwner, read_service_profile
 from .session_manager import session_manager
@@ -404,6 +404,13 @@ async def _session_owner_unavailable(_request: Request, exc: SessionOwnerUnavail
 @app.exception_handler(InputAdmissionNotReady)
 async def _input_not_ready(_request: Request, exc: InputAdmissionNotReady) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc), "code": exc.code})
+
+
+@app.exception_handler(ScheduleRegistrationError)
+async def _schedule_registration_unconfirmed(_request: Request, exc: ScheduleRegistrationError) -> JSONResponse:
+    return JSONResponse(status_code=503, content={
+        "detail": str(exc), "code": "schedule_registration_unconfirmed", "schedule_id": exc.schedule_id,
+    })
 
 
 

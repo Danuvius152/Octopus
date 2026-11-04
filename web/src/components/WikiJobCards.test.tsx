@@ -5,10 +5,85 @@ import { useSessionStore } from "../stores/sessionStore";
 import { wikiJob } from "../lib/wikiJobs.fixture";
 
 beforeEach(() => {
-  useSessionStore.setState({ token: "token-a", wikiJobs: {}, wikiJobDirty: {}, dispatchGeneration: "service-a", connected: true });
+  useSessionStore.setState({ token: "token-a", wikiJobs: {}, wikiJobDirty: {}, wikiJobReadErrors: {}, dispatchGeneration: "service-a", connected: true });
   vi.stubGlobal("fetch", vi.fn(async () => new Response("[]")));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it("keeps an accepted cancellation and saved data when confirmation fails, and only retries GET", async () => {
+  const card = wikiJob();
+  let controlled = false;
+  let recovered = false;
+  const posts: RequestInit[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    if (init?.method === "POST") { controlled = true; posts.push(init); return Response.json({}); }
+    if (controlled && !recovered) return Response.json({ detail: "confirmation offline" }, { status: 503 });
+    return Response.json([recovered ? { ...card, state_version: 2, status: "cancelled" } : card]);
+  }));
+  useSessionStore.getState().mergeWikiJobs("original", [card]);
+  render(<WikiJobCards sessionId="original" />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole("button", { name: "Cancel maintenance" }));
+  await screen.findByText("Cancellation request accepted for attempt 1.");
+  expect(await screen.findByText(/State refresh failed:.*503/)).toBeTruthy();
+  expect(screen.getByText(card.scope)).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  recovered = true;
+  fireEvent.click(screen.getByRole("button", { name: "Refresh task state" }));
+  await screen.findByText("Wiki maintenance · Cancelled");
+  expect(screen.getByText("Cancellation request accepted for attempt 1.")).toBeTruthy();
+  expect(screen.queryByText(/State refresh failed/)).toBeNull();
+  expect(posts).toHaveLength(1);
+});
+
+it.each([403, 409])("retains the original HTTP %s control error when GET also fails and later recovers", async (status) => {
+  const card = wikiJob();
+  let controlled = false;
+  let recovered = false;
+  let posts = 0;
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    if (init?.method === "POST") { controlled = true; posts++; return Response.json({}, { status }); }
+    if (controlled && !recovered) return Response.json({}, { status: 503 });
+    return Response.json([card]);
+  }));
+  useSessionStore.getState().mergeWikiJobs("original", [card]);
+  render(<WikiJobCards sessionId="original" />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole("button", { name: "Cancel maintenance" }));
+  const error = await screen.findByRole("alert");
+  const original = error.textContent;
+  expect(original).toContain(status === 409 ? "task changed" : "HTTP 403");
+  await screen.findByText(/State refresh failed:.*503/);
+  recovered = true;
+  fireEvent.click(screen.getByRole("button", { name: "Refresh task state" }));
+  await waitFor(() => expect(screen.queryByText(/State refresh failed/)).toBeNull());
+  expect(error.textContent).toBe(original);
+  expect(posts).toBe(1);
+});
+
+it("preserves accepted verification and existing detail evidence when its card refresh fails", async () => {
+  const card = wikiJob({ status: "completed_with_attention" });
+  let controlled = false;
+  let posts = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === "POST") { controlled = true; posts++; return Response.json({}); }
+    if (url.includes("/details")) return Response.json({ job_id: card.job_id, vault_id: card.vault_id,
+      state_version: 1, attempt: 1, current_attempt: 1, attempts: [1], status: card.status,
+      settlement_phase: "none", error: "Original retained evidence", items: [], outputs: [], next_offset: null,
+      actions: { verify: true, retry: false, readmit: false, blocked_reason: null } });
+    return controlled ? Response.json({}, { status: 503 }) : Response.json([card]);
+  }));
+  useSessionStore.getState().mergeWikiJobs("original", [card]);
+  render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByRole("button", { name: "Task details" }));
+  const verify = await screen.findByRole("button", { name: "Verify saved result and index" });
+  await waitFor(() => expect(verify).toBeEnabled());
+  fireEvent.click(verify);
+  await screen.findByText("Verification request accepted for attempt 1.");
+  await screen.findByText(/State refresh failed:.*503/);
+  expect(screen.getByText("Original retained evidence")).toBeTruthy();
+  expect(posts).toBe(1);
+});
 
 it("shows persisted completed outputs after a chat is reopened", () => {
   useSessionStore.getState().mergeWikiJobs("original", [wikiJob({ status: "completed", state_version: 3,
@@ -101,7 +176,7 @@ it("reconciles a retained task missed while disconnected even after it leaves th
       && String(url).includes("vault_id=historical-vault") ? [{ ...old, status: "completed", state_version: 3 }] : firstPage));
   vi.stubGlobal("fetch", fetcher);
   const { container } = render(<WikiJobCards sessionId="original" />);
-  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("503"));
+  await screen.findByText(/State refresh failed:.*503/);
   await act(async () => useSessionStore.setState({ connected: true }));
   await screen.findByRole("button", { name: "Completed maintenance (31 loaded)" });
   expect(container.querySelector('[data-wiki-job="old-job"]')).toBeNull();

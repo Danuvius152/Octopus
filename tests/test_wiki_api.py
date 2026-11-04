@@ -1879,11 +1879,9 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
 async def test_schedule_contract_requires_live_scope_or_verified_human_intent_at_creation(
     client, tmp_path, monkeypatch
 ):
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
     from server.mcp_identity import mint
     from server.routers import schedules
+    from server.scheduler import ScheduleRunner
     from server.wiki.tasks import tasks
 
     vault = tmp_path / "vault"
@@ -1892,11 +1890,8 @@ async def test_schedule_contract_requires_live_scope_or_verified_human_intent_at
     agent = await wiki_api.session_manager.db.get_system_agent()
     session = await wiki_api.session_manager.create_session(agent["id"])
     monkeypatch.setattr(schedules, "_db", wiki_api.session_manager.db)
-    monkeypatch.setattr(
-        schedules,
-        "_runner",
-        SimpleNamespace(add=AsyncMock(), next_run_at=lambda _: None),
-    )
+    runner = ScheduleRunner(wiki_api.session_manager, wiki_api.session_manager.db)
+    monkeypatch.setattr(schedules, "_runner", runner)
     plain = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id)}"}
     endpoint = f"/api/sessions/{session.id}/schedules"
     rejected = await client.post(
@@ -1920,6 +1915,8 @@ async def test_schedule_contract_requires_live_scope_or_verified_human_intent_at
     )
     assert human.status_code == 201, human.text
     assert human.json()["wiki_mode"] == "maintain"
+    saved = await wiki_api.session_manager.db.get_schedule_definition(human.json()["id"])
+    assert saved["wiki_mode"] == "maintain"
     token = tasks.open(session, "read")
     try:
         scoped = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
@@ -1939,6 +1936,7 @@ async def test_schedule_contract_requires_live_scope_or_verified_human_intent_at
         # Real live caller inheritance is exercised by knowledge_schedules.
     finally:
         tasks.close(token)
+        await runner.shutdown()
 
 
 async def test_bom_frontmatter_is_one_protected_block_even_with_blank_lines(

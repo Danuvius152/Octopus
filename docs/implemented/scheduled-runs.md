@@ -21,6 +21,42 @@ partials do not replace the root outcome or require a result-text query. Failed
 notification leaves the committed outcome intact. Stop pauses dispatch and keeps
 that conversation visible under the existing archive policy.
 
+### Definition controls and shutdown
+
+The Runner owns each create, update and deletion before its first database
+wait. The owned task commits the definition with the existing permission and
+expected-definition checks, then reconciles the trigger under the registration
+lock. Reconciliation rereads the current definition, so an overtaken edit cannot
+restore a later deletion or re-enable a disabled schedule. Deletion commits
+before removing its trigger. Cancelling the HTTP/MCP waiter does not cancel this
+responsibility or its list-change notification.
+
+A registration failure is observed with the original schedule ID and cause;
+the saved definition remains authoritative. There is no automatic business replay
+or compensating create. The [tool contract](schedule-tool.md#6-the-list-moves-while-you-watch)
+describes the actionable error returned to callers.
+
+Shutdown closes new control and fire admission and pauses launches, while already
+owned controls may still register their committed definitions. It joins these
+controls before destroying APScheduler, then joins the original captured callback
+owners within the same absolute deadline. An unconfirmed control timeout preserves
+the scheduler and task references for another join; it does not allow storage
+teardown underneath them. Callback failure and retirement evidence remain separate.
+An expected-definition conflict or closure of the original requesting work is a
+typed, rolled-back domain refusal: the caller keeps its original 409, and the
+finished control does not become a cleanup failure. Unexpected write failures,
+registration failures and unfinished controls still fail shutdown.
+
+Archive keeps origin repointing inside its original lifecycle operation. Triggers
+hold only the schedule ID and each fire rereads the database origin, so repointing
+needs no re-registration and preserves the original cadence, including an archive
+that reaches this step after Runner admission closed.
+
+Regressions in `test_schedules.py`, `test_scheduler.py`,
+`test_knowledge_schedules.py` and `test_session_manager.py` cover cancelled waiters
+after actual writes, competing definitions, HTTP/MCP registration failures,
+shutdown timeout/rejoin and archive followed by a real successor fire.
+
 ## 2. A schedule never has two runs outstanding
 
 A schedule that runs every 5 minutes and takes 10 used to start a second run

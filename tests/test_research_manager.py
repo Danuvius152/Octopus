@@ -403,6 +403,182 @@ async def test_cancel_after_completion_preserves_pending_delivery(rm, mgr, db, m
     assert (await db.get_research_job(job["id"]))["injection_status"] == "delivered"
 
 
+@pytest.mark.parametrize("phase", ["sql", "committed"])
+async def test_cancel_waiter_cannot_leave_a_committed_cancellation_without_pipeline_stop(rm, mgr, db, monkeypatch, phase):
+    started, stopping, retired = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    release_cleanup, entered, release_sql = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def pipeline(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            stopping.set()
+            await release_cleanup.wait()
+            retired.set()
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "cancel across the real transaction")
+    original = rm._tasks[job["id"]]
+    await asyncio.wait_for(started.wait(), 2)
+    execute, commit = db.conn._execute, db.conn.commit
+    updating = False
+
+    async def gated_execute(function, *args, **kwargs):
+        nonlocal updating
+        result = await execute(function, *args, **kwargs)
+        if args and isinstance(args[0], str) and args[0].startswith("UPDATE research_jobs SET status=") and not entered.is_set():
+            updating = True
+            if phase == "sql":
+                entered.set()
+                await release_sql.wait()
+        return result
+
+    async def gated_commit():
+        await commit()
+        if updating and phase == "committed" and not entered.is_set():
+            entered.set()
+            await release_sql.wait()
+
+    monkeypatch.setattr(db.conn, "_execute", gated_execute)
+    monkeypatch.setattr(db.conn, "commit", gated_commit)
+    waiter = asyncio.create_task(rm.cancel(job["id"]))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        waiter.cancel()
+        release_sql.set()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert (await db.get_research_job(job["id"]))["status"] == "cancelled"
+        await asyncio.wait_for(stopping.wait(), 1)
+        assert not retired.is_set()
+        assert rm.drain_blockers(), "A cancelled result is not pipeline retirement"
+        release_cleanup.set()
+        await rm.wait_for_idle()
+        assert retired.is_set() and original.done()
+    finally:
+        release_sql.set()
+        release_cleanup.set()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await rm.shutdown()
+
+
+async def test_repeated_cancel_stops_a_previously_cancelled_job_and_joins_original_cleanup(rm, mgr, db, monkeypatch):
+    started, stopping, release, retired = (asyncio.Event() for _ in range(4))
+
+    async def pipeline(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            stopping.set()
+            await release.wait()
+            retired.set()
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "finish the original cancellation")
+    original = rm._tasks[job["id"]]
+    await asyncio.wait_for(started.wait(), 2)
+    # A prior transaction can have committed without its old waiter signalling.
+    won, saved = await db.confirm_research_outcome(job["id"], "cancelled", completed_at="original cancellation")
+    assert won
+    draining = None
+    try:
+        first = await rm.cancel(job["id"])
+        await asyncio.wait_for(stopping.wait(), 2)
+        second = await rm.cancel(job["id"])
+        assert first == second == saved
+        assert original.cancelling() == 1, "A repeat signal would interrupt original cleanup"
+        draining = asyncio.create_task(rm.wait_for_idle())
+        with pytest.raises(TimeoutError, match=job["id"]):
+            await rm.shutdown(timeout=.01)
+        assert not draining.done() and not retired.is_set()
+        assert rm.drain_blockers()
+        release.set()
+        await asyncio.wait_for(draining, 2)
+        await rm.shutdown()
+        assert retired.is_set() and not rm.drain_blockers()
+    finally:
+        release.set()
+        if draining is not None:
+            await draining
+        await rm.shutdown()
+
+
+async def test_shutdown_joins_admitted_cancellation_without_cancelling_its_transaction(rm, mgr, db, monkeypatch):
+    started = asyncio.Event()
+
+    async def pipeline(*args, **kwargs):
+        started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "cancel before shutdown")
+    await asyncio.wait_for(started.wait(), 2)
+    async with db._write_lock:
+        waiter = asyncio.create_task(rm.cancel(job["id"]))
+        async with asyncio.timeout(2):
+            while job["id"] not in rm._cancel_tasks:
+                await asyncio.sleep(0)
+        # Let its original control reach the actual held database lock first.
+        await asyncio.sleep(0)
+        control = rm._cancel_tasks[job["id"]]
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        with pytest.raises(TimeoutError, match=job["id"]):
+            await rm.shutdown(timeout=.01)
+        assert not control.done() and control.cancelling() == 0
+        assert any(job["id"] in blocker for blocker in rm.drain_blockers())
+    await rm.shutdown()
+    assert control.done() and not control.cancelled()
+    assert (await db.get_research_job(job["id"]))["status"] == "cancelled"
+    assert not rm.drain_blockers()
+
+
+async def test_late_cancellation_signals_only_its_captured_pipeline(rm, mgr, db):
+    session = await _session(mgr, db)
+    await db.create_research_job("original-job", session.id, "q", "now")
+    original = asyncio.create_task(asyncio.Event().wait())
+    replacement_release = asyncio.Event()
+    replacement = asyncio.create_task(replacement_release.wait())
+    rm._register_task("original-job", original)
+    waiter = None
+    try:
+        async with db._write_lock:
+            waiter = asyncio.create_task(rm.cancel("original-job"))
+            async with asyncio.timeout(2):
+                while "original-job" not in rm._cancel_tasks:
+                    await asyncio.sleep(0)
+            rm._register_task("original-job", replacement)
+        assert (await waiter)["status"] == "cancelled"
+        await asyncio.gather(original, return_exceptions=True)
+        assert original.cancelled()
+        assert not replacement.done() and replacement.cancelling() == 0
+        assert rm._tasks["original-job"] is replacement
+    finally:
+        replacement_release.set()
+        await asyncio.gather(*(task for task in (original, replacement, waiter) if task is not None), return_exceptions=True)
+        await rm.shutdown()
+
+
+async def test_missing_job_cancellation_is_a_domain_error_during_shutdown(rm, db):
+    async with db._write_lock:
+        waiter = asyncio.create_task(rm.cancel("missing-job"))
+        async with asyncio.timeout(2):
+            while "missing-job" not in rm._cancel_tasks:
+                await asyncio.sleep(0)
+        rm.begin_shutdown()
+    with pytest.raises(rm_mod.ResearchError) as error:
+        await waiter
+    assert error.value.status_code == 404
+    await rm.shutdown()
+    assert not rm.drain_blockers()
+
+
 @pytest.mark.parametrize("completion_kind", ["delivered", "notification_failed", "unavailable"])
 async def test_delivery_receipts_distinguish_queue_processing_and_current_browser_confirmation(
     rm, mgr, db, monkeypatch, completion_kind,
@@ -778,6 +954,62 @@ async def _cli_pid(pid_file: Path) -> int:
         while not pid_file.exists():
             await asyncio.sleep(0.01)
     return int(pid_file.read_text())
+
+
+@pytest.mark.parametrize("stage", ["reason", "web"])
+async def test_cancelled_http_waiter_still_retires_original_research_cli(
+    rm, mgr, db, monkeypatch, tmp_path, stage, short_process_shutdown,
+):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from server.deps import get_session_manager
+    from server.routers import research
+    from server.users import UserManager
+
+    pid_file = _blocking_research_cli(monkeypatch, tmp_path, stage=stage)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "HTTP cancellation owns the original leaf")
+    pid = await _cli_pid(pid_file)
+    pipeline = rm._tasks[job["id"]]
+    app = FastAPI()
+    app.include_router(research.router)
+    app.dependency_overrides[get_session_manager] = lambda: mgr
+    monkeypatch.setattr(research, "research_manager", rm)
+    token = await UserManager(db).issue_token(session.user_id)
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute = db.conn._execute
+
+    async def after_sql(function, *args, **kwargs):
+        result = await execute(function, *args, **kwargs)
+        if args and isinstance(args[0], str) and args[0].startswith("UPDATE research_jobs SET status=") and not entered.is_set():
+            entered.set()
+            await release.wait()
+        return result
+
+    monkeypatch.setattr(db.conn, "_execute", after_sql)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
+                           headers={"Authorization": f"Bearer {token}"}) as api:
+        url = f"/api/sessions/{session.id}/research/{job['id']}"
+        waiter = asyncio.create_task(api.post(f"{url}/cancel"))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            waiter.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            repeated = await api.post(f"{url}/cancel")
+            assert repeated.status_code == 200 and repeated.json()["status"] == "cancelled"
+            await asyncio.wait_for(rm.wait_for_idle(), 5)
+            assert pipeline.done() and not rm.drain_blockers()
+            assert (await api.get(url)).json()["status"] == "cancelled"
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+            assert int(pid_file.read_text()) == pid, "Cancellation must not start a replacement leaf"
+        finally:
+            release.set()
+            await asyncio.gather(waiter, return_exceptions=True)
+            await rm.shutdown()
 
 
 @pytest.mark.asyncio

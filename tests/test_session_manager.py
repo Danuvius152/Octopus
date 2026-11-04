@@ -1338,20 +1338,20 @@ async def test_archive_leaves_agent_schedules_alone(manager):
 
 
 @pytest.mark.asyncio
-async def test_archive_repoints_origin_session_schedules(manager):
-    """A schedule created from a session (origin_session_id == that session)
-    follows the live successor when the session is archived: the DB row is
-    repointed onto the new session and the live job is re-registered."""
+@pytest.mark.parametrize("closing", [False, True])
+async def test_archive_repoints_origin_session_schedules(manager, monkeypatch, closing):
+    """An admitted archive retains its origin update through Runner shutdown.
+
+    The original trigger keeps cadence; a real later fire reads its successor
+    from the DB, including after the Runner was restarted.
+    """
+    from server.knowledge import encode, for_account
+    from server.scheduler import ScheduleRunner
+
     old = await _new(manager, name="Origin", working_dir=None)
     agent_id = old.agent_id
-
-    rescheduled: list[dict] = []
-
-    class FakeRunner:
-        async def reschedule(self, row):
-            rescheduled.append(row)
-
-    manager.set_schedule_runner(FakeRunner())
+    runner = ScheduleRunner(manager, manager.db)
+    context = for_account(session_id=old.id, request_id="schedule", user_id=old.user_id, prompt="summarize")
 
     await manager.db.save_schedule(
         schedule_id="s-origin",
@@ -1361,6 +1361,7 @@ async def test_archive_repoints_origin_session_schedules(manager):
         interval_seconds=300,
         created_at="2026-01-01T00:00:00+00:00",
         origin_session_id=old.id,
+        knowledge_context=encode(context),
     )
     # An unrelated schedule (no origin) must be left alone.
     await manager.db.save_schedule(
@@ -1370,24 +1371,62 @@ async def test_archive_repoints_origin_session_schedules(manager):
         prompt="ping",
         interval_seconds=300,
         created_at="2026-01-01T00:00:00+00:00",
+        knowledge_context=encode(context),
     )
+    await runner.initialize(paused=True)
+    original_next = runner.next_run_at("s-origin")
+    cleaning, release, started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    started_sessions = []
 
-    new = await manager.archive_session(old.id)
+    class Run(_QueuedRun):
+        async def start(self, *args, **kwargs):
+            await super().start(*args, **kwargs)
+            started.set()
 
-    rows = {r["id"]: r for r in await manager.db.load_schedules()}
-    # The origin-anchored schedule now points at the successor session.
-    assert rows["s-origin"]["origin_session_id"] == new.id
-    # The unrelated schedule is untouched.
-    assert rows["s-other"]["origin_session_id"] is None
-    # Only the repointed schedule was re-registered, with the new origin.
-    assert [r["id"] for r in rescheduled] == ["s-origin"]
-    assert rescheduled[0]["origin_session_id"] == new.id
+        async def stop(self):
+            cleaning.set()
+            await release.wait()
+            await super().stop()
+
+    def make_run(session, *args, **kwargs):
+        started_sessions.append(session.id)
+        return Run([]) if session.id == old.id else _QueuedRun([], release=release)
+
+    monkeypatch.setattr(manager, "_make_run", make_run)
+    original = await manager.start_message(old.id, "held")
+    await asyncio.wait_for(started.wait(), 3)
+    archiving = asyncio.create_task(manager.archive_session(old.id))
+    try:
+        await asyncio.wait_for(cleaning.wait(), 3)
+        assert not archiving.done()
+        if closing:
+            runner.begin_shutdown()
+            await runner.shutdown()
+        release.set()
+        new = await archiving
+        await original.wait()
+        rows = {r["id"]: r for r in await manager.db.load_schedules()}
+        assert rows["s-origin"]["origin_session_id"] == new.id
+        assert rows["s-other"]["origin_session_id"] is None
+        if closing:
+            runner = ScheduleRunner(manager, manager.db)
+            await runner.initialize(paused=True)
+        else:
+            assert runner.next_run_at("s-origin") == original_next
+        await runner._fire("s-origin")
+        await manager.await_session_execution(new.id)
+        assert new.id in started_sessions
+        messages = await manager.db.load_messages(new.id)
+        assert any(message["role"] == "user" and message["content"].endswith("summarize") for message in messages)
+    finally:
+        release.set()
+        await asyncio.gather(archiving, return_exceptions=True)
+        await runner.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_archive_repoints_origin_schedules_without_runner(manager):
-    """The DB repoint happens even if no ScheduleRunner is wired (e.g. a
-    headless context) — only the live re-register is skipped."""
+    """Origin updates belong to archive even without a wired ScheduleRunner."""
     old = await _new(manager, name="Origin2", working_dir=None)
     await manager.db.save_schedule(
         schedule_id="s-db-only",

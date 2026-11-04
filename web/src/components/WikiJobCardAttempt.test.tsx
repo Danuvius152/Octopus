@@ -5,7 +5,7 @@ import { useSessionStore } from "../stores/sessionStore";
 import { wikiJob } from "../lib/wikiJobs.fixture";
 
 beforeEach(() => useSessionStore.setState({
-  token: "token-a", wikiJobs: {}, wikiJobDirty: {}, dispatchGeneration: "service-a", connected: true,
+  token: "token-a", wikiJobs: {}, wikiJobDirty: {}, wikiJobReadErrors: {}, dispatchGeneration: "service-a", connected: true,
 }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 

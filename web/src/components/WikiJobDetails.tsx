@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { WikiJobCard, WikiJobDetail, WikiJobOutput } from "../api";
-import { controlWikiJob, loadWikiJobDetail, loadWikiJobOutput } from "../lib/wikiJobs";
+import { controlWikiJob, loadWikiJobDetail, loadWikiJobOutput, wikiControlGuard, wikiReadGuard } from "../lib/wikiJobs";
 import { newSubmissionId } from "../lib/submission";
 import { useSessionStore } from "../stores/sessionStore";
 
@@ -14,52 +14,75 @@ export function WikiJobDetails({ card, sessionId, close, setUnavailable }: {
   const [detail, setDetail] = useState<WikiJobDetail | null>(null);
   const [output, setOutput] = useState<WikiJobOutput | null>(null);
   const [error, setError] = useState("");
+  const [controlError, setControlError] = useState("");
+  const [receipt, setReceipt] = useState("");
   const [busy, setBusy] = useState(false);
   const [paths, setPaths] = useState("");
   const [newPaths, setNewPaths] = useState("");
   const [refresh, setRefresh] = useState(0);
   const operations = useRef(new Map<string, string>());
   const reading = useRef(0);
+  const controller = useRef<AbortController | null>(null);
+  const previousIdentity = useRef("");
   const token = useSessionStore((state) => state.token);
+  const account = useSessionStore((state) => state.accountGeneration);
   const generation = useSessionStore((state) => state.dispatchGeneration);
+  const connected = useSessionStore((state) => state.connected);
+  const activeSession = useSessionStore((state) => state.activeSessionId);
+  const mainView = useSessionStore((state) => state.mainView);
   const { job_id, vault_id, state_version } = card;
   useEffect(() => {
     let active = true;
     const reads = reading;
-    reads.current++;
-    setOutput(null);
-    setDetail(null);
-    setBusy(false);
-    void loadWikiJobDetail({ job_id, vault_id }, attempt).then((value) => {
-      if (active) {
+    const identity = ++reads.current;
+    const request = new AbortController();
+    controller.current = request;
+    if (mainView !== "chat") {
+      setBusy(false);
+      return () => { request.abort(); reads.current++; };
+    }
+    const current = wikiReadGuard();
+    const key = JSON.stringify([job_id, vault_id, attempt, token, account, generation]);
+    if (previousIdentity.current !== key) {
+      setOutput(null); setDetail(null); setControlError(""); setReceipt("");
+      previousIdentity.current = key;
+    }
+    setBusy(true);
+    void loadWikiJobDetail({ job_id, vault_id }, attempt, 0, request.signal).then((value) => {
+      if (active && current() && reading.current === identity) {
         if (value === null) setUnavailable(true);
         else { setDetail(value); setError(""); }
       }
-    }).catch((failure) => { if (active) setError(String(failure.message)); });
-    return () => { active = false; reads.current++; };
-  }, [job_id, vault_id, state_version, attempt, token, generation, refresh, setUnavailable]);
+    }).catch((failure) => { if (active && current() && reading.current === identity) setError(String(failure.message)); })
+      .finally(() => { if (active && current() && reading.current === identity) setBusy(false); });
+    return () => { active = false; request.abort(); reads.current++; };
+  }, [job_id, vault_id, state_version, attempt, token, account, generation, connected, activeSession, mainView, refresh, setUnavailable]);
 
   const more = async () => {
     if (!detail || detail.next_offset === null) return;
-    const identity = reading.current;
+    const identity = ++reading.current;
+    const current = wikiReadGuard();
+    const signal = controller.current?.signal;
     setBusy(true);
     try {
-      const page = await loadWikiJobDetail(card, attempt, detail.next_offset);
-      if (reading.current !== identity) return;
+      const page = await loadWikiJobDetail(card, attempt, detail.next_offset, signal);
+      if (reading.current !== identity || !current() || signal?.aborted) return;
       if (page === null) setUnavailable(true);
       else setDetail({ ...page, items: [...detail.items, ...page.items], outputs: [...detail.outputs, ...page.outputs] });
-    } catch (failure) { if (reading.current === identity) setError(failure instanceof Error ? failure.message : "Could not load task details."); }
-    finally { if (reading.current === identity) setBusy(false); }
+    } catch (failure) { if (reading.current === identity && current() && !signal?.aborted) setError(failure instanceof Error ? failure.message : "Could not load task details."); }
+    finally { if (reading.current === identity && current() && !signal?.aborted) setBusy(false); }
   };
   const read = async (receipt: string, view: "history" | "current", more = false) => {
     const identity = ++reading.current;
+    const current = wikiReadGuard();
+    const signal = controller.current?.signal;
     setBusy(true); setError("");
     try {
       const page = await loadWikiJobOutput(card, attempt, receipt, view, more ? output?.next_start ?? 0 : 0,
-        more ? output?.revision : undefined);
-      if (reading.current === identity) setOutput({ ...page, content: more ? (output?.content ?? "") + page.content : page.content });
-    } catch (failure) { if (reading.current === identity) setError(failure instanceof Error ? failure.message : "Could not read output."); }
-    finally { if (reading.current === identity) setBusy(false); }
+        more ? output?.revision : undefined, signal);
+      if (reading.current === identity && current() && !signal?.aborted) setOutput({ ...page, content: more ? (output?.content ?? "") + page.content : page.content });
+    } catch (failure) { if (reading.current === identity && current() && !signal?.aborted) setError(failure instanceof Error ? failure.message : "Could not read output."); }
+    finally { if (reading.current === identity && current() && !signal?.aborted) setBusy(false); }
   };
   const act = async (action: "verify" | "retry" | "readmit") => {
     const scope = action === "readmit" ? {
@@ -69,14 +92,17 @@ export function WikiJobDetails({ card, sessionId, close, setUnavailable }: {
     } : {};
     const key = JSON.stringify([action, attempt, scope]);
     const identity = reading.current;
-    setBusy(true); setError("");
+    const current = wikiControlGuard();
+    setBusy(true); setControlError(""); setReceipt("");
     try {
       if (!operations.current.has(key)) operations.current.set(key, newSubmissionId());
-      await controlWikiJob(sessionId, { ...card, attempt }, action, { ...scope, operation_id: operations.current.get(key)! });
-      operations.current.delete(key);
-      if (reading.current === identity) setRefresh((value) => value + 1);
-    } catch (failure) { if (reading.current === identity) setError(failure instanceof Error ? failure.message : "Could not update the task."); }
-    finally { if (reading.current === identity) setBusy(false); }
+      const result = await controlWikiJob(sessionId, { ...card, attempt }, action, { ...scope, operation_id: operations.current.get(key)! });
+      if (result.state === "accepted" && current()) {
+        operations.current.delete(key); setReceipt(result.message);
+        if (await result.refresh && reading.current === identity && current()) setRefresh((value) => value + 1);
+      }
+    } catch (failure) { if (current()) setControlError(failure instanceof Error ? failure.message : "Could not update the task."); }
+    finally { if (reading.current === identity && current()) setBusy(false); }
   };
   return <section role="dialog" aria-label="Wiki task details" className="mt-2 space-y-2 rounded border border-border p-3 text-xs">
     <div className="flex justify-between gap-2"><strong>Task details</strong><button onClick={close}>Close details</button></div>
@@ -118,6 +144,10 @@ export function WikiJobDetails({ card, sessionId, close, setUnavailable }: {
       <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words">{output.content}</pre>
       {output.next_start !== null && <button disabled={busy} onClick={() => void read(output.receipt_id, output.view, true)} className="text-primary">More output text</button>}
     </div>}
-    {error && <p role="alert" className="whitespace-pre-wrap break-words text-destructive">{error}</p>}
+    {receipt && <p role="status">{receipt}</p>}
+    {controlError && <p role="alert" className="whitespace-pre-wrap break-words text-destructive">{controlError}</p>}
+    {error && <><p role="alert" className="whitespace-pre-wrap break-words text-destructive">{error}</p>
+      <button type="button" onClick={() => setRefresh((value) => value + 1)} className="text-primary">Refresh task details</button>
+    </>}
   </section>;
 }

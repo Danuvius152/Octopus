@@ -159,6 +159,19 @@ pending item、换 ID 即视为成功或自动重跑整个请求来隐藏此问�
 当前[根完成合同](../implemented/codex-backend.md#root-completion-and-selected-answer)
 已按 producer 完成义务修正；以上保留当时缺陷及首红证据，不代表当前实现或部署。
 
+## Pending child work identity evidence
+
+2026-11-04 的产品受控回归使用原 framed stdio peer，依次发送 pending child、
+wait started、child turn bound 和 wait completed，不发送直接 child terminal。
+修复前，原 wait 已捕获的对象在绑定时被替换，Owner/SQLite 最终把卡片保存为
+interrupted；正确性断言先失败。原地绑定后，同一卡片保存 completed、实际 child
+turn 与原 request 来源，根答案及结果不变。纯适配器负对照另外覆盖第二轮先开始、
+旧 wait 晚到、直接终态重复和 wait 先于绑定完成。
+
+该方法证明产品内部身份不变量，未运行新的真实0.166.0 provider 顺序探测，也不
+证明真实 producer 必然能产生该序列；前述 G0 锁版观察不能补造这一可达性证据。
+当前职责与回归入口归 [Native 子任务合同](../implemented/native-subagents.md)。
+
 ## 同锁版源码与局部重试核验
 
 剩余修复使用相同源码 revision `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`，

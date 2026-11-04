@@ -68,8 +68,19 @@ async def test_retry_in_another_chat_returns_only_to_the_current_dispatcher(jobs
     assert len(await return_inputs(returning.manager, old_session.id)) == len(old_returns), (
         "A new dispatch must not restart result reporting for the prior request"
     )
+    # The old dispatcher keeps observation rights even after another chat owns
+    # the current generation's automatic return. All deliveries may be ACKed.
+    cards = await client.get(f"/api/sessions/{old_session.id}/wiki-jobs")
+    assert cards.status_code == 200, cards.text
+    old_card = next(card for card in cards.json() if card["job_id"] == job["id"])
+    current_job = jobs.get(job["id"])
+    assert (old_card["attempt"], old_card["state_version"], old_card["status"]) == (
+        current_job["attempt"], current_job["state_version"], current_job["status"],
+    )
+    assert old_card["current_state"] == "available"
     await job_notifications.dispatch(jobs, returning.manager)
     assert len(await return_inputs(returning.manager, current.id)) == 1
+    assert len(await return_inputs(returning.manager, old_session.id)) == len(old_returns)
 
 
 def generation(jobs, job_id):
