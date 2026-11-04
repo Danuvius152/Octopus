@@ -69,6 +69,15 @@ the latest request or restart an unsealed round. No additional collection root
 or transfer/import step is introduced. Derived credential-use and Connector grant
 comparison evidence is not a persistent revision service or a new backup resource.
 
+Device-login staging, target reservations, in-flight commit/cleanup tasks and
+original credential-deletion proofs are process-local and are not transferred or
+restarted. Completed credential metadata retains its existing collection rules;
+model subscription authorization remains excluded from account archives. A
+complete backup requires retired writers and matching DB/provider-home files;
+capturing a login's uncommitted staging or an uncertain cross-file/DB publication
+does not create a recoverable login. This adds no root or import step; see the
+[credential publication boundary](implemented/harness-credential-reauth.md#codex-device-operation-ownership).
+
 App Server native source, child text/tool messages, `native_subagent` status
 facts and original question bindings use the same existing chat-message JSON
 and follow that same archive exclusion. Complete backup/restore retains their

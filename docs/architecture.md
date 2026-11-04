@@ -122,7 +122,7 @@ In development, Vite serves the SPA on port 5173 with HMR and proxies `/api`,
 | `large_prompts.py` | Legacy transport prompt spill over ~100 KB, with a small `Read` pointer to avoid argv `E2BIG`. App Server keeps its input inline in RPC; original input remains persisted. |
 | `attachments.py` / `file_viewer.py` | Account-owned session attachments; working-dir-scoped file reads for the viewer. |
 | `connector_manager.py` + `connectors/` | Connector framework (see below). |
-| `credentials` (`oauth_login.py`, `oauth_credentials.py`, `oauth_providers.py`, `oauth_errors.py`, `codex_login.py`) | Stored backend credentials: API keys, OAuth logins, and Codex device-auth in-app login. The original OAuth task owns exchange through the complete database commit; the narrow credential writer handles encryption and persistence. |
+| `credentials` (`oauth_login.py`, `oauth_credentials.py`, `oauth_providers.py`, `oauth_errors.py`, `codex_login.py`, `codex_credentials.py`) | Stored backend credentials: API keys, OAuth logins, and Codex device-auth in-app login. Original login tasks own acquisition through their acknowledged commit and cleanup; narrow writers handle encryption/persistence, while the Codex operation also coordinates staged auth publication and original target/deletion responsibility. Status observers perform no publication. |
 | `tunnel.py` | `cloudflared tunnel --url` subprocess manager; parses the public URL, monitors, stops gracefully. |
 | `notifiers/` | Notification destinations (webhook), pluggable. |
 | `fork_helpers.py` | Pure helpers for `/rewind`: git-anchor capture at turn-start, side-effect classification over parent rows, safe-revert preflight + git-stash execution. |

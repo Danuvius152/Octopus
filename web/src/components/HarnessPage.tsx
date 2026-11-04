@@ -121,11 +121,12 @@ export function HarnessPage({
   );
 
   const fetchCredentials = useCallback(async (current: () => boolean = () => true) => {
+    const account = useSessionStore.getState().accountGeneration;
     try {
       const res = await fetch(API, { headers });
       if (res.ok) {
         const items: CredentialInfo[] = await res.json();
-        if (!current()) return null;
+        if (!current() || useSessionStore.getState().accountGeneration !== account) return null;
         setCredentials(items);
         return items;
       }
@@ -138,16 +139,6 @@ export function HarnessPage({
   useEffect(() => {
     fetchCredentials();
   }, [fetchCredentials]);
-
-  // Replace an existing credential (re-auth) or append a new one, off the
-  // freshest store state — works for both fresh sign-in and in-place re-auth.
-  const upsertCredential = (c: CredentialInfo) => {
-    const cur = useSessionStore.getState().credentials;
-    const idx = cur.findIndex((x) => x.id === c.id);
-    setCredentials(
-      idx >= 0 ? cur.map((x) => (x.id === c.id ? c : x)) : [...cur, c]
-    );
-  };
 
   // ----------------------------------------------------------- open / close
 
@@ -318,13 +309,16 @@ export function HarnessPage({
   useEffect(() => {
     if (flowKind !== "codex_device" || !codexLoginId) return;
     let cancelled = false;
+    const view = viewGeneration.current;
+    const account = useSessionStore.getState().accountGeneration;
+    const current = () => !cancelled && viewGeneration.current === view && useSessionStore.getState().accountGeneration === account;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
         const res = await fetch(`${API}/codex/${codexLoginId}/status`, {
           headers,
         });
-        if (cancelled) return;
+        if (!current()) return;
         if (res.ok) {
           const body: {
             state: string;
@@ -333,9 +327,9 @@ export function HarnessPage({
             message?: string | null;
             credential?: CredentialInfo | null;
           } = await res.json();
-          if (body.state === "success" && body.credential) {
-            upsertCredential(body.credential);
-            closeAndReset();
+          if (body.state === "success") {
+            await fetchCredentials(current);
+            if (current()) closeAndReset();
             return;
           }
           if (body.state === "error" || body.state === "cancelled") {
@@ -358,7 +352,7 @@ export function HarnessPage({
       } catch {
         // transient — keep polling
       }
-      if (!cancelled) timer = setTimeout(poll, 2000);
+      if (current()) timer = setTimeout(poll, 2000);
     };
     // Poll quickly at first so the code appears promptly, then settle to 2s.
     timer = setTimeout(poll, 600);

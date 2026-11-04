@@ -298,15 +298,22 @@ async def test_waiting_mutation_refuses_a_backend_stopped_before_its_lock(sapphi
             ctx["base"] + "/api/save?vault=obv", headers=ctx["headers"],
             json={"path": "note.md", "content": "must not send", "revision": ""},
         ))
+        stopping = None
         try:
             async with asyncio.timeout(2):
                 while not app_bridge._preparations:
                     await asyncio.sleep(0)
-            await backend_supervisor.stop(ctx["id"])
+            stopping = asyncio.create_task(backend_supervisor.stop(ctx["id"]))
+            async with asyncio.timeout(3):
+                while not pending.cancelling():
+                    await asyncio.sleep(0)
+            assert not stopping.done(), "Stop must join the admitted writer's original lock cleanup"
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
-        refused = await asyncio.wait_for(pending, 3)
-    assert refused.status_code == 503, refused.text
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert stopping is not None
+        await asyncio.wait_for(stopping, 3)
     assert state.state == "stopped"
     assert (ctx["data"] / "started").stat().st_mtime_ns == started
     assert not (ctx["data"] / "dispatched").exists()
@@ -334,8 +341,8 @@ async def test_body_wait_cannot_rebind_original_mutation_to_a_restarted_backend(
         replacement = await backend_supervisor.ensure_running(ctx["id"], original.app_dir)
         assert replacement is original and replacement.process is not old_process
         release.set()
-        refused = await asyncio.wait_for(waiting, 3)
-        assert refused.status_code == 503, refused.text
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
         assert replacement.state == "running", "refusal must not abort the replacement writer"
         assert not (ctx["data"] / "dispatched").exists()
         assert (ctx["root"] / "note.md").read_bytes() == ctx["original"]

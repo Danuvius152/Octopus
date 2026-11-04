@@ -14,6 +14,7 @@ Two routers live here:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
 import os
@@ -30,15 +31,14 @@ from fastapi.responses import (
 )
 
 from .. import deps
-from ..aio import complete_cleanup
 from ..app_agent import AppAgentError, app_agent_manager
 from ..app_backends import (
-    ABSENT,
-    RUNNING,
+    BackendAbsentError,
     BackendCapacityError,
-    BackendTarget,
+    BackendUse,
     backend_supervisor,
 )
+from ..app_proxy import own_response
 from ..applications import (
     ApplicationError,
     ApplicationManager,
@@ -387,25 +387,12 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     row = await _application_for_request(request, app_id)
 
     try:
-        state = await backend_supervisor.ensure_running(app_id, row["app_dir"])
+        use = await backend_supervisor.acquire(app_id, row["app_dir"])
+    except BackendAbsentError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     except BackendCapacityError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
-    if state.state == ABSENT:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            "This application has no backend (no executable start.sh)",
-        )
-    if state.state != RUNNING or not state.port:
-        # 503 rather than 500: the app is fine, its backend isn't up. The
-        # message carries the reason because a dead backend with no output is
-        # the thing this feature exists to avoid.
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            state.error or f"backend is {state.state}",
-        )
-
-    target = BackendTarget(state.port, state.process)
-    url = f"http://127.0.0.1:{target.port}/api/{path}"
+    url = f"http://127.0.0.1:{use.target.port}/api/{path}"
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in _SKIP_REQUEST_HEADERS
@@ -415,43 +402,53 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     # listening should answer the socket immediately.
     from ..wiki.app_bridge import forward
 
-    request_body = await request.body()
-    # Preserve pair order; the query token belongs only to Octopus.
-    query = urlencode([(key, value) for key, value in request.query_params.multi_items() if key != "token"]).encode("ascii")
-    upstream = httpx.Request(request.method, httpx.URL(url).copy_with(query=query or None), headers=headers, content=request_body)
     try:
-        managed = await forward(row, target, upstream)
-    except BackendCapacityError as exc:
-        raise HTTPException(503, str(exc)) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(502, f"backend did not answer: {exc}") from exc
-    if managed is not None:
-        return Response(managed.content, status_code=managed.status_code, headers={
-            key: value for key, value in managed.headers.items() if key.lower() not in _SKIP_RESPONSE_HEADERS
-        })
+        request_body = await request.body()
+        # Preserve pair order; the query token belongs only to Octopus.
+        query = urlencode([(key, value) for key, value in request.query_params.multi_items() if key != "token"]).encode("ascii")
+        upstream = httpx.Request(request.method, httpx.URL(url).copy_with(query=query or None), headers=headers, content=request_body)
+        use.require_running()
+        managed = await forward(row, use, upstream)
+        if managed is not None:
+            return Response(managed.content, status_code=managed.status_code, headers={
+                key: value for key, value in managed.headers.items() if key.lower() not in _SKIP_RESPONSE_HEADERS
+            })
 
-    client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
-    try:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
+        use.add_cleanup(client.aclose)
+        use.require_running()
         resp = await client.send(upstream, stream=True)
+        own_response(use, resp)
+        response_headers = {key: value for key, value in resp.headers.items() if key.lower() not in _SKIP_RESPONSE_HEADERS}
+        response = BackendStreamingResponse(
+            resp.aiter_raw(), use=use, status_code=resp.status_code, headers=response_headers,
+            media_type=resp.headers.get("content-type"),
+        )
+        use.detach()
+        return response
     except BaseException as exc:
-        await complete_cleanup(client.aclose())
+        if use.owner is asyncio.current_task() or use.owner is None:
+            await use.finish()
+        if isinstance(exc, BackendCapacityError):
+            raise HTTPException(503, str(exc)) from exc
         if isinstance(exc, httpx.HTTPError):
             raise HTTPException(502, f"backend did not answer: {exc}") from exc
         raise
-    response_headers = {key: value for key, value in resp.headers.items() if key.lower() not in _SKIP_RESPONSE_HEADERS}
 
-    async def body():
+
+class BackendStreamingResponse(StreamingResponse):
+    """The actual ASGI invocation owns cleanup, including header-send failure."""
+
+    def __init__(self, content, *, use: BackendUse, **kwargs):
+        super().__init__(content, **kwargs)
+        self.use = use
+
+    async def __call__(self, scope, receive, send):
         try:
-            async for chunk in resp.aiter_raw():
-                yield chunk
+            self.use.attach()
+            await super().__call__(scope, receive, send)
         finally:
-            await resp.aclose()
-            await client.aclose()
-
-    return StreamingResponse(
-        body(), status_code=resp.status_code, headers=response_headers,
-        media_type=resp.headers.get("content-type"),
-    )
+            await self.use.finish()
 
 
 # ------------------------------------------------------------- agent access

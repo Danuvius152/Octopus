@@ -2,17 +2,35 @@
 
 import asyncio
 import gzip
-from types import SimpleNamespace
 
 import httpx
 import pytest
 from starlette.requests import Request
 
+from server.app_backends import BackendSupervisor
 from server.routers import applications as route
 from server.wiki import app_bridge
+from tests.app_proxy import application
 
 
-async def test_ordinary_proxy_retains_transport_cleanup_through_repeated_cancellation(tmp_path, monkeypatch):
+@pytest.fixture
+async def backend(tmp_path, monkeypatch):
+    directory = application(tmp_path, "app")
+    supervisor = BackendSupervisor()
+
+    async def authorized(*args):
+        return {"id": "app", "app_dir": str(directory)}
+
+    monkeypatch.setattr(route, "_application_for_request", authorized)
+    monkeypatch.setattr(route, "backend_supervisor", supervisor)
+    monkeypatch.setattr("server.app_backends.backend_supervisor", supervisor)
+    try:
+        yield supervisor
+    finally:
+        await supervisor.shutdown()
+
+
+async def test_ordinary_proxy_retains_transport_cleanup_through_repeated_cancellation(backend, monkeypatch):
     sending, closing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     retired = []
     real_client = httpx.AsyncClient
@@ -27,12 +45,6 @@ async def test_ordinary_proxy_retains_transport_cleanup_through_repeated_cancell
             await release.wait()
             retired.append(True)
 
-    async def authorized(*args):
-        return {"id": "app", "app_dir": str(tmp_path)}
-
-    async def running(*args):
-        return SimpleNamespace(state=route.RUNNING, port=12345, process=None)
-
     async def unmanaged(*args):
         return None
 
@@ -41,8 +53,6 @@ async def test_ordinary_proxy_retains_transport_cleanup_through_repeated_cancell
 
     request = Request({"type": "http", "method": "GET", "path": "/apps/app/api/data",
                        "headers": [], "query_string": b""}, receive)
-    monkeypatch.setattr(route, "_application_for_request", authorized)
-    monkeypatch.setattr(route.backend_supervisor, "ensure_running", running)
     monkeypatch.setattr(app_bridge, "begin", unmanaged)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=Transport(), **kwargs))
     calling = asyncio.create_task(route.proxy_application_api(request, "app", "data"))
@@ -63,7 +73,7 @@ async def test_ordinary_proxy_retains_transport_cleanup_through_repeated_cancell
 
 
 @pytest.mark.parametrize("encoded,mutation", [(True, False), (False, False), (True, True)])
-async def test_proxy_encoding_matches_raw_stream_or_decoded_mutation(tmp_path, monkeypatch, encoded, mutation):
+async def test_proxy_encoding_matches_raw_stream_or_decoded_mutation(backend, monkeypatch, encoded, mutation):
     original = b'{"ok":true}'
     wire = gzip.compress(original) if encoded else original
 
@@ -87,12 +97,6 @@ async def test_proxy_encoding_matches_raw_stream_or_decoded_mutation(tmp_path, m
     def client(**kwargs):
         return real_client(transport=httpx.MockTransport(upstream), **kwargs)
 
-    async def authorized(*args):
-        return {"app_dir": str(tmp_path), "id": "app"}
-
-    async def running(*args):
-        return SimpleNamespace(state=route.RUNNING, port=12345, process=None)
-
     class Mutation(app_bridge.AppMutation):
         def __init__(self):
             self.body = {}
@@ -109,10 +113,8 @@ async def test_proxy_encoding_matches_raw_stream_or_decoded_mutation(tmp_path, m
     request = Request({
         "type": "http", "method": "POST" if mutation else "GET",
         "path": "/apps/app/api/data", "headers": [], "query_string": b"",
+        "asgi": {"spec_version": "2.4"},
     }, receive)
-    monkeypatch.setattr(route, "_application_for_request", authorized)
-    monkeypatch.setattr(route.backend_supervisor, "ensure_running", running)
-    monkeypatch.setattr(route.backend_supervisor, "require_running", lambda *args, **kwargs: None)
     monkeypatch.setattr(app_bridge, "begin", begin)
     monkeypatch.setattr(httpx, "AsyncClient", client)
     response = await route.proxy_application_api(request, "app", "data")
@@ -124,7 +126,13 @@ async def test_proxy_encoding_matches_raw_stream_or_decoded_mutation(tmp_path, m
         assert upstream_closed == ["finished"]
         assert response.headers["content-length"] == str(len(original))
     else:
-        body = b"".join([chunk async for chunk in response.body_iterator])
+        messages = []
+
+        async def send(message):
+            messages.append(message)
+
+        await response(request.scope, request.receive, send)
+        body = b"".join(message.get("body", b"") for message in messages)
         assert body == wire
         assert response.headers.get("content-encoding") == ("gzip" if encoded else None)
         if encoded:

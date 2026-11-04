@@ -191,19 +191,65 @@ valid and the flag clears.
   deletion after success does not erase that historical result or recreate a row.
 - **Codex** (`POST /credentials/codex/start`): optional
   `reauth_credential_id`. The permanent `codex_home_for(reauth_credential_id)`
-  path and credential ID stay unchanged. The login CLI writes into a fresh
-  staging home under the same home root; only after successful exit and auth
-  validation does Octopus atomically replace the existing `auth.json` with a
-  mode-0600 file. Failure, cancellation and launch errors remove only this
-  staging home, preserving existing authorization, configuration and native
-  sessions. The status route serializes persistence for each login and checks
-  the target account again on update. Repeated success reads return the owned
-  credential; deletion produces an explicit error without recreating the row.
-  Only a new sign-in inserts a credential.
+  path and credential ID stay unchanged. Both first login and reauthorization
+  use isolated staging. The original operation publishes validated authorization
+  and metadata independently of status polling; the complete boundary is below.
 - **API key** (`PATCH /credentials/{id}` with a new secret): clears the
   flag too, so re-pasting a fresh key recovers an `api_key` credential.
 
 A brand-new login already creates `status=active`, so no change there.
+
+### Codex device operation ownership
+
+`CodexLoginManager` fixes account, login, credential, staging and permanent home
+before spawning. It reserves the target before the first await; overlapping
+reauthorization returns 409 without another CLI. Different targets progress
+independently. The original task owns the CLI group, publication and cleanup;
+page closure or cancelled status observation withdraws none of that work.
+The scrape watchdog only governs authorizing; it cannot reclassify a publishing
+operation whose valid material arrived without a complete displayed device code.
+Every manager signal path respects the original confirmed group-exit proof.
+
+After confirmed CLI/group exit and validation, the operation enters publishing
+without an intervening await. Its only committer obtains the account key and uses
+a short real write transaction to recheck the available account, target owner,
+backend and eligibility. It saves the old auth, replaces only `auth.json` with
+mode 0600, updates matching metadata, and waits for that original COMMIT receipt.
+New credentials insert only here; reauthorization preserves current label edits
+and existing configuration/native history. No provider or CLI wait, file-tree
+cleanup or nested public DB transaction runs inside this publication transaction.
+
+| Phase | Cancellation, failure and completion |
+| --- | --- |
+| Authorizing | Explicit cancel/shutdown revokes later publication, kills and joins the original CLI group, then removes only staging. |
+| Publishing | Cancel/shutdown joins the only committer; cancelling an observer cannot cancel it. A current-account or target refusal publishes no new material. |
+| Known rollback after replacement | Restore old auth only while the publication's file identity is still owned. Lost identity or an inability to check/restore it follows storage fail-stop. |
+| Uncertain COMMIT | Fail-stop without rereading to guess commit, retrying publication or restoring old auth. |
+| Committed, cleaning | Historical success remains success. Staging cleanup failure retains target ownership and drain blocking; explicit cancel/shutdown can retry cleanup alone, with a bounded wait and retained group-exit proof. |
+| Retired | Release target only after the original task and cleanup have ended; TTL never discards unfinished responsibility. |
+
+Credential deletion is one owned operation through the Harness login driver.
+It reserves the same target, retires authorizing work or joins a publishing
+committer, then acquires the configuration/write boundary. That transaction
+checks current account/target ownership and deletes bindings. Only its confirmed
+removed row authorizes permanent-home cleanup. Refusal leaves existing auth,
+configuration and native history intact; an unpublished first login owns staging
+only. A confirmed row deletion followed by failed home cleanup retains the
+original deletion proof. HTTP retry or shutdown resumes that cleanup without
+repeating the DB delete, even when the current row is gone. No slow login or
+cleanup wait holds the configuration lock or DB transaction.
+Directory inspection treats only explicit `FileNotFoundError` as already removed.
+Permission/I/O errors preserve the original cleanup task, target or deletion proof
+and blocker; a false `Path.exists()` result is not retirement evidence.
+
+GET status only observes historical state and the currently available credential.
+Deleting a credential never rewrites historical success or grants an old login
+permission to create a row/home again. Actual route/SQLite, controlled CLI,
+process-group, file, ordering and fail-stop regressions live in
+`tests/test_codex_login.py`; the rendered UI consumer is in `HarnessPage.test.tsx`.
+These operations and deletion proofs are process-local. They add no persistent
+publication ledger, restart scan or recovery guarantee across SIGKILL, a crash
+or storage fail-stop; cross-file/DB atomicity is not promised in that window.
 
 ### Claude OAuth operation ownership
 
@@ -253,8 +299,10 @@ late process output and bounded, masked full logging.
   consumes the typed cancellation receipt. Late success, error and cancellation
   cannot update a retired account/view. Historical completion refetches the
   current credential list instead of upserting its old result, so deleting a
-  credential is not undone by a late response. Codex retains its device polling
-  and cancellation flow. `HarnessPage.test.tsx` covers these actual consumers.
+  credential is not undone by a late response. Codex also stops polling on
+  historical success even if its current credential is gone, and rereads the
+  current list; view/account generation guards reject late results.
+  `HarnessPage.test.tsx` covers these actual consumers.
 - `useWebSocket.ts`: an `error` event with `code === "auth_expired"` renders
   the chat error text (as today) AND refetches `/api/credentials` so the
   sidebar badge appears immediately without a reload.

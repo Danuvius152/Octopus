@@ -5,7 +5,10 @@ these run anywhere (no codex binary, no ChatGPT account). The fake emits the
 same URL + code shape and writes auth.json on the success path."""
 
 import asyncio
+import json
 import os
+import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -33,9 +36,22 @@ def _isolate_codex_home(tmp_path, monkeypatch):
         lambda: [sys.executable, _FAKE, "login", "--device-auth"],
     )
     # Fresh manager state each test.
-    codex_login.codex_login_manager._sessions.clear()
+    monkeypatch.setattr(codex_login, "codex_login_manager", codex_login.CodexLoginManager())
     monkeypatch.delenv("CODEX_FAKE_LOGIN_MODE", raising=False)
     yield
+
+
+@pytest.fixture
+async def owned_manager():
+    db = Database(":memory:")
+    await db.initialize()
+    owner, _ = await create_account(db)
+    manager = codex_login.CodexLoginManager(db)
+    try:
+        yield manager, db, owner["id"]
+    finally:
+        await manager.shutdown()
+        await db.close()
 
 
 @pytest.fixture
@@ -49,6 +65,7 @@ async def client():
     async with AsyncClient(transport=transport, base_url="http://test",
                            headers={"Authorization": f"Bearer {bearer}"}) as c:
         yield c, db
+    await codex_login.codex_login_manager.shutdown()
     await db.close()
 
 
@@ -118,10 +135,10 @@ async def test_late_successful_drive_cannot_replace_scrape_timeout(tmp_path, mon
         await asyncio.wait_for(drive_waiting.wait(), 2)
         await asyncio.wait_for(session._scraped.wait(), 2)  # Timeout has won, cleanup is still suspended.
         release_drive.set()
+        release_failure.set()
         await asyncio.wait_for(session._task, 2)
         assert session.state == codex_login.CodexLoginState.error
         assert "device code in time" in session.message
-        release_failure.set()
         await session._watchdog
         assert session._proc.returncode == 0 and manager.drain_blockers() == ()
     finally:
@@ -131,21 +148,21 @@ async def test_late_successful_drive_cannot_replace_scrape_timeout(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_start_scrapes_url_and_code():
-    mgr = codex_login.CodexLoginManager()
-    session = await mgr.start("My ChatGPT")
+async def test_start_scrapes_url_and_code(owned_manager):
+    mgr, _, owner = owned_manager
+    session = await mgr.start("My ChatGPT", user_id=owner)
     # `start` returns immediately (non-blocking); the URL+code are scraped by
     # the drive task. Wait for it, then assert what was captured.
-    assert os.path.isdir(session.codex_home)
+    assert os.path.isdir(session._login_home)
     await session._task
     assert session.verification_url == "https://auth.openai.com/codex/device"
     assert session.user_code == "TEST-CODE9"
 
 
 @pytest.mark.asyncio
-async def test_success_writes_authjson_and_marks_success():
-    mgr = codex_login.CodexLoginManager()
-    session = await mgr.start("ok")
+async def test_success_writes_authjson_and_marks_success(owned_manager):
+    mgr, _, owner = owned_manager
+    session = await mgr.start("ok", user_id=owner)
     await session._task
     assert session.state == codex_login.CodexLoginState.success
     assert os.path.exists(os.path.join(session.codex_home, "auth.json"))
@@ -274,6 +291,43 @@ async def test_shutdown_owns_login_spawn_before_its_process_handle_arrives(monke
 # --- route tests -----------------------------------------------------------
 
 
+async def test_original_login_publishes_without_any_status_observer(client):
+    c, db = client
+    response = await c.post("/api/credentials/codex/start", json={"label": "No polling"})
+    assert response.status_code == 201
+    login = codex_login.codex_login_manager.get(response.json()["login_id"])
+    await asyncio.wait_for(asyncio.shield(login._task), 3)
+    listed = (await c.get("/api/credentials")).json()
+    assert [row["id"] for row in listed] == [login.credential_id]
+    assert login.state == codex_login.CodexLoginState.success
+    assert (await db.get_credential(login.credential_id))["label"] == "No polling"
+
+
+async def test_overlapping_reauthorization_conflicts_until_original_cli_retires(client, monkeypatch):
+    c, _ = client
+    credential = await c.post("/api/credentials", json={"backend": "codex", "auth_type": "oauth", "label": "Existing", "secret": "home"})
+    target = credential.json()["id"]
+    monkeypatch.setenv("CODEX_FAKE_LOGIN_MODE", "hang")
+    body = {"label": "Reauthorize", "reauth_credential_id": target}
+    first = await c.post("/api/credentials/codex/start", json=body)
+    assert first.status_code == 201
+    first_id = first.json()["login_id"]
+    second_id = None
+    try:
+        second = await c.post("/api/credentials/codex/start", json=body)
+        if second.status_code == 201:
+            second_id = second.json()["login_id"]
+        assert second.status_code == 409
+        await c.post("/api/credentials/codex/cancel", json={"login_id": first_id})
+        again = await c.post("/api/credentials/codex/start", json=body)
+        assert again.status_code == 201
+        second_id = again.json()["login_id"]
+    finally:
+        await c.post("/api/credentials/codex/cancel", json={"login_id": first_id})
+        if second_id:
+            await c.post("/api/credentials/codex/cancel", json={"login_id": second_id})
+
+
 @pytest.mark.asyncio
 async def test_codex_login_route_end_to_end(client):
     c, db = client
@@ -384,7 +438,7 @@ async def test_codex_login_cancel_route(client, monkeypatch):
 
 
 @pytest.mark.parametrize("outcome", ["cancel", "failure", "spawn_failure", "invalid_auth", "scrape_timeout", "success"])
-async def test_reauthorization_preserves_existing_home_and_only_publishes_valid_auth(tmp_path, monkeypatch, outcome):
+async def test_reauthorization_preserves_existing_home_and_only_publishes_valid_auth(tmp_path, monkeypatch, owned_manager, outcome):
     credential_id = "existing"
     home = Path(codex_login.codex_home_for(credential_id))
     home.mkdir(parents=True)
@@ -423,13 +477,14 @@ async def test_reauthorization_preserves_existing_home_and_only_publishes_valid_
 
         monkeypatch.setattr(codex_login.asyncio, "create_subprocess_exec", fail_spawn)
 
-    mgr = codex_login.CodexLoginManager()
+    mgr, db, owner = owned_manager
+    await db.save_credential(credential_id, "codex", "Existing label", "oauth", "old", "now", user_id=owner)
     try:
         if outcome == "spawn_failure":
             with pytest.raises(RuntimeError, match="synthetic spawn failure"):
-                await mgr.start("Reauthorize", reauth_credential_id=credential_id)
+                await mgr.start("Reauthorize", reauth_credential_id=credential_id, user_id=owner)
         else:
-            session = await mgr.start("Reauthorize", reauth_credential_id=credential_id)
+            session = await mgr.start("Reauthorize", reauth_credential_id=credential_id, user_id=owner)
             assert session.codex_home == str(home)
             assert session._login_home != str(home)
             if outcome == "cancel":
@@ -452,27 +507,24 @@ async def test_reauthorization_preserves_existing_home_and_only_publishes_valid_
         await mgr.shutdown()
 
 
-async def test_codex_status_retries_and_concurrent_pollers_return_one_owned_credential(client, tmp_path):
+async def test_codex_status_retries_only_observe_original_commit_and_current_availability(client):
     c, db = client
     owner = (await db.get_system_agent())["user_id"]
-    session = codex_login.CodexLoginSession(
-        id="successful-login", credential_id="one-credential", codex_home=str(tmp_path / "login-home"),
-        label="Retryable login", state=codex_login.CodexLoginState.success, user_id=owner,
-    )
-    codex_login.codex_login_manager._sessions[session.id] = session
+    started = await c.post("/api/credentials/codex/start", json={"label": "Retryable login"})
+    session = codex_login.codex_login_manager.get(started.json()["login_id"])
+    await asyncio.shield(session._task)
     path = f"/api/credentials/codex/{session.id}/status"
     replies = await asyncio.gather(*(c.get(path) for _ in range(5)))
     assert all(reply.status_code == 200 for reply in replies)
     assert all(reply.json()["credential"]["id"] == session.credential_id for reply in replies)
     assert len(await db.load_credentials(owner)) == 1
-    # Discard all prior responses and retry after persistence.
+    # Discard all prior responses and retry after the original commit.
     assert (await c.get(path)).json()["credential"]["id"] == session.credential_id
     await db.delete_credential(session.credential_id)
     deleted = await c.get(path)
     assert deleted.status_code == 200
-    assert deleted.json()["state"] == "error"
+    assert deleted.json()["state"] == "success"
     assert deleted.json()["credential"] is None
-    assert "no longer available" in deleted.json()["message"]
     assert await db.load_credentials(owner) == []
 
 
@@ -488,7 +540,8 @@ async def test_codex_status_is_not_readable_by_another_account(client, tmp_path)
     codex_login.codex_login_manager._sessions[session.id] = session
     response = await c.get(f"/api/credentials/codex/{session.id}/status", headers={"Authorization": f"Bearer {other_bearer}"})
     assert response.status_code == 404
-    assert not session.persisted
+    assert await db.load_credentials(owner) == []
+    assert not Path(session.codex_home).exists()
 
 
 async def test_new_login_launch_failure_removes_only_its_owned_home(monkeypatch):
@@ -515,7 +568,7 @@ async def test_deleted_reauthorization_target_is_not_recreated_on_status(client,
     codex_login.codex_login_manager._sessions[session.id] = session
     response = await c.get(f"/api/credentials/codex/{session.id}/status")
     assert response.status_code == 200
-    assert response.json()["state"] == "error"
+    assert response.json()["state"] == "success"
     assert response.json()["credential"] is None
     assert await db.get_credential(session.credential_id, owner) is None
 
@@ -557,3 +610,574 @@ async def test_reauthorization_failure_keeps_credential_row_and_agent_binding(cl
     assert await db.get_credential(credential_id, owner) == original_row
     assert (await db.get_agent(agent["id"], owner))["credential_id"] == credential_id
     assert (home / "auth.json").read_bytes() == original_auth
+
+
+@pytest.fixture
+def authorization_barrier(tmp_path, monkeypatch):
+    script = tmp_path / "controlled_login.py"
+    script.write_text(
+        "import os, pathlib, time\n"
+        "home = pathlib.Path(os.environ['CODEX_HOME'])\n"
+        "(home/'auth.json').write_text('{\"tokens\":{\"access_token\":\"controlled-new\"}}')\n"
+        "print('https://auth.example/device TEST-CODE9', flush=True)\n"
+        "while not (home/'authorize').exists(): time.sleep(.01)\n"
+    )
+    monkeypatch.setattr(codex_login, "build_codex_login_argv", lambda: [sys.executable, str(script)])
+
+
+async def start_controlled(c, db, reauthorize):
+    target = None
+    if reauthorize:
+        created = await c.post("/api/credentials", json={
+            "backend": "codex", "auth_type": "oauth", "label": "Original", "secret": "old-home",
+        })
+        target = created.json()["id"]
+        home = Path(codex_login.codex_home_for(target))
+        home.mkdir(parents=True)
+        (home / "auth.json").write_text('{"tokens":{"access_token":"old"}}')
+        (home / "config.toml").write_text('model="keep"')
+    response = await c.post("/api/credentials/codex/start", json={"label": "Started label", "reauth_credential_id": target})
+    assert response.status_code == 201, response.text
+    login = codex_login.codex_login_manager.get(response.json()["login_id"])
+    await asyncio.wait_for(login._scraped.wait(), 3)
+    return login
+
+
+@pytest.mark.parametrize("reauthorize", [False, True])
+@pytest.mark.parametrize("change", ["delete", "disable"])
+async def test_revocation_before_publication_cannot_be_undone_by_late_login(client, authorization_barrier, reauthorize, change):
+    c, db = client
+    login = await start_controlled(c, db, reauthorize)
+    if change == "delete":
+        response = await c.delete(f"/api/credentials/{login.credential_id}")
+        assert response.status_code == 204, response.text
+        assert login.state == codex_login.CodexLoginState.cancelled
+        assert await db.get_credential(login.credential_id) is None
+        assert not Path(login.codex_home).exists()
+    else:
+        owner = (await db.get_system_agent())["user_id"]
+        await db.set_user_disabled(owner, at="now")
+        Path(login._login_home, "authorize").touch()
+        await asyncio.wait_for(asyncio.shield(login._task), 3)
+        assert login.state == codex_login.CodexLoginState.error
+        if reauthorize:
+            assert "old" in Path(login.codex_home, "auth.json").read_text()
+        else:
+            assert not Path(login.codex_home).exists()
+    assert login.phase == codex_login.CodexLoginPhase.retired
+    assert not codex_login.codex_login_manager.drain_blockers()
+
+
+async def test_reauthorization_preserves_label_edits_and_different_targets_are_independent(client, authorization_barrier):
+    c, db = client
+    first = await start_controlled(c, db, True)
+    second = await start_controlled(c, db, True)
+    edited = await c.patch(f"/api/credentials/{first.credential_id}", json={"label": "Edited while authorizing"})
+    assert edited.status_code == 200
+    for login in (first, second):
+        Path(login._login_home, "authorize").touch()
+    await asyncio.gather(*(asyncio.shield(login._task) for login in (first, second)))
+    row = await db.get_credential(first.credential_id)
+    assert row["label"] == "Edited while authorizing"
+    assert all(login.state == codex_login.CodexLoginState.success for login in (first, second))
+    assert len(await db.load_credentials()) == 2
+
+
+@pytest.mark.parametrize("reauthorize", [False, True])
+@pytest.mark.parametrize("observer", ["status", "cancel", "delete", "shutdown", "disable"])
+async def test_original_commit_survives_observer_cancellation_and_orders_later_deletion(
+    client, authorization_barrier, monkeypatch, reauthorize, observer,
+):
+    c, db = client
+    manager = codex_login.codex_login_manager
+    login = await start_controlled(c, db, reauthorize)
+    committing, release = asyncio.Event(), asyncio.Event()
+    original = db.conn.commit
+    execute = db.conn.execute
+    armed = True
+    material_written = False
+
+    def publication_sql(sql, parameters=()):
+        nonlocal material_written
+        if sql.startswith(("INSERT INTO backend_credentials", "UPDATE backend_credentials SET")):
+            material_written = True
+        return execute(sql, parameters)
+
+    async def commit():
+        nonlocal armed
+        if armed and material_written:
+            armed = False
+            committing.set()
+            await release.wait()
+        await original()
+
+    monkeypatch.setattr(db.conn, "commit", commit)
+    monkeypatch.setattr(db.conn, "execute", publication_sql)
+    Path(login._login_home, "authorize").touch()
+    waiting = None
+    try:
+        await asyncio.wait_for(committing.wait(), 3)
+        if observer == "status":
+            waiting = asyncio.create_task(c.get(f"/api/credentials/codex/{login.id}/status"))
+        elif observer == "cancel":
+            waiting = asyncio.create_task(c.post("/api/credentials/codex/cancel", json={"login_id": login.id}))
+        elif observer == "delete":
+            waiting = asyncio.create_task(c.delete(f"/api/credentials/{login.credential_id}"))
+        elif observer == "disable":
+            waiting = asyncio.create_task(db.set_user_disabled(login.user_id, at="now"))
+        else:
+            waiting = asyncio.create_task(manager.shutdown())
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        if observer in {"status", "cancel"}:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+        assert manager.drain_blockers()
+        release.set()
+        await asyncio.wait_for(asyncio.shield(login._task), 3)
+        if observer in {"delete", "shutdown", "disable"}:
+            result = await asyncio.wait_for(waiting, 3)
+            if observer == "delete":
+                assert result.status_code == 204
+        assert login.state == codex_login.CodexLoginState.success
+        row = await db.get_credential(login.credential_id)
+        if observer == "delete":
+            assert row is None and not Path(login.codex_home).exists()
+        else:
+            assert row is not None and row["status"] == "active"
+            assert json.loads(Path(login.codex_home, "auth.json").read_text())["tokens"]["access_token"] == "controlled-new"
+        if observer == "disable":
+            with pytest.raises(ValueError, match="Account is unavailable"):
+                await db.require_run_authority(login.user_id, login.credential_id, "codex")
+        assert login.phase == codex_login.CodexLoginPhase.retired
+    finally:
+        release.set()
+        if waiting is not None:
+            await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_known_metadata_rollback_restores_only_original_auth_and_keeps_native_history(client, authorization_barrier, monkeypatch):
+    c, db = client
+    login = await start_controlled(c, db, True)
+    original = db.conn.execute
+
+    def reject(sql, parameters=()):
+        if sql.startswith("UPDATE backend_credentials SET"):
+            raise sqlite3.IntegrityError("explicit metadata rejection")
+        return original(sql, parameters)
+
+    monkeypatch.setattr(db.conn, "execute", reject)
+    Path(login._login_home, "authorize").touch()
+    await asyncio.wait_for(asyncio.shield(login._task), 3)
+    assert login.state == codex_login.CodexLoginState.error
+    assert json.loads(Path(login.codex_home, "auth.json").read_text())["tokens"]["access_token"] == "old"
+    assert Path(login.codex_home, "config.toml").read_text() == 'model="keep"'
+    assert (await db.get_credential(login.credential_id))["label"] == "Original"
+
+
+async def test_committed_login_retains_target_and_success_until_failed_staging_cleanup_is_confirmed(
+    client, authorization_barrier, monkeypatch,
+):
+    c, db = client
+    manager = codex_login.codex_login_manager
+    login = await start_controlled(c, db, True)
+    remove = codex_login.shutil.rmtree
+
+    def unavailable(path, *args, **kwargs):
+        if str(path) == login._login_home:
+            raise OSError("staging cleanup unavailable")
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(codex_login.shutil, "rmtree", unavailable)
+    Path(login._login_home, "authorize").touch()
+    try:
+        with pytest.raises(OSError, match="staging cleanup unavailable"):
+            await asyncio.wait_for(asyncio.shield(login._task), 3)
+        assert login.state == codex_login.CodexLoginState.success
+        assert login.phase == codex_login.CodexLoginPhase.cleanup
+        assert manager.drain_blockers()
+        response = await c.post("/api/credentials/codex/start", json={"label": "Overlap", "reauth_credential_id": login.credential_id})
+        assert response.status_code == 409
+        status = (await c.get(f"/api/credentials/codex/{login.id}/status")).json()
+        assert status["state"] == "success" and status["credential"]["id"] == login.credential_id
+    finally:
+        monkeypatch.setattr(codex_login.shutil, "rmtree", remove)
+    await manager.cancel(login.id)
+    assert login.state == codex_login.CodexLoginState.success
+    assert login.phase == codex_login.CodexLoginPhase.retired
+    assert not manager.drain_blockers()
+
+
+async def test_successful_login_retires_descendants_before_releasing_its_target(client, tmp_path, monkeypatch):
+    from server.process_groups import group_has_live_members_after_kill
+
+    script = tmp_path / "login_with_descendant.py"
+    script.write_text(
+        "import os, pathlib, subprocess, sys\n"
+        "home=pathlib.Path(os.environ['CODEX_HOME'])\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "(home/'descendant').write_text(str(child.pid))\n"
+        "(home/'auth.json').write_text('{\"tokens\":{\"access_token\":\"valid\"}}')\n"
+        "print('https://auth.example/device TEST-CODE9',flush=True)\n"
+    )
+    monkeypatch.setattr(codex_login, "build_codex_login_argv", lambda: [sys.executable, str(script)])
+    c, _ = client
+    response = await c.post("/api/credentials/codex/start", json={"label": "With helper"})
+    login = codex_login.codex_login_manager.get(response.json()["login_id"])
+    await asyncio.wait_for(asyncio.shield(login._task), 3)
+    assert login.state == codex_login.CodexLoginState.success
+    assert not group_has_live_members_after_kill(login._proc.pid)
+    assert not codex_login.codex_login_manager.drain_blockers()
+
+
+@pytest.mark.parametrize("failure,reauthorize", [
+    ("commit-before", False), ("commit-after", False), ("commit-before", True),
+    ("commit-after", True), ("file-ownership", True), ("ownership-check", True),
+])
+def test_uncertain_publication_uses_storage_fail_stop_without_guessing_or_overwriting_external_auth(tmp_path, failure, reauthorize):
+    probe = Path(__file__).parent / "_fixtures" / "codex_publication_probe.py"
+    result = subprocess.run([sys.executable, str(probe), str(tmp_path), failure, str(reauthorize)],
+                            capture_output=True, text=True, timeout=8)
+    assert result.returncode == 70, result.stderr
+    assert not (tmp_path / "incorrect-success").exists()
+    identity = json.loads((tmp_path / "identity.json").read_text())
+    home = Path(identity["home"])
+    material = json.loads((home / "auth.json").read_text())["tokens"]["access_token"]
+    assert material == ("external" if failure == "file-ownership" else "fake")
+    with sqlite3.connect(tmp_path / "storage.db") as reader:
+        row = reader.execute("SELECT needs_reconnect FROM backend_credentials WHERE id=?", (identity["credential_id"],)).fetchone()
+    if failure == "commit-after":
+        assert row == (0,)
+    else:
+        assert row == ((1,) if reauthorize else None)
+    if reauthorize:
+        assert (home / "config.toml").read_text() == 'model="preserved"'
+
+
+@pytest.mark.parametrize("reauthorize", [False, True])
+async def test_deleted_committed_login_stays_historically_successful_without_recreating_home(client, authorization_barrier, reauthorize):
+    c, db = client
+    login = await start_controlled(c, db, reauthorize)
+    Path(login._login_home, "authorize").touch()
+    await asyncio.shield(login._task)
+    assert (await c.delete(f"/api/credentials/{login.credential_id}")).status_code == 204
+    for _ in range(2):
+        response = await c.get(f"/api/credentials/codex/{login.id}/status")
+        assert response.json()["state"] == "success" and response.json()["credential"] is None
+        assert not Path(login.codex_home).exists()
+        assert await db.get_credential(login.credential_id) is None
+
+
+async def test_credential_deletion_keeps_home_cleanup_when_its_http_observer_is_cancelled(client, monkeypatch):
+    import threading
+
+    c, db = client
+    started = await c.post("/api/credentials/codex/start", json={"label": "Delete original"})
+    login = codex_login.codex_login_manager.get(started.json()["login_id"])
+    await asyncio.shield(login._task)
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    remove = codex_login.shutil.rmtree
+
+    def held_remove(path, *args, **kwargs):
+        if str(path) == login.codex_home:
+            loop.call_soon_threadsafe(entered.set)
+            release.wait(3)
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(codex_login.shutil, "rmtree", held_remove)
+    deleting = asyncio.create_task(c.delete(f"/api/credentials/{login.credential_id}"))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert await db.get_credential(login.credential_id) is None
+        deleting.cancel()
+        await asyncio.sleep(0)
+        assert codex_login.codex_login_manager.drain_blockers()
+    finally:
+        release.set()
+        await asyncio.gather(deleting, return_exceptions=True)
+    async with asyncio.timeout(3):
+        while codex_login.codex_login_manager.drain_blockers():
+            await asyncio.sleep(.01)
+    assert not Path(login.codex_home).exists()
+
+
+async def test_disable_while_delete_retires_login_refuses_formal_home_deletion(client, authorization_barrier, monkeypatch):
+    import threading
+
+    c, db = client
+    login = await start_controlled(c, db, True)
+    home = Path(login.codex_home)
+    (home / "sessions").mkdir()
+    (home / "sessions" / "original.jsonl").write_text("original native history")
+    original_row = await db.get_credential(login.credential_id)
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    remove = codex_login.shutil.rmtree
+
+    def held_staging(path, *args, **kwargs):
+        if str(path) == login._login_home:
+            loop.call_soon_threadsafe(entered.set)
+            release.wait(3)
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(codex_login.shutil, "rmtree", held_staging)
+    deleting = asyncio.create_task(c.delete(f"/api/credentials/{login.credential_id}"))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        await db.set_user_disabled(login.user_id, at="now")
+    finally:
+        release.set()
+    response = await deleting
+    assert response.status_code == 403, response.text
+    assert await db.get_credential(login.credential_id) == original_row
+    assert (home / "sessions" / "original.jsonl").read_text() == "original native history"
+    assert (home / "config.toml").read_text() == 'model="keep"'
+    assert json.loads((home / "auth.json").read_text())["tokens"]["access_token"] == "old"
+    assert not codex_login.codex_login_manager.drain_blockers()
+
+
+async def test_delete_retry_finishes_original_home_cleanup_after_confirmed_row_deletion(client, monkeypatch):
+    c, db = client
+    started = await c.post("/api/credentials/codex/start", json={"label": "Retry cleanup"})
+    login = codex_login.codex_login_manager.get(started.json()["login_id"])
+    await asyncio.shield(login._task)
+    remove = codex_login.shutil.rmtree
+
+    def failed_home(path, *args, **kwargs):
+        if str(path) == login.codex_home:
+            raise OSError("formal home cleanup unavailable")
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(codex_login.shutil, "rmtree", failed_home)
+    try:
+        with pytest.raises(OSError, match="formal home cleanup unavailable"):
+            await c.delete(f"/api/credentials/{login.credential_id}")
+        assert await db.get_credential(login.credential_id) is None
+        assert codex_login.codex_login_manager.drain_blockers()
+        assert Path(login.codex_home).exists()
+    finally:
+        monkeypatch.setattr(codex_login.shutil, "rmtree", remove)
+    response = await c.delete(f"/api/credentials/{login.credential_id}")
+    assert response.status_code == 204, response.text
+    assert not Path(login.codex_home).exists()
+    assert not codex_login.codex_login_manager.drain_blockers()
+    assert (await c.get(f"/api/credentials/codex/{login.id}/status")).json()["state"] == "success"
+
+
+async def test_shutdown_finishes_original_deleted_credential_cleanup_after_transient_failure(client, monkeypatch):
+    c, db = client
+    started = await c.post("/api/credentials/codex/start", json={"label": "Shutdown cleanup"})
+    login = codex_login.codex_login_manager.get(started.json()["login_id"])
+    await asyncio.shield(login._task)
+    remove = codex_login.shutil.rmtree
+
+    def failed_home(path, *args, **kwargs):
+        if str(path) == login.codex_home:
+            raise OSError("formal home cleanup unavailable")
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(codex_login.shutil, "rmtree", failed_home)
+    try:
+        with pytest.raises(OSError):
+            await c.delete(f"/api/credentials/{login.credential_id}")
+    finally:
+        monkeypatch.setattr(codex_login.shutil, "rmtree", remove)
+    await codex_login.codex_login_manager.shutdown()
+    assert not Path(login.codex_home).exists()
+    assert await db.get_credential(login.credential_id) is None
+    assert not codex_login.codex_login_manager.drain_blockers()
+
+
+async def test_failed_login_cleanup_retry_has_a_bounded_wait_and_keeps_original_target(client, authorization_barrier, monkeypatch):
+    import threading
+
+    c, db = client
+    manager = codex_login.codex_login_manager
+    login = await start_controlled(c, db, True)
+    remove = codex_login.shutil.rmtree
+    retrying, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    attempts = 0
+
+    def held_retry(path, *args, **kwargs):
+        nonlocal attempts
+        if str(path) == login._login_home:
+            attempts += 1
+            if attempts == 1:
+                raise OSError("first cleanup failed")
+            loop.call_soon_threadsafe(retrying.set)
+            release.wait(3)
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(codex_login.shutil, "rmtree", held_retry)
+    Path(login._login_home, "authorize").touch()
+    with pytest.raises(OSError, match="first cleanup failed"):
+        await asyncio.shield(login._task)
+    monkeypatch.setattr(codex_login, "_REAP_TIMEOUT_SECONDS", .05)
+    cancelling = asyncio.create_task(manager.cancel(login.id))
+    try:
+        await asyncio.wait_for(retrying.wait(), 1)
+        with pytest.raises(RuntimeError, match="cleanup did not exit"):
+            await asyncio.wait_for(asyncio.shield(cancelling), .5)
+        assert manager.drain_blockers()
+        assert manager.target_for(login.credential_id, login.user_id) is login
+    finally:
+        release.set()
+        await asyncio.gather(cancelling, return_exceptions=True)
+    await manager.cancel(login.id)
+    assert login.state == codex_login.CodexLoginState.success
+    assert not manager.drain_blockers()
+
+
+async def test_staging_stat_error_retains_original_login_and_cleanup_responsibility(client, authorization_barrier, monkeypatch):
+    c, db = client
+    manager = codex_login.codex_login_manager
+    login = await start_controlled(c, db, True)
+    stat = os.stat
+
+    def denied(path, *args, **kwargs):
+        if not isinstance(path, int) and os.fsdecode(path) == login._login_home:
+            raise PermissionError("Cannot inspect original staging")
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", denied)
+    Path(login._login_home, "authorize").touch()
+    try:
+        with pytest.raises(PermissionError, match="inspect original staging"):
+            await asyncio.wait_for(asyncio.shield(login._task), 3)
+        assert os.lstat(login._login_home)
+        assert manager.target_for(login.credential_id, login.user_id) is login
+        assert login.state == codex_login.CodexLoginState.success
+        assert manager.drain_blockers()
+    finally:
+        monkeypatch.setattr(os, "stat", stat)
+    await manager.cancel(login.id)
+    assert not Path(login._login_home).exists() and not manager.drain_blockers()
+
+
+async def test_formal_home_stat_error_keeps_committed_deletion_proof_for_http_retry(client, monkeypatch):
+    c, db = client
+    manager = codex_login.codex_login_manager
+    started = await c.post("/api/credentials/codex/start", json={"label": "Inspect deletion"})
+    login = manager.get(started.json()["login_id"])
+    await asyncio.shield(login._task)
+    stat = os.stat
+
+    def denied(path, *args, **kwargs):
+        if not isinstance(path, int) and os.fsdecode(path) == login.codex_home:
+            raise PermissionError("Cannot inspect original home")
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", denied)
+    try:
+        with pytest.raises(PermissionError, match="inspect original home"):
+            await c.delete(f"/api/credentials/{login.credential_id}")
+        assert await db.get_credential(login.credential_id) is None
+        assert os.lstat(login.codex_home)
+        assert manager.owns_credential(login.credential_id, login.user_id)
+        assert manager.drain_blockers()
+    finally:
+        monkeypatch.setattr(os, "stat", stat)
+    assert (await c.delete(f"/api/credentials/{login.credential_id}")).status_code == 204
+    assert not Path(login.codex_home).exists() and not manager.drain_blockers()
+
+
+@pytest.mark.parametrize("failure", ["invalid-auth", "metadata"])
+async def test_login_failure_never_signals_a_group_after_confirmed_retirement(client, authorization_barrier, monkeypatch, failure):
+    c, db = client
+    login = await start_controlled(c, db, True)
+    observed = set()
+    signals_after_retirement = []
+    wait_group = codex_login.wait_group_exit
+    kill_group = os.killpg
+    execute = db.conn.execute
+
+    async def confirmed(pid, *args, **kwargs):
+        await wait_group(pid, *args, **kwargs)
+        observed.add(pid)
+
+    def signal_group(pid, sig):
+        if pid in observed:
+            signals_after_retirement.append((pid, sig))
+        return kill_group(pid, sig)
+
+    def reject(sql, parameters=()):
+        if sql.startswith("UPDATE backend_credentials SET"):
+            raise sqlite3.IntegrityError("Confirmed publication refusal")
+        return execute(sql, parameters)
+
+    monkeypatch.setattr(codex_login, "wait_group_exit", confirmed)
+    monkeypatch.setattr(os, "killpg", signal_group)
+    if failure == "metadata":
+        monkeypatch.setattr(db.conn, "execute", reject)
+    else:
+        Path(login._login_home, "auth.json").write_text("invalid authorization")
+    Path(login._login_home, "authorize").touch()
+    await asyncio.wait_for(asyncio.shield(login._task), 3)
+    assert login.state == codex_login.CodexLoginState.error
+    assert login._proc.pid in observed
+    assert signals_after_retirement == []
+    assert Path(login.codex_home, "config.toml").read_text() == 'model="keep"'
+
+
+async def test_scrape_watchdog_cannot_reclassify_an_operation_already_publishing(client, tmp_path, monkeypatch):
+    c, db = client
+    script = tmp_path / "authorized_without_device_code.py"
+    script.write_text(
+        "import os, pathlib\n"
+        "pathlib.Path(os.environ['CODEX_HOME'],'auth.json').write_text('{\"tokens\":{\"access_token\":\"valid\"}}')\n"
+        "print('https://auth.example/device',flush=True)\n"
+    )
+    monkeypatch.setattr(codex_login, "build_codex_login_argv", lambda: [sys.executable, str(script)])
+    entered, release = asyncio.Event(), asyncio.Event()
+    expire_watchdog = asyncio.Event()
+    wait_for = asyncio.wait_for
+    commit, execute = db.conn.commit, db.conn.execute
+    publication = False
+
+    async def controlled_deadline(awaitable, timeout):
+        if timeout != codex_login._SCRAPE_TIMEOUT_SECONDS:
+            return await wait_for(awaitable, timeout)
+        observed = asyncio.create_task(awaitable)
+        deadline = asyncio.create_task(expire_watchdog.wait())
+        try:
+            done, _ = await asyncio.wait({observed, deadline}, return_when=asyncio.FIRST_COMPLETED)
+            if observed in done:
+                return observed.result()
+            raise TimeoutError
+        finally:
+            for task in (observed, deadline):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(observed, deadline, return_exceptions=True)
+
+    def publication_sql(sql, parameters=()):
+        nonlocal publication
+        if sql.startswith("INSERT INTO backend_credentials"):
+            publication = True
+        return execute(sql, parameters)
+
+    async def held_commit():
+        if publication:
+            entered.set()
+            await release.wait()
+        await commit()
+
+    monkeypatch.setattr(db.conn, "execute", publication_sql)
+    monkeypatch.setattr(db.conn, "commit", held_commit)
+    monkeypatch.setattr(asyncio, "wait_for", controlled_deadline)
+    started = await c.post("/api/credentials/codex/start", json={"label": "Already publishing"})
+    login = codex_login.codex_login_manager.get(started.json()["login_id"])
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert login.phase == codex_login.CodexLoginPhase.publishing and not login.device_code_ready
+        expire_watchdog.set()
+        await wait_for(asyncio.shield(login._watchdog), 1)
+        assert login.state == codex_login.CodexLoginState.pending
+        assert login._watchdog.done()
+    finally:
+        release.set()
+        await asyncio.shield(login._task)
+        await asyncio.shield(login._watchdog)
+    assert login.state == codex_login.CodexLoginState.success

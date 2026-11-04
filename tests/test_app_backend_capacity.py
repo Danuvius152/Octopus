@@ -4,7 +4,6 @@ import asyncio
 import shlex
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -164,7 +163,7 @@ async def test_failed_retirement_does_not_release_capacity(tmp_path, monkeypatch
         monkeypatch.setattr(app_backends, "wait_group_exit", unconfirmed)
         with pytest.raises(RuntimeError, match="exit unconfirmed"):
             await supervisor.stop("first")
-        with pytest.raises(BackendCapacityError, match="retirement unconfirmed"):
+        with pytest.raises(BackendCapacityError, match="retiring"):
             await supervisor.ensure_running("second", str(second))
         assert not (second / "started").exists()
         monkeypatch.setattr(app_backends, "wait_group_exit", real_wait)
@@ -293,15 +292,18 @@ async def test_installation_does_not_take_a_running_backend_slot(tmp_path, monke
 async def test_mutation_readmission_capacity_refusal_never_forwards_the_body(tmp_path, monkeypatch):
     attempts, forwarded, finished = [], [], []
     real_client = httpx.AsyncClient
+    supervisor = BackendSupervisor()
+    directory = _app(tmp_path, "app", ready=True)
+    ensure = supervisor.ensure_running
+    require = supervisor.require_running
+    refuse = False
 
     async def authorized(*args):
-        return {"id": "app", "app_dir": str(tmp_path)}
+        return {"id": "app", "app_dir": str(directory)}
 
     async def running(*args):
         attempts.append(True)
-        if len(attempts) == 1:
-            return SimpleNamespace(state=RUNNING, port=12345, process=None)
-        raise BackendCapacityError("Application backend capacity is unavailable")
+        return await ensure(*args)
 
     class Mutation:
         async def finish(self):
@@ -311,6 +313,8 @@ async def test_mutation_readmission_capacity_refusal_never_forwards_the_body(tmp
             pytest.fail("A refused request must not abort an application writer")
 
     async def begin(*args):
+        nonlocal refuse
+        refuse = True
         return Mutation()
 
     def upstream(request):
@@ -328,13 +332,19 @@ async def test_mutation_readmission_capacity_refusal_never_forwards_the_body(tmp
         "headers": [], "query_string": b"",
     }, receive)
     monkeypatch.setattr(route, "_application_for_request", authorized)
-    monkeypatch.setattr(route.backend_supervisor, "ensure_running", running)
+    monkeypatch.setattr(route, "backend_supervisor", supervisor)
+    monkeypatch.setattr(supervisor, "ensure_running", running)
     def refuse_readmission(*args, **kwargs):
-        raise BackendCapacityError("Application backend capacity is unavailable")
-    monkeypatch.setattr(route.backend_supervisor, "require_running", refuse_readmission)
+        if refuse:
+            raise BackendCapacityError("Application backend capacity is unavailable")
+        return require(*args, **kwargs)
+    monkeypatch.setattr(supervisor, "require_running", refuse_readmission)
     monkeypatch.setattr(app_bridge, "begin", begin)
     monkeypatch.setattr(httpx, "AsyncClient", client)
-    with pytest.raises(HTTPException) as refused:
-        await route.proxy_application_api(request, "app", "save")
-    assert refused.value.status_code == 503
-    assert len(attempts) == 1 and finished == [True] and forwarded == []
+    try:
+        with pytest.raises(HTTPException) as refused:
+            await route.proxy_application_api(request, "app", "save")
+        assert refused.value.status_code == 503
+        assert len(attempts) == 1 and finished == [True] and forwarded == []
+    finally:
+        await supervisor.shutdown()

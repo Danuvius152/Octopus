@@ -17,6 +17,10 @@ from .transaction import Transaction
 from .users import owner_is_available
 
 
+class CredentialOwnerUnavailable(ValueError):
+    """The original deletion was refused before changing a binding."""
+
+
 class CredentialsMixin(DatabaseBase):
 
     async def require_run_authority(self, user_id: str | None, credential_id: str | None, backend: str) -> None:
@@ -51,26 +55,33 @@ class CredentialsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             if require_available_owner and not await owner_is_available(tx, user_id):
                 raise ValueError("Account is unavailable")
-            await tx.execute(
-                "INSERT INTO backend_credentials "
-                "(id, backend, label, auth_type, created_at, "
-                " status, needs_reconnect, user_id, token_expires_at) "
-                "VALUES (?, ?, ?, ?, ?, 'active', 0, ?, ?)",
-                (
-                    credential_id,
-                    backend,
-                    label,
-                    auth_type,
-                    created_at,
-                    user_id,
-                    token_expires_at,
-                ),
-            )
-            await tx.execute(
-                "INSERT OR REPLACE INTO credential_secrets "
-                "(credential_id, secret_encrypted) VALUES (?, ?)",
-                (credential_id, secret_encrypted),
-            )
+            await self._save_credential(tx, credential_id, backend, label, auth_type, secret_encrypted,
+                                        created_at, user_id, token_expires_at)
+
+    async def _save_credential(
+        self, tx: Transaction, credential_id: str, backend: str, label: str, auth_type: str,
+        secret_encrypted: str, created_at: str, user_id: str | None, token_expires_at: str | None = None,
+    ) -> None:
+        await tx.execute(
+            "INSERT INTO backend_credentials "
+            "(id, backend, label, auth_type, created_at, "
+            " status, needs_reconnect, user_id, token_expires_at) "
+            "VALUES (?, ?, ?, ?, ?, 'active', 0, ?, ?)",
+            (
+                credential_id,
+                backend,
+                label,
+                auth_type,
+                created_at,
+                user_id,
+                token_expires_at,
+            ),
+        )
+        await tx.execute(
+            "INSERT OR REPLACE INTO credential_secrets "
+            "(credential_id, secret_encrypted) VALUES (?, ?)",
+            (credential_id, secret_encrypted),
+        )
 
     async def load_credentials(
         self, user_id: str | None = None
@@ -210,12 +221,25 @@ class CredentialsMixin(DatabaseBase):
 
     async def delete_credential(self, credential_id: str) -> bool:
         async with self.transaction(write=True) as tx:
-            # Session bindings predate the credential FK. Clear them in the
-            # deletion's transaction, so a rejected delete leaves defaults
-            # intact just like the agent FK does.
-            await tx.execute("UPDATE sessions SET credential_id=NULL WHERE credential_id=?", (credential_id,))
-            # ON DELETE CASCADE on credential_secrets handles the secret row.
-            cursor = await tx.execute(
-                "DELETE FROM backend_credentials WHERE id = ?", (credential_id,)
-            )
-            return cursor.rowcount > 0
+            return await self._delete_credential(tx, credential_id)
+
+    async def delete_owned_credential(self, credential_id: str, user_id: str | None) -> dict[str, Any] | None:
+        async with self.transaction(write=True) as tx:
+            if not await owner_is_available(tx, user_id):
+                raise CredentialOwnerUnavailable("Account is unavailable")
+            row = await self._get_credential(tx, credential_id, user_id)
+            if row is None or row["user_id"] != user_id:
+                return None
+            await self._delete_credential(tx, credential_id)
+            return row
+
+    async def _delete_credential(self, tx: Transaction, credential_id: str) -> bool:
+        # Session bindings predate the credential FK. Clear them in the
+        # deletion's transaction, so a rejected delete leaves defaults
+        # intact just like the agent FK does.
+        await tx.execute("UPDATE sessions SET credential_id=NULL WHERE credential_id=?", (credential_id,))
+        # ON DELETE CASCADE on credential_secrets handles the secret row.
+        cursor = await tx.execute(
+            "DELETE FROM backend_credentials WHERE id = ?", (credential_id,)
+        )
+        return cursor.rowcount > 0

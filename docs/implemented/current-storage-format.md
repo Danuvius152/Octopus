@@ -116,6 +116,17 @@ not new persistent revisions. The original credential/installation transaction
 compares current encrypted material and ownership before applying rejection.
 OAuth reauthorization atomically updates the existing `auth_type` and secret fields.
 
+Codex device login's original committer coordinates its staged `auth.json` and
+credential metadata under the short write transaction, with historical success
+only after that original COMMIT acknowledgment. Status reads perform no writes.
+Target reservations, cleanup tasks, deletion phase/proof and confirmed process-group
+exit are process-local ownership facts, not persistent revisions or new storage
+roots. Explicit deletion retries use the original confirmed row deletion to
+finish local cleanup; they do not repeat a DB write. No publication ledger,
+startup recovery, format bump or guarantee across crash/fail-stop is introduced.
+The complete failure and compensation rules belong to the
+[credential contract](harness-credential-reauth.md#codex-device-operation-ownership).
+
 The current main declaration includes `client_submissions.native_inputs`, a checked JSON array with
 default `[]`. Each version-1 entry belongs to the original product input and one
 attempt, retaining separate RPC/thread/turn identities, acceptance proof and

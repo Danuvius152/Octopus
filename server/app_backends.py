@@ -22,6 +22,7 @@ import signal
 import socket
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -126,6 +127,98 @@ class BackendTarget:
     process: asyncio.subprocess.Process | None
 
 
+class BackendUse:
+    """One original request, including transport cleanup or a Wiki follower.
+
+    The supervisor owns the registration; the current consumer owns execution.
+    A returned, unstarted response has no executing task but still owns cleanup.
+    """
+
+    def __init__(self, supervisor: BackendSupervisor, state: BackendState, target: BackendTarget):
+        self.supervisor, self.state, self.target = supervisor, state, target
+        self.owner = asyncio.current_task()
+        self._cleanups: list[Callable[[], Awaitable[None]]] = []
+        self._finishing: asyncio.Task[None] | None = None
+
+    def require_running(self) -> None:
+        self.supervisor.require_running(self.state.app_id, self.target)
+
+    def attach(self) -> None:
+        # Consuming the captured response sends nothing to the backend port.
+        # Its bytes remain valid even if that original process has exited.
+        if self not in self.state._uses or self._finishing is not None or self.state._retiring:
+            raise BackendCapacityError("Application request has retired")
+        self.owner = asyncio.current_task()
+
+    def detach(self) -> None:
+        self.owner = None
+
+    @property
+    def retired(self) -> bool:
+        return self not in self.state._uses
+
+    def add_cleanup(self, cleanup: Callable[[], Awaitable[None]]) -> None:
+        self._cleanups.append(cleanup)
+
+    async def release_cleanup(self, cleanup: Callable[[], Awaitable[None]]) -> None:
+        """Retire one confirmed transport without ending the original job use."""
+        await cleanup()
+        if cleanup in self._cleanups:
+            self._cleanups.remove(cleanup)
+
+    async def finish(self) -> None:
+        self._start_finish()
+        await complete_cleanup(self._join_finish())
+
+    def _start_finish(self) -> asyncio.Task[None]:
+        if self._finishing is None:
+            self._finishing = asyncio.create_task(self._finish(), name=f"app-{self.state.app_id}-request-cleanup")
+        return self._finishing
+
+    async def _join_finish(self) -> None:
+        assert self._finishing is not None
+        await asyncio.shield(self._finishing)
+
+    async def _finish(self) -> None:
+        errors = []
+        for cleanup in reversed(self._cleanups[:]):
+            try:
+                await self.release_cleanup(cleanup)
+            except BaseException as error:
+                errors.append(error)
+        self.owner = None
+        if errors:
+            raise errors[0]
+        self.state._uses.discard(self)
+        self.state.last_used = time.monotonic()
+
+    async def interrupt(self) -> None:
+        owner = self.owner
+        # Cleanup already owns the exit. Cancelling its caller here would
+        # replace an original transport/receipt error with our own cancellation.
+        if self._finishing is None and owner is not None and not owner.done():
+            if not owner.cancelling():
+                owner.cancel("Application backend stopped")
+            done, _ = await asyncio.wait({owner}, timeout=_TASK_DRAIN_SECONDS)
+            if not done:
+                raise RuntimeError(f"Application {self.state.app_id} request did not exit")
+        cleanup = self._start_finish()
+        done, _ = await asyncio.wait({cleanup}, timeout=_TASK_DRAIN_SECONDS)
+        if not done:
+            raise RuntimeError(f"Application {self.state.app_id} request cleanup did not exit")
+        cleanup.result()
+
+    async def abort(self) -> None:
+        """Confirm the original process exit without waiting on this consumer.
+
+        Full retirement joins consumers afterwards. This ordering also applies
+        when the consumer's cleanup runs in complete_cleanup's separate task.
+        """
+        self.supervisor._begin_retirement(self.state)
+        assert self.state._process_retirement is not None
+        await asyncio.shield(self.state._process_retirement)
+
+
 @dataclass
 class BackendState:
     """Live state for one application's backend."""
@@ -151,6 +244,11 @@ class BackendState:
     _waiter: asyncio.Task[int] | None = field(default=None, repr=False)
     _operation: asyncio.Task[Any] | None = field(default=None, repr=False)
     _spawn: asyncio.Task[asyncio.subprocess.Process] | None = field(default=None, repr=False)
+    _uses: set[BackendUse] = field(default_factory=set, repr=False)
+    _retiring: bool = field(default=False, repr=False)
+    _retirement: asyncio.Task[None] | None = field(default=None, repr=False)
+    _process_retirement: asyncio.Task[None] | None = field(default=None, repr=False)
+    _rebuild_dir: str | None = field(default=None, repr=False)
 
     def public(self) -> dict[str, Any]:
         return {
@@ -188,10 +286,23 @@ class BackendSupervisor:
         """Readmit the original backend after a managed writer waits for its lock."""
         state = self.get(app_id)
         if (self._shutting_down or app_id in self._blocked_apps or state is None
-                or state.state != RUNNING or state.port != target.port or state.process is not target.process
+                or state._retiring or state.state != RUNNING or state.port != target.port or state.process is not target.process
                 or target.process is None or target.process.returncode is not None):
             raise BackendCapacityError("Application backend stopped or changed while waiting for write admission")
         return state
+
+    async def acquire(self, app_id: str, app_dir: str) -> BackendUse:
+        """Select and register without yielding between the two facts."""
+        state = await self.ensure_running(app_id, app_dir)
+        if state.state == ABSENT:
+            raise BackendAbsentError("This application has no backend (no executable start.sh)")
+        if state.state != RUNNING or state.port is None:
+            raise BackendCapacityError(state.error or f"backend is {state.state}")
+        target = BackendTarget(state.port, state.process)
+        self.require_running(app_id, target)
+        use = BackendUse(self, state, target)
+        state._uses.add(use)
+        return use
 
     def describe(self, app_id: str, app_dir: str) -> dict[str, Any]:
         """Public backend status for the API, without starting anything."""
@@ -243,7 +354,7 @@ class BackendSupervisor:
             raise RuntimeError("Application backend supervisor is shutting down")
         st = self._state_for(app_id, app_dir)
         async with st.lock:
-            if self._shutting_down or app_id in self._blocked_apps:
+            if self._shutting_down or app_id in self._blocked_apps or st._retiring:
                 raise RuntimeError("Application backend supervisor is shutting down")
             st._operation = asyncio.current_task()
             try:
@@ -344,6 +455,8 @@ class BackendSupervisor:
         if self._shutting_down or app_id in self._blocked_apps:
             raise RuntimeError("Application backend supervisor is shutting down")
         st = self._state_for(app_id, app_dir)
+        if st._retiring:
+            raise BackendCapacityError("Application backend is retiring")
         st.last_used = time.monotonic()
 
         if backend_script(app_dir, "start.sh") is None:
@@ -353,8 +466,12 @@ class BackendSupervisor:
         async with st._admission:
             while True:
                 async with st.lock:
+                    if st._retiring:
+                        raise BackendCapacityError("Application backend is retiring")
                     if self._shutting_down or app_id in self._blocked_apps:
                         raise RuntimeError("Application backend supervisor is shutting down")
+                    if st._uses and (st.process is None or st.process.returncode is not None):
+                        raise BackendCapacityError("Original application requests have not retired")
                     st._operation = asyncio.current_task()
                     try:
                         result = await self._ensure_running(st)
@@ -462,14 +579,82 @@ class BackendSupervisor:
         st = self._backends.get(app_id)
         if st is None:
             return
-        async with st.lock:
-            await self._stop_state(st)
+        await complete_cleanup(self._join_retirement(self._begin_retirement(st)))
+
+    async def _join_retirement(self, task: asyncio.Task[None]) -> None:
+        await asyncio.shield(task)
+
+    def _begin_retirement(self, st: BackendState, *, rebuild_dir: str | None = None) -> asyncio.Task[None]:
+        already_retiring = st._retiring
+        st._retiring = True
+        if rebuild_dir is not None:
+            st._rebuild_dir = rebuild_dir
+        if st._retirement is None or st._retirement.done():
+            operation = st._operation
+            if operation is not None and operation is not asyncio.current_task() and not operation.done() and not operation.cancelling():
+                operation.cancel()
+            process = st._process_retirement
+            if (not already_retiring or process is None or process.cancelled()
+                    or (process.done() and process.exception() is not None)):
+                st._process_retirement = asyncio.create_task(self._retire_process(st))
+            st._retirement = asyncio.create_task(self._retire(st), name=f"app-{st.app_id}-retire")
+            st._retirement.add_done_callback(self._observe_retirement)
+        return st._retirement
+
+    @staticmethod
+    def _observe_retirement(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error("Application retirement remains unconfirmed", exc_info=(type(error), error, error.__traceback__))
+
+    async def _retire_process(self, st: BackendState) -> None:
+        try:
+            await asyncio.wait_for(st.lock.acquire(), timeout=_TASK_DRAIN_SECONDS)
+        except TimeoutError as error:
+            raise RuntimeError(f"Application {st.app_id} stop lock did not become available") from error
+        try:
+            await self._stop_process(st)
+        finally:
+            st.lock.release()
+
+    async def _retire(self, st: BackendState) -> None:
+        assert st._process_retirement is not None
+        process_error = None
+        try:
+            await asyncio.shield(st._process_retirement)
+        except Exception as error:
+            process_error = error
+        # No lifecycle lock spans consumer cleanup: Wiki consumers may need
+        # the original process-exit proof before finishing their journal.
+        results = await asyncio.gather(*(use.interrupt() for use in tuple(st._uses)), return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if process_error is not None:
+            raise process_error
+        if errors or st._uses:
+            raise RuntimeError(f"Application {st.app_id} request cleanup unconfirmed") from (errors[0] if errors else None)
+        self._release_process(st)
+        if st._rebuild_dir is not None:
+            st.installed = False
+            st.state = STOPPED if backend_script(st._rebuild_dir, "start.sh") else ABSENT
+            st.error = None
+            st.failed_at = None
+            st._rebuild_dir = None
+        st._retiring = False
 
     def close_application(self, app_id: str) -> None:
         """Seal install/start before joining their original state in stop()."""
         self._blocked_apps.add(app_id)
 
     async def _stop_state(self, st: BackendState) -> None:
+        already_retiring = st._retiring
+        st._retiring = True
+        await self._stop_process(st)
+        if st._uses:
+            raise RuntimeError(f"Application {st.app_id} requests have not retired")
+        self._release_process(st)
+        if not already_retiring and (st._retirement is None or st._retirement.done()):
+            st._retiring = False
+
+    async def _stop_process(self, st: BackendState) -> None:
         if st._spawn is not None:
             spawn = st._spawn
             try:
@@ -520,7 +705,8 @@ class BackendSupervisor:
             st._readers = list(pending)
             if pending:
                 raise RuntimeError(f"Application {st.app_id} output readers did not exit")
-        # Process and readers must finish before their ownership is released.
+    def _release_process(self, st: BackendState) -> None:
+        # Process, readers and consumers finish before ownership is released.
         st.process = None
         st.pid = None
         st.port = None
@@ -536,11 +722,7 @@ class BackendSupervisor:
         st = self._backends.get(app_id)
         if st is None:
             return
-        await self.stop(app_id)
-        st.installed = False
-        st.state = STOPPED if backend_script(app_dir, "start.sh") else ABSENT
-        st.error = None
-        st.failed_at = None
+        await complete_cleanup(self._join_retirement(self._begin_retirement(st, rebuild_dir=app_dir)))
 
     async def stop_all(self) -> int:
         stopped = 0
@@ -556,7 +738,8 @@ class BackendSupervisor:
     async def _evict_one(self) -> None:
         # Selection and acquisition of an unlocked lock do not suspend. Other
         # admissions cannot choose this lifecycle once its stop has begun.
-        candidates = [st for st in self._slots.values() if st.state == RUNNING and not st.lock.locked()]
+        candidates = [st for st in self._slots.values() if st.state == RUNNING and not st.lock.locked()
+                      and not st._uses and not st._retiring]
         if not candidates:
             raise BackendCapacityError("Application backend capacity is unavailable; all slots are starting or retiring")
         st = min(candidates, key=lambda item: item.last_used)
@@ -574,11 +757,13 @@ class BackendSupervisor:
         now = time.monotonic()
         stopped = 0
         for st in list(self._backends.values()):
-            if st.state != RUNNING:
+            if st.state != RUNNING or st._uses or st._retiring:
                 continue
             if now - st.last_used < IDLE_TIMEOUT_S:
                 continue
             async with st.lock:
+                if st._uses or st._retiring:
+                    continue
                 self._log(st, "stopped after idle timeout")
                 await self._stop_state(st)
             stopped += 1
@@ -604,7 +789,7 @@ class BackendSupervisor:
 
     def drain_blockers(self) -> tuple[str, ...]:
         # Running idle servers remain resources for normal shutdown to retire.
-        if any(st.lock.locked() or st._admission.locked() or st._spawn is not None
+        if any(st._uses or st._retiring or st.lock.locked() or st._admission.locked() or st._spawn is not None
                or st._operation is not None for st in self._owned_states()):
             return ("backend start, stop or spawn cleanup",)
         return ()
@@ -658,16 +843,9 @@ class BackendSupervisor:
                     continue
                 st._spawn = None
             try:
-                await asyncio.wait_for(st.lock.acquire(), timeout=_TASK_DRAIN_SECONDS)
-            except TimeoutError:
-                failures.append(f"Application {app_id} stop lock did not become available")
-                continue
-            try:
-                await self._stop_state(st)
+                await self._join_retirement(self._begin_retirement(st))
             except Exception as exc:
                 failures.append(str(exc))
-            finally:
-                st.lock.release()
         if failures:
             raise RuntimeError("Application backend shutdown incomplete: " + "; ".join(failures))
 
@@ -677,6 +855,10 @@ class BackendSupervisor:
 
 class BackendCapacityError(RuntimeError):
     """This request did not obtain a backend slot; the application did not fail."""
+
+
+class BackendAbsentError(RuntimeError):
+    """The application does not declare a backend."""
 
 
 def _kill_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGKILL) -> None:

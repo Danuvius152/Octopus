@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -29,10 +28,9 @@ from ..auth import verify_token
 from ..crypto import encrypt
 from ..database import Database
 from ..deps import ScopeUser, SessionMgr
-from ..harness import LoginDriver, LoginMethod, get_harness, has_backend
+from ..harness import LoginDriver, LoginMethod, get_harness
 from ..harness.login import OAuthCompletion
 from ..models import (
-    AuthType,
     BackendKind,
     CreateCredentialRequest,
     CredentialInfo,
@@ -42,10 +40,8 @@ from ..models import (
 )
 from ..oauth_credentials import OAuthCredentials
 from ..oauth_errors import OAuthLoginError
+from ..sessions.configuration import SessionConfigurationError
 from ..users import UserManager
-
-if TYPE_CHECKING:
-    from ..codex_login import CodexLoginSession
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +54,10 @@ _db = None
 def set_db(db) -> None:
     global _db
     _db = db
+    from ..codex_login import codex_login_manager
+
+    if db is not None:
+        codex_login_manager.bind(db)
 
 
 def _require_db():
@@ -144,11 +144,11 @@ async def _update_credential(
         update_kwargs["needs_reconnect"] = False
         update_kwargs["last_refresh_error_code"] = None
 
-    if update_kwargs:
-        await db.update_credential(credential_id, **update_kwargs)
-
-    updated = await db.get_credential(credential_id)
-    assert updated is not None
+    updated = await db.reauthorize_credential(
+        credential_id, user_id=user_id, backend=existing["backend"], **update_kwargs,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="credential not found")
     return _row_to_info(updated)
 
 
@@ -159,19 +159,12 @@ async def delete_credential(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    row = await session_manager.delete_credential_binding(credential_id, user_id)
+    try:
+        row = await session_manager.delete_credential_binding(credential_id, user_id)
+    except SessionConfigurationError as error:
+        raise HTTPException(error.status_code, str(error)) from error
     if row is None:
         raise HTTPException(status_code=404, detail="credential not found")
-    # Revoke any on-disk login state for this credential's harness (Codex
-    # rmtree's its CODEX_HOME; Claude has nothing on disk). The harness owns
-    # the cleanup — no backend-kind branching here.
-    driver = (
-        get_harness(row["backend"]).login
-        if has_backend(row.get("backend"))
-        else None
-    )
-    if driver is not None:
-        driver.cleanup_credential(credential_id)
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +291,8 @@ async def oauth_cancel(
 class CodexLoginStartRequest(BaseModel):
     label: str = Field(min_length=1)
     # Re-authorization (harness-credential-reauth.md §5): when set, re-run
-    # `codex login` against this existing credential's own CODEX_HOME so its
-    # auth.json is refreshed in place (no new row, no new dir, bindings kept).
+    # Publish staged authorization into this existing credential's CODEX_HOME
+    # after validating the current target; keep its row, native history and bindings.
     reauth_credential_id: str | None = None
 
 
@@ -331,6 +324,8 @@ async def codex_login_start(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
+    from ..codex_login import CodexLoginConflict
+
     if req.reauth_credential_id is not None:
         db = _require_db()
         existing = await db.get_credential(req.reauth_credential_id, user_id)
@@ -347,6 +342,8 @@ async def codex_login_start(
             reauth_credential_id=req.reauth_credential_id,
             user_id=user_id,
         )
+    except CodexLoginConflict as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
     return CodexLoginStartResponse(login_id=session.id)
@@ -356,8 +353,7 @@ async def codex_login_start(
 async def codex_login_status(
     login_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
-    """Poll an in-flight Codex login. On success, persist the credential row
-    (pointing at the CODEX_HOME dir) once and return it."""
+    """Observe the historical operation and the credential's current availability."""
     from ..codex_login import CodexLoginState
 
     session = _login_driver(BackendKind.codex.value).get(login_id)
@@ -366,9 +362,9 @@ async def codex_login_status(
 
     credential: CredentialInfo | None = None
     if session.state == CodexLoginState.success:
-        db = _require_db()
-        secret_key = await UserManager(db).data_key_for(user_id)
-        credential = await _persist_codex_login(db, session, user_id, secret_key)
+        row = await _require_db().get_credential(session.credential_id, user_id)
+        if row is not None and row["user_id"] == user_id:
+            credential = _row_to_info(row)
 
     return CodexLoginStatusResponse(
         state=session.state.value,
@@ -377,69 +373,6 @@ async def codex_login_status(
         message=session.message,
         credential=credential,
     )
-
-
-async def _persist_codex_login(
-    db: Database, session: CodexLoginSession, user_id: str | None, secret_key: str,
-) -> CredentialInfo | None:
-    from ..codex_login import CodexLoginState
-
-    # Concurrent status pollers share this login's one persistence operation.
-    async with session._persist_lock:
-        existing = await db.get_credential(session.credential_id, user_id)
-        if session.persisted or session._reauth:
-            if (existing is None or existing["user_id"] != user_id
-                    or existing["backend"] != BackendKind.codex.value):
-                session.state = CodexLoginState.error
-                session.message = "The signed-in credential is no longer available. Start a new sign-in."
-                return None
-            if session.persisted:
-                return _row_to_info(existing)
-        # No real secret for Codex — the credential *is* the CODEX_HOME dir.
-        # Store the dir path (encrypted, harmless) so the row is self-describing;
-        # session_manager resolves the dir deterministically from credential_id.
-        if existing is not None:
-            # Re-authorization: the row already exists (its CODEX_HOME just got
-            # a fresh auth.json) — clear the needs_reconnect flag in place so
-            # every binding keeps working (harness-credential-reauth.md §5).
-            updated = await db.reauthorize_credential(
-                session.credential_id,
-                user_id=user_id,
-                backend=BackendKind.codex.value,
-                label=session.label,
-                status=CredentialStatus.active.value,
-                needs_reconnect=False,
-                last_refresh_error_code=None,
-            )
-            if updated is None:
-                session.state = CodexLoginState.error
-                session.message = "The signed-in credential is no longer available. Start a new sign-in."
-                return None
-            session.persisted = True
-            credential = _row_to_info(updated)
-        else:
-            created_at = datetime.now(UTC).isoformat()
-            await db.save_credential(
-                credential_id=session.credential_id,
-                backend=BackendKind.codex.value,
-                label=session.label,
-                auth_type=AuthType.oauth.value,
-                secret_encrypted=encrypt(
-                    session.codex_home, secret_key
-                ),
-                created_at=created_at,
-                user_id=user_id,
-            )
-            session.persisted = True
-            credential = CredentialInfo(
-                id=session.credential_id,
-                backend=BackendKind.codex,
-                label=session.label,
-                auth_type=AuthType.oauth,
-                created_at=created_at,
-            )
-
-        return credential
 
 
 @router.post("/codex/cancel", status_code=status.HTTP_204_NO_CONTENT)

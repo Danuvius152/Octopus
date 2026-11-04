@@ -25,6 +25,13 @@ still named `claude_session_id`. The latter stores either backend's native
 identity; its old spelling does not make consumers Claude-specific. These names
 avoid a persistence/API migration for a vocabulary-only change.
 
+Login drivers also identify their original unpublished credential or unfinished
+deletion cleanup, and own deletion through binding removal and local cleanup.
+Configuration code resolves that declared owner even after the current row is
+gone; it does not infer a backend from a directory or inspect a login manager's
+private registry. Device publication, target exclusion and the original COMMIT
+boundary are maintained in the [credential contract](harness-credential-reauth.md#codex-device-operation-ownership).
+
 ## Assembly, execution and retirement
 
 <a id="instruction-assembly"></a>

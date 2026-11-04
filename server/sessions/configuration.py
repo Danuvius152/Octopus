@@ -8,7 +8,8 @@ from typing import Any
 
 from ..aio import complete_cleanup
 from ..credential_bindings import validate_credential_binding
-from ..harness import model_settings
+from ..db.credentials import CredentialOwnerUnavailable
+from ..harness import all_backends, get_harness, has_backend, model_settings
 from .base import Session, SessionManagerBase
 
 
@@ -101,9 +102,27 @@ class ConfigurationMixin(SessionManagerBase):
         assert self.db is not None
         async def remove() -> dict[str, Any] | None:
             assert self.db is not None
+            row = await self.db.get_credential(credential_id, user_id)
+            if row is None:
+                driver = next((login for backend in all_backends()
+                               if (login := get_harness(backend).login) is not None
+                               and login.owns_credential(credential_id, user_id)), None)
+                if driver is None:
+                    return None
+            else:
+                driver = get_harness(row["backend"]).login if has_backend(row["backend"]) else None
+            if driver is not None:
+                return await driver.delete_credential(credential_id, user_id, remove_binding)
+            return await remove_binding()
+
+        async def remove_binding() -> dict[str, Any] | None:
+            assert self.db is not None
             async with self.configuration_lock:
-                row = await self.db.get_credential(credential_id, user_id)
-                if row is None or not await self.db.delete_credential(credential_id):
+                try:
+                    row = await self.db.delete_owned_credential(credential_id, user_id)
+                except CredentialOwnerUnavailable as error:
+                    raise SessionConfigurationError(str(error), 403) from error
+                if row is None:
                     return None
                 for live in self.sessions.values():
                     if live.credential_id == credential_id:

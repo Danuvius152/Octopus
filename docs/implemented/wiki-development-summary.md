@@ -149,7 +149,11 @@ SQLite 收据各自保留，取消或记录失败不伪造跨资源回滚。普�
 仍为 410。SmartReader 的 agent 通路和 Sapphire 的文件通路保持，同次保存不双写。
 
 Sapphire 的受管 HTTP 操作由 AppMutation/app_bridge 持有完整生命周期，proxy
-只消费结果；原 backend 身份、异步 job 接管、失败及清理责任见
+只消费结果。它复用 supervisor 的原实例使用登记；202 无 await 转交原登记与
+client 给既有 follower，后续每次 poll 验证原 target，直到实际工作及 journal 清理
+确认才释放。主动 abort 只等原进程退出证明，完整退休另等消费者，避免自身等待；
+传输观察失败与清理失败分别留诊断，后者继续阻塞 drain。没有新增任务队列或租约
+服务。原 backend 身份、异步 job 接管、失败及清理责任见
 [应用后端合同](application-backends.md#7-routing)。
 
 隔离真实文件与 HTTP/App/MCP 路径回归覆盖准备后撤权、重绑、旧借用退出、最终

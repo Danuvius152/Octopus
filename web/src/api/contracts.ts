@@ -2261,8 +2261,7 @@ export interface paths {
         };
         /**
          * Codex Login Status
-         * @description Poll an in-flight Codex login. On success, persist the credential row
-         *     (pointing at the CODEX_HOME dir) once and return it.
+         * @description Observe the historical operation and the credential's current availability.
          */
         get: operations["codex_login_status_api_credentials_codex__login_id__status_get"];
         put?: never;

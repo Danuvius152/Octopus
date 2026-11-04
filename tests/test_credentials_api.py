@@ -442,7 +442,7 @@ async def test_patch_new_secret_clears_needs_reconnect(client):
 
 
 @pytest.mark.asyncio
-async def test_codex_status_reauth_clears_flag_in_place(client):
+async def test_codex_status_observation_does_not_clear_a_current_reconnect_flag(client):
     from server.codex_login import (
         CodexLoginSession,
         CodexLoginState,
@@ -473,13 +473,13 @@ async def test_codex_status_reauth_clears_flag_in_place(client):
         body = res.json()
         assert body["state"] == "success"
         assert body["credential"]["id"] == "codexcred001"
-        assert body["credential"]["needs_reconnect"] is False
+        assert body["credential"]["needs_reconnect"] is True
 
         rows = await db.load_credentials()
         assert len(rows) == 1                     # still one row, updated in place
         row = await db.get_credential("codexcred001")
-        assert row["needs_reconnect"] is False
-        assert row["status"] == "active"
+        assert row["needs_reconnect"] is True
+        assert row["status"] == "needs_reconnect"
     finally:
         codex_login_manager._sessions.pop("login-reauth", None)
 

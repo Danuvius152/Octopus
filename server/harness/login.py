@@ -17,17 +17,19 @@ importing the managers directly and branching on backend kind:
   - `complete_oauth(request, credentials)` redirect only — own exchange and commit
   - `get(id)`              current login record; device polling or OAuth owner check
   - `cancel(id)`           backend-specific cancellation; OAuth returns its result
-  - `cleanup_credential(id)` revoke local state on delete (Codex: rmtree
-                           its CODEX_HOME; Claude: nothing on disk)
+  - `owns_credential(id, user_id)` identify unpublished login or unfinished cleanup
+  - `delete_credential(id, user_id, remove)` retire any original login before
+                           the binding deletion and local-state cleanup
 
 Methods a given method doesn't use raise NotImplementedError. The drivers
 wrap the existing `OAuthLoginManager` / `CodexLoginManager` singletons
 (which keep their state + tests) — this layer only routes through the
-harness and owns the per-kind delete cleanup.
+harness and owns the per-kind deletion lifetime, including local cleanup.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
@@ -74,4 +76,8 @@ class LoginDriver(Protocol):
     async def complete_oauth(self, request: OAuthCompletion, credentials: OAuthCredentialWriter) -> CredentialInfo: ...
     def get(self, login_id: str) -> Any: ...  # the record, or None
     async def cancel(self, login_id: str) -> OAuthCancelResponse | None: ...
-    def cleanup_credential(self, credential_id: str) -> None: ...
+    def owns_credential(self, credential_id: str, user_id: str | None) -> bool: ...
+    async def delete_credential(
+        self, credential_id: str, user_id: str | None,
+        remove: Callable[[], Awaitable[dict[str, Any] | None]],
+    ) -> dict[str, Any] | None: ...

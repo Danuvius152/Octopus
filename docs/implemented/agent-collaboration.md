@@ -64,6 +64,20 @@ A delegation child session keeps the ordinary session retention policy:
   the last such responsibility rechecks that candidate and can seal directly.
   A refused empty child is archived; storage uncertainty follows fail-stop.
 
+  Follow-up setup keeps its own admission phase. Typed SessionOwner refusals
+  prove no input was accepted and permit restoring the previous round. A plain
+  exception or lost receipt remains unknown even if the session is later removed.
+  If the original parent/child deletion is confirmed and this setup never
+  submitted input (or received an explicit refusal) and owns no resources, it
+  closes only its captured in-memory round/work without writing a nonexistent
+  previous snapshot. It also withdraws that exact parent-work responsibility.
+  A changed relationship or recording-closed marker alone is not deletion proof;
+  accepted/unknown input keeps its original owner and drain responsibility.
+  `tests/test_delegation_restart_deletion.py` covers parent/child deletion around
+  CAS, before input, after acceptance and with a lost receipt, nested withdrawal
+  and relationship replacement. Existing refusal/question-writer tests retain
+  previous-round ownership when continuation is refused.
+
   Once every owned reply and related input is processed, the last successful
   carrier can be the final candidate without an extra synthesis call. The seal
   rejects further delegated responsibility/input for that work. Parent failure

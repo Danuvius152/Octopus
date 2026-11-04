@@ -868,10 +868,13 @@ class _OAuthLoginDriver:
 
         return await oauth_login_manager.cancel(login_id)
 
-    def cleanup_credential(self, credential_id: str) -> None:
+    async def delete_credential(self, credential_id, user_id, remove):
         # Claude credentials are a secret blob in the DB — nothing on disk to
         # revoke; row deletion is sufficient.
-        return None
+        return await remove()
+
+    def owns_credential(self, credential_id: str, user_id: str | None) -> bool:
+        return False  # Redirect completion has no unpublished directory target.
 
 
 # ------------------------------------------------------------------ profile

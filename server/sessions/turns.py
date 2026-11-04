@@ -388,7 +388,7 @@ class TurnsMixin(SessionManagerBase):
         database = self.input_database()
         session = self.sessions.get(session_id)
         if session is None:
-            raise ValueError(f"Session {session_id} not found")
+            raise SessionAdmissionClosed(f"Session {session_id} not found")
         if self._admission_closed:
             from ..submission_models import SubmissionConflict
             from .client_submissions import input_digest

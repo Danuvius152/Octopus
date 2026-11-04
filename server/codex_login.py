@@ -8,9 +8,8 @@ itself polls the device endpoint; when the user authorizes in their browser it
 writes `auth.json` into that dir and exits 0. No secret is stored in Octopus —
 the credential *is* the dir, and Codex manages the token + its refresh there.
 
-Lifecycle: `start(label)` → spawn + scrape (returns url+code) → caller polls
-`status(login_id)` until `success`/`error` → on success the route persists a
-`backend_credentials` row pointing at the dir.
+The original task owns spawn, staging, publication and confirmed cleanup.
+Status polling only observes that operation and current credential availability.
 """
 
 from __future__ import annotations
@@ -24,11 +23,18 @@ import shutil
 import signal
 import tempfile
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
+from typing import Any, Literal
 
+from .aio import complete_cleanup
+from .codex_credentials import CodexCredentials
 from .config import settings
+from .database import Database
 from .harness.run import _which_with_fallback, augmented_path
+from .process_groups import wait_group_exit
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +55,17 @@ class CodexLoginState(str, Enum):
     cancelled = "cancelled"
 
 
+class CodexLoginPhase(str, Enum):
+    authorizing = "authorizing"
+    publishing = "publishing"
+    cleanup = "cleanup"
+    retired = "retired"
+
+
+class CodexLoginConflict(RuntimeError):
+    """The original operation still owns this credential target."""
+
+
 @dataclass
 class CodexLoginSession:
     id: str
@@ -59,14 +76,16 @@ class CodexLoginSession:
     user_code: str | None = None
     state: CodexLoginState = CodexLoginState.pending
     message: str | None = None
-    persisted: bool = False  # set once the route saves the credential row
+    phase: CodexLoginPhase = CodexLoginPhase.authorizing
     # Who started this login — see `LoginSession.user_id` in oauth_login.py.
     user_id: str | None = None
     # A reauthorization owns only a staging home, never the existing native
     # records. Publish its auth.json atomically after a successful CLI exit.
     _login_home: str | None = field(default=None, repr=False)
     _reauth: bool = field(default=False, repr=False)
-    _persist_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _committer: asyncio.Task[None] | None = field(default=None, repr=False)
+    _cleanup_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    _group_retired: bool = field(default=False, repr=False)
     _proc: asyncio.subprocess.Process | None = field(default=None, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
     _watchdog: asyncio.Task | None = field(default=None, repr=False)
@@ -76,6 +95,23 @@ class CodexLoginSession:
     @property
     def device_code_ready(self) -> bool:
         return bool(self.verification_url and self.user_code)
+
+
+@dataclass
+class _CredentialDeletion:
+    """Original deletion proof survives a failed local home cleanup.
+
+    Only a confirmed removed row authorizes permanent-home deletion. Retrying
+    cleaning_home reuses that proof and never replays the database operation.
+    """
+
+    credential_id: str
+    user_id: str | None
+    login: CodexLoginSession | None
+    remove: Callable[[], Awaitable[dict[str, Any] | None]]
+    phase: Literal["retiring_login", "deleting_binding", "cleaning_home"] = "retiring_login"
+    removed_row: dict[str, Any] | None = None
+    task: asyncio.Task[dict[str, Any] | None] | None = None
 
 
 def build_codex_login_argv() -> list[str] | None:
@@ -111,12 +147,34 @@ def _kill_process_group(proc: asyncio.subprocess.Process | None) -> None:
             pass
 
 
+def _kill_login_group(session: CodexLoginSession) -> None:
+    if not session._group_retired:
+        _kill_process_group(session._proc)
+
+
+async def _remove_owned_home(path: str | Path) -> None:
+    directory = Path(path)
+    try:
+        directory.stat()
+    except FileNotFoundError:
+        return
+    # exists() can turn permission/I/O failures into False. Only a known
+    # missing root or successful deletion confirms this original cleanup.
+    await asyncio.to_thread(shutil.rmtree, directory)
+
+
 class CodexLoginManager:
     """Holds in-flight Codex device-auth logins. Single instance, app-lifetime."""
 
-    def __init__(self) -> None:
+    def __init__(self, db: Database | None = None) -> None:
         self._sessions: dict[str, CodexLoginSession] = {}
+        self._targets: dict[str, CodexLoginSession] = {}
+        self._deletions: dict[str, _CredentialDeletion] = {}
+        self._credentials = CodexCredentials(db) if db is not None else None
         self._shutting_down = False
+
+    def bind(self, db: Database) -> None:
+        self._credentials = CodexCredentials(db)
 
     async def start(
         self,
@@ -138,12 +196,11 @@ class CodexLoginManager:
         # runs in an owned staging home so a failed CLI cannot damage valid
         # auth, configuration or native session records in the existing home.
         credential_id = reauth_credential_id or uuid.uuid4().hex[:12]
+        if credential_id in self._targets or credential_id in self._deletions:
+            raise CodexLoginConflict("A sign-in for this credential is still in progress")
         home = codex_home_for(credential_id)
-        os.makedirs(home, exist_ok=reauth_credential_id is not None)
-        login_home = (
-            tempfile.mkdtemp(prefix=f".{credential_id}-login-", dir=codex_home_root())
-            if reauth_credential_id else home
-        )
+        os.makedirs(codex_home_root(), exist_ok=True)
+        login_home = tempfile.mkdtemp(prefix=f".{credential_id}-login-", dir=codex_home_root())
 
         env = os.environ.copy()
         env["CODEX_HOME"] = login_home
@@ -165,27 +222,48 @@ class CodexLoginManager:
         # Register before yielding to spawn. The drive owns the process even
         # if the HTTP waiter is cancelled or shutdown starts during creation.
         self._sessions[session.id] = session
+        self._targets[credential_id] = session
+        credentials = self._credentials
         spawned = asyncio.Event()
 
         async def launch_and_drive() -> None:
             try:
-                session._proc = await asyncio.create_subprocess_exec(
-                    *argv, cwd=login_home, env=env,
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    start_new_session=True,
-                )
+                try:
+                    session._proc = await asyncio.create_subprocess_exec(
+                        *argv, cwd=login_home, env=env,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                except Exception as exc:
+                    await self._fail(session, f"Could not launch the `codex` CLI for sign-in: {exc}")
+                    return
+                finally:
+                    spawned.set()
+                if session.state != CodexLoginState.pending:
+                    _kill_login_group(session)
+                await self._drive(session, credentials)
+            except asyncio.CancelledError:
+                if session.state == CodexLoginState.pending:
+                    session.state = CodexLoginState.cancelled
+                    session.message = "Sign-in execution cancelled"
+                raise
             except Exception as exc:
-                await self._fail(session, f"Could not launch the `codex` CLI for sign-in: {exc}")
-                return
+                await self._fail(session, f"Could not complete Codex sign-in: {exc}")
             finally:
-                spawned.set()
-            if session.state != CodexLoginState.pending:
-                _kill_process_group(session._proc)
-            await self._drive(session)
+                session._scraped.set()
+                await complete_cleanup(self._join_cleanup(session))
 
         session._task = asyncio.create_task(launch_and_drive(), name=f"codex-login-{session.id}")
+        def finished(task):
+            if not task.cancelled() and (error := task.exception()) is not None:
+                session.message = f"Sign-in cleanup remains unconfirmed: {error}"
+                logger.error("Codex login %s cleanup remains unconfirmed", session.id,
+                             exc_info=(type(error), error, error.__traceback__))
+            self._release_target(session)
+
+        session._task.add_done_callback(finished)
         # Scrape happens asynchronously — `start` returns immediately so the
         # HTTP request can't outlive a proxy/tunnel timeout (codex blocks the
         # whole device-auth window polling for authorization). The UI polls
@@ -194,6 +272,7 @@ class CodexLoginManager:
         self._gc()
         await spawned.wait()
         if session._proc is None:
+            await self._reap(session)
             raise RuntimeError(session.message)
 
         logger.info(
@@ -207,7 +286,8 @@ class CodexLoginManager:
         try:
             await asyncio.wait_for(session._scraped.wait(), _SCRAPE_TIMEOUT_SECONDS)
         except TimeoutError:
-            if session.state == CodexLoginState.pending and not session.device_code_ready:
+            if (session.phase == CodexLoginPhase.authorizing
+                    and session.state == CodexLoginState.pending and not session.device_code_ready):
                 await self._fail(
                     session,
                     "Codex didn't return a device code in time — check the "
@@ -215,7 +295,7 @@ class CodexLoginManager:
                 )
                 await self._reap(session)
 
-    async def _drive(self, session: CodexLoginSession) -> None:
+    async def _drive(self, session: CodexLoginSession, credentials: CodexCredentials | None) -> None:
         """Read codex's output: scrape url+code, then await exit and classify."""
         proc = session._proc
         assert proc is not None and proc.stdout is not None
@@ -231,13 +311,17 @@ class CodexLoginManager:
 
         rc = await proc.wait()
         if session.state != CodexLoginState.pending:
-            shutil.rmtree(session._login_home or session.codex_home, ignore_errors=True)
-            session._scraped.set()
             return
         login_home = session._login_home or session.codex_home
         auth_path = os.path.join(login_home, "auth.json")
         auth_ok = os.path.isfile(auth_path)
         if rc == 0 and auth_ok:
+            # Retire possible descendants before validating their final bytes.
+            _kill_login_group(session)
+            await wait_group_exit(proc.pid, timeout=_REAP_TIMEOUT_SECONDS, after_kill=True)
+            session._group_retired = True
+            if session.state != CodexLoginState.pending:
+                return
             try:
                 with open(auth_path) as auth_file:
                     auth = json.load(auth_file)
@@ -248,15 +332,11 @@ class CodexLoginManager:
                 await self._fail(session, "Codex sign-in produced invalid auth.json.")
                 session._scraped.set()
                 return
-            if session._reauth:
-                try:
-                    os.replace(auth_path, os.path.join(session.codex_home, "auth.json"))
-                except OSError as exc:
-                    await self._fail(session, f"Could not save Codex sign-in: {exc}")
-                    session._scraped.set()
-                    return
-                shutil.rmtree(login_home, ignore_errors=True)
-            session.state = CodexLoginState.success
+            if credentials is None:
+                raise RuntimeError("Codex credential database is not bound")
+            session.phase = CodexLoginPhase.publishing
+            session._committer = asyncio.create_task(credentials.commit(session), name=f"codex-login-{session.id}-commit")
+            await complete_cleanup(self._join_commit(session))
             logger.info("Codex login %s: success", session.id)
         else:
             await self._fail(
@@ -266,6 +346,44 @@ class CodexLoginManager:
                 else f"Codex sign-in exited with status {rc}.",
             )
         session._scraped.set()  # unblock start() if it never scraped
+
+    async def _join_commit(self, session: CodexLoginSession) -> None:
+        assert session._committer is not None
+        await asyncio.shield(session._committer)
+
+    async def _cleanup(self, session: CodexLoginSession) -> None:
+        """Only confirmed group exit and staging removal release the target."""
+        proc = session._proc
+        if proc is not None and not session._group_retired:
+            _kill_login_group(session)
+            await proc.wait()
+            await wait_group_exit(proc.pid, timeout=_REAP_TIMEOUT_SECONDS, after_kill=True)
+            session._group_retired = True
+        if session._login_home is not None:
+            await _remove_owned_home(session._login_home)
+        session.phase = CodexLoginPhase.retired
+        self._release_target(session)
+
+    def _release_target(self, session: CodexLoginSession) -> None:
+        if (session.phase == CodexLoginPhase.retired and session._task is not None and session._task.done()
+                and self._targets.get(session.credential_id) is session):
+            self._targets.pop(session.credential_id)
+
+    async def _join_cleanup(self, session: CodexLoginSession) -> None:
+        """Explicit cancel/shutdown can retry failed cleanup, never publication.
+
+        Retain the same target and result. Group-exit proof is kept so a later
+        staging cleanup retry never signals a retired process group's old pid.
+        """
+        await asyncio.shield(self._start_cleanup(session))
+
+    def _start_cleanup(self, session: CodexLoginSession) -> asyncio.Task[None]:
+        task = session._cleanup_task
+        if task is None or (task.done() and not task.cancelled() and task.exception() is not None):
+            session.phase = CodexLoginPhase.cleanup
+            task = asyncio.create_task(self._cleanup(session), name=f"codex-login-{session.id}-cleanup")
+            session._cleanup_task = task
+        return task
 
     def _try_scrape(self, session: CodexLoginSession, buf: str) -> None:
         if session.verification_url is None:
@@ -289,8 +407,18 @@ class CodexLoginManager:
         done, _ = await asyncio.wait({session._task}, timeout=_REAP_TIMEOUT_SECONDS)
         if not done or (session._proc is not None and session._proc.returncode is None):
             raise RuntimeError(f"Codex login {session.id} shutdown did not confirm process exit")
-        if not session._task.cancelled():
+        if session.phase == CodexLoginPhase.cleanup:
+            # An explicit retirement request may finish a prior local cleanup
+            # failure. The original failed task and diagnostic remain recorded.
+            cleanup = self._start_cleanup(session)
+            done, _ = await asyncio.wait({cleanup}, timeout=_REAP_TIMEOUT_SECONDS)
+            if not done:
+                raise RuntimeError(f"Codex login {session.id} cleanup did not exit")
+            cleanup.result()
+        elif not session._task.cancelled() and session.phase != CodexLoginPhase.retired:
             session._task.result()
+        if session.phase != CodexLoginPhase.retired:
+            raise RuntimeError(f"Codex login {session.id} cleanup remains unconfirmed")
 
     async def _fail(self, session: CodexLoginSession, message: str) -> None:
         if session.state != CodexLoginState.pending:
@@ -298,31 +426,92 @@ class CodexLoginManager:
         session.state = CodexLoginState.error
         session.message = message
         session._scraped.set()
-        _kill_process_group(session._proc)
-        if session._proc is not None:
-            await session._proc.wait()
-        # This login owns the fresh home or reauthorization staging home only.
-        shutil.rmtree(session._login_home or session.codex_home, ignore_errors=True)
+        _kill_login_group(session)
         logger.info("Codex login %s: error — %s", session.id, message)
 
     async def cancel(self, login_id: str) -> None:
         session = self._sessions.get(login_id)
         if session is None:
             return
-        if session.state in (CodexLoginState.success, CodexLoginState.error):
-            return
-        session.state = CodexLoginState.cancelled
-        session.message = "cancelled by user"
-        _kill_process_group(session._proc)
+        if session.phase == CodexLoginPhase.authorizing and session.state == CodexLoginState.pending:
+            session.state = CodexLoginState.cancelled
+            session.message = "cancelled by user"
+            _kill_login_group(session)
         await self._reap(session)
-        shutil.rmtree(session._login_home or session.codex_home, ignore_errors=True)
         logger.info("Codex login %s: cancelled", login_id)
 
     def get(self, login_id: str) -> CodexLoginSession | None:
         return self._sessions.get(login_id)
 
+    def target_for(self, credential_id: str, user_id: str | None) -> CodexLoginSession | None:
+        target = self._targets.get(credential_id)
+        return target if target is not None and target.user_id == user_id else None
+
+    def owns_credential(self, credential_id: str, user_id: str | None) -> bool:
+        deletion = self._deletions.get(credential_id)
+        return (self.target_for(credential_id, user_id) is not None
+                or deletion is not None and deletion.user_id == user_id)
+
+    async def delete_credential(
+        self, credential_id: str, user_id: str | None,
+        remove: Callable[[], Awaitable[dict[str, Any] | None]],
+    ) -> dict[str, Any] | None:
+        """Retire the original login before the short binding/file deletion.
+
+        Waiting here holds neither the configuration lock nor a DB transaction.
+        The deletion's original task owns cleanup if its observer disappears.
+        """
+        existing = self._deletions.get(credential_id)
+        if existing is not None:
+            if existing.user_id != user_id:
+                return None
+            return await asyncio.shield(self._deletion_task(existing))
+        deletion = _CredentialDeletion(credential_id, user_id, self.target_for(credential_id, user_id), remove)
+        self._deletions[credential_id] = deletion
+        return await asyncio.shield(self._deletion_task(deletion))
+
+    def _deletion_task(self, deletion: _CredentialDeletion) -> asyncio.Task[dict[str, Any] | None]:
+        task = deletion.task
+        if task is None or task.done():
+            task = asyncio.create_task(self._delete_original(deletion), name=f"codex-credential-{deletion.credential_id}-delete")
+            deletion.task = task
+
+            def finished(task):
+                if not task.cancelled() and (error := task.exception()) is not None and self._deletions.get(deletion.credential_id) is deletion:
+                    logger.error("Codex credential %s deletion cleanup remains unconfirmed", deletion.credential_id,
+                                 exc_info=(type(error), error, error.__traceback__))
+
+            task.add_done_callback(finished)
+        return task
+
+    async def _delete_original(self, deletion: _CredentialDeletion) -> dict[str, Any] | None:
+        if deletion.phase == "retiring_login":
+            if deletion.login is not None:
+                await self.cancel(deletion.login.id)
+            deletion.phase = "deleting_binding"
+        if deletion.phase == "deleting_binding":
+            try:
+                deletion.removed_row = await deletion.remove()
+            except Exception:
+                # The DB's healthy, explicit refusal changed no binding. There
+                # is no file-delete authority or unfinished effect to retain.
+                self._deletions.pop(deletion.credential_id, None)
+                raise
+            if deletion.removed_row is None:
+                self._deletions.pop(deletion.credential_id, None)
+                login = deletion.login
+                if login is not None and not login._reauth and login.state != CodexLoginState.success:
+                    # An unpublished first login owned staging only. Its
+                    # confirmed cancellation needs no permanent-home cleanup.
+                    return {"id": deletion.credential_id, "backend": "codex", "user_id": deletion.user_id}
+                return None
+            deletion.phase = "cleaning_home"
+        await _remove_owned_home(codex_home_for(deletion.credential_id))
+        self._deletions.pop(deletion.credential_id, None)
+        return deletion.removed_row
+
     def drain_blockers(self) -> tuple[str, ...]:
-        if any((item._task is not None and not item._task.done())
+        if self._deletions or any(item.phase != CodexLoginPhase.retired or (item._task is not None and not item._task.done())
                or (item._watchdog is not None and not item._watchdog.done())
                or (item._proc is not None and item._proc.returncode is None)
                for item in self._sessions.values()):
@@ -333,10 +522,10 @@ class CodexLoginManager:
         """Close admission and signal captured login owners without yielding."""
         self._shutting_down = True
         for session in list(self._sessions.values()):
-            if session.state == CodexLoginState.pending:
+            if session.phase == CodexLoginPhase.authorizing and session.state == CodexLoginState.pending:
                 session.state = CodexLoginState.cancelled
                 session.message = "server shutdown"
-            _kill_process_group(session._proc)
+                _kill_login_group(session)
             if session._watchdog is not None and not session._watchdog.done() and not session._watchdog.cancelling():
                 session._watchdog.cancel()
 
@@ -356,6 +545,17 @@ class CodexLoginManager:
                 failures.append(f"{session.id}: {exc}")
                 continue
             self._sessions.pop(session.id, None)
+        for credential_id, deletion in tuple(self._deletions.items()):
+            task = self._deletion_task(deletion)
+            done, _ = await asyncio.wait({task}, timeout=_REAP_TIMEOUT_SECONDS)
+            if not done:
+                failures.append(f"{credential_id}: credential deletion did not exit")
+            else:
+                try:
+                    task.result()
+                except Exception as error:
+                    if self._deletions.get(credential_id) is deletion:
+                        failures.append(f"{credential_id}: {error}")
         if failures:
             raise RuntimeError("Codex login shutdown incomplete: " + "; ".join(failures))
 
@@ -366,6 +566,7 @@ class CodexLoginManager:
             s.id
             for s in self._sessions.values()
             if now - s._created_at > _LOGIN_TTL_SECONDS
+            and s.phase == CodexLoginPhase.retired
             and (s._task is None or s._task.done())
             and (s._watchdog is None or s._watchdog.done())
             and (s._proc is None or s._proc.returncode is not None)

@@ -326,6 +326,41 @@ are offline test-fixture results; they do not establish live-provider or
 browser E2E acceptance, deployment, or closure of the other remediation tickets.
 Reuse requires unchanged relevant source, configuration, dependencies and environment.
 
+### App, login and delegation ownership regressions
+
+The CR-01–CR-03 regressions use original public entry points and controlled
+external peers: proxy HTTP to local process groups, device-login routes to a
+controlled CLI plus real SQLite/files, and actual delegation/session deletion.
+`test_app_request_lifetime.py` and `test_wiki_app_request_lifetime.py` observe
+original-target loss, occupied capacity, actual effects and complete resource
+retirement, including 202 handoff and failed cleanup. Existing
+`test_app_proxy_wiki_target.py` lock/body barriers allow active stop to interrupt
+and join the original request before admitting a replacement.
+Poll-close fault injection retains a failed first close after a later `done`,
+and weak response references verify that successful polls are not accumulated.
+
+`test_codex_login.py` separates publication COMMIT from earlier key/read commits
+when placing a barrier. It covers cancelled observers, overlapping targets,
+disable/delete ordering, label preservation, whole-group exit, compensation
+ownership, committed deletion cleanup reentry and retained drain blockers.
+Directory-denial regressions inject actual `os.stat` failures and use `os.lstat`
+to prove the original directories remain, covering `Path.exists()` suppression.
+Process-group signal probes retain real group-exit observation; publishing barriers
+also show that an expired scrape watchdog cannot overwrite the publishing phase.
+`_fixtures/codex_publication_probe.py` isolates real fail-stop exits; known rollback
+and unknown acknowledgment are different outcomes. Rendered `HarnessPage` tests
+check historical success against current lists and retired view/account guards.
+`test_delegation_restart_deletion.py` retains accepted/unknown input responsibility
+while permitting only a confirmed resource-free, unadmitted setup to retire after
+relationship deletion. Existing command/return tests continue to prove rollback
+after typed refusal and preservation of the previous question writer.
+
+These are offline correctness checks for process-local ownership. They do not
+prove provider authentication, crash recovery, production deployment or closure
+of the remaining remediation tickets. Full-gate and release selections remain
+the ones above; do not substitute a 202, terminal UI label or cancelled waiter
+for an observed effect/retirement receipt.
+
 ### Optional resource experiments
 
 The [2026-11-03 resource and MCP experiments](reference/runtime-resource-boundaries-20261103.md)

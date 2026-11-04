@@ -39,7 +39,11 @@ the parent consumed every child result. Usage timing has the narrower
 
 The selected native login remains the authentication authority. A bound
 credential selects its runtime home; an unbound invocation follows the existing
-host-default path. In-app device login is implemented. This differs from the
+host-default path. In-app device login is published by the original manager
+task through its acknowledged file/metadata commit; status only observes it.
+Reauthorization and deletion retain original target/cleanup ownership as defined
+in the [credential contract](harness-credential-reauth.md#codex-device-operation-ownership).
+This differs from the
 original plan's unresolved login alternatives. Public transcript export/import
 is separate from [rewind](session-rewind.md) and [native-copy fork](session-fork.md).
 

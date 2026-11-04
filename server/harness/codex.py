@@ -905,14 +905,15 @@ class _DeviceLoginDriver:
 
         await codex_login_manager.cancel(login_id)
 
-    def cleanup_credential(self, credential_id: str) -> None:
-        # A Codex credential IS its CODEX_HOME dir (auth.json + token) — remove
-        # it so deletion actually revokes local access.
-        import shutil
+    async def delete_credential(self, credential_id, user_id, remove):
+        from ..codex_login import codex_login_manager
 
-        from ..codex_login import codex_home_for
+        return await codex_login_manager.delete_credential(credential_id, user_id, remove)
 
-        shutil.rmtree(codex_home_for(credential_id), ignore_errors=True)
+    def owns_credential(self, credential_id: str, user_id: str | None) -> bool:
+        from ..codex_login import codex_login_manager
+
+        return codex_login_manager.owns_credential(credential_id, user_id)
 
 
 # ------------------------------------------------------------------ profile

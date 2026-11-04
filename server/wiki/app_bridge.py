@@ -12,6 +12,7 @@ import httpx
 from starlette.datastructures import QueryParams
 
 from ..aio import complete_cleanup
+from ..app_proxy import own_response
 from .history import WikiHistory, atomic, history_text, sync_directory
 from .registry import registry
 from .storage import file_effect
@@ -96,17 +97,20 @@ class AppMutation:
         self._finish_lock = asyncio.Lock()
         _active.add(self)
 
-    async def forward(self, app_id, request):
+    async def forward(self, use, request):
         """Own dispatch, receipt interpretation and the original client transfer."""
-        client = None
-        dispatched = transferred = False
-        response = None
+        self.use = use
+        self._dispatched = self._settled = False
+        client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
+        use.add_cleanup(client.aclose)
+        use.add_cleanup(self._retire_effect)
         try:
-            client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
-            dispatched = True
+            use.require_running()
+            self._dispatched = True
             response = await client.send(request, stream=True)
+            close_response = own_response(use, response)
             await response.aread()
-            await response.aclose()
+            await use.release_cleanup(close_response)
             # aread decodes; validators for the compressed representation no
             # longer describe these bytes. Ordinary proxy streams remain raw.
             if response.headers.pop("content-encoding", None):
@@ -129,28 +133,20 @@ class AppMutation:
                 job_id = receipt.get("id")
                 if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
                     raise WikiError("Application returned no valid async job receipt", 502)
-                self.follow_job(client, str(request.url.copy_with(path="/", query=None)).rstrip("/"), job_id, app_id)
-                transferred = True
+                self.follow_job(client, str(request.url.copy_with(path="/", query=None)).rstrip("/"), job_id, use)
             else:
-                await self.finish()
+                self._settled = True
+                await use.finish()
             return response
         except BaseException:
-            if not transferred:
-                if dispatched:
-                    await complete_cleanup(self.abort(app_id))
-                else:
-                    await complete_cleanup(self.finish())
+            await use.finish()
             raise
-        finally:
-            if not transferred:
-                async def close():
-                    try:
-                        if response is not None:
-                            await response.aclose()
-                    finally:
-                        if client is not None:
-                            await client.aclose()
-                await complete_cleanup(close())
+
+    async def _retire_effect(self):
+        if self._dispatched and not self._settled:
+            await self.abort(self.use)
+        else:
+            await self.finish()
 
     async def finish(self):
         async with self._finish_lock:
@@ -168,10 +164,8 @@ class AppMutation:
                 self.borrow.__exit__(None, None, None)
             _active.discard(self)
 
-    async def abort(self, app_id):
-        from ..app_backends import backend_supervisor
-
-        await backend_supervisor.stop(app_id)
+    async def abort(self, use):
+        await use.abort()
         await self.finish()
 
     async def conflict(self, body):
@@ -240,57 +234,58 @@ class AppMutation:
 
         await complete_cleanup(asyncio.to_thread(remember))
 
-    def follow_job(self, client, base, job_id, app_id):
+    def follow_job(self, client, base, job_id, use):
         async def wait():
-            terminal = False
             failures = 0
             try:
                 while True:
                     try:
-                        response = await client.get(f"{base}/api/jobs/{job_id}")
-                        response.raise_for_status()
-                        payload = response.json()
+                        use.require_running()
+                        response = await client.send(client.build_request("GET", f"{base}/api/jobs/{job_id}"), stream=True)
+                        close_response = own_response(use, response)
+                        try:
+                            await response.aread()
+                            response.raise_for_status()
+                            payload = response.json()
+                        finally:
+                            await use.release_cleanup(close_response)
                         if payload.get("id", job_id) != job_id:
                             raise ValueError("Sapphire returned another job's state")
                         state = payload.get("status")
                         if state in {"done", "error"}:
-                            terminal = True
+                            self._settled = True
                             break
                         if state != "running":
                             raise ValueError("Unrecognized Sapphire job status")
                         failures = 0
                     except Exception:
+                        # Known original-target loss is decisive; no polling
+                        # the old port or retrying the mutation against a new one.
+                        use.require_running()
                         failures += 1
                         if failures >= 6:
                             logger.warning(
                                 "Stopping app %s: Git job %s cannot be supervised",
-                                app_id,
+                                use.state.app_id,
                                 job_id,
                             )
                             break
                     await asyncio.sleep(0.5)
             finally:
 
-                async def cleanup():
-                    try:
-                        if terminal:
-                            await self.finish()
-                        else:
-                            await self.abort(app_id)
-                    finally:
-                        await client.aclose()
-
-                await complete_cleanup(cleanup())
+                await use.finish()
 
         task = asyncio.create_task(wait(), name=f"wiki-app-{job_id}")
+        use.owner = task
         _pending[task] = self.user_id
 
         def finished(task):
             if not task.cancelled() and (error := task.exception()) is not None:
                 logger.error(
-                    "Wiki application journal failed", exc_info=error
+                    "Wiki application job observation failed" if use.retired else "Wiki application cleanup failed", exc_info=error
                 )
-                return  # Shutdown must still report this unconfirmed journal.
+                if not use.retired:
+                    return  # Shutdown must still report unconfirmed cleanup.
             _pending.pop(task, None)
 
         task.add_done_callback(finished)
@@ -311,20 +306,18 @@ async def begin(app_row, method, endpoint, query, body=b""):
         _preparations.pop(task, None)
 
 
-async def forward(app_row, target, request):
+async def forward(app_row, use, request):
     """Return a loaded managed receipt, or leave ordinary forwarding to proxy."""
-    from ..app_backends import backend_supervisor
-
     mutation = await begin(app_row, request.method, request.url.path.removeprefix("/api/"),
                            QueryParams(request.url.query), request.content)
     if mutation is None:
         return None
     try:
-        backend_supervisor.require_running(app_row["id"], target)
+        use.require_running()
     except BaseException:
         await complete_cleanup(mutation.finish())
         raise
-    return await mutation.forward(app_row["id"], request)
+    return await mutation.forward(use, request)
 
 
 async def _join_preparation(task):

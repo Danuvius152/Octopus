@@ -136,6 +136,12 @@ Manager 接管原对象的完成与资源责任。`done` 表示已结算，可�
 原 Manager 接管。已确认资源退出后，应用历史退休与后代附件物化先于数据库删除；
 发布订阅者可以发起删除，原 publisher 继续由外部排空，不形成自身等待。
 
+委派 follow-up setup 的退出另须区分接纳与关系删除：明确的接纳拒绝可恢复旧轮次；
+确认原关系已删、输入从未提交或明确被拒且没有资源时，才可直接退休捕获的内存
+round/work 并撤回原 parent-work 责任。关系换代、普通异常或未知回执不能据此清理。
+删除回调只证明关系已删，不替代原执行或资源退出；完整规则归
+[命名委派](agent-collaboration.md#52-sub-session-lifecycle)。
+
 <a id="codex-native-input-evidence"></a>
 ### Codex 首输入证据与准备边界
 
@@ -363,6 +369,13 @@ schedule 策略仍有效。可靠跨请求返回走现有独立工作机制；�
 重试。AppMutation.abort 同样依赖应用后端真实停止；正常退出与忽略 SIGTERM 的
 后代分别验证，不能用自动丢弃 done task 的集合代替退休 owner。
 
+App 普通代理与 Wiki follower 共用 supervisor 的原实例使用登记，涵盖 body 等待、
+响应消费和清理；LRU、idle 与自然 drain 消费同一事实。主动停止先关闭准入，
+确认原进程退出，再在短状态锁外中断或等待消费者清理。Wiki abort 只等待原进程
+退出证明，不等待包含自身的完整退休。202 转交仍持有原登记且后续发送复核原
+target，不能以响应结束宣称实际 mutation 完成；细节归
+[应用后端](application-backends.md#6-lifecycle)。
+
 BG 的原命令结果、输出、时限、进程组退休和父返回分别归
 [后台任务合同](background-tasks.md#结果退休与返回顺序)。其普通完成与父返回在
 捕获的进程组退休确认之后；失败保留原 owner，不重跑命令或据 shell leader 退出
@@ -589,8 +602,13 @@ argv/file 溢出路径；原输入及附件仍由同一 submission 与文件 own
 对话或历史 resume；one-shot 使用无工具文本 worker。运行参数与诊断保留可读信息，
 只掩码实际秘密。各传输分别验证自己的真实输入边界，不按 backend 名猜测 argv 限制。
 
-凭据的 `CODEX_HOME` 同时保存认证和原生会话。重新授权借用已有目录；取消、
-provider 失败和 spawn 失败不授予删除该目录的权限。用预存 rollout 验证这些
+凭据的 `CODEX_HOME` 同时保存认证和原生会话。设备登录在独立 staging 取得材料，
+原 task 在短事务中发布正式 auth 和同次元数据，唯一原 COMMIT 确认后才记历史成功。
+status 只观察；取消或关闭观察者不取消 committer。重授权保留已有目录，取消、
+provider 失败和 spawn 失败不授予删除该目录的权限；正式 home 清理须有原凭据
+删除已提交的证明。清理失败保留原占用与 drain blocker，重试只继续原清理。
+跨文件/DB 的未知提交及无法确认补偿责任仍沿既有 fail-stop，不增加崩溃恢复账本。
+细节归 [凭据发布合同](harness-credential-reauth.md#codex-device-operation-ownership)。用预存 rollout 验证这些
 清理出口，不能只验证新建空目录。诊断须区分仍可重读的完整原文、历史中确实发生
 的重读和已丢弃的字节；显示预算截断本身不证明原文丢失。
 

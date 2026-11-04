@@ -71,6 +71,7 @@ from .runtime_types import (
     AdmissionIntegrityError,
     QuotaExceeded,
     SessionAdmissionBusy,
+    SessionAdmissionClosed,
     SessionMailboxFull,
     SessionOwnerUnavailable,
     _Attempt,
@@ -665,7 +666,7 @@ class OwnerRuntime:
             return self._existing_input(existing, digest)
         new_session = command.schedule is not None and session.origin == "schedule" and session.id not in manager.sessions
         if not new_session and manager.sessions.get(session.id) is not session:
-            raise ValueError(f"Session {session.id} not found")
+            raise SessionAdmissionClosed(f"Session {session.id} not found")
         agent = await manager.require_active_agent(session.agent_id)
         if session._transcript_integrity != "ok":
             raise AdmissionIntegrityError("Transcript has duplicate sequences; export and review it before continuing")

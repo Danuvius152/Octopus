@@ -7,8 +7,9 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
-from httpx import AsyncClient, MockTransport, Response
+from httpx import AsyncClient, MockTransport, Request, Response
 
+from server.app_backends import BackendSupervisor
 from server.mcp_identity import mint
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs, WikiWorker
@@ -16,6 +17,7 @@ from server.wiki.store import WikiError, revision
 from server.wiki.tasks import tasks
 from tests import test_wiki_history as wiki_history
 from tests import wiki_api as wiki_api
+from tests.app_proxy import write_backend
 from tests.submission import receipt_from_events
 from tests.wiki_job_runtime import sapphire_delete
 
@@ -453,7 +455,7 @@ async def test_asset_exception_does_not_bypass_path_confinement(client, asset_no
 
 
 @pytest.fixture
-def mutation_bridge(monkeypatch):
+async def mutation_bridge(monkeypatch):
     from server.wiki import app_bridge
 
     # Owners are registered through follow_job; isolate their service lifetime.
@@ -462,6 +464,20 @@ def mutation_bridge(monkeypatch):
     yield app_bridge
     assert all(task.done() and not task.cancelled() and task.exception() is not None
                for task in app_bridge._pending)
+
+
+async def dispatch_mutation(mutation, row, remote, monkeypatch):
+    """Retain real use admission while the journal tests control HTTP receipts."""
+    from pathlib import Path
+
+    directory = Path(row["app_dir"])
+    write_backend(directory, "import http.server, os; http.server.HTTPServer(('127.0.0.1', int(os.environ['PORT'])), http.server.BaseHTTPRequestHandler).serve_forever()")
+    supervisor = BackendSupervisor()
+    use = await supervisor.acquire(row["id"], row["app_dir"])
+    with monkeypatch.context() as patch:
+        patch.setattr("server.wiki.app_bridge.httpx.AsyncClient", lambda **kwargs: remote)
+        await mutation.forward(use, Request("POST", f"http://127.0.0.1:{use.target.port}/api/git"))
+    return supervisor
 
 
 async def test_mutation_shutdown_timeout_keeps_writer_lock_until_journal_finishes(sapphire, mutation_bridge, monkeypatch):
@@ -478,8 +494,9 @@ async def test_mutation_shutdown_timeout_keeps_writer_lock_until_journal_finishe
     monkeypatch.setattr(WikiHistory, "finish_external", delayed_finish)
     mutation = await mutation_bridge.begin(row, "POST", "git", {"vault": "obv"}, json.dumps({"action": "sync"}).encode())
     history.store.path("note.md").write_bytes(b"edited")
-    remote = AsyncClient(transport=MockTransport(lambda request: Response(200, json={"status": "done"})))
-    mutation.follow_job(remote, "http://sapphire", "journal-owner", row["id"])
+    remote = AsyncClient(transport=MockTransport(lambda request: Response(
+        202 if request.method == "POST" else 200, json={"id": "journal-owner", "status": "done"})))
+    supervisor = await dispatch_mutation(mutation, row, remote, monkeypatch)
     try:
         await asyncio.wait_for(entered.wait(), 3)
         with pytest.raises(RuntimeError, match="Wiki application writer teardown remains unconfirmed"):
@@ -509,6 +526,7 @@ async def test_mutation_shutdown_timeout_keeps_writer_lock_until_journal_finishe
         release.set()
         await mutation_bridge.shutdown()
         await remote.aclose()
+        await supervisor.shutdown()
 
 
 async def test_mutation_shutdown_reports_and_retains_failed_journal_owner(sapphire, mutation_bridge, monkeypatch, caplog):
@@ -520,13 +538,14 @@ async def test_mutation_shutdown_reports_and_retains_failed_journal_owner(sapphi
     monkeypatch.setattr(WikiHistory, "finish_external", failed_finish)
     mutation = await mutation_bridge.begin(row, "POST", "git", {"vault": "obv"}, json.dumps({"action": "sync"}).encode())
     history.store.path("note.md").write_bytes(b"edited")
-    remote = AsyncClient(transport=MockTransport(lambda request: Response(200, json={"status": "done"})))
-    mutation.follow_job(remote, "http://sapphire", "failed-journal-owner", row["id"])
+    remote = AsyncClient(transport=MockTransport(lambda request: Response(
+        202 if request.method == "POST" else 200, json={"id": "failed-journal-owner", "status": "done"})))
+    supervisor = await dispatch_mutation(mutation, row, remote, monkeypatch)
     try:
         # Let the normal completion callback report the storage failure before
         # shutdown inspects owners; an already-finished failure must survive.
         async with asyncio.timeout(3):
-            while not any(record.getMessage() == "Wiki application journal failed" for record in caplog.records):
+            while not any(record.getMessage() == "Wiki application cleanup failed" for record in caplog.records):
                 await asyncio.sleep(.01)
 
         with pytest.raises(RuntimeError, match="Wiki application writer teardown remains unconfirmed") as failure:
@@ -538,6 +557,8 @@ async def test_mutation_shutdown_reports_and_retains_failed_journal_owner(sapphi
         assert (history.state / "external-change.json").is_file()
     finally:
         await remote.aclose()
+        with pytest.raises(RuntimeError, match="request cleanup unconfirmed"):
+            await supervisor.shutdown()
 
 
 async def test_shutdown_joins_delete_receipt_before_releasing_journal(sapphire, mutation_bridge, monkeypatch):

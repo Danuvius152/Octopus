@@ -75,6 +75,9 @@ from .research.manager import research_manager
 from .service_health import ServiceUnavailable
 from .sessions.runtime_types import (
     AdmissionIntegrityError,
+    SessionAdmissionBusy,
+    SessionAdmissionClosed,
+    SessionMailboxFull,
     SessionOwnerUnavailable,
 )
 from .sessions.submission import (
@@ -205,6 +208,8 @@ class DelegationRunState:
     # relationship, while question notices need only the original child.
     _round_recording_closed: bool = False
     _question_notices_closed: bool = False
+    # Confirmed row deletion is narrower than a writer closed by replacement.
+    _relationship_deleted: bool = False
 
     def to_public_dict(self) -> dict[str, Any]:
         """API-shape for ``GET /sessions/{sid}/delegations`` and the
@@ -273,6 +278,7 @@ class DelegationManager:
         for rec in self._rounds.values():
             if session_id in (rec.delegation_id, rec.parent_session_id):
                 rec._round_recording_closed = True
+                rec._relationship_deleted = True
             if session_id == rec.delegation_id:
                 rec._question_notices_closed = True
         self._retire_delivery_failures()
@@ -373,6 +379,8 @@ class DelegationManager:
         assert self.db is not None
         rows = {row["id"]: row for row in await self.db.load_sessions(include_archived=True)}
         parent, child = rows.get(rec.parent_session_id), rows.get(rec.delegation_id)
+        if parent is None or child is None:
+            rec._relationship_deleted = True
         if child is None:
             rec._question_notices_closed = True
         if parent is None or parent["user_id"] != user_id:
@@ -906,6 +914,7 @@ class DelegationManager:
                 _metric_recorded=False, _terminal_injecting=False,
                 _question_deliveries={},
                 _terminal_command=None, _round_recording_closed=False, _question_notices_closed=False,
+                _relationship_deleted=False,
                 _child_work_ids=set(), request=request, _candidate_request_id=None,
                 owned_context=owned_context, created_at=datetime.now(UTC).isoformat(),
             )
@@ -916,24 +925,40 @@ class DelegationManager:
         child = self.session_mgr.get_session(delegation_id)
         reopening = child is None
         restored_previous = False
+        admission: Literal["not_submitted", "unknown", "refused", "accepted"] = "not_submitted"
 
         async def rollback_setup() -> None:
             nonlocal restored_previous
             assert self.session_mgr is not None
             # Only a confirmed business refusal before admission rolls back.
             # Neither a lost waiter nor an unknown storage error takes this path.
-            if self.session_mgr.has_pending_or_active_work(delegation_id, rec.work_id):
+            if admission not in {"not_submitted", "refused"} or self.session_mgr.has_pending_or_active_work(delegation_id, rec.work_id):
                 return
             async with rec._save_lock:
                 if self._records.get(delegation_id) is not rec or rec.state != "running":
                     return
-                previous._persisted_state = await self._commit_round(rec, previous, parent.user_id)
+                try:
+                    previous._persisted_state = await self._commit_round(rec, previous, parent.user_id)
+                except DelegationError:
+                    if not rec._relationship_deleted:
+                        raise
+                    # No submission was made (or its original receipt refused
+                    # it), and the original relation's deletion is confirmed.
+                    # There is no remaining row to restore. Unknown acceptance
+                    # and a replaced relation never enter this local exit.
+                    if self.session_mgr.has_pending_or_active_work(delegation_id, rec.work_id):
+                        return
+                    self._records.pop(delegation_id, None)
+                    rec.state = "cancelled"
+                    rec.error = "Delegation relationship deleted before child admission"
+                    rec.finished_at = datetime.now(UTC).isoformat()
+                else:
+                    self._records[delegation_id] = previous
+                    restored_previous = True
                 close_work(rec.work_id)
-                self._records[delegation_id] = previous
                 self._rounds.pop(rec.work_id, None)
                 rec._round_recording_closed = True
                 rec._question_notices_closed = True
-                restored_previous = True
             await self._withdraw_child_responsibility(rec)
             if reopening:
                 await self.session_mgr.auto_archive_scheduled_session(delegation_id)
@@ -954,16 +979,23 @@ class DelegationManager:
             )
             if self.session_mgr.get_session(parent_session_id) is not parent:
                 raise DelegationError("Parent session is gone", status_code=404)
+            if self.session_mgr.get_session(delegation_id) is not child:
+                raise DelegationError("Child session is gone; start a fresh delegation", status_code=409)
             self._require_caller(scope, parent_session_id, parent_work_id)
             if rec.state != "running" or not work_is_open(rec.work_id) or self._records.get(delegation_id) is not rec:
                 return rec
             try:
+                admission = "unknown"
                 receipt = await self.session_mgr.start_message(
                     delegation_id, composed, source="delegation", work_id=rec.work_id,
                     knowledge_context=owned_context.execution,
                 )
+            except (SessionAdmissionClosed, SessionAdmissionBusy, SessionMailboxFull, AdmissionIntegrityError) as exc:
+                admission = "refused"
+                raise DelegationError(str(exc), status_code=409) from exc
             except ValueError as exc:
                 raise DelegationError(str(exc), status_code=409) from exc
+            admission = "accepted" if receipt.accepted else "refused"
             if not receipt.accepted:
                 await self._save_round(
                     rec, running_only=True, state="cancelled",

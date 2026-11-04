@@ -24,6 +24,7 @@ it("finishes Codex sign-in when a retry returns the credential after the first s
       if (statusReads === 1) throw new TypeError("Success response lost after credential was saved");
       return Response.json({ state: "success", credential });
     }
+    if (path.endsWith("/credentials") && statusReads >= 2) return Response.json([credential]);
     return Response.json([]);
   }));
   await act(async () => { render(<HarnessPage onToggleSidebar={() => {}} />); });
@@ -42,6 +43,62 @@ it("finishes Codex sign-in when a retry returns the credential after the first s
   expect(screen.getByText("Recovered account")).toBeTruthy();
   await act(async () => vi.advanceTimersByTimeAsync(10000));
   expect(statusReads).toBe(2);
+});
+
+it.each([null, { id: "deleted", backend: "codex", label: "Old result", auth_type: "oauth", created_at: "now" }])(
+  "ends Codex observation on historical success and uses the current list: %s", async (credential) => {
+    vi.useFakeTimers();
+    let statusReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
+      const path = String(url);
+      if (path.endsWith("/codex/start")) return Response.json({ login_id: "login" });
+      if (path.endsWith("/codex/login/status")) {
+        statusReads++;
+        return Response.json({ state: "success", credential });
+      }
+      return Response.json([]);
+    }));
+    await act(async () => { render(<HarnessPage onToggleSidebar={() => {}} />); });
+    fireEvent.click(screen.getByText("Sign in to Claude Code or Codex"));
+    fireEvent.click(screen.getByRole("button", { name: /Codex.*Sign in with ChatGPT/ }));
+    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Login" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Continue" })); });
+    await act(async () => vi.advanceTimersByTimeAsync(600));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(useSessionStore.getState().credentials).toEqual([]);
+    await act(async () => vi.advanceTimersByTimeAsync(10000));
+    expect(statusReads).toBe(1);
+  },
+);
+
+it("does not publish an old account's credential reread after Codex historical success", async () => {
+  vi.useFakeTimers();
+  let succeeded = false;
+  let finishList!: (response: Response) => void;
+  vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(url);
+    if (path.endsWith("/codex/start")) return Response.json({ login_id: "login" });
+    if (path.endsWith("/codex/login/status")) {
+      succeeded = true;
+      return Response.json({ state: "success", credential: null });
+    }
+    const authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+    if (path.endsWith("/credentials") && succeeded && authorization === "Bearer account-token") {
+      return new Promise<Response>((resolve) => { finishList = resolve; });
+    }
+    return Response.json([]);
+  }));
+  await act(async () => { render(<HarnessPage onToggleSidebar={() => {}} />); });
+  fireEvent.click(screen.getByText("Sign in to Claude Code or Codex"));
+  fireEvent.click(screen.getByRole("button", { name: /Codex.*Sign in with ChatGPT/ }));
+  fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Old account" } });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Continue" })); });
+  await act(async () => vi.advanceTimersByTimeAsync(600));
+  expect(finishList).toBeTypeOf("function");
+  await act(async () => { useSessionStore.getState().setToken("new-account-token"); });
+  await act(async () => { finishList(Response.json([{ id: "old", backend: "codex", label: "Old account credential", auth_type: "oauth", created_at: "now" }])); });
+  expect(useSessionStore.getState().credentials).toEqual([]);
+  expect(screen.queryByText("Old account credential")).toBeNull();
 });
 
 async function enterClaudeCode() {

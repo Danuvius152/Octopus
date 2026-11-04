@@ -126,20 +126,37 @@ needs. A backend that never binds is reported as such, with its log — this is
 what a daemonizing `start.sh` looks like from the outside.
 
 **Idle stop.** After `APP_BACKEND_IDLE_TIMEOUT` (default 15 minutes) with no
-proxied request, the process is stopped. The next request starts it again.
+active request or transferred work, the process is stopped. The next request starts it again.
 Same reasoning as the CLI-process reaper in `inline-steering.md` §7, and the
 same hard bound: at most four admitted backend lifecycles, including startup,
 running processes and unconfirmed retirement. The supervisor reserves a slot
 atomically on its event loop before spawn; only confirmed spawn failure or
-retirement of the original process group and output readers releases it.
+retirement of the original process group, output readers and request cleanup releases it.
 Dependency installation does not consume a backend slot.
 
-When full, admission stops an eligible RUNNING instance in least-recently-used
+Before reading a body, `BackendSupervisor.acquire` selects and registers the
+original port/process without an intervening await. The same `BackendUse`
+protects body waits, upstream send, response consumption and confirmed cleanup.
+Returning a response object or receiving headers does not release it. Ordinary
+stream cleanup belongs to the actual ASGI invocation, including header-send
+failure and cancellation before iteration; an unstarted response remains owned
+and can be closed by the supervisor. Response and client cleanup are both
+attempted, including when one fails. Unconfirmed cleanup retains the registration.
+`app_proxy.own_response` retains the original stream-close acknowledgment across
+HTTPX automatic body closure: `Response.is_closed` is set before cleanup awaits
+and cannot prove that a failed close completed. Both transport paths join the
+same close task rather than replaying cleanup or trusting that flag.
+Wiki polls also capture each streamed response before reading it. A successful
+close releases that local transport responsibility while retaining the job use;
+failed close receipts survive later successful polls and continue blocking
+retirement. Long jobs do not accumulate already closed response registrations.
+
+When full, admission stops an eligible RUNNING instance with no active uses in least-recently-used
 order under that instance's lifecycle lock, with no requesting-app lifecycle
 lock held. Requests for the same app serialize admission, including eviction,
 so concurrent opens share a single start without retiring extra victims.
-Stop and install use only the lifecycle lock; admission never nests two apps'
-lifecycle locks. Startup and retirement do not hold a global capacity lock.
+Admission never nests two apps' lifecycle locks. Startup and retirement do not
+hold a global capacity lock. Idle reaping also skips the same active uses.
 If all slots are starting, busy or retiring, the new request gets HTTP 503 without forwarding its
 body. A Wiki mutation waiting for its file lock readmits only the original
 backend; it never invokes lazy startup again. Proxy captures an immutable port
@@ -152,6 +169,23 @@ there is no capacity wait queue. Failed retirement retains the original slot,
 including a process handle that arrives after its startup waiter is cancelled.
 Shutdown seals admission, joins captured operations and retires their resources;
 it reports incomplete cleanup instead of reusing an unconfirmed slot.
+
+Explicit stop, rebuild, delete and forced shutdown seal admission before joining
+the original process and consumers. Process exit is confirmed under the lifecycle
+lock; consumer interruption and cleanup run outside it. A Wiki abort waits only
+for that original process-exit proof, so cleanup cannot wait on its own full
+retirement. Consumers already cleaning up are joined without cancelling their
+caller and masking its original error. Timeouts retain the original handle,
+registration and slot with closed admission. A later stop can join cleanup that
+finished late without signalling a process group already proven retired.
+Successful stop reopens ordinary lazy-start rules; rebuild invalidates installation
+before reopening, and deletion remains sealed. Natural drain reads active uses
+and does not interrupt them. A captured response may finish after its original
+process exits: consuming those bytes sends nothing to a replacement port.
+
+These checks protect managed lifecycles and reject known target loss before a
+send. A TCP port is not an identity credential for arbitrary same-host processes;
+this contract does not provide operating-system isolation.
 
 Application deletion seals install/start admission before joining the original
 backend state. A late spawn, unconfirmed group exit or undrained reader keeps
@@ -221,6 +255,18 @@ exit during waits, including another HTTP service reusing the old port with zero
 body dispatch after refusal. It also covers transferred 202 work, consumer
 cancellation and invalid receipts. `tests/test_application_proxy_encoding.py`
 retains the raw/decoded encoding contract and repeated-cancellation cleanup.
+`tests/test_app_request_lifetime.py` additionally covers ordinary slow bodies,
+capacity, idle/drain, unstarted responses, ASGI failures and control operations.
+`tests/test_wiki_app_request_lifetime.py` observes real 202 work, file effects,
+follower transfer/refusal, partial receipts, cancellation and old-port reuse.
+
+The Wiki follower holds the same use through actual job settlement and journal
+cleanup, and validates the original target before every poll. A 202 receipt is
+not mutation success. Transfer registers the follower without yielding or
+releasing the use; a rejected transfer keeps cleanup with the original caller.
+Abort stops that captured instance, never a later instance with the same app ID.
+Confirmed cleanup can retire an observation error while retaining its diagnostic;
+failed journal or transport cleanup remains a drain blocker.
 
 A backend is reachable **only** through this proxy. It binds `127.0.0.1`, so it
 is not exposed on the network, and the tunnel exposes Octopus, not the app.
