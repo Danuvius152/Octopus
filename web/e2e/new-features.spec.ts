@@ -823,6 +823,20 @@ test.describe("Credentials Panel", () => {
     // covered by tests/test_codex_login.py against a fake CLI.
     // start is non-blocking → returns just a login_id; the URL+code and then
     // success arrive via status polls.
+    const currentCredential = {
+      id: "codex-cred-1",
+      backend: "codex",
+      label: "ChatGPT E2E",
+      auth_type: "oauth",
+      created_at: "2026-05-22T00:00:00Z",
+    };
+    let published = false;
+    let currentListReads = 0;
+    await page.route("**/api/credentials", (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      if (published) currentListReads += 1;
+      return route.fulfill({ status: 200, json: published ? [currentCredential] : [] });
+    });
     await page.route("**/api/credentials/codex/start", (route) => {
       route.fulfill({
         status: 201,
@@ -833,6 +847,7 @@ test.describe("Credentials Panel", () => {
     let polls = 0;
     await page.route("**/api/credentials/codex/codex-login/status", (route) => {
       polls += 1;
+      published = polls > 1;
       const device = {
         verification_url: "https://auth.openai.com/codex/device",
         user_code: "TEST-CODE9",
@@ -843,13 +858,7 @@ test.describe("Credentials Panel", () => {
           : {
               state: "success",
               ...device,
-              credential: {
-                id: "codex-cred-1",
-                backend: "codex",
-                label: "ChatGPT E2E",
-                auth_type: "oauth",
-                created_at: "2026-05-22T00:00:00Z",
-              },
+              credential: { ...currentCredential, label: "Historical login label" },
             };
       route.fulfill({
         status: 200,
@@ -877,13 +886,15 @@ test.describe("Credentials Panel", () => {
     );
     await expect(dialog.locator(".codex-user-code")).toContainText("TEST-CODE9");
 
-    // Polling reports success → dialog closes and the credential appears,
-    // badged as Codex.
+    // Success closes observation and reads the current list. A later label
+    // edit must win over the historical status payload.
     await expect(dialog).toHaveCount(0, { timeout: 6000 });
     const item = page.locator(".credential-item", { hasText: "ChatGPT E2E" });
     await expect(item).toBeVisible();
     await expect(item.locator(".credential-badge.backend-codex")).toBeVisible();
     await expect(item).toContainText("Codex");
+    expect(currentListReads).toBeGreaterThan(0);
+    await expect(page.locator(".credential-item", { hasText: "Historical login label" })).toHaveCount(0);
   });
 
   test("create-session form shows credential selector when credentials exist", async ({
