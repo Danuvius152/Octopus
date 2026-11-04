@@ -23,6 +23,10 @@ from server.database import Database
 from server.oauth_providers import OAuthTokenSet
 from server.users import UserManager
 
+ACCESS_TOKEN = "test-access-4f50fcb687c9436fa736685c97f93634"
+REFRESH_TOKEN = "test-refresh-e2f103670a924731a943dd879a72ef18"
+ROTATED_TOKEN = "test-rotated-8c71e758508b432eab1f3fece60c9721"
+
 
 class FakeProvider:
     kind = "fakekind"
@@ -42,7 +46,7 @@ class FakeProvider:
         return "https://fake/auth"
 
     async def exchange_code(self, **k):
-        return OAuthTokenSet("at", "rt", time.time() + 3600)
+        return OAuthTokenSet(ACCESS_TOKEN, REFRESH_TOKEN, time.time() + 3600)
 
     async def refresh(self, *, client_id, client_secret, refresh_token):
         self.refresh_calls += 1
@@ -52,7 +56,7 @@ class FakeProvider:
             from server.connectors.errors import ConnectorRefreshError
 
             raise ConnectorRefreshError(400, "invalid_grant")
-        return OAuthTokenSet("refreshed", None, time.time() + 3600, scopes=["s"])
+        return OAuthTokenSet(ROTATED_TOKEN, None, time.time() + 3600, scopes=["s"])
 
 
 class FakeConnector(ConnectorBase):
@@ -122,7 +126,7 @@ async def mgr(db, provider, clean_registry):
 
 
 def _token_set(expires_in: float = 3600.0) -> OAuthTokenSet:
-    return OAuthTokenSet("at", "rt", time.time() + expires_in, scopes=["s"])
+    return OAuthTokenSet(ACCESS_TOKEN, REFRESH_TOKEN, time.time() + expires_in, scopes=["s"])
 
 
 @pytest.mark.parametrize("phase", ["provider", "save_lock", "commit"])
@@ -171,12 +175,12 @@ async def test_refresh_waiter_cancellation_keeps_the_original_rotated_result(mgr
         with pytest.raises(asyncio.CancelledError):
             await waiter
         token = await mgr.get_access_token(installation["id"], owner["id"])
-        assert token["access_token"] == "refreshed"
+        assert token["access_token"] == ROTATED_TOKEN
         assert provider.refresh_calls == 1, "A cancelled waiter discarded the original rotation"
         assert len(initiated) == 1, "A cancelled waiter restarted the original remote request"
         saved = await db.get_connector_secret(installation["id"])
         key = await UserManager(db).data_key_for(owner["id"])
-        assert _deserialize_token_set(decrypt(saved, key)).access_token == "refreshed"
+        assert _deserialize_token_set(decrypt(saved, key)).access_token == ROTATED_TOKEN
     finally:
         release.set()
         finish_commit.set()
@@ -237,7 +241,12 @@ async def test_owned_rotation_shutdown_keeps_received_response_and_observes_fail
             with pytest.raises(RuntimeError, match="during shutdown") as failed:
                 await asyncio.wait_for(stopping, 2)
             assert isinstance(failed.value.__cause__, sqlite3.IntegrityError)
-            assert "rotated token save rejected" in caplog.text
+            diagnostic = "\n".join(record.getMessage() for record in caplog.records
+                                   if record.name == "server.connector_manager")
+            assert "sqlite3.IntegrityError" in diagnostic
+            assert "rotated token save rejected" in diagnostic
+            assert "_save_refresh_result" in diagnostic
+            assert not any(secret in caplog.text for secret in (ACCESS_TOKEN, REFRESH_TOKEN, ROTATED_TOKEN, "csec"))
             assert await database.get_connector_secret(installation["id"]) == original
             assert not (await database.get_connector_installation(installation["id"]))["needs_reconnect"]
         else:
@@ -252,7 +261,7 @@ async def test_owned_rotation_shutdown_keeps_received_response_and_observes_fail
         reopened = Database(str(path))
         await reopened.initialize()
         try:
-            assert (await ConnectorManager(reopened).get_access_token(installation["id"], account["id"]))["access_token"] == "refreshed"
+            assert (await ConnectorManager(reopened).get_access_token(installation["id"], account["id"]))["access_token"] == ROTATED_TOKEN
             assert provider.refresh_calls == 1
         finally:
             await reopened.close()
@@ -278,11 +287,39 @@ async def test_shared_refresh_still_rejects_another_account(mgr, db, owner, prov
         with pytest.raises(ConnectorError, match="not found"):
             await mgr.get_access_token(installation["id"], other["id"])
         release.set()
-        assert (await waiter)["access_token"] == "refreshed"
+        assert (await waiter)["access_token"] == ROTATED_TOKEN
         assert provider.refresh_calls == 1
     finally:
         release.set()
         await asyncio.gather(waiter, return_exceptions=True)
+
+
+async def test_refresh_failure_logs_mask_credentials_and_retain_the_exception_chain(
+    mgr, db, owner, provider, monkeypatch, caplog,
+):
+    installation = await mgr.complete_install(kind="fakekind", token_set=_token_set(1), user_id=owner["id"])
+    original = await db.get_connector_secret(installation["id"])
+
+    async def fail(**kwargs):
+        try:
+            raise ValueError(f"credential rejected: {kwargs['refresh_token']} {kwargs['client_secret']}")
+        except ValueError as error:
+            raise RuntimeError("provider transport failed") from error
+
+    monkeypatch.setattr(provider, "refresh", fail)
+    with pytest.raises(ConnectorError) as failed:
+        await mgr.get_access_token(installation["id"], owner["id"])
+    assert isinstance(failed.value.__cause__, RuntimeError)
+    assert isinstance(failed.value.__cause__.__cause__, ValueError)
+    diagnostic = "\n".join(record.getMessage() for record in caplog.records
+                           if record.name == "server.connector_manager")
+    for context in ("ValueError", "credential rejected", "RuntimeError", "provider transport failed",
+                    "ConnectorTokenError", "_get_access_token", "[redacted]"):
+        assert context in diagnostic
+    assert not any(secret in caplog.text for secret in (ACCESS_TOKEN, REFRESH_TOKEN, "csec"))
+    assert await db.get_connector_secret(installation["id"]) == original
+    assert not (await db.get_connector_installation(installation["id"]))["needs_reconnect"]
+    assert not mgr.drain_blockers()
 
 
 @pytest.mark.parametrize("operation", ["install", "update"])
@@ -327,7 +364,7 @@ async def test_owned_refresh_keeps_short_database_operations_available(mgr, db, 
         await asyncio.wait_for(entered.wait(), 2)
         await asyncio.wait_for(db.update_user_field(owner["id"], extra_roots="[]"), 1)
         release.set()
-        assert (await asyncio.wait_for(refreshing, 2))["access_token"] == "refreshed"
+        assert (await asyncio.wait_for(refreshing, 2))["access_token"] == ROTATED_TOKEN
         assert provider.refresh_calls == 1
     finally:
         release.set()
@@ -372,7 +409,7 @@ async def test_complete_install_creates_and_encrypts(mgr, db, owner):
     # Secret is stored encrypted and round-trips to the original token set.
     blob = await db.get_connector_secret(inst["id"])
     ts = _deserialize_token_set(decrypt(blob, await UserManager(db).data_key_for(owner["id"])))
-    assert ts.access_token == "at" and ts.refresh_token == "rt"
+    assert ts.access_token == ACCESS_TOKEN and ts.refresh_token == REFRESH_TOKEN
 
 
 @pytest.mark.asyncio
@@ -402,7 +439,7 @@ async def test_concurrent_first_authorizations_return_the_same_committed_install
     results = await asyncio.gather(*(
         mgr.complete_install(
             kind="fakekind", user_id=owner["id"], requested_label=label,
-            token_set=OAuthTokenSet(token, "rt", time.time() + 3600, scopes=[label]),
+            token_set=OAuthTokenSet(token, REFRESH_TOKEN, time.time() + 3600, scopes=[label]),
         ) for label, token in (("first", "first-token"), ("second", "second-token"))
     ), return_exceptions=True)
     assert all(isinstance(result, dict) for result in results), results
@@ -481,7 +518,7 @@ async def test_authorization_secret_failure_rolls_back_metadata_and_identity(mgr
         assert current == []
     else:
         assert current == [original]
-        assert (await mgr.get_access_token(original["id"], owner["id"]))["access_token"] == "at"
+        assert (await mgr.get_access_token(original["id"], owner["id"]))["access_token"] == ACCESS_TOKEN
 
 
 @pytest.mark.asyncio
@@ -505,7 +542,7 @@ async def test_unknown_kind_rejected(mgr, owner):
 async def test_token_no_refresh_when_fresh(mgr, provider, owner):
     inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(3600), user_id=owner["id"])
     out = await mgr.get_access_token(inst["id"], user_id=owner["id"])
-    assert out["access_token"] == "at"
+    assert out["access_token"] == ACCESS_TOKEN
     assert provider.refresh_calls == 0
 
 
@@ -513,15 +550,15 @@ async def test_token_no_refresh_when_fresh(mgr, provider, owner):
 async def test_token_refreshes_near_expiry(mgr, db, provider, owner):
     inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(10), user_id=owner["id"])
     out = await mgr.get_access_token(inst["id"], user_id=owner["id"])
-    assert out["access_token"] == "refreshed"
+    assert out["access_token"] == ROTATED_TOKEN
     assert provider.refresh_calls == 1
     # New token persisted; reconnect state stays clean.
     refreshed = await mgr.get_installation(inst["id"])
     assert refreshed["needs_reconnect"] is False
     blob = await db.get_connector_secret(inst["id"])
     ts = _deserialize_token_set(decrypt(blob, await UserManager(db).data_key_for(owner["id"])))
-    assert ts.access_token == "refreshed"
-    assert ts.refresh_token == "rt"  # carried over when refresh omits it
+    assert ts.access_token == ROTATED_TOKEN
+    assert ts.refresh_token == REFRESH_TOKEN  # carried over when refresh omits it
 
 
 @pytest.mark.asyncio
@@ -543,7 +580,7 @@ async def test_concurrent_token_refreshes_once(mgr, provider, owner):
         mgr.get_access_token(inst["id"], user_id=owner["id"]), mgr.get_access_token(inst["id"], user_id=owner["id"])
     )
     assert provider.refresh_calls == 1  # lock serializes; 2nd sees fresh token
-    assert all(r["access_token"] == "refreshed" for r in results)
+    assert all(r["access_token"] == ROTATED_TOKEN for r in results)
 
 
 @pytest.mark.asyncio

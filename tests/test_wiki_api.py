@@ -690,31 +690,15 @@ async def test_mcp_curator_executes_new_contracts_through_real_http(client, tmp_
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
-    from server.mcp_identity import mint
-    from server.wiki.jobs import WikiJobs
-    from server.wiki.tasks import tasks
-    from tests.callback_api import start_callback_api
+    from tests.wiki_job_runtime import worker_callback
 
     vault = tmp_path / "vault"
     (vault / "Library").mkdir(parents=True)
     (vault / "Library/note.md").write_text("# 当前文章\n\n观点和条件完整。\n")
     config = await configure(client, vault)
-    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
-    jobs = WikiJobs(owner)
-    job = jobs.maintain("mcp-check", "", "检查当前文章", ["Library/note.md"], None, [], "human")
-    session = await wiki_api.session_manager.create_session(config["curator_agent_id"], "MCP 合同", str(tmp_path))
-    jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], job["items"])
-    token = tasks.open(session, "maintain")
-    from server.deps import get_session_manager
-    from server.main import _wiki_error
-    from server.routers.wiki import router
-    from server.wiki import WikiError
-
-    api = await start_callback_api(router, overrides={get_session_manager: lambda: wiki_api.session_manager}, exception_handlers={WikiError: _wiki_error}, readiness_token=mint(session.id, user_id=session.user_id))
-    monkeypatch.setattr(settings, "port", api.port)
-    try:
-        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}) as transport:
+    async with worker_callback(config, ["Library/note.md"], client=client) as (worker, api):
+        monkeypatch.setattr(settings, "port", api.port)
+        async with httpx.AsyncClient(headers=worker.headers) as transport:
             async with streamable_http_client(f"http://127.0.0.1:{api.port}/mcp/wiki/mcp", http_client=transport) as (reader, writer, _):
                 async with ClientSession(reader, writer) as peer:
                     await peer.initialize()
@@ -730,10 +714,6 @@ async def test_mcp_curator_executes_new_contracts_through_real_http(client, tmp_
                     result = await peer.call_tool("revise", {"request": {"doc": card["id"], "expected_revision": card["revision"], "operation": "no_change", "reason": "已经满足当前范围"}})
                     receipt = json.loads(result.content[0].text)
                     assert receipt["changed"] is False and receipt["receipt_id"]
-    finally:
-        tasks.close(token)
-        tasks.unassign(session.id)
-        await api.stop()
 
 
 async def test_explicit_image_read_returns_original_bytes_and_rejects_other_assets(

@@ -23,15 +23,17 @@ async def main(configuration, phase):
     # acquiring ownership or preparing storage. The parent sets the two
     # provider environment overrides under this same root.
     assert all(Path(value).resolve().is_relative_to(root) for value in _paths(settings).values())
-    popen = subprocess.Popen
+    popen_init = subprocess.Popen.__init__
 
-    def no_model(command, *args, **kwargs):
-        if isinstance(command, (list, tuple)) and Path(command[0]).name in {"codex", "claude"}:
+    def no_model(self, args, *positional, **kwargs):
+        command = args[0] if isinstance(args, (list, tuple)) else args
+        executable = kwargs.get("executable") or command
+        if Path(os.fsdecode(executable)).name in {"codex", "claude"}:
             (root / "model-started").touch()
             raise AssertionError("Mechanical recovery must not run a model")
-        return popen(command, *args, **kwargs)
+        popen_init(self, args, *positional, **kwargs)
 
-    subprocess.Popen = no_model
+    subprocess.Popen.__init__ = no_model
     from server.database import Database
     from server.knowledge import encode, for_account
     from server.session_manager import session_manager
@@ -41,6 +43,28 @@ async def main(configuration, phase):
     from server.wiki.history import WikiHistory
     from server.wiki.jobs import WikiJobs
     from server.wiki.registry import registry
+
+    if phase == "process-protocol":
+        from typing import get_type_hints
+
+        from mcp.os.win32.utilities import FallbackProcess
+
+        # Python 3.12 evaluates this annotation at import time. Force the
+        # same check on interpreters with deferred annotations as well.
+        get_type_hints(FallbackProcess.__init__)
+        with subprocess.Popen(args=[sys.executable, "-c", "print('controlled peer')"],
+                              stdout=subprocess.PIPE, text=True) as process:
+            stdout, _ = process.communicate(timeout=5)
+            assert stdout == "controlled peer\n" and process.wait() == 0
+            assert isinstance(process, subprocess.Popen)
+        for command in (["codex", "--version"], "claude", b"/guarded/codex"):
+            try:
+                subprocess.run(args=command, check=True)
+            except AssertionError as error:
+                assert "must not run a model" in str(error)
+            else:
+                raise AssertionError("The recovery guard allowed a model CLI")
+        return
 
     owner = InstallationOwner(settings)
     owner.acquire()

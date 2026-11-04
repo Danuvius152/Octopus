@@ -13,7 +13,7 @@ from server.wiki.store import WikiError, revision
 from tests.test_wiki_commonmark_locations import store as store
 from tests.test_wiki_read_response import client as client
 from tests.test_wiki_read_response import setup_note
-from tests.test_wiki_write_gates import active_worker
+from tests.wiki_job_runtime import active_worker
 
 
 def test_locator_page_does_not_copy_omitted_body_but_still_checks_current_bytes(store, monkeypatch):
@@ -151,7 +151,8 @@ async def test_warm_raw_coordinates_grant_only_returned_text_and_require_live_au
     text = "# Topic\n\n" + "".join(f"## Section {index}\n\nEvidence and conditions {index}.\n\n" for index in range(3))
     root, config = await setup_note(client, tmp_path, text)
     path = "Library/note.md"
-    async with active_worker(config, [path], client=client) as headers:
+    async with active_worker(config, [path], client=client) as worker:
+        headers = worker.headers
         first = await client.get("/api/wiki/blocks", headers=headers, params={"doc": path, "view": "locators", "limit": 3})
         assert first.status_code == 200, first.text
         assert first.json()["next_offset"] is not None

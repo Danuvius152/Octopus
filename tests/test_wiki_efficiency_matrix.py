@@ -19,7 +19,7 @@ from server.wiki.maintenance_state import status
 from server.wiki.registry import registry
 from server.wiki.store import WikiStore, revision
 from tests import wiki_api as wiki_api
-from tests.test_wiki_write_gates import active_worker
+from tests.wiki_job_runtime import active_worker
 
 pytestmark = pytest.mark.wiki_perf
 client = wiki_api.client
@@ -395,7 +395,8 @@ async def test_http_views_worker_reads_and_concurrency(client, tmp_path, cost_pr
         payload = {"view": "compact", "items": [{"doc": str(path.relative_to(root)), "length": 100} for path in paths]}
         await cost_probe.measure_async("http_read_many", lambda payload=payload: client.post("/api/wiki/read-many", json=payload),
                                       ok, **(options | {"dimensions": {"batch_documents": count}}))
-    async with active_worker(config, ["Library/long.md"], client=client) as headers:
+    async with active_worker(config, ["Library/long.md"], client=client) as worker:
+        headers = worker.headers
         await cost_probe.measure_async("http_worker_read", lambda: client.get("/api/wiki/read", headers=headers,
                                       params={"doc": "Library/long.md", "length": 100, "view": "compact"}), ok, **options)
 

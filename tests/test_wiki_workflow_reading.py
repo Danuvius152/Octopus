@@ -8,7 +8,7 @@ from server.wiki.registry import registry
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
 from tests import wiki_api as wiki_api
-from tests.test_wiki_write_gates import active_worker
+from tests.wiki_job_runtime import active_worker
 
 client = wiki_api.client
 
@@ -30,7 +30,8 @@ async def prepare(client, tmp_path):
 
 async def test_compact_source_details_continue_without_body_evidence_and_expire_on_source_change(client, tmp_path):
     root, config, source = await prepare(client, tmp_path)
-    async with active_worker(config, ['target.md'], client=client) as headers:
+    async with active_worker(config, ['target.md'], client=client) as worker:
+        headers = worker.headers
         initial = await client.get('/api/wiki/read', headers=headers,
                                    params={'doc': 'target.md', 'view': 'compact', 'length': 1, 'source_limit': 1})
         assert initial.status_code == 200, initial.text
@@ -39,7 +40,7 @@ async def test_compact_source_details_continue_without_body_evidence_and_expire_
         assert page['total'] == 3 and len(page['items']) == 1 and not page['complete']
         assert page['items'][0]['doc'] == source['id']
         assert page['items'][0]['current_revision'] == source['revision']
-        current = next(task for task in tasks.active.values() if task.job_id)
+        current = worker.task
         before = {key: list(ranges) for key, ranges in current.reads.items()}
         continued = await client.get('/api/wiki/read', headers=headers, params={
             'doc': value['id'], 'source_cursor': page['next_cursor'], 'source_limit': 1,
@@ -66,7 +67,8 @@ async def test_compact_source_details_continue_without_body_evidence_and_expire_
 async def test_location_batch_reuses_only_explicit_current_task_delivery(client, tmp_path):
     _, config, source = await prepare(client, tmp_path)
     request = {'doc': source['id'], 'expected_revision': source['revision'], 'location': '#claim'}
-    async with active_worker(config, ['target.md'], client=client) as headers:
+    async with active_worker(config, ['target.md'], client=client) as worker:
+        headers = worker.headers
         original = await client.post('/api/wiki/read-many', headers=headers, json={'items': [request, request], 'view': 'compact'})
         assert original.status_code == 200, original.text
         first = original.json()
@@ -85,7 +87,7 @@ async def test_location_batch_reuses_only_explicit_current_task_delivery(client,
         # A deliberate context-recovery read still returns the real passage.
         recovered = await client.post('/api/wiki/read-many', headers=headers, json={'items': [request], 'view': 'compact'})
         assert recovered.status_code == 200 and recovered.json()['characters_returned'] == first['characters_returned']
-        task = next(task for task in tasks.active.values() if task.job_id)
+        task = worker.task
         task.reads.clear()
         fresh = await client.post('/api/wiki/read-many', headers=headers, json={
             'items': [request], 'reuse_delivered': True, 'view': 'compact',
@@ -95,14 +97,15 @@ async def test_location_batch_reuses_only_explicit_current_task_delivery(client,
 
 async def test_location_pagination_never_claims_unreturned_source_text(client, tmp_path):
     _, config, source = await prepare(client, tmp_path)
-    async with active_worker(config, ['target.md'], client=client) as headers:
+    async with active_worker(config, ['target.md'], client=client) as worker:
+        headers = worker.headers
         result = await client.get('/api/wiki/read', headers=headers, params={
             'doc': source['id'], 'expected_revision': source['revision'], 'location': '#claim', 'length': 8,
         })
         assert result.status_code == 200, result.text
         first = result.json()
         assert first['content'] == '## Claim' and first['next_start'] == first['end']
-        task = next(task for task in tasks.active.values() if task.job_id)
+        task = worker.task
         store = registry.store(task.user_id)
         with pytest.raises(WikiError, match='cited current passage'):
             tasks.require_source_read(task, store, {'doc': source['id'], 'revision': source['revision'], 'location': '#claim'})
@@ -117,14 +120,15 @@ async def test_location_pagination_never_claims_unreturned_source_text(client, t
 
 async def test_actual_raw_source_passage_satisfies_citation_without_a_second_delivery(client, tmp_path):
     _, config, source = await prepare(client, tmp_path)
-    async with active_worker(config, ['target.md'], client=client) as headers:
+    async with active_worker(config, ['target.md'], client=client) as worker:
+        headers = worker.headers
         reference = {'doc': source['id'], 'revision': source['revision'], 'location': '#claim'}
         first = await client.get('/api/wiki/blocks', headers=headers, params={
             'doc': source['id'], 'expected_revision': source['revision'], 'offset': 2, 'limit': 2, 'budget_chars': 8,
         })
         assert first.status_code == 200, first.text
         current = first.json()
-        task = next(task for task in tasks.active.values() if task.job_id)
+        task = worker.task
         store = registry.store(task.user_id)
         with pytest.raises(WikiError, match='cited current passage'):
             tasks.require_source_read(task, store, reference)
@@ -145,19 +149,21 @@ async def test_raw_delivery_does_not_reuse_offsets_when_extraction_removes_a_bom
     root, config, _ = await prepare(client, tmp_path)
     source = root / 'source.md'
     source.write_bytes(b'\xef\xbb\xbf' + source.read_bytes())
-    async with active_worker(config, ['target.md'], client=client) as headers:
+    async with active_worker(config, ['target.md'], client=client) as worker:
+        headers = worker.headers
         result = await client.get('/api/wiki/blocks', headers=headers, params={'doc': 'source.md', 'budget_chars': 8})
         assert result.status_code == 200, result.text
         document = result.json()
         key = (document['id'], document['path'], document['revision'])
-        task = next(task for task in tasks.active.values() if task.job_id)
+        task = worker.task
         assert task.raw_reads[key] == [(0, 8)]
         assert key not in task.reads
 
 
 async def test_explicit_reuse_returns_only_the_next_gap_and_does_not_cross_revisions(client, tmp_path):
     root, config, source = await prepare(client, tmp_path)
-    async with active_worker(config, ['target.md'], client=client) as headers:
+    async with active_worker(config, ['target.md'], client=client) as worker:
+        headers = worker.headers
         first = await client.get('/api/wiki/read', headers=headers, params={
             'doc': source['id'], 'location': '#claim', 'length': 8,
         })
@@ -189,7 +195,8 @@ async def test_long_optional_source_label_preserves_short_action_fields(client, 
     target = root / 'target.md'
     target.write_text(target.read_text().replace('    location: L1\n',
                      '    location: L1\n    id: ' + json.dumps('展示标签' * 1500, ensure_ascii=False) + '\n', 1))
-    async with active_worker(config, ['target.md'], client=client) as headers:
+    async with active_worker(config, ['target.md'], client=client) as worker:
+        headers = worker.headers
         response = await client.get('/api/wiki/read', headers=headers, params={'doc': 'target.md', 'view': 'compact'})
         assert response.status_code == 200, response.text
         value = response.json()['sources']
@@ -204,7 +211,8 @@ async def test_oversized_source_locator_has_a_real_original_declaration_recovery
     location = 'L' + '9' * 3000
     target = root / 'target.md'
     target.write_text(target.read_text().replace('    location: L1\n', '    location: ' + location + '\n', 1))
-    async with active_worker(config, ['target.md'], client=client) as headers:
+    async with active_worker(config, ['target.md'], client=client) as worker:
+        headers = worker.headers
         response = await client.get('/api/wiki/read', headers=headers, params={'doc': 'target.md', 'view': 'compact'})
         assert response.status_code == 200, response.text
         page = response.json()['sources']

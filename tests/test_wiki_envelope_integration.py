@@ -18,7 +18,7 @@ from server.wiki.registry import registry
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
 from tests import wiki_api as api
-from tests.test_wiki_write_gates import active_worker
+from tests.wiki_job_runtime import active_worker
 
 client = api.client
 
@@ -68,7 +68,8 @@ async def test_navigation_http_shape_and_shortened_final_pages_keep_every_identi
     _, config = await configure(client, tmp_path, files)
     grants = []
     monkeypatch.setattr(tasks, "record_read", lambda *args: grants.append(args))
-    async with active_worker(config, ["Library/note00.md"], client=client) as headers:
+    async with active_worker(config, ["Library/note00.md"], client=client) as worker:
+        headers = worker.headers
         bridge(client, monkeypatch, headers)
         for name, route, arguments in [
             ("search", "search", {"query": "shared", "intent": "lookup", "view": "compact"}),
@@ -133,9 +134,10 @@ async def test_full_model_reads_clip_before_grants_and_finish_exact_unicode(clie
     original = '\ufeff# Source\r\n\r\n' + '甲😀e\u0301\\"\t条件。\r\n' * 2200
     text = original.removeprefix('\ufeff')
     _, config = await configure(client, tmp_path, {"Library/note.md": original})
-    async with active_worker(config, ["Library/note.md"], client=client) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as worker:
+        headers = worker.headers
         bridge(client, monkeypatch, headers)
-        task = tasks.require(verify(headers["Authorization"].split()[1]))
+        task = worker.task
         passages, start, revision = [], 0, None
         while True:
             request = {"doc": "Library/note.md", "start": start, "length": 24000,
@@ -164,9 +166,10 @@ async def test_full_model_reads_clip_before_grants_and_finish_exact_unicode(clie
 async def test_full_metadata_refusal_retains_prior_receipts_without_granting_more(client, tmp_path, monkeypatch):
     text = "# Source\n\n" + "## Heading\n\nA paragraph.\n\n" * 600
     _, config = await configure(client, tmp_path, {"Library/note.md": text})
-    async with active_worker(config, ["Library/note.md"], client=client) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as worker:
+        headers = worker.headers
         bridge(client, monkeypatch, headers)
-        task = tasks.require(verify(headers["Authorization"].split()[1]))
+        task = worker.task
         await invoke("read", {"doc": "Library/note.md", "length": 4}, headers)
         prior = copy.deepcopy(task.reads)
         value = await invoke("read", {"doc": "Library/note.md", "view": "full"}, headers)
@@ -182,9 +185,10 @@ async def test_raw_large_block_keeps_hash_and_can_continue_without_unseen_edit_g
     full = WikiCuration(registry.store(owner)).blocks("Library/note.md")
     block = max(full["blocks"], key=lambda part: part["characters"])
     assert block["sha256"] == hashlib.sha256(block["content"].encode()).hexdigest()
-    async with active_worker(config, ["Library/note.md"], client=client) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as worker:
+        headers = worker.headers
         bridge(client, monkeypatch, headers)
-        task = tasks.require(verify(headers["Authorization"].split()[1]))
+        task = worker.task
         cursor, passages = None, []
         while True:
             value = await invoke("blocks", {"doc": "Library/note.md", "ids": [block["id"]], "offset": 0,
@@ -222,7 +226,8 @@ async def test_compact_jobs_pages_keep_exact_keys_and_minimum_oversize_is_refuse
     jobs = WikiJobs(owner)
     for index in range(8):
         jobs.maintain(str(index) + "甲😀" * 1200, "", f"purpose{index}", ["Library/note.md"], None, [], "human")
-    async with active_worker(config, ["Library/note.md"], client=client) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as worker:
+        headers = worker.headers
         bridge(client, monkeypatch, headers)
         # active_worker adds one genuine scoped job as well.
         expected = jobs.list(limit=30, view="full")["items"]

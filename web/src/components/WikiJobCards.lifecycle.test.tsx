@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { WikiJobCards } from "./WikiJobCards";
 import { useSessionStore } from "../stores/sessionStore";
 import { wikiJob } from "../lib/wikiJobs.fixture";
+import { deferred } from "../test-support/deferred";
 
 beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);
@@ -45,11 +46,10 @@ it("opens details and controls with the new attempt discovered beyond the first 
   vi.stubGlobal("fetch", fetcher);
   useSessionStore.getState().mergeWikiJobs("original", [old]);
   render(<WikiJobCards sessionId="original" />);
-  await screen.findByText("Wiki maintenance · Reviewing");
-  fireEvent.click(screen.getByRole("button", { name: "Task details" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Task details" }));
   await screen.findByLabelText("Maintenance attempt");
   expect(details[0].searchParams.get("attempt")).toBe("2");
-  fireEvent.click(screen.getByRole("button", { name: "Cancel maintenance" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel maintenance" }));
   await waitFor(() => expect(posts).toHaveLength(1));
   expect(JSON.parse(String(posts[0].body))).toMatchObject({ expected_attempt: 2, expected_vault_id: current.vault_id });
 });
@@ -103,13 +103,21 @@ it.each(["queued", "running", "interrupted", "failed", "cancelled", "completed_w
 
 it("restores collapsed history from HTTP on reopen and keeps older pages reachable", async () => {
   const first = Array.from({ length: 30 }, (_, index) => wikiJob({ job_id: `job-${index}`, status: "completed" }));
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => Response.json(
-    new URL(url).searchParams.get("offset") === "30" ? [wikiJob({ job_id: "older", status: "completed" })] : first,
-  )));
+  const retained = wikiJob({ job_id: "retained", status: "running" });
+  const recheck = deferred<Response>();
+  useSessionStore.getState().mergeWikiJobs("original", [retained]);
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const params = new URL(url).searchParams;
+    if (params.get("job_id") === retained.job_id) return recheck.promise;
+    return Response.json(params.get("offset") === "30" ? [wikiJob({ job_id: "older", status: "completed" })] : first);
+  }));
   render(<WikiJobCards sessionId="original" />);
   const history = await screen.findByRole("button", { name: "Completed maintenance (30 loaded)" });
-  expect(screen.queryByText(/Wiki maintenance ·/)).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "More maintenance tasks" }));
+  expect(history.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.queryByText(/Wiki maintenance · Completed/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "More maintenance tasks" })).toBeNull();
+  recheck.resolve(Response.json([retained]));
+  fireEvent.click(await screen.findByRole("button", { name: "More maintenance tasks" }));
   await waitFor(() => expect(history.textContent).toBe("Completed maintenance (31 loaded)"));
   fireEvent.click(history);
   expect(screen.getAllByText(/Wiki maintenance · Completed/)).toHaveLength(31);

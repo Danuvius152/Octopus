@@ -10,7 +10,7 @@ from server.mcp_servers import wiki as wiki_tools
 from server.wiki import read_response
 from server.wiki.tasks import tasks
 from tests import wiki_api as wiki_tests
-from tests.test_wiki_write_gates import active_worker
+from tests.wiki_job_runtime import active_worker
 
 client = wiki_tests.client
 
@@ -69,7 +69,8 @@ async def test_byte_clipping_records_only_actual_unicode_prefix_and_can_finish_m
         record(task, document)
 
     monkeypatch.setattr(tasks, "record_read", observe)
-    async with active_worker(config, ["Library/note.md"], client=client) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as worker:
+        headers = worker.headers
         start, revision, passages = 0, None, []
         while True:
             if batch:
@@ -193,7 +194,8 @@ async def test_clipped_batch_keeps_merged_empty_eof_in_its_own_range(client, tmp
                 {"doc": "Library/note.md", "start": len(text), "length": 1}]
     if eof_first:
         requests.reverse()
-    async with active_worker(config, ["Library/note.md"], client=client) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as worker:
+        headers = worker.headers
         response = await client.post("/api/wiki/read-many", headers=headers, json={"view": "compact", "items": requests})
         assert response.status_code == 200, response.text
         data = response.json()

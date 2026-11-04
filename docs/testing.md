@@ -254,10 +254,35 @@ evidence under the reuse policy above.
   when injecting loss of exit proof.
 - `tests/wiki_api.py` owns HTTP account/Manager/database fixtures;
   `tests/wiki_job_runtime.py` adds authenticated job helpers.
+  Its `active_worker` returns the exact headers, task and scope; consumers use
+  those identities rather than the newest entry in a shared task table. Each
+  job registers retirement immediately. Session creation retains its original
+  task and registers cleanup before waiting, so cancellation still observes
+  and deletes a late-created session. Cleanup closes the task and assignment,
+  retires the session, then awaits the job's cancellation and effect settlement;
+  the complete exit stack and callback host stop finish before cancellation
+  propagates. The fixture's original `JobOwner` proves that this helper never
+  submits model input. That proof is limited to these controlled API fixtures
+  and must not stand in for a real model worker's retirement evidence.
   `tests/wiki_jobs.py` is a separate store-only fixture and cannot substitute
   for the HTTP account. Teardown through `db.close()` drains turns, joins Owners
   and only then closes storage. Frontend WS lifecycle tests reuse
   [`Socket`](../web/src/test-support/socket.ts) with explicit callback ordering.
+- Connector diagnostic fixtures use long credential values that do not collide
+  with ordinary prose. Assertions inspect the Connector's own logger, preserve
+  exception/cause context, and check masking alongside unchanged storage and
+  retired work. An unrelated raw asyncio exception copy cannot establish that
+  the Connector diagnostic is readable. Product masking still covers short secrets.
+- `tests/joint_recovery_process.py` guards `Popen.__init__`, retaining the real
+  generic process class, communication, exit and reaping protocols. Its
+  process-protocol phase evaluates the actual MCP process annotation even on
+  interpreters that defer annotations, then exercises a controlled subprocess
+  and the model-CLI rejection guard. Import order cannot replace this guarantee.
+- UI lifecycle tests wait for the actual button and pagination state needed for
+  their next interaction. The Wiki history regression holds the original
+  by-id HTTP reread pending after history has rendered, exposing the interval
+  before pagination is ready. Store updates or request counts alone do not
+  establish DOM readiness; use observable waits without sleeps or wider timeouts.
 - `tests/byte_reads.py` observes binary `read()` on actual file handles, retaining
   fileno/context behavior and explicit before/after barriers. Use the actual I/O
   boundary when checking source-version consistency, replacement, byte cost or
@@ -277,6 +302,29 @@ evidence under the reuse policy above.
   grant. The pinned local HTTP 503 probe is fault injection, not an upstream
   outage; capacity or media-generation observations prove only their observed
   stages. Saved artifact, row and file effects remain independently verifiable.
+
+### Test fixture remediation evidence
+
+T-01–T-04 were verified on 2026-11-04 against baseline
+`4f1418da3906fedd7221d9b239774681e785945c` plus the regression-code patch
+SHA256 `bd8053033019f38043d005c7b921b08f8149e149d7c1d09701a7944ecfe5b9b5`.
+Strengthened assertions exposed the short-token diagnostic collision and the
+broken generic `Popen` replacement. Failure injection also exposed assignment
+and persisted-job leaks, late session creation, interrupted settlement/host
+stop, and the pagination rendering window. These failures remain distinct
+from the passing repair checks; none were converted to skips or weaker gates.
+
+`./scripts/check.sh` passed all nine commit gates: 6,733 backend hermetic cases
+and 1,059 frontend cases, including the complete affected modules and shared
+helper consumers. The environment was Linux/WSL, Python 3.14.4, pytest 9.1.1,
+MCP 1.30.0 and AnyIO 4.15.1 under `constraints-python.txt`, with Node 24.21.0,
+Bun 1.4.2 and Vitest 4.1.12 under the existing JS lockfile. Separately,
+`python -m pytest tests/test_joint_recovery_reentry.py -q` passed both cases
+on Python 3.12.16 in an isolated environment installed with the same Python
+constraints. Test state stayed under an independent test-cache root. These
+are offline test-fixture results; they do not establish live-provider or
+browser E2E acceptance, deployment, or closure of the other remediation tickets.
+Reuse requires unchanged relevant source, configuration, dependencies and environment.
 
 ### Optional resource experiments
 

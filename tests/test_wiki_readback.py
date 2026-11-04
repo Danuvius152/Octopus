@@ -7,7 +7,7 @@ from tests import test_wiki_legacy_metadata as legacy
 from tests import wiki_api as wiki_api
 from tests.test_wiki_grant_v2 import assigned
 from tests.test_wiki_supporting_navigation import setup_notes
-from tests.test_wiki_write_gates import active_worker
+from tests.wiki_job_runtime import active_worker
 
 client = wiki_api.client
 legacy_notes = legacy.notes
@@ -99,7 +99,8 @@ async def test_new_job_metadata_refresh_copies_old_key_note_and_reports_effectiv
     root, store, config = legacy_notes
     await legacy.initially_organize(client)
     old_summary = next(part['raw'] for part in legacy.managed(store)[1] if part['role'] == 'key_note')
-    async with active_worker(config, [legacy.NOTE], client=client) as headers:
+    async with active_worker(config, [legacy.NOTE], client=client) as worker:
+        headers = worker.headers
         result = await legacy.organize(client, headers=headers, tags=['worker-refresh'])
         assert result.status_code == 200, result.text
         plan = result.json()['readback']
