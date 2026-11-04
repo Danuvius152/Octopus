@@ -190,6 +190,14 @@ async def resolve_principal(token: str) -> Principal | None:
     return None
 
 
+async def resolve_socket_access(token: str, session_id: str | None) -> tuple[Principal | None, str | None]:
+    """Browser connection identity and frame ownership share the final DB read."""
+    if _user_manager is None:
+        return None, None
+    user, owner = await _user_manager.resolve_socket_access(token, session_id)
+    return (Principal(user["id"], "account") if user is not None else None), owner
+
+
 async def scope_user_id_for(token: str) -> tuple[bool, str | None]:
     """Allowed and scoped together, without double resolution or activity writes."""
     principal = await resolve_principal(token)

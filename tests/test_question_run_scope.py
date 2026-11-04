@@ -60,7 +60,8 @@ async def question_runtime(monkeypatch, tmp_path, short_process_shutdown):
         try:
             yield manager, session, client, events, starts
         finally:
-            await manager.interrupt(session.id)
+            if not manager.session_owner_failed(session.id):
+                await manager.interrupt(session.id)
             await manager.await_session_execution(session.id, timeout=5)
             await manager.stop_all_held_processes()
             await database.close()

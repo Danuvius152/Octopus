@@ -9,6 +9,7 @@ import pytest
 
 from server import monitor
 from server.attachments import save_upload
+from server.config import settings
 from server.database import Database
 from server.monitor import MetricsStore, query
 from server.question_resolution import AnswerSource
@@ -130,6 +131,11 @@ async def test_live_native_question_replies_on_original_connection(live_product,
     )
     assert ref.request_id == question.request_id == receipt.request_id
     assert ref.question_ids == ("banner",)
+    # G0's Default-mode capability emits a real nonblocking question. It
+    # proves optional delivery, not blocking/idle suspension. The latter uses
+    # explicit isBlocking=true frames in test_work_interaction_policy.py.
+    assert ref.blocking is False and question.wait_mode == "optional"
+    assert question.interaction_policy == "human" and question.deadline is not None
     request, = requests
     assert request["method"] == "item/tool/requestUserInput" and request["id"] == ref.server_request_id
     # The model only learns this unpredictable value from the native reply.
@@ -155,6 +161,47 @@ async def test_live_native_question_replies_on_original_connection(live_product,
     assert (resolution["request_id"], resolution["attempt_id"]) == (receipt.request_id, ref.attempt_id)
     assert resolution["answers"][0]["text"] == answer
     assert run.retirement_state == "proven" and run.active_turn is None
+
+
+async def test_live_unattended_native_question_preserves_partial_effect_and_stops_missing_decision(live_product, tmp_path, monkeypatch):
+    from server.harness import codex_app_server
+
+    manager, database, session, _ = live_product
+    monkeypatch.setitem(codex_app_server._REQUIRED_FEATURES, "features.default_mode_request_user_input", True)
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    partial = f"INDEPENDENT-{uuid.uuid4().hex}"
+    events = []
+    async def observe(event):
+        events.append(event)
+    manager.on_broadcast("unattended-native-acceptance", observe)
+    receipt = await manager.start_message(session.id,
+        "This is an unattended native-input protocol check in the isolated working directory. "
+        f"First write exactly {partial} to independent.txt; this independent step is authorized. "
+        "Then call native request_user_input once (id=destination) asking the human to authorize Blue or Green. "
+        "The host will return immediately without human interaction; exercising that native result is required. "
+        "There is no authorized default. Treat an empty answer as a missing decision, never as permission. "
+        "dependent.txt may be created only after an actual human authorizes a destination, so leave it absent otherwise. "
+        "Report the completed independent step and the missing decision with DECISION_REQUIRED. "
+        "Do not use MCP ask or helpers, and do not reopen or replay the question.", source="schedule")
+    try:
+        completion = await asyncio.wait_for(receipt.wait(), 180)
+        assert completion.outcome.status == "success", completion
+        await assert_retired(receipt)
+        assert (tmp_path / "independent.txt").read_text().strip() == partial
+        assert not (tmp_path / "dependent.txt").exists()
+        assert not manager.get_pending_questions(session.id)
+        rows = await database.load_messages(session.id)
+        requested, = [row for row in rows if row["type"] == "question_request"]
+        closed, = [row for row in rows if row["type"] == "question_closed"]
+        assert requested["tool_use_id"] == closed["tool_use_id"]
+        assert requested["tool_input"]["interaction_policy"] == "unattended"
+        assert closed["tool_input"]["reason"] == "needs_input"
+        assert closed["tool_input"]["question_resolution"]["answers"] is None
+        assert not [event for event in events if event["type"] == "question_answer"]
+        result = await database.read_session_result(session.id, receipt.request_id)
+        assert "DECISION_REQUIRED" in result.reply_text()
+    finally:
+        manager.remove_broadcast("unattended-native-acceptance")
 
 
 async def test_live_steer_reaches_the_original_active_root(live_product, tmp_path):

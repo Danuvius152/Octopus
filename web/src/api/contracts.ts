@@ -3904,6 +3904,8 @@ export interface components {
             questions: {
                 [key: string]: unknown;
             }[];
+            /** Mcp Call Id */
+            mcp_call_id?: string | null;
         };
         /** CreateScheduleRequest */
         CreateScheduleRequest: {
@@ -4931,6 +4933,10 @@ export interface components {
             request_id?: string | null;
             /** Attempt Id */
             attempt_id?: string | null;
+            /** Interaction Policy */
+            interaction_policy?: ("human" | "unattended") | null;
+            /** Wait Mode */
+            wait_mode?: ("blocking" | "optional" | "mcp") | null;
         };
         /**
          * PinOrderRequest
@@ -10191,6 +10197,7 @@ export interface operations {
         parameters: {
             query?: {
                 timeout?: number;
+                structured?: boolean;
                 token?: string | null;
             };
             header?: never;

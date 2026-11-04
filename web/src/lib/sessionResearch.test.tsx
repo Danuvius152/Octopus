@@ -244,6 +244,7 @@ it("loads existing research when selecting after WS connects, then accepts progr
     const path = String(url);
     if (path.endsWith("/research")) return Response.json([job]);
     if (path.endsWith("/api/sessions/s1")) return Response.json({ ...session, messages: [], dispatch_state: dispatch() });
+    if (path.includes("/api/sessions") && !path.includes("/api/sessions/s1")) return Response.json([session]);
     return Response.json([]);
   });
   vi.stubGlobal("fetch", fetcher);
@@ -311,6 +312,7 @@ it("reloads research on WS reconnect after establishing the detail's service gen
   vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
     const path = String(url);
     if (path.endsWith("/api/sessions/s1")) return Response.json({ ...session, messages: [], dispatch_state: dispatch() });
+    if (path.includes("/api/sessions") && !path.includes("/api/sessions/s1")) return Response.json([session]);
     if (path.endsWith("/research")) return Response.json([job]);
     return Response.json([]);
   }));

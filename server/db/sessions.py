@@ -77,6 +77,33 @@ async def insert_session(tx: Transaction, record: dict[str, Any]) -> None:
 
 
 class SessionsMixin(DatabaseBase):
+    async def get_request_missing_decisions(self, session_id: str, request_id: str) -> list[str]:
+        """Original question resolutions, without inventing a new request outcome."""
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(
+                "SELECT content FROM messages WHERE session_id=? AND type='question_closed' "
+                "AND json_extract(tool_input,'$.reason')='needs_input' "
+                "AND json_extract(tool_input,'$.question_resolution.request_id')=? ORDER BY seq",
+                (session_id, request_id),
+            )
+            return [json.loads(row[0]) for row in rows]
+
+    async def get_question_result(self, session_id: str, question_id: str) -> dict[str, Any] | None:
+        """Read only the original question's committed resolution, including after retirement."""
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                "SELECT content,tool_input FROM messages WHERE session_id=? AND tool_use_id=? "
+                "AND type IN ('question_answer','question_closed') ORDER BY seq DESC LIMIT 1",
+                (session_id, question_id),
+            )
+            if row is None:
+                return None
+            details = json.loads(row[1]) if row[1] else {}
+            resolution = details.get("question_resolution")
+            if not isinstance(resolution, dict) or resolution.get("question_id") != question_id:
+                raise ValueError("Question has no structured resolution")
+            return {"answer": json.loads(row[0]), "resolution": resolution, "reason": details.get("reason")}
+
 
     async def session_has_inputs(self, session_id: str) -> bool:
         """An empty builder has neither retained messages nor admitted inputs."""

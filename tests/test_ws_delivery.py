@@ -424,6 +424,162 @@ async def test_queued_account_frame_rechecks_live_authority(runtime, monkeypatch
         assert client[1].empty()
 
 
+@pytest.mark.parametrize("resource", ["deleted", "unknown", "foreign", "archived"])
+async def test_queued_session_frame_does_not_revoke_valid_account(
+    runtime, monkeypatch, tmp_path, caplog, resource,
+):
+    from server import ws_delivery
+    from server.agent_manager import AgentManager
+    from server.users import UserManager
+
+    manager, db, bearer = runtime
+    user_id = (await deps.resolve_principal(bearer)).user_id
+    agent = await db.get_system_agent()
+    if resource == "foreign":
+        other = await UserManager(db).create_user(username="other-frame-owner", password="password2")
+        agent = await AgentManager(db).create_agent(name="foreign", user_id=other["id"])
+    session = await manager.create_session(agent["id"], "queued frame", None)
+    if resource == "archived":
+        await manager.archive_session(session.id)
+    sid = "unknown-session" if resource == "unknown" else session.id
+    monkeypatch.setattr(ws_delivery, "MAX_PENDING_FRAMES", 6)
+    monkeypatch.setattr(ws_delivery, "MAX_PENDING_BYTES", 2048)
+    release = asyncio.Event()
+    async with connection(manager, bearer, release=release) as browser:
+        await manager._broadcast({"type": "schedules_changed", "marker": "first"})
+        await asyncio.wait_for(browser[3].wait(), 1)
+        # Deliberately misroute a frame through the real bus: delivery must
+        # enforce ownership independently of the producer's audience.
+        await manager._broadcast({"type": "assistant_text", "session_id": sid, "content": "private"}, user_id=user_id)
+        if resource == "deleted":
+            assert await manager.delete_session(session.id)
+        await manager._broadcast({"type": "schedules_changed", "marker": "after"})
+        release.set()
+        assert (await frame(browser[1]))["marker"] == "first"
+        if resource == "archived":
+            assert (await frame(browser[1]))["content"] == "private"
+        while (event := await frame(browser[1])).get("type") == "session_deleted":
+            pass
+        assert event == {"type": "schedules_changed", "marker": "after"}
+        # Repeated drops must return both budgets; the valid frame is a
+        # barrier proving the previous drop finished before the next offer.
+        for number in range(6):
+            if resource != "archived":
+                await manager._broadcast({"type": "assistant_text", "session_id": sid, "content": "x" * 400}, user_id=user_id)
+            await manager._broadcast({"type": "schedules_changed", "marker": number})
+            assert (await frame(browser[1]))["marker"] == number
+        assert not browser[2].done()
+    if resource == "foreign":
+        assert "cross-account" in caplog.text
+
+
+@pytest.mark.parametrize("entry", ["rest", "internal", "archived", "failed"])
+async def test_confirmed_deletion_notifies_both_browsers_after_original_retirement(
+    runtime, monkeypatch, entry,
+):
+    import httpx
+
+    from server.routers.sessions import router as session_router
+
+    manager, db, bearer = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "delete on two pages", None)
+    if entry == "archived":
+        await manager.archive_session(session.id)
+    original = db.delete_session
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delete(sid):
+        entered.set()
+        await release.wait()
+        if entry == "failed":
+            raise RuntimeError("original deletion failed")
+        await original(sid)
+
+    monkeypatch.setattr(db, "delete_session", delete)
+    app = FastAPI()
+    app.include_router(session_router)
+    app.dependency_overrides[get_session_manager] = lambda: manager
+    async with connection(manager, bearer) as first, connection(manager, bearer) as second:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            async def remove():
+                if entry == "rest":
+                    response = await client.delete(f"/api/sessions/{session.id}", headers={"Authorization": f"Bearer {bearer}"})
+                    assert response.status_code == 204
+                else:
+                    assert await manager.delete_session(session.id)
+
+            deleting = asyncio.create_task(remove())
+            async def assert_no_deletion():
+                await manager._broadcast({"type": "schedules_changed", "marker": "barrier"})
+                for browser in (first, second):
+                    while (event := await frame(browser[1])).get("marker") != "barrier":
+                        assert event["type"] != "session_deleted"
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                await assert_no_deletion()
+                release.set()
+                if entry == "failed":
+                    with pytest.raises(RuntimeError, match="original deletion failed"):
+                        await deleting
+                    assert manager.get_session(session.id) is session
+                    await assert_no_deletion()
+                else:
+                    await deleting
+                    for browser in (first, second):
+                        assert await receipt_frame(browser[1], "session_deleted") == {"type": "session_deleted", "session_id": session.id}
+                        assert not browser[2].done()
+                    assert manager.get_session(session.id) is None
+                    assert await db.get_session_binding(session.id) is None
+                    assert not await manager.delete_session(session.id)
+                    await manager._broadcast({"type": "schedules_changed"})
+                    for browser in (first, second):
+                        assert await frame(browser[1]) == {"type": "schedules_changed"}
+            finally:
+                release.set()
+                await asyncio.gather(deleting, return_exceptions=True)
+
+
+@pytest.mark.parametrize("transition", ["archive", "delete-archived"])
+async def test_frame_readability_and_account_share_the_final_read(runtime, monkeypatch, transition):
+    manager, db, bearer = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "ownership during authentication", None)
+    if transition == "delete-archived":
+        await manager.archive_session(session.id)
+    entered, release = asyncio.Event(), asyncio.Event()
+    read = db.get_token_user
+    held = False
+
+    async def read_after_transition(*args, **kwargs):
+        nonlocal held
+        if not held and asyncio.current_task().get_name().startswith("websocket-writer:"):
+            held = True
+            entered.set()
+            await release.wait()
+        return await read(*args, **kwargs)
+
+    monkeypatch.setattr(db, "get_token_user", read_after_transition)
+    async with connection(manager, bearer) as browser:
+        await manager._broadcast({"type": "assistant_text", "session_id": session.id, "content": "original"}, user_id=session.user_id)
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            if transition == "archive":
+                await manager.archive_session(session.id)
+            else:
+                # Archived sessions are removed through existing DB consumers.
+                await db.delete_session(session.id)
+            release.set()
+            await manager._broadcast({"type": "schedules_changed"})
+            seen = []
+            while (event := await frame(browser[1]))["type"] != "schedules_changed":
+                seen.append(event)
+            assert any(event.get("content") == "original" for event in seen) == (transition == "archive")
+            assert not browser[2].done()
+        finally:
+            release.set()
+
+
 async def test_setup_proof_cannot_open_business_socket_before_or_after_setup(monkeypatch):
     from server.users import UserManager
 

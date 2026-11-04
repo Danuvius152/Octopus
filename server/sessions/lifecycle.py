@@ -779,8 +779,12 @@ class LifecycleMixin(SessionManagerBase):
 
     async def _unarchive_session(
         self, session_id: str, user_id: str | None = None, *, returning: OwnedTaskContext | None = None,
+        wait_for_lifecycle: bool = True,
     ) -> Session:
-        async with self._session_lifecycle_lock(session_id):
+        lock = self._session_lifecycle_lock(session_id)
+        if not wait_for_lifecycle and lock.locked():
+            raise SessionAdmissionBusy("Original session lifecycle is busy")
+        async with lock:
             if returning is not None:
                 self._require_task_return(returning, session_id, user_id)
             current = self.sessions.get(session_id)
@@ -861,6 +865,7 @@ class LifecycleMixin(SessionManagerBase):
 
     async def _restore_task_return(
         self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
+        wait_for_lifecycle: bool = True,
     ) -> tuple[Session, KnowledgeContext] | None:
         """Restore only the fixed, still-authorized caller of independent work."""
         if owned is None:
@@ -873,7 +878,7 @@ class LifecycleMixin(SessionManagerBase):
                 return None
             agent_id, _ = eligibility
             session = await self._run_agent_operation(agent_id, lambda: self._unarchive_session(
-                reference.session_id, reference.user_id, returning=owned,
+                reference.session_id, reference.user_id, returning=owned, wait_for_lifecycle=wait_for_lifecycle,
             ))
         except SessionAdmissionBusy:
             raise
@@ -885,7 +890,11 @@ class LifecycleMixin(SessionManagerBase):
     async def delete_session(self, session_id: str, *, only_empty_application: str | None = None) -> bool:
         session = self.sessions.get(session_id)
         if session is None:
-            return False
+            if self.db is None or only_empty_application is not None:
+                return False
+            archived_deletion = asyncio.create_task(self._delete_archived_session(session_id), name=f"delete-archived-session-{session_id}")
+            self._own_task(archived_deletion)
+            return await asyncio.shield(archived_deletion)
         if only_empty_application is not None:
             # A conditional refusal cannot fulfill an overlapping explicit
             # delete. Successful proof joins the original shared deletion.
@@ -915,10 +924,29 @@ class LifecycleMixin(SessionManagerBase):
         async with self._retirement_operation(session.agent_id):
             return await self._finish_session_deletion(session)
 
+    async def _delete_archived_session(self, session_id: str) -> bool:
+        async with self._session_lifecycle_lock(session_id):
+            if self.sessions.get(session_id) is not None:
+                return await self.delete_session(session_id)
+            assert self.db is not None
+            binding = await self.db.get_session_binding(session_id)
+            if binding is None or not binding["archived"]:
+                return False
+            audience = binding["user_id"]
+            if audience is None:
+                raise ValueError("The session has no attachment owner")
+            await self.retire_application_session_work(session_id)
+            await self._blit_attachments_to_descendant_forks(session_id)
+            await self.db.delete_session(session_id)
+            self._archived_dispatch.pop(session_id, None)
+            await self._broadcast({"type": "session_deleted", "session_id": session_id}, user_id=audience)
+            return True
+
     async def _finish_session_deletion(self, session: Session) -> bool:
         session_id = session.id
         if session.user_id is None:
             raise ValueError("The session has no attachment owner")
+        audience = session.user_id
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
         if not await self._close_original_execution(owner, CloseExecution("deleted")):
             return False
@@ -933,6 +961,7 @@ class LifecycleMixin(SessionManagerBase):
         if self.sessions.get(session_id) is session:
             self.sessions.pop(session_id)
             self._session_removed(session)
+        await self._broadcast({"type": "session_deleted", "session_id": session_id}, user_id=audience)
         # Native transcripts and already authorized downloads may still use
         # the original attachment/spill paths. Row deletion is not proof that
         # these references have ended, so it does not authorize file removal.

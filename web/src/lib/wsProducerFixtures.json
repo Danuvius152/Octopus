@@ -322,6 +322,7 @@
       "request_context": {
         "knowledge": {
           "value": {
+            "interaction_policy": "human",
             "maintenance": {
               "may_submit": false,
               "required_selections": []

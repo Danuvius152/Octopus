@@ -232,7 +232,8 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         role: "assistant",
         type: "question_request",
         tool_name: "AskUserQuestion",
-        tool_input: { questions, deadline: data.deadline ?? null },
+        tool_input: { questions, deadline: data.deadline ?? null,
+          interaction_policy: data.interaction_policy, wait_mode: data.wait_mode },
         tool_use_id: questionId,
       });
       addPendingQuestion(sessionId, {
@@ -241,6 +242,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         deadline: data.deadline,
         request_id: data.request_id,
         attempt_id: data.attempt_id,
+        interaction_policy: data.interaction_policy, wait_mode: data.wait_mode,
       });
       break;
     }

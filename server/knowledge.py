@@ -7,6 +7,7 @@ future write grants. Only trusted server entry points construct new requests.
 import json
 import uuid
 from dataclasses import asdict, dataclass, replace
+from typing import Literal
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -35,6 +36,7 @@ class KnowledgeContext:
     maintenance: MaintenanceLimit
     registration: tuple[str, str] | None = None
     task_requirements: tuple[str, ...] = ()
+    interaction_policy: Literal["human", "unattended"] | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in {"auto", "read", "maintain"}:
@@ -91,7 +93,8 @@ def _requested_mode(prompt: str, selected: str | None) -> str | None:
     return explicit_mode(prompt)
 
 
-def for_entry(session, prompt: str, *, request_id: str, selected: str | None = None) -> KnowledgeContext:
+def for_entry(session, prompt: str, *, request_id: str, selected: str | None = None,
+              interaction_policy: Literal["human", "unattended"] | None = "human") -> KnowledgeContext:
     """Capture current registration and host assignment before admission yields."""
     from .wiki.tasks import tasks
 
@@ -103,7 +106,7 @@ def for_entry(session, prompt: str, *, request_id: str, selected: str | None = N
                           prompt=prompt, selected=mode, worker=worker)
     if mode is None:
         context = replace(context, maintenance=MaintenanceLimit(False))
-    return context
+    return replace(context, interaction_policy=interaction_policy)
 
 
 def for_account(*, session_id: str, request_id: str, user_id: str | None,
@@ -240,6 +243,11 @@ def render(context: KnowledgeContext | None, *, original: bool = True) -> str:
         if original and context.task_requirements else ""
     )
     return (
+        ("本轮工作为无人值守（unattended）。必要决定先依已有事实、授权与既定默认求解；子工作可先请父代理求解。"
+         "仍缺用户决定时，立即报告已完成部分与缺失事项并停止依赖步骤，不等待人工表单，不猜测选择或制造授权。"
+         "独立已授权部分可以完成；用户新输入才能明确续接，不重开旧题、重放请求或补跑计划；最终文字不替代效果回执。\n"
+         if context.interaction_policy == "unattended" else "")
+        +
         f"本轮知识来源要求（需实际取得的依据，不是维护权限）：{required}。\n"
         f"{original_instruction}"
         f"{task_instruction}"

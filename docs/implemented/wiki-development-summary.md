@@ -265,6 +265,15 @@ App Server 维护沿原 request receipt 和 work 退休，不读取最终答案�
 根失败或取消保留已发生效果与失败原因，helper partial 不独立判定领域成功或失败。
 通知失败不重跑模型，也不重做已提交效果。
 
+新的 Wiki worker 根工作使用 unattended 策略；人工原工作产生的异步 Wiki 返回
+继承原策略。必要决定缺失且没有既定授权默认时，原问题立即结算 `needs_input`，
+不留下长期人工表单，也不允许以代答扩权。worker 先核对原领域效果 receipt；
+仍缺效果时，读取同一原 request 已保存的问题关闭记录，将准确缺失决定附到原
+item 的 attention 说明。已有失败原因继续保留，不能被缺失决定文字覆盖；正常
+最终文字不能代替维护凭证。已确认效果及独立完成部分保留，不自动重开问题、
+重生成、重新提交原请求或补做 schedule fire。`test_unattended_domain_consumers.py`
+验证原 WikiWorker、实际文件和 effect 事实，以及一次性 schedule 只消费一次。
+
 任务 items 沿用原 JSON 列，正常业务只接受版本1及当前状态、执行阶段；业务
 Python／SQL 不解释历史编码。每批 `ExecutionRef` 固定原 attempt/session/request；
 历史引用可供核验，只有当前引用可以推进执行状态。正常完成、取消与启动恢复

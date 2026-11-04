@@ -41,7 +41,11 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
     delivery = SocketDelivery(ws, session_manager, conn_id, token, principal)
 
     async def broadcast(msg: dict):
-        delivery.offer(msg)
+        if msg.get("type") == "question_request" and msg.get("answer_target", "human") != "human":
+            return
+        # The deletion owner captures the trusted account audience before
+        # removal. Its minimal receipt cannot look up the deleted row again.
+        delivery.offer(msg, session_scoped=msg.get("type") != "session_deleted")
 
     session_manager.on_broadcast(conn_id, broadcast, user_id, required=False)
     delivery.start()

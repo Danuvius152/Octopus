@@ -50,6 +50,23 @@ reconstruct them. Live question callbacks and reply authority are not
 persisted or restored. Backup and transfer scope remains with
 [account portability](../backup-and-migrate.md#account-export-and-import).
 
+Original input/work `KnowledgeContext` JSON also carries nullable
+`interaction_policy` (`human` or `unattended`), inherited through existing child
+and return bindings. Missing legacy fields remain `None`; there is no origin-
+based backfill. Existing question-request `tool_input` retains policy, wait mode,
+answer target and, for MCP ask, authenticated original scope plus actual SDK
+RPC/session/server/tool and supplied metadata. The metadata is association
+evidence, not invocation authority, and missing native/call identities remain
+unknown. `needs_input` uses the existing question-closure reason and resolution;
+Wiki reads that original request's saved closure without a new domain status.
+
+These additions change no tables, format markers or collection roots. Complete
+JSON preservation retains them; text-only projections cannot reconstruct them.
+The original MCP call record, accepted command Future, runner, waiter-release
+evidence and parent receipt callbacks remain process-local and cannot be restored
+as permission or pending execution. Existing input, message, task and schedule
+backup/exclusion rules apply without a new import object or startup replay.
+
 Ordinary App Server adds typed native source to the existing nullable
 `messages.runtime_metadata` JSON: original request/attempt plus native
 thread/turn/item, root thread/turn, known parent and phase. `tool_call_id` is

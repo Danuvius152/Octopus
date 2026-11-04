@@ -267,6 +267,13 @@ class PendingQuestion:
     retirement_requested: bool = False
     backend: HarnessRun | None = field(default=None, repr=False)
     native_ref: NativeQuestionRef | None = field(default=None, repr=False)
+    resolution: dict[str, Any] | None = None
+    interaction_policy: Literal["human", "unattended"] | None = None
+    wait_mode: Literal["blocking", "optional", "mcp"] = "mcp"
+    answer_target: Literal["human", "parent", "none"] = "human"
+    parent_receipt: SubmissionReceipt | None = field(default=None, repr=False)
+    waiters: int = 0
+    waiters_released: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     def is_current(self, attempt_id: str | None) -> bool:
         """Read original attempt eligibility; callers own state and expiry."""
@@ -456,6 +463,9 @@ class SessionManagerBase:
     async def close_session_owners(self) -> None:
         raise NotImplementedError  # provided by a mixin
 
+    async def join_mcp_question_calls(self) -> None:
+        raise NotImplementedError  # provided by a mixin
+
     async def _blit_attachments_to_descendant_forks(self, session_id: str) -> None:
         raise NotImplementedError  # provided by a mixin
 
@@ -627,6 +637,7 @@ class SessionManagerBase:
 
     async def _restore_task_return(
         self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
+        wait_for_lifecycle: bool = True,
     ) -> tuple[Session, KnowledgeContext] | None:
         raise NotImplementedError  # provided by lifecycle
 
@@ -637,6 +648,7 @@ class SessionManagerBase:
 
     async def admit_return(
         self, target: ReturnTarget, *, prepare: Callable[[], Awaitable[ReturnBody | ReturnSkipped]],
+        wait_for_lifecycle: bool = True,
     ) -> ReturnAdmission:
         raise NotImplementedError  # provided by turns
 
@@ -678,17 +690,9 @@ class SessionManagerBase:
     _OAUTH_REFRESH_LEEWAY_SEC = 300
     _BACKEND_DISPLAY = {"claude-code": "Claude Code", "codex": "Codex"}
     AUTO_ANSWER_TEXT = (
-        "No human is available to answer this question right now. "
-        "Proceed with the task autonomously and try hard to finish it without "
-        "asking again. Make the most reasonable choice and continue.\n\n"
-        "Only stop and leave a clear note describing what you would have done "
-        "if the next action is genuinely risky or irreversible — for example: "
-        "destroying data, force-pushing or rewriting shared git history, "
-        "deploying to production, modifying billing/payments, sending "
-        "messages or emails to external recipients, or running commands that "
-        "affect shared infrastructure. For everything else (ambiguous design "
-        "choices, formatting, library picks, small refactors), pick the most "
-        "reasonable option and keep going."
+        "The question expired without a user answer. No choice or new authorization was received. "
+        "Continue only where existing facts, authorization and agreed defaults already permit it. "
+        "For steps that depend on this missing decision, stop and report the completed work and the decision needed."
     )
 
     def __init__(self) -> None:

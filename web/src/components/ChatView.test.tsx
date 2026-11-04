@@ -5,6 +5,7 @@ import { mockChatViewport } from "./chatViewport.test-support";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { schedules } from "../lib/scheduleList";
+import { sessions } from "../lib/sessionList";
 import commandCasesData from "../../../tests/fixtures/wiki-command-cases.json";
 
 const commandCases = commandCasesData as { message: string; mode: "read" | "maintain" | null }[];
@@ -25,6 +26,49 @@ beforeEach(() => {
   });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+it("keeps unsent text until deletion is confirmed and cannot carry it into another session", () => {
+  const { input } = setup();
+  fireEvent.change(input, { target: { value: "Private unfinished input" } });
+  expect(input).toHaveValue("Private unfinished input");
+  // A request or failed DELETE does not mutate the confirmed list.
+  act(() => useSessionStore.setState({ sessionRead: { loaded: true, loading: false, stale: true, error: "Delete failed" } }));
+  expect(input).toHaveValue("Private unfinished input");
+  act(() => { sessions.remove(session.id); });
+  expect(useSessionStore.getState().activeSessionId).toBeNull();
+  act(() => {
+    useSessionStore.setState({ sessions: [{ ...session, id: "next-session" }], activeSessionId: "next-session" });
+  });
+  expect(screen.getByRole("textbox")).toHaveValue("");
+});
+
+it("does not confuse a live-list omission after remote archive with confirmed deletion", () => {
+  const { input } = setup();
+  fireEvent.change(input, { target: { value: "Keep this archived conversation draft" } });
+  act(() => useSessionStore.setState({ sessions: [], archivedSessions: [] }));
+  act(() => useSessionStore.setState({ sessions: [{ ...session, id: "other" }],
+    archivedSessions: [{ ...session, archived: true }], activeSessionId: "other" }));
+  expect(screen.getByRole("textbox")).toHaveValue("Keep this archived conversation draft");
+});
+
+it.each(["refused", "unknown", "failed"])("retires a pending submission draft when deletion precedes its %s receipt", async (kind) => {
+  type Reply = Exclude<Awaited<ReturnType<Parameters<typeof ChatView>[0]["sendMessage"]>>, void>;
+  let resolve!: (reply: Reply) => void;
+  let reject!: (error: Error) => void;
+  const pending = new Promise<Reply>((done, fail) => { resolve = done; reject = fail; });
+  const { input, send } = setup(() => pending);
+  fireEvent.change(input, { target: { value: "Do not resurrect this deleted input" } });
+  fireEvent.click(send);
+  act(() => { sessions.remove(session.id); });
+  act(() => useSessionStore.setState({ sessions: [{ ...session, id: "other" }], activeSessionId: "other" }));
+  await act(async () => {
+    if (kind === "failed") reject(new Error("transport gone"));
+    else resolve({ accepted: false, clientRequestId: "late", ...(kind === "unknown" ? { state: "unknown" as const } : {}), message: "late refusal" });
+  });
+  expect(screen.queryByText("Do not resurrect this deleted input")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Restore draft" })).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox")).toHaveValue("");
+});
 
 it("does not restore schedules deleted during a slash-command creation", async () => {
   useSessionStore.getState().setToken("schedule-token");

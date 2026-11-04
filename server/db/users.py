@@ -302,20 +302,21 @@ class UsersMixin(DatabaseBase):
             "revoked_at": row[7],
         }
 
-    async def get_token_user(self, token_hash: str) -> dict[str, Any] | None:
+    async def get_token_user(self, token_hash: str, *, session_id: str | None = None) -> dict[str, Any] | None:
         """Read the bearer and its current account together, without a write."""
         async with self.transaction(write=False) as tx:
             columns = ", ".join(f"u.{column.strip()}" for column in _USER_COLUMNS.split(","))
             cursor = await tx.execute(
-                f"SELECT {columns}, t.revoked_at, t.expires_at "
+                f"SELECT {columns}, t.revoked_at, t.expires_at, "
+                "(SELECT user_id FROM sessions WHERE id = ?) "
                 "FROM auth_tokens AS t JOIN users AS u ON u.id = t.user_id "
                 "WHERE t.token_hash = ?",
-                (token_hash,),
+                (session_id, token_hash),
             )
             row = await cursor.fetchone()
             if row is None:
                 return None
-            return {"user": _row_to_user(row), "revoked_at": row[8], "expires_at": row[9]}
+            return {"user": _row_to_user(row), "revoked_at": row[8], "expires_at": row[9], "session_owner": row[10]}
 
     async def list_tokens(self, user_id: str) -> list[dict[str, Any]]:
         async with self.transaction(write=False) as tx:

@@ -285,10 +285,6 @@ class AppAgentManager:
             rows = await mgr.db.load_sessions(include_archived=True)
             victims = [s["id"] for s in rows if s["origin"] == ORIGIN_APP and s["app_id"] == app_id]
             for sid in victims:
-                if mgr.get_session(sid) is None:
-                    await mgr.retire_application_session_work(sid)
-                    await mgr.db.delete_session(sid)
-                    continue
                 await mgr.delete_session(sid)
                 if turn := self._turns.get(sid):
                     if not turn.done.is_set():
@@ -708,11 +704,15 @@ class AppAgentManager:
             turn.emit({"type": "tool", "name": msg.get("tool") or ""})
             return
         if kind == "question_request":
+            if msg.get("answer_target", "human") != "human":
+                return
             turn.emit(
                 {
                     "type": "question",
                     "question_id": msg.get("question_id"),
                     "questions": msg.get("questions") or [],
+                    "deadline": msg.get("deadline"), "interaction_policy": msg.get("interaction_policy"),
+                    "wait_mode": msg.get("wait_mode"),
                 }
             )
             return

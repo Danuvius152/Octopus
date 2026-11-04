@@ -1,210 +1,126 @@
-"""MCP namespace exposing one tool: `user` (presented to the model
-as `mcp__ask__user`).
-
-Replaces the built-in `AskUserQuestion` tool, which Octopus formerly
-intercepted via the CLI control protocol over stdio
-(`--permission-prompt-tool=stdio` + a deny-channel hack to inject the
-user's answer). That path was load-bearing for AUQ but exposed us to
-a CLI premature-exit bug at large context scale (post-mortem in
-`docs/post-mortems/2026-05-18-bg-pipeline-hardening.md` §2). The fix is to switch
-the CLI to its VM0-style command shape (positional argv prompt, no
-`--permission-prompt-tool=stdio`) and rebuild AUQ on top of an MCP
-tool that uses regular HTTP to coordinate with the host.
-
-Flow:
-
-  1. Model calls `mcp__ask__user(questions=[...])`.
-  2. This MCP server POSTs the questions to
-     `/api/sessions/{id}/questions`, gets back a `question_id`.
-  3. Octopus broadcasts a `question_request` WS event so the
-     frontend renders the form (no shape change vs. the legacy
-     path).
-  4. This server long-polls
-     `/api/sessions/{id}/questions/{question_id}/answer` with a
-     60-second per-call window, looping until it gets an answer or
-     the session-level auto-answer timeout fires.
-  5. When the user (or the auto-answer) submits, the long-poll
-     returns the rendered answer text; this server returns that text
-     as the tool's result so the model can continue.
-
-The tool's `questions` schema mirrors the built-in AUQ tool: each
-question is `{question, header?, multiSelect?, options:[{label,
-description}]}`. We don't validate exhaustively — the host re-
-validates and the frontend renders whatever it gets.
-
-Spawned by the harness as a child MCP server. Env injected by the harness
-assembly (`server/harness/assembly.py:build_callback_env`):
-  OCTOPUS_API_BASE     http://127.0.0.1:{settings.port}
-  OCTOPUS_AUTH_TOKEN   the bearer token
-  OCTOPUS_SESSION_ID   the session this CLI invocation belongs to
-"""
+"""Async ask transport; the original SessionOwner retains creation and cleanup."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import sys
-import time
-from pathlib import Path
 from typing import Any
 
-# Repo root on sys.path so `from server.<x>` works regardless of cwd.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+import anyio
+import httpx
+from mcp.server.fastmcp import Context, FastMCP
 
-import httpx  # noqa: E402
-from mcp.server.fastmcp import FastMCP
+from ..sessions.mcp_questions import McpQuestionCall
+from . import _host
 
-from . import _host  # noqa: E402
-
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stderr,
-    format="%(asctime)s ask-mcp %(levelname)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
-
-
 mcp = FastMCP("octopus-ask")
-
-
-def _env_or_log(name: str) -> str | None:
-    """Resolved from the request scope and settings rather than the process
-    environment: this namespace is served in-process now, so one process
-    handles every session (polish-2026-09.md §4 B1)."""
-    v = _host.resolve(name)
-    if not v:
-        logger.error("%s unavailable for this call", name)
-    return v
-
-
-# The host owns question expiry, including an administrator disabling it.
-# A successful 408 is evidence that it still accepts this pending question.
 _PER_POLL_TIMEOUT = 60.0
 _MAX_CONSECUTIVE_COMMUNICATION_FAILURES = 3
 
 
-@mcp.tool(name="user")
-def ask_user(questions: list[dict[str, Any]]) -> str:
-    """Ask the user one or more questions and block until they answer.
-
-    Use this whenever you'd previously have called the built-in
-    AskUserQuestion tool — that tool is disabled in this environment;
-    this is its replacement.
-
-    Each question in the `questions` list is a dict with:
-      - question:    str, the question text (required)
-      - header:      str, very short label (≤ 12 chars) shown as a
-                     chip in the UI (optional)
-      - multiSelect: bool, allow multiple answers (default False)
-      - options:     list of {label: str, description: str} (2-4
-                     options required; the user can also supply "Other"
-                     free-text, which the UI provides automatically)
-
-    Returns the user's answer(s) as a single text string, formatted
-    by Octopus (something like
-    `Q: <question>\\nA: <selected label> (<notes>)`). On session-level
-    auto-answer timeout, returns a synthesized "act autonomously"
-    instruction the model should follow.
-    """
-    api = _env_or_log("OCTOPUS_API_BASE")
-    sid = _env_or_log("OCTOPUS_SESSION_ID")
-    tok = _env_or_log("OCTOPUS_AUTH_TOKEN")
-    if not (api and sid and tok):
-        return (
-            "Error: ask server is misconfigured (env vars missing). "
-            "Cannot route this question to the user."
-        )
-    if not isinstance(questions, list) or not questions:
-        return "Error: `questions` must be a non-empty list."
-
-    hdrs = {"Authorization": f"Bearer {tok}"}
-
-    # Step 1: create the pending question on the host.
+async def _run_call(call: McpQuestionCall, questions: list[dict[str, Any]]) -> str:
+    call.started = True
+    api, sid = _host.api_base(), call.scope.session_id
+    headers = _host.headers()
+    creation: asyncio.Task[httpx.Response] | None = None
+    reason = "communication_failure"
     try:
-        r = httpx.post(
-            f"{api}/api/sessions/{sid}/questions",
-            json={"questions": questions},
-            headers=hdrs,
-            timeout=10.0,
-        )
-    except httpx.HTTPError as e:
-        return f"Error: failed to reach Octopus to create question: {e}"
-    if r.status_code != 201:
-        return f"Error: Octopus rejected the question ({r.status_code}): {r.text[:300]}"
-    qid = r.json().get("question_id")
-    if not qid:
-        return f"Error: Octopus didn't return a question_id: {r.text[:300]}"
-    logger.info("created question %s", qid)
-
-    # Step 2: long-poll until the host resolves or closes the question.
-    communication_failures = 0
-    question_resolved = False
-    try:
-        while True:
+        if call.cancelled:
+            return "Question call cancelled before creation. No answer was received."
+        async with httpx.AsyncClient(headers=headers) as client:
             try:
-                r = httpx.get(
-                    f"{api}/api/sessions/{sid}/questions/{qid}/answer",
-                    params={"timeout": _PER_POLL_TIMEOUT},
-                    headers=hdrs,
-                    # +5 s padding on httpx-side timeout so we always get
-                    # the host's 408 rather than tripping our own timeout
-                    # mid-flight.
-                    timeout=_PER_POLL_TIMEOUT + 5.0,
-                )
-            except httpx.HTTPError as e:
-                communication_failures += 1
-                logger.warning("long-poll failed transiently: %s", e)
-                if communication_failures >= _MAX_CONSECUTIVE_COMMUNICATION_FAILURES:
-                    return (
-                        "Error: communication with Octopus failed repeatedly while "
-                        "waiting for the user's answer. No answer was received."
-                    )
-                time.sleep(float(communication_failures))
-                continue
-            if r.status_code >= 500:
-                communication_failures += 1
-                if communication_failures >= _MAX_CONSECUTIVE_COMMUNICATION_FAILURES:
-                    return (
-                        "Error: communication with Octopus failed repeatedly while "
-                        "waiting for the user's answer. No answer was received."
-                    )
-                time.sleep(float(communication_failures))
-                continue
-            communication_failures = 0
-            if r.status_code == 200:
-                ans = r.json().get("answer")
-                if ans is None:
-                    return f"Error: host returned 200 with no answer body: {r.text[:300]}"
-                question_resolved = True
-                logger.info("question %s answered (%d chars)", qid, len(ans))
-                return ans
-            if r.status_code == 408:
-                # Expected — host had no answer within this window. Loop.
-                continue
-            if r.status_code == 404:
-                question_resolved = True
-                # Session went away while we were waiting (deleted,
-                # archived). Surface so the model knows.
-                return (
-                    f"Error: question {qid} disappeared while waiting "
-                    f"(session may have been reset or deleted)."
-                )
-            # Anything else: bail with a clear message.
-            return f"Error long-polling answer ({r.status_code}): {r.text[:300]}"
+                creation = asyncio.create_task(client.post(f"{api}/api/sessions/{sid}/questions",
+                    json={"questions": questions, "mcp_call_id": call.id}, timeout=10.0))
+                response = await asyncio.shield(creation)
+                if response.status_code != 201:
+                    raise ValueError(f"Error: Octopus rejected the question ({response.status_code}): {response.text[:300]}")
+                qid = response.json().get("question_id")
+                if not isinstance(qid, str) or call.pending is None or call.pending.question_id != qid:
+                    raise ValueError("Error: Octopus returned an invalid original question receipt.")
+                failures = 0
+                while True:
+                    try:
+                        response = await client.get(f"{api}/api/sessions/{sid}/questions/{qid}/answer",
+                            params={"timeout": _PER_POLL_TIMEOUT, "structured": True}, timeout=_PER_POLL_TIMEOUT + 5)
+                    except httpx.HTTPError:
+                        failures += 1
+                    else:
+                        if response.status_code < 500:
+                            failures = 0
+                            if response.status_code == 408:
+                                continue
+                            if response.status_code == 200:
+                                body = response.json()
+                                answer = body.get("answer") if isinstance(body, dict) else None
+                                resolution = body.get("resolution") if isinstance(body, dict) else None
+                                if (not isinstance(answer, str) or not isinstance(resolution, dict)
+                                        or resolution.get("question_id") != qid
+                                        or resolution.get("disposition") not in {"answered", "expired", "closed", "cancelled"}):
+                                    raise ValueError("Error: host returned an invalid question answer.")
+                                return answer
+                            # Retirement may revoke the bearer before this
+                            # HTTP observer returns. Only the original saved
+                            # resolution, never the HTTP error, proves closure.
+                            if call.pending.ready.is_set() and call.pending.resolution is not None:
+                                return call.pending.answer or "Question closed. No answer was received."
+                            raise ValueError(f"Error long-polling answer ({response.status_code}): {response.text[:300]}")
+                        failures += 1
+                    if failures >= _MAX_CONSECUTIVE_COMMUNICATION_FAILURES:
+                        raise ValueError("Error: communication with Octopus failed repeatedly while waiting. No answer was received.")
+                    await asyncio.sleep(float(failures))
+            finally:
+                call.cancelled = True
+                if creation is not None:
+                    try:
+                        await asyncio.shield(creation)
+                    except httpx.HTTPError:
+                        pass  # The original Owner envelope is observed below.
+    except asyncio.CancelledError:
+        reason = "cancelled"
+        raise
+    except (httpx.HTTPError, ValueError) as error:
+        raise ValueError(f"Error: question communication failed: {error}") from error
     finally:
-        if not question_resolved:
-            # Stop waiving the host's idle deadline when this tool no longer
-            # has a communication path that can receive a human answer.
-            try:
-                httpx.delete(
-                    f"{api}/api/sessions/{sid}/questions/{qid}",
-                    params={"reason": "communication_failure"},
-                    headers=hdrs,
-                    timeout=10.0,
-                )
-            except httpx.HTTPError:
-                logger.warning("could not close abandoned question %s", qid)
+        await call.finish(reason)
+
+
+@mcp.tool(name="user")
+async def ask_user(questions: list[dict[str, Any]], ctx: Context) -> str:
+    """Ask the user and wait for the original question's resolution.
+
+    Each question has question, optional header/multiSelect, and options of
+    label/description. Normal unanswered results contain no user choice and
+    grant no new permission; continue only within existing authorization.
+    """
+    scope = _host.scope()
+    request = ctx.request_context.request
+    if scope is None or request is None:
+        raise ValueError("Original MCP question scope is unavailable")
+    manager = request.scope.get("octopus.session_manager")
+    if manager is None:
+        raise ValueError("Original MCP host is unavailable")
+    metadata = ctx.request_context.meta
+    call = manager.register_mcp_question_call(scope, {
+        "rpc_id": ctx.request_context.request_id,
+        "mcp_session_id": request.headers.get("mcp-session-id"),
+        "server": "ask", "tool": "user",
+        "metadata": metadata.model_dump(by_alias=True, exclude_none=True) if metadata is not None else None,
+    })
+    call.task = asyncio.create_task(_run_call(call, questions), name=f"mcp-question-{call.id}")
+    manager._own_task(call.task)
+    try:
+        return await asyncio.shield(call.task)
+    except anyio.get_cancelled_exc_class():
+        call.cancel()
+        # SDK cancellation is an AnyIO level-triggered scope. Protect the
+        # handler's join as well as the original runner, then propagate cancel.
+        with anyio.CancelScope(shield=True):
+            await asyncio.gather(call.task, return_exceptions=True)
+        if call.error is not None:
+            logger.error("Original MCP question cleanup failed call=%s: %s", call.id, call.error)
+        raise
+
 
 if __name__ == "__main__":
     mcp.run()

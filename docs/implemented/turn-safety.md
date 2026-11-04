@@ -61,6 +61,18 @@ Environment overrides are `OCTOPUS_TURN_IDLE_TIMEOUT_SECONDS`,
 `OCTOPUS_TURN_MAX_SECONDS`, and `OCTOPUS_TURN_IDLE_MAX_RETRIES`.
 These bounds apply to both backends and delegation children.
 
+Human native blocking questions have no question-expiry deadline. The original
+QuestionOwner's `waiting_questions` pauses idle while that answer is pending;
+ending the wait resumes the original watchdog. The logical turn start is never
+reset, so an enabled overall cap includes human thinking time. Stop, native
+resolved/terminal, attempt retirement and real failure can still end the wait.
+The UI and history explain this distinction using the captured policy/mode.
+MCP questions retain their default 1800-second question limit and 0-disabled
+setting; legacy unknown-policy and nonblocking native questions keep compatible
+expiry. Unattended work instead records `needs_input` without a long human wait.
+The [original-work policy](architecture-contract.md#原工作交互策略与等待) owns
+classification and inheritance; browser presence is not an input to it.
+
 ## 4. Interaction with existing paths
 
 - Auth-expiry / transient-retry classification and premature-exit recovery

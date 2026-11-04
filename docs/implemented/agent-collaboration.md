@@ -232,7 +232,7 @@ supplies account/agent provenance, and the actual delegation supplies the parent
 relationship. Saved answer structure and the live event agree; a parent agent's
 answer is not labelled as a human answer.
 
-If the parent's model decides it can't answer, it has three options
+For human-policy work, if the parent's model decides it can't answer, it has three options
 expressible in its normal language/tool loop:
 
 - Call its **own** `ask` tool to ask its caller (recursing one hop
@@ -246,11 +246,11 @@ expressible in its normal language/tool loop:
 Each original work/question owns a live relay control, with an in-flight guard
 and independent stopped/unknown observation before any diagnostic await. A
 duplicate event cannot submit during that await or after an unconfirmed return.
-The original receipt takes priority; only a definite pre-effect capacity refusal
+The original receipt takes priority; for human-policy work, only a definite pre-effect capacity refusal
 permits another submission, with the question revalidated before it. Permanent
 refusal or unknown is explained in the original child's existing delivery notice,
 identified by work/question, so it does not depend on the refused parent
-transcript. The original question remains answerable while pending. A child
+transcript. The human-policy question remains answerable while pending. A child
 notice failure remains a failure with its original owner/exception; it neither
 recreates the question nor reopens return submission. Ending a question discards
 its live relay control only after required diagnostic recording has settled;
@@ -262,6 +262,35 @@ input retains that batch identity. The original Owner expires it before starting
 an answer model turn. Parent Stop remains paused through restoration and new
 returns; human correction does not resume the backlog, and explicit Resume
 continues the successful admission order.
+
+<a id="unattended-questions"></a>
+#### Unattended questions
+
+The child inherits its original requesting work's policy, including across
+follow-ups and BG/Research returns. An unattended child can offer the original
+question to its actual parent for an answer within existing facts and authority.
+This is one opportunistic admission: busy/capacity or lifecycle-lock refusal
+records the existing stopped-delivery notice and closes the question as
+`needs_input`, without sleeping, restoring through a held lock or repeatedly
+submitting. Ordinary human-policy return restoration retains its existing rules.
+
+After actual parent admission, the child's Owner captures that exact receipt.
+Its completion only wakes Owner; if no answer was accepted, Owner closes the
+question with the missing decision. Owner does not wait for parent execution,
+MCP cleanup or waiter release. Answers still require the trusted agent source
+and real parent/delegation relationship; an unattended question cannot be
+answered through a human form or expanded into an indefinite escalation chain.
+The parent cannot invent a user choice or new permission. Independent authorized
+effects remain valid; dependent steps stop, and user-supplied continuation is a
+new input rather than an automatic replay. `test_unattended_parent_questions.py`
+exercises actual admission, parent REST answer/no-answer and a held archive lock.
+
+A stopped parent refuses a new unattended question return. If Stop follows
+admission, its original Owner expires the unstarted solver input and completes
+that exact receipt, including a retained unstarted claim. The child then closes
+as `needs_input`. Ordinary queued work remains paused; Resume cannot replay the
+expired solver. Stop during an already running solver uses the ordinary
+interruption/receipt path. No cross-Owner join or second cleanup task is added.
 
 ### 5.6 `mcp__ask_agent__cancel` and `mcp__ask_agent__list`
 

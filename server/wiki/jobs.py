@@ -1845,7 +1845,7 @@ class WikiWorker:
                 return
             for item in readable:
                 item["worker_request"] = dict(reference)
-                if await _io(jobs.settle_item, job_id, item):
+                if await self._settle_original_item(jobs, job_id, item):
                     continue
                 if item.get("kind") == "creation":
                     continue
@@ -1896,9 +1896,21 @@ class WikiWorker:
             # a state transition in the replacement maintenance attempt.
             reference.update(phase="settled", recording_state="committed", terminal=outcome)
         item["worker_request"] = reference
-        await _io(jobs.settle_item, job_id, item, outcome)
+        await self._settle_original_item(jobs, job_id, item, outcome)
         if session is not None:
             await self.manager.archive_session(session_id, replace=False, only_request_id=request_id)
+
+    async def _settle_original_item(self, jobs, job_id, item, outcome=None):
+        recovered = await _io(jobs.settle_item, job_id, item, outcome)
+        reference = item.get("worker_request") or {}
+        if not recovered and reference.get("request_id"):
+            decisions = await self.manager.db.get_request_missing_decisions(reference["session_id"], reference["request_id"])
+            if decisions:
+                terminal = outcome or reference.get("terminal")
+                failure = [item["error"]] if terminal and terminal.get("status") != "success" and item.get("error") else []
+                item.update(status="attention", error="\n\n".join([*failure, *decisions]))
+                return True  # Settled attention; missing input never authorizes another model pass.
+        return recovered
 
 
 worker = WikiWorker()

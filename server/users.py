@@ -404,14 +404,23 @@ class UserManager:
             return None
         digest = token_digest(token)
         row = await self.db.get_token_user(digest)
-        if row is None or row["revoked_at"] or _expired(row["expires_at"]):
-            return None
-        user = row["user"]
-        if user["disabled_at"]:
+        user = self._token_user(row)
+        if user is None:
             return None
         if touch:
             await self.db.touch_token(digest, at=_now())
         return user
+
+    @staticmethod
+    def _token_user(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if row is None or row["revoked_at"] or _expired(row["expires_at"]) or row["user"]["disabled_at"]:
+            return None
+        return row["user"]
+
+    async def resolve_socket_access(self, token: str, session_id: str | None) -> tuple[dict[str, Any] | None, str | None]:
+        """Current account and frame owner from one committed read, without activity writes."""
+        row = await self.db.get_token_user(token_digest(token), session_id=session_id) if token else None
+        return self._token_user(row), row["session_owner"] if row is not None else None
 
     async def record_token_activity(self, token: str) -> None:
         """Activity bookkeeping, after the caller has validated its bearer."""

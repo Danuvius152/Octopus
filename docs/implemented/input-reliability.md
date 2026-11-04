@@ -134,6 +134,10 @@ Saved inputs **Dismiss notice** commits only a persistent visibility edit,
 then best-effort notifies the original Owner. An unavailable or retired Owner
 does not veto the edit or get recreated. **Stop** interrupts the active request
 and pauses dispatch; **Resume processing** explicitly resumes the backlog.
+An unstarted unattended question-solving return instead expires on Stop and
+completes its original receipt, ending that child's bounded opportunity; it
+cannot run on Resume. Ordinary inputs retain the paused-backlog contract.
+See [unattended questions](agent-collaboration.md#unattended-questions).
 Stop and question-answer confirmations clear their pending frontend notice on
 success. Failed or unconfirmed commands remain visible; their **Dismiss** only
 hides that frontend prompt. Question answers remain in the conversation history.

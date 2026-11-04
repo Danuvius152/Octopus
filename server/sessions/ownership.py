@@ -182,6 +182,7 @@ class OwnershipMixin(SessionManagerBase):
         if any(owner.publisher.in_callback() for owner in self._session_owners.values()):
             raise RuntimeError("Owner publication drain must run outside its subscribers")
         async with asyncio.timeout(_BACKEND_RETIRE_TIMEOUT):
+            await self.join_mcp_question_calls()
             while True:
                 owners = tuple(self._session_owners.values())
                 for owner in owners:

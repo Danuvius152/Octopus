@@ -163,6 +163,23 @@ export function ChatView({
   const { attachments: pendingAttachments, addFiles, removeAttachment, retryAttachment,
     restoreAttachments, clearAttachments, rejectedFiles, dismissRejectedFiles, unready,
     readyIds: readyAttachmentIds } = useDraftAttachments(activeSessionId);
+  useEffect(() => {
+    const discard = (sessionId?: string) => {
+      for (const [id, draft] of submittedDrafts.current) {
+        if (!sessionId || draft.sessionId === sessionId) submittedDrafts.current.delete(id);
+      }
+      setRejectedDrafts((drafts) => drafts.filter((draft) => sessionId && draft.sessionId !== sessionId));
+      setRestoredInput((draft) => draft && sessionId && draft.sessionId !== sessionId ? draft : null);
+      if (!sessionId || sessionId === activeSessionId) {
+        setInput(""); clearAttachments(); setRequiredAttachmentCount(0); setSubmissionError(""); setHistory(HISTORY_IDLE);
+      }
+    };
+    const deleted = sessionList.onDeleted(discard);
+    const account = useSessionStore.subscribe((state, before) => {
+      if (state.accountGeneration !== before.accountGeneration) discard();
+    });
+    return () => { deleted(); account(); };
+  }, [activeSessionId, clearAttachments]);
   const messagesMap = useSessionStore((s) => s.messages);
   const streamingMap = useSessionStore((s) => s.streamingText);
   const streamingItems = useSessionStore((s) => s.streamingItems);
@@ -368,6 +385,7 @@ export function ChatView({
           return (
             <QuestionPrompt
               question={pending}
+              agentLabel={agentLabel}
               onSubmit={(id, answers) =>
                 answerQuestion(activeSessionId, id, answers)
               }
@@ -383,6 +401,8 @@ export function ChatView({
             <div className="question-header flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground">
               <span aria-hidden className="text-xs">?</span>
               <strong>{agentLabel} asked</strong>
+              {msg.tool_input?.interaction_policy === "human" && msg.tool_input?.wait_mode === "blocking" &&
+                <span>Human blocking question · no automatic question deadline</span>}
             </div>
             <div className="question-body px-3 pb-3 space-y-1">
               {questions.map((q, i) => (
@@ -609,7 +629,10 @@ export function ChatView({
     clearAttachments();
     setRequiredAttachmentCount(0);
     if (submission) {
+      submittedDrafts.current.set(draft.id, draft);
       void submission.then((reply) => {
+        if (submittedDrafts.current.get(draft.id) !== draft) return;
+        submittedDrafts.current.delete(draft.id);
         if (!reply.accepted || reply.execution?.state === "withdrawn" || reply.state === "unknown") setRejectedDrafts((drafts) => [...drafts, {
           ...draft, reason: reply.message || "Your message was not accepted.",
           ...(reply.execution?.state === "withdrawn" && reply.clientRequestId ? { recoveryOfClientId: reply.clientRequestId } : {}),
@@ -620,6 +643,8 @@ export function ChatView({
           if (!result || result.outcome?.code === "attachment_unavailable") submittedDrafts.current.set(reply.requestId, draft);
         }
       }).catch(() => {
+        if (submittedDrafts.current.get(draft.id) !== draft) return;
+        submittedDrafts.current.delete(draft.id);
         setRejectedDrafts((drafts) => [...drafts, { ...draft, reason: "Delivery was not confirmed. Check the conversation before sending again." }]);
       });
     }

@@ -148,6 +148,11 @@ class SessionOwner:
         reply.add_done_callback(self._observe_reply)
         envelope = _QuestionCommand(command, reply, size)
         if isinstance(command, CreateQuestion):
+            if command.call_id is not None:
+                call = self.questions.mcp_calls.get(command.call_id)
+                if call is None or call.scope != command.scope or call.creation is not None:
+                    raise ValueError("Original MCP question call is unavailable")
+                call.creation = reply
             self._commands.append(envelope)
             self._command_bytes += size
         else:
@@ -226,6 +231,8 @@ class SessionOwner:
     def drain_blockers(self) -> tuple[str, ...]:
         """Observe this original writer; a held idle host retires at shutdown."""
         session = self.session
+        if self.questions.mcp_calls:
+            return ("MCP question call cleanup",)
         if session._pending_queue or session._steer_queue:
             return ("retained input",)
         if session._forking or session._archive_reservation is not None:
@@ -293,6 +300,9 @@ class SessionOwner:
         try:
             while True:
                 self._wake.clear()
+                failed_call = next((call for call in self.questions.mcp_calls.values() if call.error is not None), None)
+                if failed_call is not None:
+                    raise RuntimeError(f"Original MCP question call {failed_call.id} cleanup is unconfirmed") from failed_call.error
                 for publication in self.publisher.take_completed():
                     self.runtime.published(publication)
                     if isinstance(publication.marker, QuestionPublished):
@@ -364,7 +374,7 @@ class SessionOwner:
                     continue
                 if self.idle:
                     self._idle.set()
-                if self._closing and self.publisher.idle and self.runtime.idle:
+                if self._closing and self.publisher.idle and self.runtime.idle and not self.questions.mcp_calls:
                     await self.publisher.close()
                     return
                 await self._wake.wait()

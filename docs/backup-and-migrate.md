@@ -61,6 +61,17 @@ associations; restoring it does not revive callbacks or infer missing legacy
 structure/provenance from text. Compatibility is described in the
 [current storage contract](implemented/current-storage-format.md#publication-boundary).
 
+Original-work interaction policy stays inside existing input/task/schedule
+context JSON. Question wait mode, answer target, MCP call association and
+`needs_input` closure stay in existing message JSON. Collect or exclude them
+with their owning records above: account archives still exclude chat/execution
+and schedule history; a consistent complete backup keeps their original
+associations, and the Wiki ledger retains its existing domain facts. No extra
+root, migration object or restoration step is introduced. Missing legacy policy
+remains unknown. Restoring saved facts does not recreate MCP handlers, command
+Futures, REST waiters, parent callbacks or permission to answer an old question,
+and never automatically resumes a fire or replays missing-decision work.
+
 Delegation's existing session JSON also retains outstanding child-work references
 and its successful candidate request. Complete backup preserves them together
 with the original submissions, carriers and terminals. Account archives exclude

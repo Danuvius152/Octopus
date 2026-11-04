@@ -61,6 +61,25 @@ The [current execution contract](architecture-contract.md) owns admission and
 retirement; the [remaining tenancy proposal](../plans/multi-tenancy-gaps.md) must
 be checked against code before treating any old audit finding as still present.
 
+<a id="websocket-delivery"></a>
+## WebSocket delivery
+
+`SocketDelivery` separates current connection identity from each frame's
+readability. Its final awaited database read checks the token/account and
+session owner in one committed snapshot, avoiding an owner read surviving a
+later deletion. Only an invalid account or bearer closes with 4001. Missing or
+deleted sessions drop content; foreign ownership drops with an error diagnostic.
+Archived sessions remain readable by their owner. The decision-to-send interval
+adds no other awaited lookup. This is a check at that snapshot, not a promise
+to retract a frame already handed to the transport.
+
+Every drop releases both frame and byte budgets. Closing owns the budget reset,
+so cancellation cannot double-decrement. The minimal `session_deleted` event
+uses the original deletion lifecycle's trusted captured audience, rather than
+looking up the deleted row, while still checking the account at send time.
+`test_ws_delivery.py` covers mounted slow sockets, deletion/archive during the
+last identity read, foreign/unknown frames, revocation and budget reuse.
+
 ## Keys and secrets
 
 The server-held master key wraps one random data-encryption key per account.

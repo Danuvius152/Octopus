@@ -473,7 +473,17 @@ class OwnerRuntime:
             session._dispatch_paused = True
             for request in (*session._pending_queue, *session._steer_queue):
                 request.priority = False
-            return await self._interrupt(command.cause, retain_unstarted=True)
+            interrupted = await self._interrupt(command.cause, retain_unstarted=True)
+            # A queued unattended solver has one opportunity, bounded by Stop.
+            # Settle its original input; the child observes that same receipt.
+            for queued_input in tuple(session._pending_queue):
+                if queued_input.source != "delegation":
+                    continue
+                question_return = await load_pending_input(manager, session.id, queued_input)
+                if self._unattended_question_return(question_return):
+                    session._pending_queue.remove(queued_input)
+                    await self.complete(question_return, reason="expired")
+            return interrupted
         if isinstance(command, CancelRequest):
             removed = [item for item in (*session._pending_queue, *session._steer_queue)
                        if item.request_id == command.request_id]
@@ -646,6 +656,11 @@ class OwnerRuntime:
                 or session._run.backend is not None and session._run.backend.work_id == work_id
                 or any(resource.backend.work_id == work_id for resource in session._run.retirements.values()))
 
+    @staticmethod
+    def _unattended_question_return(request: QueuedPrompt) -> bool:
+        return bool(request.question_session_id and request.question_id and request.knowledge_context is not None
+                    and request.knowledge_context.interaction_policy == "unattended")
+
     async def _submit(self, command: Submit) -> SubmissionReceipt:
         from ..knowledge import for_entry
         from ..mcp_identity import work_is_open
@@ -681,7 +696,13 @@ class OwnerRuntime:
         request.knowledge_context = request.knowledge_context or for_entry(
             session, request.prompt if request.trusted_request is None else request.trusted_request,
             request_id=request.request_id, selected=request.wiki_mode,
+            interaction_policy="human" if request.source == "human" else
+                "unattended" if request.source in {"schedule", "wiki"} else None,
         )
+        if request.source == "schedule":
+            # A definition's authoring policy is not the policy of its later
+            # autonomous fire. Child/return contexts otherwise inherit intact.
+            request.knowledge_context = replace(request.knowledge_context, interaction_policy="unattended")
         if request.knowledge_context.origin.user_id != session.user_id:
             raise ValueError("Request knowledge belongs to another account")
         if command.recovery_of:
@@ -698,6 +719,8 @@ class OwnerRuntime:
             )
         request.wiki_mode = request.knowledge_context.mode
         request.trusted_request = request.knowledge_context.trusted_request
+        if session._dispatch_paused and self._unattended_question_return(request):
+            return SubmissionReceipt.closed(request.request_id, "withdrawn")
         request.priority = session._dispatch_paused and request.source == "human"
         if request.source == "human":
             manager._check_turn_quota(session)

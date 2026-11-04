@@ -31,14 +31,14 @@ it.each([false, true])("updates a session in place in the archived=%s list", (ar
 });
 
 it.each(["archive", "delete"])("does not let a stale snapshot resurrect a session after %s", async (action) => {
-  const old = list.refresh();
+  const old = list.refresh(true);
   if (action === "archive") list.archive("old");
   else list.remove("old");
   calls[0].resolve(Response.json([row()]));
   expect(await old).toEqual({ state: "pending" }); await flush();
   expect(useSessionStore.getState().sessions).toEqual([]);
   expect(calls).toHaveLength(2);
-  calls[1].resolve(Response.json([])); await flush();
+  calls[1].resolve(Response.json(action === "archive" ? [{ ...row(), archived: true }] : [])); await flush();
   expect(useSessionStore.getState().sessions).toEqual([]);
   expect(useSessionStore.getState().archivedSessions.map((item) => item.id)).toEqual(action === "archive" ? ["old"] : []);
   expect(useSessionStore.getState().sessionRead.stale).toBe(false);
@@ -57,6 +57,36 @@ it("preserves sessions created during a read and coalesces conflicting observati
   expect(useSessionStore.getState().sessionRead.stale).toBe(false);
 });
 
+it.each(["archived", "deleted"])("confirms a missing selected session after reconnect before treating it as %s", async (outcome) => {
+  useSessionStore.setState({ activeSessionId: "old" });
+  const deleted = vi.fn(); const unsubscribe = list.onDeleted(deleted);
+  list.connect({ socket: {}, accountGeneration: useSessionStore.getState().accountGeneration }); await flush();
+  calls[0].resolve(Response.json([])); await flush();
+  expect(useSessionStore.getState().activeSessionId).toBe("old");
+  expect(deleted).not.toHaveBeenCalled();
+  expect(calls).toHaveLength(2);
+  calls[1].resolve(Response.json(outcome === "archived" ? [{ ...row(), archived: true }] : [])); await flush();
+  expect(useSessionStore.getState().activeSessionId).toBe(outcome === "archived" ? "old" : null);
+  expect(deleted.mock.calls).toEqual(outcome === "deleted" ? [["old"]] : []);
+  unsubscribe();
+});
+
+it.each([false, true])("confirms every missing session for draft cleanup through an inclusive=%s reconnect", async (inclusive) => {
+  list.row(row("selected"));
+  useSessionStore.setState({ activeSessionId: "selected", messages: { old: [{ role: "user", type: "text", content: "retained" }] } });
+  const deleted = vi.fn(); list.onDeleted(deleted);
+  const reading = list.refresh(inclusive);
+  calls[0].resolve(Response.json([row("selected")])); await reading; await flush();
+  if (!inclusive) {
+    expect(deleted).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(2);
+    calls[1].resolve(Response.json([row("selected")])); await flush();
+  }
+  expect(deleted.mock.calls).toEqual([["old"]]);
+  expect(useSessionStore.getState().messages.old).toBeUndefined();
+  expect(useSessionStore.getState().activeSessionId).toBe("selected");
+});
+
 it("rejects an old detail without overriding the newer status and confirms through one list read", async () => {
   const detail = list.capture();
   list.patch("old", { status: "idle" });
@@ -67,7 +97,7 @@ it("rejects an old detail without overriding the newer status and confirms throu
   calls[0].resolve(Response.json([row("old", "idle")])); await flush();
 });
 
-it("rejects reversed reconnect responses and retired sockets without extra reads", async () => {
+it("rejects reversed reconnect responses and confirms missing members through one inclusive read", async () => {
   const accountGeneration = useSessionStore.getState().accountGeneration;
   const first = { socket: {}, accountGeneration }, second = { socket: {}, accountGeneration };
   list.connect(first); await flush();
@@ -75,10 +105,12 @@ it("rejects reversed reconnect responses and retired sockets without extra reads
   list.disconnect(first); list.connect(second); await flush();
   expect(list.accepts(first)).toBe(false);
   calls[1].resolve(Response.json([row("new", "idle")])); await flush();
+  expect(calls).toHaveLength(3);
+  calls[2].resolve(Response.json([row("new", "idle")])); await flush();
   calls[0].resolve(Response.json([row()])); await flush();
   expect(list.row(row(), detail)).toBe(false); await flush();
   expect(useSessionStore.getState().sessions.map((item) => item.id)).toEqual(["new"]);
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(3);
 });
 
 it.each(["account", "token", "service", "dispose"])("retires reads and details across %s changes", async (kind) => {
@@ -100,7 +132,7 @@ it("preserves rows and exposes errors until a successful explicit refresh", asyn
   expect(useSessionStore.getState().sessions[0].id).toBe("old");
   expect(useSessionStore.getState().sessionRead).toMatchObject({ stale: true, error: "offline" });
   await vi.advanceTimersByTimeAsync(60_000); expect(calls).toHaveLength(1);
-  const refresh = list.refresh(); calls[1].resolve(Response.json([])); await refresh;
+  const refresh = list.refresh(true); calls[1].resolve(Response.json([])); await refresh;
   expect(useSessionStore.getState().sessionRead).toMatchObject({ loaded: true, stale: false, error: null });
 });
 
@@ -136,7 +168,7 @@ it.each(["created", "restored"] as const)("a %s receipt can follow an already ob
 });
 
 it.each(["created", "restored"] as const)("waits for one accepted snapshot before allowing navigation after %s", async (kind) => {
-  const oldRead = list.refresh(), original = list.capture();
+  const oldRead = list.refresh(true), original = list.capture();
   list.patch("old", { status: "idle" });
   const confirmed = list[kind](row("new", "running"), original);
   calls[0].resolve(Response.json([row()]));

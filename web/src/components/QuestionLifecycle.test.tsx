@@ -1,6 +1,6 @@
 import { Socket } from "../test-support/socket";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
 import { mockChatViewport } from "./chatViewport.test-support";
@@ -20,6 +20,27 @@ const closed = {
   type: "question_closed", session_id: sid, seq: 2, question_id: "q1",
   reason: "interrupted", message: "Question closed: interrupted. No answer was received.",
 };
+
+it("shows the original human blocking policy from live events and a refreshed snapshot", async () => {
+  handleWsMessage({ ...requested, deadline: null, interaction_policy: "human", wait_mode: "blocking" });
+  const view = renderChat();
+  await waitFor(() => expect(screen.getByText("Waiting for your answer · no automatic question deadline")).toBeVisible());
+  expect(screen.queryByText("Claude is asking")).not.toBeInTheDocument();
+  view.unmount();
+  act(() => {
+    useSessionStore.setState({ pendingQuestions: {}, messages: {}, lastAppliedSeq: {} });
+    applySessionSnapshot(sid, {
+      dispatch_state: { ...emptyDispatch, revision: 1, active_request_id: "r1" },
+      active_attempt: { request_id: "r1", attempt_id: "a1" }, next_message_seq: 2,
+      messages: [{ role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: {
+        questions: [question], deadline: null, interaction_policy: "human", wait_mode: "blocking",
+      } }], pending_questions: [{ question_id: "q1", questions: [question], deadline: null,
+        request_id: "r1", attempt_id: "a1", interaction_policy: "human", wait_mode: "blocking" }],
+    });
+  });
+  renderChat();
+  await waitFor(() => expect(screen.getByText("Waiting for your answer · no automatic question deadline")).toBeVisible());
+});
 
 beforeEach(() => {
   mockChatViewport();
@@ -132,11 +153,13 @@ it("keeps a newer WebSocket question answerable when the earlier HTTP refetch co
   Socket.reset(0);
   let resolveDetail!: (response: Response) => void;
   const detail = new Promise<Response>((resolve) => { resolveDetail = resolve; });
+  const sessionRows = useSessionStore.getState().sessions;
   vi.stubGlobal("WebSocket", Socket);
   vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith(`/api/sessions/${sid}`)
-    ? detail : new Response(JSON.stringify(url.endsWith("/api/sessions")
-      ? useSessionStore.getState().sessions : url.endsWith("/submissions") ? { items: [] } : []))));
+    ? detail : new Response(JSON.stringify(url.includes("/api/sessions") && !url.includes(`/api/sessions/${sid}`)
+      ? sessionRows : url.endsWith("/submissions") ? { items: [] } : []))));
   useSessionStore.setState({ token: "question-test-token" });
+  useSessionStore.setState({ sessions: sessionRows, activeSessionId: sid });
   const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1" };
   handleWsMessage({ type: "dispatch_state", session_id: sid, dispatch_state: dispatch });
 

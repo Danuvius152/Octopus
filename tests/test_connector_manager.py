@@ -228,11 +228,13 @@ async def test_owned_rotation_shutdown_keeps_received_response_and_observes_fail
             await waiter
         assert manager.drain_blockers()
         if closing == "timeout":
+            shutdown_budget = connector_manager._REFRESH_SHUTDOWN_SECONDS
             monkeypatch.setattr(connector_manager, "_REFRESH_SHUTDOWN_SECONDS", .01)
             with pytest.raises(TimeoutError, match="have not retired"):
                 await manager.shutdown()
             assert manager.drain_blockers()
             assert await database.get_connector_installation(installation["id"])
+            monkeypatch.setattr(connector_manager, "_REFRESH_SHUTDOWN_SECONDS", shutdown_budget)
         stopping = asyncio.create_task(database.close() if closing == "db_close" else manager.shutdown())
         await asyncio.sleep(0)  # The actual owner joins the outstanding rotation.
         assert not stopping.done()

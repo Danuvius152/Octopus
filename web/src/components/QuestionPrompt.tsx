@@ -12,10 +12,11 @@ export interface AnswerPayload {
 
 interface Props {
   question: PendingQuestion;
+  agentLabel?: string;
   onSubmit: (questionId: string, answers: AnswerPayload[]) => void | Promise<SubmissionReply>;
 }
 
-export function QuestionPrompt({ question, onSubmit }: Props) {
+export function QuestionPrompt({ question, onSubmit, agentLabel = "Agent" }: Props) {
   const [submitting, setSubmitting] = useState(false);
   // For each sub-question, hold either selected option labels or a free-text
   // "Other" answer. `selected` is an array even for single-select so the
@@ -62,8 +63,10 @@ export function QuestionPrompt({ question, onSubmit }: Props) {
     <div className="msg msg-question rounded-lg border-[0.7px] border-primary/30 bg-card overflow-hidden">
       <div className="question-header flex items-center gap-2.5 px-3 py-2 bg-primary-50 text-sm text-foreground">
         <IconHelpCircle size={18} className="text-primary shrink-0" />
-        <strong>Claude is asking</strong>
+        <strong>{agentLabel} is asking</strong>
       </div>
+      {question.interaction_policy === "human" && question.wait_mode === "blocking" &&
+        <p className="px-3 pt-2 text-sm text-muted-foreground">Waiting for your answer · no automatic question deadline</p>}
       <div className="question-body px-3 py-3 space-y-5">
         {question.questions.map((q, i) => {
           const multi = !!q.multiSelect;

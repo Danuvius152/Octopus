@@ -7,9 +7,10 @@ import time
 from copy import deepcopy
 from typing import Any
 
-from ..mcp_identity import McpScope
+from ..mcp_identity import McpScope, require_live_scope
 from ..question_resolution import SYSTEM_SOURCE, UNKNOWN_SOURCE, AnswerSource
 from .base import PendingQuestion, Session, SessionManagerBase
+from .mcp_questions import McpQuestionCall
 from .owner import SessionOwner
 from .owner_questions import (
     AnswerQuestion,
@@ -24,6 +25,25 @@ __all__ = ["QuestionClosedError", "QuestionsMixin"]
 
 
 class QuestionsMixin(SessionManagerBase):
+    def register_mcp_question_call(self, scope: McpScope, identity: dict[str, Any]) -> McpQuestionCall:
+        require_live_scope(scope, scope.session_id)
+        session = self.get_session(scope.session_id, scope.user_id)
+        if session is None or session._admission_closed or self._admission_closed:
+            raise ValueError("Original MCP question session is unavailable")
+        owner = self._question_owner(session)
+        call = McpQuestionCall(owner, scope, deepcopy(identity))
+        owner.questions.mcp_calls[call.id] = call
+        return call
+
+    async def join_mcp_question_calls(self) -> None:
+        calls = [call for owner in self._session_owners.values() for call in owner.questions.mcp_calls.values()]
+        for call in calls:
+            call.cancel()
+        await asyncio.gather(*(asyncio.shield(call.task) for call in calls if call.task is not None), return_exceptions=True)
+        for call in calls:
+            if call.error is not None or call.id in call.owner.questions.mcp_calls:
+                raise RuntimeError(f"Original MCP question call {call.id} cleanup is unconfirmed") from call.error
+
     def _question_owner(self, session: Session, *, internal: bool = False) -> SessionOwner:
         # Original attempt cleanup is allowed after archive seals new external
         # admission. It must use the original owner, never resurrect a failure.
@@ -36,7 +56,7 @@ class QuestionsMixin(SessionManagerBase):
 
     async def create_pending_question(
         self, session_id: str, questions: list[dict[str, Any]], *,
-        attempt_id: str | None = None, scope: McpScope | None = None,
+        attempt_id: str | None = None, scope: McpScope | None = None, call_id: str | None = None,
     ) -> str | None:
         session = self.sessions.get(session_id)
         if session is None:
@@ -44,7 +64,7 @@ class QuestionsMixin(SessionManagerBase):
         if self._admission_closed or session._admission_closed:
             raise ValueError("Session admission is closed")
         pending = await self._question_owner(session).call_question(CreateQuestion(
-            deepcopy(questions), attempt_id=attempt_id, scope=scope,
+            deepcopy(questions), attempt_id=attempt_id, scope=scope, call_id=call_id,
         ))
         assert pending is None or isinstance(pending, PendingQuestion)
         return pending.question_id if pending is not None else None
@@ -76,12 +96,32 @@ class QuestionsMixin(SessionManagerBase):
         if not isinstance(captured, PendingQuestion):
             raise QuestionClosedError("Question not found or closed")
         try:
-            await asyncio.wait_for(captured.ready.wait(), timeout=timeout)
-        except TimeoutError:
-            return None
+            captured.waiters += 1
+            captured.waiters_released.clear()
+            try:
+                await asyncio.wait_for(captured.ready.wait(), timeout=timeout)
+            except TimeoutError:
+                return None
+        finally:
+            captured.waiters -= 1
+            if not captured.waiters:
+                captured.waiters_released.set()
         if captured.state != "answered" or captured.answer is None:
             raise QuestionClosedError("Question not found or closed")
         return captured.answer
+
+    async def wait_for_question_result(self, session_id: str, question_id: str, timeout: float) -> dict[str, Any] | None:
+        try:
+            answer = await self.wait_for_question_answer(session_id, question_id, timeout)
+        except QuestionClosedError:
+            answer = None
+        else:
+            if answer is None:
+                return None
+        result = await self.input_database().get_question_result(session_id, question_id)
+        if result is None:
+            raise QuestionClosedError("Question not found or resolution unavailable")
+        return result
 
     def get_pending_questions(self, session_id: str) -> tuple[PendingQuestion, ...]:
         session = self.sessions.get(session_id)

@@ -274,6 +274,8 @@ class PendingQuestionInfo(BaseModel):
     deadline: str | None = None
     request_id: str | None = None
     attempt_id: str | None = None
+    interaction_policy: Literal["human", "unattended"] | None = None
+    wait_mode: Literal["blocking", "optional", "mcp"] | None = None
 
 
 class DispatchQueueItem(BaseModel):

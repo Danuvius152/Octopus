@@ -63,3 +63,33 @@ it("keeps a newer idle observation when the reconnect's running snapshot arrives
     expect(useSessionStore.getState().sessions[0].status).toBe("idle");
   } finally { hook.unmount(); }
 });
+
+it("deletes the selected session and rejects the list and detail already in flight", async () => {
+  Socket.reset(0); vi.stubGlobal("WebSocket", Socket);
+  const deleted = { id: "deleted", name: "Deleted", status: "idle", archived: false } as SessionInfo;
+  useSessionStore.setState({ token: "deletion-bearer", accountGeneration: useSessionStore.getState().accountGeneration + 1,
+    dispatchGeneration: "service", connected: false });
+  useSessionStore.setState({ sessions: [deleted], activeSessionId: deleted.id,
+    pendingQuestions: { deleted: [{ question_id: "q", questions: [{ question: "Choose?" }] }] } });
+  const replies: ((response: Response) => void)[] = [];
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/api/sessions")
+    ? new Promise<Response>((resolve) => replies.push(resolve)) : Promise.resolve(Response.json([]))));
+  const hook = renderHook(() => useWebSocket());
+  try {
+    const socket = Socket.instances[0];
+    await act(async () => { socket.readyState = 1; socket.onopen?.(); });
+    const deletion = JSON.stringify({ type: "session_deleted", session_id: deleted.id });
+    act(() => { socket.onmessage?.({ data: deletion }); socket.onmessage?.({ data: deletion }); });
+    expect(useSessionStore.getState().sessions).toEqual([]);
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    expect(useSessionStore.getState().pendingQuestions.deleted).toBeUndefined();
+    await act(async () => { replies[0](Response.json([deleted])); });
+    expect(useSessionStore.getState().sessions).toEqual([]);
+    await act(async () => { replies[1](Response.json([])); });
+    expect(useSessionStore.getState().sessions).toEqual([]);
+    act(() => useSessionStore.getState().setToken("next-account"));
+    useSessionStore.setState({ sessions: [deleted] });
+    act(() => socket.onmessage?.({ data: deletion }));
+    expect(useSessionStore.getState().sessions).toEqual([deleted]);
+  } finally { hook.unmount(); }
+});

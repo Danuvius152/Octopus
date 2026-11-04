@@ -122,6 +122,8 @@ export interface PendingQuestion {
   deadline?: string | null;
   request_id?: string | null;
   attempt_id?: string | null;
+  interaction_policy?: "human" | "unattended" | null;
+  wait_mode?: "blocking" | "optional" | "mcp" | null;
 }
 
 /** Return `map` without `key`, or `map` itself when the key isn't there.
@@ -281,6 +283,7 @@ interface SessionStore {
 
   activeSessionId: string | null;
   setActiveSessionId: (id: string | null) => void;
+  forgetSession: (id: string) => void;
 
   messages: Record<string, Message[]>;
   addMessage: (sessionId: string, msg: MessageInput) => void;
@@ -718,6 +721,20 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       activeApplicationId: null,
       sidebarOpen: false,
     }),
+  forgetSession: (id) => set((s) => ({
+    activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
+    viewer: s.viewer?.sessionId === id ? null : s.viewer,
+    messages: dropKey(s.messages, id), pendingQuestions: dropKey(s.pendingQuestions, id),
+    closedQuestionIds: dropKey(s.closedQuestionIds, id), pendingForks: dropKey(s.pendingForks, id),
+    streamingText: dropKey(s.streamingText, id), streamingItems: dropKey(s.streamingItems, id),
+    subagents: dropKey(s.subagents, id), dispatchStates: dropKey(s.dispatchStates, id),
+    dispatchUnavailable: dropKey(s.dispatchUnavailable, id), sessionMembership: dropKey(s.sessionMembership, id),
+    oldestSeq: dropKey(s.oldestSeq, id), hasMoreMessages: dropKey(s.hasMoreMessages, id),
+    messageWindows: dropKey(s.messageWindows, id), lastAppliedSeq: dropKey(s.lastAppliedSeq, id),
+    bgTasks: dropKey(s.bgTasks, id), research: dropKey(s.research, id), delegations: dropKey(s.delegations, id),
+    wikiJobs: dropKey(s.wikiJobs, id), wikiJobDirty: dropKey(s.wikiJobDirty, id),
+    wikiJobReadErrors: dropKey(s.wikiJobReadErrors, id), sessionAuxiliaryErrors: dropKey(s.sessionAuxiliaryErrors, id),
+  })),
 
   lastAppliedSeq: {},
   setLastAppliedSeq: (sessionId, seq) =>

@@ -296,8 +296,12 @@ are declined, permission requests receive no permissions, and legacy approval
 methods use their own negative response shape. An unregistered dynamic tool
 returns `success:false` with explanatory `contentItems`; an unknown request
 returns MethodNotFound and fails the original stream. It cannot hang forever or
-silently approve. `isBlocking` controls native waiting evidence, not the product
-question deadline.
+silently approve. `isBlocking` supplies native waiting evidence. Combined with
+the original work's human policy, true disables the question deadline and pauses
+idle; false retains optional-question expiry. The overall cap and Stop remain
+effective. The G0 Default-mode native-question capability emits false in the
+live smoke; it proves original-connection optional delivery, while explicit true
+frames exercise blocking/idle suspension in the controlled native protocol tests.
 
 Native item conversion is a pure boundary in `codex_items.py`; it does not rename
 fields into the legacy exec parser or own execution. Complete items retain their

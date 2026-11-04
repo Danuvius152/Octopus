@@ -1382,7 +1382,7 @@ class DelegationManager:
                     result = await self.session_mgr.admit_return(
                         ReturnTarget(rec.parent_session_id, "delegation", delivery.delivery_id,
                                      rec.parent_work_id, rec.owned_context),
-                        prepare=prepare,
+                        prepare=prepare, wait_for_lifecycle=msg.get("answer_target") != "parent",
                     )
                 except AdmissionIntegrityError as error:
                     if delivery.disposition == "unknown":
@@ -1401,7 +1401,7 @@ class DelegationManager:
                     await complete_cleanup(self._retain_question_delivery(rec, question_id, delivery))
                     raise
                 if isinstance(result, SubmissionReceipt):
-                    self._acknowledge_question(rec, delivery, result)
+                    await self._acknowledge_question(rec, question_id, delivery, result)
                     return
                 if delivery.disposition == "unknown":
                     return  # Absence or a later refusal does not settle the original handoff.
@@ -1411,6 +1411,11 @@ class DelegationManager:
                     return
                 assert isinstance(result, ReturnRefused)
                 if result.reason in {"capacity", "busy"}:
+                    if msg.get("answer_target") == "parent":
+                        self._remember_question_delivery(delivery, "stopped",
+                            result.cause or "The parent cannot accept this unattended decision request")
+                        await self._retain_question_delivery(rec, question_id, delivery)
+                        return
                     await asyncio.sleep(1)
                     continue
                 if result.reason == "source_withdrawn":
@@ -1445,11 +1450,15 @@ class DelegationManager:
         if delivery.notice_recorded or rec._question_notices_closed:
             return
         label = "Return admission unconfirmed" if delivery.disposition == "unknown" else "Automatic return stopped"
+        child = self.session_mgr.get_session(rec.delegation_id)
+        pending = child._questions.get(question_id) if child else None
+        consequence = ("This unattended decision request will close as needing input; no automatic return retry will start."
+                       if pending is not None and pending.answer_target == "parent" else
+                       "This return will not be resubmitted automatically. The original question remains answerable here while pending.")
         try:
             recorded = await self.session_mgr.retain_result_notice(
                 rec.delegation_id, f"agent-question:{rec.work_id}:{question_id}",
-                f"Question {question_id}: {label}.\n{delivery.error}\n"
-                "This return will not be resubmitted automatically. The original question remains answerable here while pending.",
+                f"Question {question_id}: {label}.\n{delivery.error}\n" + consequence,
             )
             if not recorded:
                 raise SessionOwnerUnavailable("The original child question delivery notice could not be recorded")
@@ -1462,14 +1471,21 @@ class DelegationManager:
     def _question_recorded(rec: DelegationRunState, delivery: _QuestionDelivery) -> bool:
         return rec._question_notices_closed or delivery.disposition is None or delivery.notice_recorded
 
-    def _acknowledge_question(
-        self, rec: DelegationRunState, delivery: _QuestionDelivery, receipt: SubmissionReceipt,
+    async def _acknowledge_question(
+        self, rec: DelegationRunState, question_id: str, delivery: _QuestionDelivery, receipt: SubmissionReceipt,
     ) -> None:
         delivery.receipt = receipt
         delivery.disposition = None
         delivery.error = None
         if receipt.accepted:
             self._watch_completion(rec.parent_session_id, rec.parent_work_id, receipt)
+            assert self.session_mgr is not None
+            child = self.session_mgr.get_session(rec.delegation_id)
+            pending = child._questions.get(question_id) if child else None
+            if child is not None and pending is not None and pending.answer_target == "parent":
+                from .sessions.owner_questions import AttachQuestionParent
+                await self.session_mgr._question_owner(child, internal=True).call_question(
+                    AttachQuestionParent(question_id, rec.parent_session_id, receipt))
 
     @staticmethod
     def _render_question_body(questions: list[dict[str, Any]]) -> str:

@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..config import settings
 from ..harness import HarnessRun
@@ -23,8 +23,10 @@ from ..question_resolution import (
     validate_answers,
 )
 from .base import PendingQuestion
+from .mcp_questions import McpQuestionCall
 from .publication import Publication
 from .runtime_types import SessionMailboxFull
+from .submission import SubmissionReceipt
 
 if TYPE_CHECKING:
     from .owner import SessionOwner
@@ -41,6 +43,7 @@ class CreateQuestion:
     questions: list[dict[str, Any]]
     attempt_id: str | None = None
     scope: McpScope | None = None
+    call_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,13 @@ class CaptureQuestion:
 
 
 @dataclass(frozen=True)
+class AttachQuestionParent:
+    question_id: str
+    parent_session_id: str
+    receipt: SubmissionReceipt
+
+
+@dataclass(frozen=True)
 class BeginQuestionAttempt:
     attempt_id: str
     watchdog: dict[str, Any]
@@ -91,7 +101,7 @@ class CloseSessionQuestions:
 
 
 QuestionCommand = (CreateQuestion | RegisterNativeQuestion | AnswerQuestion | CloseQuestion | CaptureQuestion
-                   | BeginQuestionAttempt | EndQuestionAttempt | CloseSessionQuestions)
+                   | AttachQuestionParent | BeginQuestionAttempt | EndQuestionAttempt | CloseSessionQuestions)
 QuestionResult = bool | PendingQuestion | None
 
 
@@ -105,6 +115,8 @@ def question_command_bytes(command: QuestionCommand) -> int:
         payload = (command.question_id, command.reason, command.source.details())
     elif isinstance(command, CaptureQuestion):
         payload = command.question_id
+    elif isinstance(command, AttachQuestionParent):
+        payload = (command.question_id, command.parent_session_id, command.receipt.request_id)
     elif isinstance(command, BeginQuestionAttempt):
         payload = command.attempt_id
     else:
@@ -146,6 +158,7 @@ class OwnerQuestions:
     def __init__(self, owner: SessionOwner) -> None:
         self.owner = owner
         self._notice_order = 0
+        self.mcp_calls: dict[str, McpQuestionCall] = {}
 
     async def handle(self, command: QuestionCommand) -> QuestionResult:
         if isinstance(command, (CreateQuestion, RegisterNativeQuestion)):
@@ -153,6 +166,12 @@ class OwnerQuestions:
         if isinstance(command, AnswerQuestion):
             pending = self.owner.session._questions.get(command.question_id)
             if pending is None or pending.state != "pending":
+                return False
+            if pending.answer_target != "human" and (
+                pending.answer_target != "parent" or command.source.kind != "agent"
+                or command.source.delegation_id != self.owner.session.id
+                or command.source.parent_session_id != self.owner.session.parent_session_id
+            ):
                 return False
             answers = validate_answers(pending.questions, command.answers)
             if not pending.is_current(self.owner.session._run.question_attempt_id):
@@ -165,6 +184,15 @@ class OwnerQuestions:
         if isinstance(command, CloseQuestion):
             pending = self.owner.session._questions.get(command.question_id)
             return await self._close(pending, command.reason, source=command.source) if pending is not None else False
+        if isinstance(command, AttachQuestionParent):
+            pending = self.owner.session._questions.get(command.question_id)
+            if (pending is None or pending.state != "pending" or pending.answer_target != "parent"
+                    or command.parent_session_id != self.owner.session.parent_session_id or not command.receipt.accepted):
+                return False
+            if pending.parent_receipt is None:
+                pending.parent_receipt = command.receipt
+                command.receipt._completion.add_done_callback(lambda _done: self.owner.wake())
+            return pending.parent_receipt.request_id == command.receipt.request_id
         if isinstance(command, CaptureQuestion):
             pending = self.owner.session._questions.get(command.question_id)
             if pending is not None and pending.state == "pending":
@@ -201,6 +229,13 @@ class OwnerQuestions:
     async def _create(self, command: CreateQuestion | RegisterNativeQuestion) -> PendingQuestion | None:
 
         session, manager = self.owner.session, self.owner.manager
+        call = None
+        if isinstance(command, CreateQuestion) and command.call_id is not None:
+            call = self.mcp_calls.get(command.call_id)
+            if call is None or call.scope != command.scope:
+                raise ValueError("Original MCP question call is unavailable")
+            if call.cancelled:
+                return None
         if manager.sessions.get(session.id) is not session:
             return None
         if manager._admission_closed or session._admission_closed:
@@ -226,6 +261,17 @@ class OwnerQuestions:
         if (existing := session._questions.get(question_id)) is not None:
             return existing
         timeout = settings.ask_user_question_timeout_seconds
+        context = session._run.knowledge_context
+        interaction_policy = context.interaction_policy if context is not None else None
+        wait_mode: Literal["blocking", "optional", "mcp"] = (
+            "blocking" if native_ref is not None and native_ref.blocking else "optional" if native_ref else "mcp")
+        if interaction_policy == "human" and wait_mode == "blocking":
+            timeout = 0
+        answer_target: Literal["human", "parent", "none"] = "human"
+        if interaction_policy == "unattended":
+            request = session._run.request
+            answer_target = "parent" if session.parent_session_id and request is not None and request.source == "delegation" else "none"
+            timeout = 0
         pending = PendingQuestion(
             question_id=question_id, questions=command.questions,
             deadline=(datetime.now(UTC) + timedelta(seconds=timeout)).isoformat() if timeout > 0 else None,
@@ -236,19 +282,29 @@ class OwnerQuestions:
             backend=command.backend if isinstance(command, RegisterNativeQuestion) and command.backend is not None else
                 session._run.backend if isinstance(session._run.backend, HarnessRun) else None,
             native_ref=command.event.native_question if isinstance(command, RegisterNativeQuestion) and command.event else None,
+            interaction_policy=interaction_policy, wait_mode=wait_mode,
+            answer_target=answer_target,
         )
         details: dict[str, Any] = {
             "questions": pending.questions, "deadline": pending.deadline,
             "request_id": pending.request_id, "attempt_id": pending.attempt_id, "work_id": pending.work_id,
+            "interaction_policy": pending.interaction_policy, "wait_mode": pending.wait_mode,
+            "answer_target": pending.answer_target,
         }
         if pending.native_ref is not None:
             from dataclasses import asdict
             details["native_question"] = asdict(pending.native_ref)
+        if call is not None:
+            from dataclasses import asdict
+            details["mcp_call"] = {"scope": asdict(call.scope), **call.identity}
         event = {"type": "question_request", "session_id": session.id, "question_id": question_id, **details}
         if (isinstance(command, CreateQuestion)
                 and (self.has_waiting_notifications or not self.owner.publisher.can_offer(event))):
             raise SessionMailboxFull("Session notification capacity is full; retry this question later")
         session._questions[question_id] = pending
+        pending.waiters_released.set()
+        if call is not None:
+            call.pending = pending
         if session._run.question_watchdog is not None and (native_ref is None or native_ref.blocking):
             session._run.question_watchdog.setdefault("waiting_questions", set()).add(question_id)
         if isinstance(command, CreateQuestion) or pending.native_ref is not None:
@@ -265,6 +321,8 @@ class OwnerQuestions:
             pending.timer.add_done_callback(lambda _done: self.owner.wake())
         if pending.backend is not None and pending.backend.captures_retirement_output and not pending.is_current(session._run.question_attempt_id):
             await self._close(pending, "attempt_ended")
+        elif pending.answer_target == "none":
+            await self._close(pending, "needs_input")
         return pending
 
     async def _persist(
@@ -349,6 +407,7 @@ class OwnerQuestions:
             assert pending.backend is not None
             pending.backend.reply_question(pending.native_ref, answers)
         pending.answer = answer
+        pending.resolution = message.tool_input["question_resolution"] if message.tool_input else None
         pending.ready.set()
         return True
 
@@ -356,6 +415,11 @@ class OwnerQuestions:
         if not self._claim(pending, "closed"):
             return False
         human = f"Question closed: {reason.replace('_', ' ')}. No answer was received."
+        if reason == "needs_input":
+            human = ("This unattended work needs a user decision. No answer or new authorization was received. "
+                     "Report the completed work and missing decision, stop dependent steps, and continue only independent authorized work. "
+                     "The user can explicitly continue with a new input; do not reopen or replay this request.")
+            human += "\n\nMissing decision:\n" + "\n".join(str(question.get("question", "")) for question in pending.questions)
         message = MessageContent(role=MessageRole.system, type="question_closed", content=human,
             tool_use_id=pending.question_id, tool_input={"reason": reason,
                 "question_resolution": self._resolution(pending, "closed", source)})
@@ -367,6 +431,8 @@ class OwnerQuestions:
         if pending.native_ref is not None:
             assert pending.backend is not None
             pending.backend.reply_question(pending.native_ref, None)
+        pending.answer = human
+        pending.resolution = message.tool_input["question_resolution"] if message.tool_input else None
         pending.ready.set()
         pending.retirement_requested = True
         self._retire_if_finished(pending)
@@ -399,6 +465,12 @@ class OwnerQuestions:
                 self.owner.wake()
                 return
         for pending in tuple(self.owner.session._questions.values()):
+            if (pending.state == "pending" and pending.answer_target == "parent"
+                    and pending.request_publication is None
+                    and (pending.parent_receipt is None or pending.parent_receipt._completion.done())):
+                await self._close(pending, "needs_input")
+                self.owner.wake()
+                return
             timer = pending.timer
             if timer is not None and timer.done() and not timer.cancelled():
                 pending.timer = None

@@ -285,8 +285,12 @@ user's control; [pins](implemented/sidebar-pins.md) owns visibility and archive.
 `ask` MCP and native Codex questions join the same original Question Owner.
 The complete form is validated before claim/save; answers, expiry and closure
 are recorded once against the original attempt. A saved answer does not prove
-native receipt or model consumption. A configured deadline and an indefinitely
-waiting question are separate product choices, both retaining cancellation.
+native receipt or model consumption. The original work carries interaction
+policy through children and returns. Human native blocking can wait without a
+question deadline while retaining Stop, execution termination and whole-turn
+limits; unattended work records missing decisions without a long human form.
+Async MCP cancellation retains its original creation/cleanup responsibility
+until the question is settled and actual waiters are released.
 Historical tool-approval messages remain readable, without restoring the retired
 approval execution path. Current signed MCP scope contains account/session,
 installation, work and run lease; valid signatures do not keep a retired grant
@@ -305,6 +309,10 @@ processed the return. Inputs dispatch one at a time in successful admission orde
 Stop preserves the paused backlog, and a new manual correction does not implicitly
 resume it. No automatic batching or conversion of independent returns into steer
 is part of this behavior.
+Unattended question-solving returns have one opportunity: Stop expires an
+unstarted solver and its original receipt, without preserving it for Resume.
+The [delegation contract](implemented/agent-collaboration.md#unattended-questions)
+owns that question-bound lifetime.
 
 | Path | Domain responsibility | Current contract |
 | --- | --- | --- |

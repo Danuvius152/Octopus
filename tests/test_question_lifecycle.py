@@ -577,8 +577,9 @@ async def test_host_auto_answer_resolves_form_and_poll_once(question_host, monke
         assert answer.status_code == 200
         text = answer.json()["answer"]
         assert text == manager.AUTO_ANSWER_TEXT
-        assert "No human is available" in text
-        assert "risky or irreversible" in text
+        assert "expired without a user answer" in text
+        assert "No choice or new authorization was received" in text
+        assert "stop and report" in text
         assert not manager.has_pending_question(session.id, qid)
         snapshot = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert snapshot.json()["pending_questions"] == []

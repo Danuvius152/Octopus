@@ -335,6 +335,7 @@ class TurnsMixin(SessionManagerBase):
             while any(not task.done() for task in self._owned_tasks):
                 await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._owned_tasks)
                                        if task is not asyncio.current_task()), return_exceptions=True)
+            await self.join_mcp_question_calls()
         return active
 
     def running_turns_for(self, user_id: str | None) -> int:
@@ -429,6 +430,7 @@ class TurnsMixin(SessionManagerBase):
 
     async def admit_return(
         self, target: ReturnTarget, *, prepare: Callable[[], Awaitable[ReturnBody | ReturnSkipped]],
+        wait_for_lifecycle: bool = True,
     ) -> ReturnAdmission:
         """Own the complete receipt-first handoff; the source owns retry policy.
 
@@ -483,7 +485,8 @@ class TurnsMixin(SessionManagerBase):
             refusal = await eligibility()
             if refusal is not None:
                 return await reconcile(refusal)
-            resolved = await self._restore_task_return(target.owned, session_id=target.session_id, work_id=target.work_id)
+            resolved = await self._restore_task_return(target.owned, session_id=target.session_id, work_id=target.work_id,
+                                                      wait_for_lifecycle=wait_for_lifecycle)
             if resolved is None:
                 return await reconcile(ReturnRefused("destination_unavailable"))
             # Restoration may wait for another lifecycle command. Revalidate
@@ -946,6 +949,7 @@ class TurnsMixin(SessionManagerBase):
                     "request_id": pending_question.request_id,
                     "attempt_id": pending_question.attempt_id,
                     "work_id": pending_question.work_id,
+                    "interaction_policy": pending_question.interaction_policy, "wait_mode": pending_question.wait_mode,
                 }
             msg_seq = await self._persist_message(session, msg_content)
             if (event.type == "text" and msg_seq is not None and source
@@ -961,6 +965,7 @@ class TurnsMixin(SessionManagerBase):
                 request_id=pending_question.request_id,
                 attempt_id=pending_question.attempt_id,
                 work_id=pending_question.work_id,
+                interaction_policy=pending_question.interaction_policy, wait_mode=pending_question.wait_mode,
             )
         if ws_event is not None and msg_content is not None:
             self._tag_persisted(ws_event, msg_seq, msg_content)

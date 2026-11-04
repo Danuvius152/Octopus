@@ -103,8 +103,22 @@ the result; nobody is waiting to answer questions.
 <the schedule's prompt>
 ```
 
-That last sentence is the point: a scheduled run that ends by asking a
-clarifying question has asked nobody, and blocks until the question times out.
+Every new fire captures `interaction_policy="unattended"` in its original work
+context, even if a human authored the definition. A later human input in the same
+session captures human policy; the session's origin does not classify all future
+work. BG, Research and delegation descendants/returns keep the fire's original
+policy.
+
+If a necessary decision has no authorized default, the original question closes
+as `needs_input` immediately rather than leaving an unanswered human form.
+The run reports completed independent work and the exact missing decision, and
+stops dependent steps. A child may first seek a bounded answer from its actual
+parent under the [delegation contract](agent-collaboration.md#unattended-questions).
+The schedule's original admission and outcome rules do not change: no extra
+fire, automatic replay or second consumption of a one-shot is created. A user
+can supply a new explicit input, and recurring schedules retain their next
+ordinary trigger. A model's successful final response is not proof of the
+requested external effect.
 
 ## 4. "Last run" opens the run
 

@@ -39,6 +39,7 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
         next_message_seq: 3, dispatch_state: dispatch, active_attempt: null, pending_questions: [question], subagents: [],
       };
     } else if (url.endsWith("/bg-tasks")) body = [task];
+    else if (url.includes("/api/sessions") && !url.includes(`/api/sessions/${sid}`)) body = [{ id: sid, status: "idle", archived: false }];
     else if (url.endsWith("/delegations")) body = [delegation];
     return { ok: true, json: async () => body };
   }));

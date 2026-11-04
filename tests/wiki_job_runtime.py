@@ -142,6 +142,9 @@ class Curator:
     async def get_committed_terminal(self, session_id, request_id):
         return self.terminals.get((session_id, request_id))
 
+    async def get_request_missing_decisions(self, session_id, request_id):
+        return []  # This controlled curator never creates product questions.
+
     async def cancel_request(self, *args):
         return True
 

@@ -136,6 +136,13 @@ Manager 接管原对象的完成与资源责任。`done` 表示已结算，可�
 原 Manager 接管。已确认资源退出后，应用历史退休与后代附件物化先于数据库删除；
 发布订阅者可以发起删除，原 publisher 继续由外部排空，不形成自身等待。
 
+live 与已归档会话的删除均由 Manager 的原生命周期捕获删除前账户 audience，
+先退休原 writer，再确认 DB 删除与 registry 移除，最后广播最小 `session_deleted`。
+失败不生产成功通知；通知不从已删行反查归属，也不提供持久重放或 exactly-once。
+发送侧的逐帧资格与删除后页面清理分别归
+[账户与 WebSocket](multi-tenancy.md#websocket-delivery)和
+[会话列表](frontend-list-reconciliation.md#会话列表与跨重连写入确认)。
+
 委派 follow-up setup 的退出另须区分接纳与关系删除：明确的接纳拒绝可恢复旧轮次；
 确认原关系已删、输入从未提交或明确被拒且没有资源时，才可直接退休捕获的内存
 round/work 并撤回原 parent-work 责任。关系换代、普通异常或未知回执不能据此清理。
@@ -254,6 +261,54 @@ expired、closed；显式关闭保留 `question_closed` 和 reason，系统到�
 回答、到期和关闭只处置一次，晚答不能消费新 attempt。claim 后保存失败走原 Owner/
 存储故障边界，不发布或返回未保存的成功答案，不用撤回 claim 处理普通校验错误。
 这些事实沿现有消息 JSON 保存，不新增活回调、持久问题队列或存储根。
+
+### 原工作交互策略与等待
+
+原输入准入在既有 `KnowledgeContext.interaction_policy` 捕获 human 或 unattended。
+人工输入及其 child、BG/Research/委派/Wiki 返回继承原工作策略；新的 schedule fire
+与 Wiki worker 根工作使用 unattended。相同 session 可先执行 schedule 再接纳
+human，不以 `session.origin`、机器消息来源或浏览器在线状态改写已有策略。
+旧 JSON 缺失字段保持未知，继续原兼容等待规则，不回填人工或无人值守身份。
+
+human 的原生 blocking 问题不设问题期限，并暂停对应 idle 等待；Stop、原调用
+resolved、执行结束、真实故障及包含等待时间的整体上限仍生效。MCP 保留默认
+1800 秒、配置 0 禁用问题期限；原生非 blocking 和旧未知策略保留其兼容期限。
+Web/App、两种 session detail、实时事件及历史共用原问题的策略和 wait_mode。
+
+unattended 不创建长期人工表单：根问题立即以 `needs_input` 关闭，保存原问题及
+缺失决定，不生成用户选择或授权。子工作可先将题目交给真实父关系；一次实际
+父准入受忙碌、容量和生命周期冲突约束，不等待恢复锁或无限重试。实际接纳后
+由原父 receipt 的完成唤醒 child Owner；父未答就关闭原问题，Owner 内不等待
+父执行、MCP runner 或 REST waiter。独立已授权步骤可保留，依赖决定的步骤停止；
+父会话已暂停时拒绝新的无人值守求解输入；接纳后 Stop 则由父 Owner 将尚未执行
+的这类原输入结算为 expired，原 receipt 随即结束 child 的求解机会。普通输入
+队列仍保留暂停，Resume 不重放已过期的求解输入。
+用户补充通过新输入续接，不重开旧题或重放原工作。各领域仍以自身效果 receipt
+裁定结果，完整父子交接归[委派合同](agent-collaboration.md#unattended-questions)。
+
+<a id="mcp-question-retirement"></a>
+### MCP 原调用退休
+
+只有 ask 的长等待使用 async。实际 SDK Request 绑定原宿主，原 QuestionOwner
+持有 `McpQuestionCall`，从建题开始保留已认证 scope、原 MCP RPC/session、
+server/tool、实际提供的 metadata 及原 CreateQuestion envelope 回执。metadata
+只作关联，不能授予权限；缺失 callId/native 身份不按名字或顺序补造。
+HTTP POST 结束不证明 envelope 未创建题目；取消标记也由 `_create` 核验，
+已接纳命令最终生成的准确 pending 必须观察并结算。
+
+SDK 可先回复 Request cancelled；handler 在 AnyIO 取消屏蔽内等待原 runner，
+runner 在 Owner 外观察创建结果、通过捕获的原 owner 关闭准确题目，再等待实际
+REST waiter 的 finally 释放，随后传播取消。`ready` 只证明唤醒，不替代 waiter
+退出。run bearer 已退休时也不恢复旧权限或把清理 401 当作完成证明。
+封口 Owner 仍保留未退休 call；失败记录同时阻止自然排空和实际 shutdown，沿
+既有 owner/writer failure 出口传播，不能因 task 回调移除而假成功。
+runner 一旦进入取消或通信失败清理，既有 cancelled 标记阻止后到取消再次打断
+创建回执、关闭持久化或 waiter 释放；真正清理失败仍保留原故障事实。
+
+结构化 GET 兼容提供原已保存 resolution 和可读文本；普通 GET 的关闭 404 语义
+保留。单次 408、一个 poll 取消或浏览器断线不取消原工具调用。未知 qid、认证
+失败、不可达或无效响应仍为工具错误；只有准确原记录的已保存结算可证明关闭。
+本地接纳回答、模型实际收到回答和本地资源退出保持不同事实。
 
 <a id="native-question-control"></a>
 ### 原生问题与控制写入

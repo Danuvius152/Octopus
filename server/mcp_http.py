@@ -95,8 +95,8 @@ def _offload_sync_tools(server: Any) -> None:
     """Run `def` tool bodies in a worker thread instead of on the event loop.
 
     FastMCP calls a sync tool straight on the loop
-    (`func_metadata.call_fn_with_arg_validation`). Every tool body in
-    `mcp_servers/` is sync and makes a *blocking* HTTP call back into this same
+    (`func_metadata.call_fn_with_arg_validation`). Synchronous tool bodies in
+    `mcp_servers/` make a *blocking* HTTP call back into this same
     process, so on the loop it deadlocks: the loop cannot serve the loopback
     request until the tool returns, and the tool cannot return until the request
     is served. The result is one dead 15-second timeout per tool call, plus any
@@ -109,11 +109,9 @@ def _offload_sync_tools(server: Any) -> None:
     made them wrong, so the fix belongs here rather than in nine tool modules —
     and threading a sync handler is what FastAPI does for a `def` endpoint.
 
-    The bound is anyio's default thread limiter (40). `mcp__ask__user` can hold
-    its thread for as long as a human takes to answer, so the real ceiling is
-    concurrent *blocking* tool calls, not sessions; far above anything one box
-    runs, and the alternative — rewriting every body onto an async client — buys
-    nothing until that ceiling is in sight.
+    The bound is anyio's default thread limiter (40). Ask alone uses its async
+    cancellation/retirement contract; ordinary synchronous side-effect tools
+    retain their original worker until their operation has returned.
     """
     tools = getattr(getattr(server, "_tool_manager", None), "_tools", None)
     if not tools:  # pragma: no cover - a namespace with no tools
@@ -155,10 +153,11 @@ class _ScopeMiddleware:
     ids never authorize another run or account to use or clean it up.
     """
 
-    def __init__(self, app: Any, name: str, manager: Any = None) -> None:
+    def __init__(self, app: Any, name: str, manager: Any = None, host: FastAPI | None = None) -> None:
         self.app = app
         self.name = name
         self.manager = manager
+        self.host = host
         # Bind ownership to the actual transport, so idle expiry and manager
         # shutdown do not leave another unbounded session registry behind.
         self._owners: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
@@ -205,6 +204,10 @@ class _ScopeMiddleware:
 
         token = set_current_scope(resolved)
         try:
+            if self.host is not None:
+                from .deps import get_session_manager
+                provider = self.host.dependency_overrides.get(get_session_manager, get_session_manager)
+                scope["octopus.session_manager"] = provider()
             await self.app(scope, receive, self._log_bad_request(scope, headers, owned_send))
         finally:
             reset_current_scope(token)
@@ -264,6 +267,6 @@ def mount_all(app: FastAPI, servers: dict[str, Any] | None = None) -> list[str]:
     mounted: list[str] = []
     for name, server in (servers or build_servers()).items():
         transport_app = server.streamable_http_app()
-        app.mount(mount_path(name), _ScopeMiddleware(transport_app, name, server.session_manager))
+        app.mount(mount_path(name), _ScopeMiddleware(transport_app, name, server.session_manager, app))
         mounted.append(mount_path(name))
     return mounted

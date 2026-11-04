@@ -210,8 +210,10 @@ async def import_session(
             PendingQuestionInfo(
                 question_id=q.question_id, questions=q.questions, deadline=q.deadline,
                 request_id=q.request_id, attempt_id=q.attempt_id,
+                interaction_policy=q.interaction_policy, wait_mode=q.wait_mode,
             )
             for q in session_manager.get_pending_questions(s.id)
+            if q.answer_target == "human"
         ],
         subagents=[SubagentRun(**asdict(u)) for u in s._subagents.values()],
         # High-water mark: clients use this as the dedup baseline so any
@@ -396,8 +398,10 @@ async def get_session(
                 PendingQuestionInfo(
                     question_id=q.question_id, questions=q.questions, deadline=q.deadline,
                     request_id=q.request_id, attempt_id=q.attempt_id,
+                    interaction_policy=q.interaction_policy, wait_mode=q.wait_mode,
                 )
                 for q in session_manager.get_pending_questions(s.id)
+                if q.answer_target == "human"
             ],
             subagents=[SubagentRun(**asdict(u)) for u in s._subagents.values()],
             oldest_loaded_seq=oldest,

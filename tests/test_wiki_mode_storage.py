@@ -112,7 +112,8 @@ async def test_prepared_schedule_executes_its_source_contract_as_read_only(tmp_p
         messages = await database.load_messages(session.id)
         fired = next(message for message in messages if message["role"] == "user")
         contract = decode_context(json.dumps(fired["tool_input"]["request_context"]["knowledge"]))
-        assert contract == decode_context(original_context)
+        from dataclasses import replace
+        assert contract == replace(decode_context(original_context), interaction_policy="unattended")
         assert contract.origin.session_id == "source-original"
         assert contract.origin.request_id == "trusted-source-request"
         assert fired["tool_input"]["request_context"]["source"] == "schedule"

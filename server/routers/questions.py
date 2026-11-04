@@ -17,6 +17,9 @@ Question endpoints:
       hits). Returns `{answer: "..."}` on success, or 408 on timeout
       so the MCP server can retry. The MCP server retries until it
       gets an answer or the session-level auto-answer timer fires.
+      With structured=true, returns the original saved resolution,
+      readable answer and closure reason, including known closed questions.
+      Unknown IDs and authentication failures remain errors.
 
   POST /api/sessions/{id}/questions/{question_id}/answer
       Called by the frontend when the user submits the form. Routes
@@ -27,6 +30,8 @@ Question endpoints:
   DELETE /api/sessions/{id}/questions/{question_id}
       Closes an abandoned tool wait, wakes its pollers with 404 and
       broadcasts a persisted question_closed event to remove the form.
+      The structured opt-in can read that exact saved closure; plain
+      long-poll compatibility still reports closed questions as 404.
 
 Auth: same bearer-token model as every other API surface. The MCP
 server holds OCTOPUS_AUTH_TOKEN; the frontend sends the user's
@@ -57,6 +62,7 @@ class CreateQuestionRequest(BaseModel):
     """Body for POST /questions. The schema mirrors the existing
     AskUserQuestion tool input so the model's call shape is unchanged."""
     questions: list[dict[str, Any]]
+    mcp_call_id: str | None = None
 
 
 class AnswerItem(BaseModel):
@@ -91,7 +97,7 @@ async def create_question(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     try:
         qid = await session_manager.create_pending_question(
-            session_id, req.questions, scope=verify(_),
+            session_id, req.questions, scope=verify(_), call_id=req.mcp_call_id,
         )
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
@@ -113,6 +119,7 @@ async def wait_for_answer(
     session_id: str,
     question_id: str,
     timeout: float = 60.0,
+    structured: bool = False,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ) -> dict[str, Any]:
@@ -122,12 +129,17 @@ async def wait_for_answer(
     # Tells the request monitor this call's duration is the user's think
     # time and its 408 is "no answer yet", not a slow or failing request.
     request.state.long_poll = True
-    if session_manager.get_session(session_id, user_id) is None:
+    if not await session_manager.session_belongs_to(session_id, user_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     # Cap timeout so a misbehaving MCP server can't park a connection
     # forever. 5 min is plenty given the auto-answer default is 30 min.
     timeout = min(max(timeout, 1.0), 300.0)
     try:
+        if structured:
+            result = await session_manager.wait_for_question_result(session_id, question_id, timeout)
+            if result is None:
+                raise HTTPException(status.HTTP_408_REQUEST_TIMEOUT, "no answer yet")
+            return result
         answer = await session_manager.wait_for_question_answer(
             session_id, question_id, timeout=timeout
         )

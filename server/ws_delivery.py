@@ -12,7 +12,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -98,25 +98,28 @@ class SocketDelivery:
                 and self._writer is not asyncio.current_task() and not self._writer.done()):
             self._writer.cancel()
 
-    async def authorized(self, session_id: str | None = None) -> bool:
-        session = None
-        owner = self.principal.user_id
-        if session_id is not None and self.principal.user_id is not None:
-            session = self.manager.get_session(session_id)
-            owner = session.user_id if session is not None else (
-                await self.manager.db.get_session_owner(session_id) if self.manager.db else None
-            )
+    async def authorized(self) -> bool:
         current = await deps.resolve_principal(self.token)
         if self._closing:
             return False
-        # Account/token validation is the last await before send. Live ownership
-        # is read again here in case it changed during that validation.
-        if session is not None:
-            owner = session.user_id
-        if current != self.principal or owner != self.principal.user_id:
+        if current != self.principal:
             self.request_close(4001, "Unauthorized")
             return False
         return True
+
+    async def _delivery_decision(self, frame: _Frame) -> Literal["send", "drop", "close"]:
+        current, owner = await deps.resolve_socket_access(self.token, frame.session_id)
+        if self._closing:
+            return "close"
+        if current != self.principal:
+            self.request_close(4001, "Unauthorized")
+            return "close"
+        if frame.session_id is not None and owner != self.principal.user_id:
+            if owner is not None:
+                logger.error("Dropped cross-account WebSocket frame session=%s account=%s owner=%s",
+                             frame.session_id, self.principal.user_id, owner)
+            return "drop"
+        return "send"
 
     async def record_activity(self) -> None:
         if self.principal.credential_kind != "account" or deps._user_manager is None:
@@ -153,11 +156,16 @@ class SocketDelivery:
                 await self._wake.wait()
                 while self._queue and not self._closing:
                     frame = self._queue.popleft()
-                    if not await self.authorized(frame.session_id):
+                    decision = await self._delivery_decision(frame)
+                    if decision == "close":
                         return
-                    await asyncio.wait_for(self.ws.send_text(frame.text), SEND_TIMEOUT_SECONDS)
-                    self._pending_frames -= 1
-                    self._pending_bytes -= frame.size
+                    if decision == "send":
+                        await asyncio.wait_for(self.ws.send_text(frame.text), SEND_TIMEOUT_SECONDS)
+                    # request_close owns the complete reset when it interrupts
+                    # an in-flight operation. Otherwise this frame releases once.
+                    if not self._closing:
+                        self._pending_frames -= 1
+                        self._pending_bytes -= frame.size
                 self._wake.clear()
         except asyncio.CancelledError:
             pass  # The connection owner interrupted an in-flight send.

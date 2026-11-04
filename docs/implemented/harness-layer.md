@@ -64,6 +64,14 @@ AGENTS/CLAUDE files own project rules; canonical memory owns durable preferences
 and pointers. They do not become four copies of the same engineering contract.
 Request-specific trusted knowledge restrictions stay associated with that request.
 
+The same original request context carries its interaction policy through child
+work and asynchronous returns; a machine return does not turn human work into
+an unattended root. Policy controls waiting, without creating permission or a
+new Harness execution state. Human native blocking pauses question/idle expiry;
+Stop, execution termination and the whole-turn cap still close the original
+attempt. See [question ownership](architecture-contract.md#原工作交互策略与等待)
+and [watchdogs](turn-safety.md#3-per-turn-watchdog-idle--overall).
+
 Claude renders the composed instructions into its native invocation and can
 conditionally retain a compatible host; ordinary Codex applies controller
 instructions at thread start/resume and updates a resumed thread without changing
@@ -73,6 +81,17 @@ own narrower assembly. The historical fresh-process observation in
 reuse, injection or tool authority.
 
 ### Execution and resources
+
+The long-waiting MCP ask handler is async and retains its original host through
+the SDK's saved Request. Its original QuestionOwner, accepted command receipt
+and managed runner own cancellation through exact question settlement and actual
+REST waiter release. SDK cancellation may respond before that retirement; an
+HTTP timeout alone does not prove an accepted create command stopped. All joins
+stay outside Owner, and unconfirmed cleanup blocks shutdown even after the task
+has failed. Other synchronous side-effect tools keep their existing ownership.
+The complete [MCP retirement contract](architecture-contract.md#mcp-question-retirement)
+also separates actual supplied metadata from invocation authority and local
+answer acceptance from provider consumption.
 
 Discovery checks the executable selected for ordinary interaction, using the
 same profile selector as invocation construction. Codex reads
