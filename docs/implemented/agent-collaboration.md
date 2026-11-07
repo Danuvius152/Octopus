@@ -119,7 +119,7 @@ Stable `agent-terminal:{work_id}` admission identity, persisted
 `_terminal_disposition` and the in-flight guard prevent duplicate delivery.
 
 Terminal and question returns use the session's complete
-[`admit_return` operation](architecture-contract.md#公共返回接管). The source keeps
+[`admit_return` operation](input-reliability.md#公共返回接管). The source keeps
 its original work/delivery identity, reentry guard, round CAS or child notice
 writer, retry policy and completion observation. Pure preparation reads the
 exact request/final-attempt reply or revalidates the original round and pending
@@ -131,7 +131,7 @@ child missing its exact terminal remains an integrity error. A confirmed empty
 reply retains the existing empty-text placeholder.
 
 Request/carrier/terminal/attempt association and committed body selection belong
-to the shared [session result reader](architecture-contract.md#原请求结果读取).
+to the shared [session result reader](input-reliability.md#原请求结果读取).
 Delegation alone owns continuous concatenation/strip, its empty-answer text and
 agent-error delivery meaning; it does not maintain another association rule.
 
@@ -225,7 +225,7 @@ empty answers. Passing the batch identity prevents a delayed answer from
 consuming a later question.
 
 The original Question Owner owns the shared
-[validation and resolution contract](architecture-contract.md#问题结算).
+[validation and resolution contract](input-reliability.md#问题结算).
 This entry converts question IDs/positions and retains its historical text strip;
 it does not clear malformed selection types before validation. Authentication
 supplies account/agent provenance, and the actual delegation supplies the parent

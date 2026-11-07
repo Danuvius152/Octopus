@@ -13,9 +13,9 @@ installation and referenced files; a source checkout or a guessed
 
 Account export/import is the provided migration interface. Complete-backup
 restoration is a broader operator procedure; the account importer does not
-restore excluded history or arbitrary historical formats. Architecture and
-storage decisions live in [the architecture contract](implemented/architecture-contract.md)
-and [current storage and publication handoff](implemented/current-storage-format.md).
+restore excluded history or arbitrary historical formats. Architecture decisions
+live in [the architecture overview](architecture.md#ownership-and-failure-boundaries);
+format and publication rules live in [the storage contract](implemented/current-storage-format.md).
 Installation admission, drain and original handoff receipts are defined in the
 [installation lifecycle](implemented/installation-lifecycle.md); this guide
 owns the ordered operator steps, rather than a second lifecycle contract.
@@ -170,7 +170,7 @@ or symlink targets outside the supported set instead of silently omitting them.
 An empty target means the selected Octopus data locations do not exist; unrelated
 files elsewhere in the target home are permitted.
 
-Locate the active source configuration using [local operating procedures](local-wsl.md).
+Locate the active source configuration using [local configuration](local-wsl.md#配置和数据).
 Do not infer its database or provider paths from the development checkout, and
 do not print secret environment-file values. Resolve pending writes affecting
 the selected data with their existing owners before exporting; historical tasks
@@ -185,7 +185,7 @@ the source and confirms readiness before compressing the copy.
 Only an explicit successful receipt for the original request authorizes stopping
 the source; a missing status, another request's marker or partially closed gates
 does not. Lost responses are confirmed against that same receipt. See the
-[handoff contract](implemented/architecture-contract.md#安装自然排空与交接收据).
+[handoff contract](implemented/installation-lifecycle.md#领域事实与封口收据).
 
 ```bash
 octopus export-account ACCOUNT_ID /private/account.zip \
@@ -337,7 +337,7 @@ separate decision after verified recovery.
 Every feature adding persistent types, relationships, roots or formats must
 maintain account selection, exclusions and restoration in the same change. The
 owning modules and acceptance boundary are in
-[the architecture contract](implemented/architecture-contract.md#账户搬迁的开发约定).
+[the storage development contract](implemented/current-storage-format.md#账户搬迁的开发约定).
 Verify new semantics with an isolated round trip, including growth between
 exports when collection changes. This supports matching-version archives,
 not arbitrary old-package upgrades, hot migration, multi-root mapping or

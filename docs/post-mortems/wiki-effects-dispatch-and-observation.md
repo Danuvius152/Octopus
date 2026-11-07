@@ -135,7 +135,7 @@ GET 不得创建订阅或新通知。仅断言“B 收到了结果”漏掉 A �
 
 已有发布的恢复仍按上文核对原效果、录制与退休；未知写入、reader 截断和未确认
 清理不享受纯输入例外。当前判断继续归 Wiki 结算及
-[跨模块完成合同](../implemented/architecture-contract.md#输入完成与资源退休)。
+[跨模块完成合同](../implemented/input-reliability.md#原请求完成与失败交接)。
 
 ## 仍存边界
 

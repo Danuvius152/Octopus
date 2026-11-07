@@ -19,7 +19,7 @@ Octopus 继续拥有输入、独立工作派发、问题和业务结果；Harnes
 本页合并旧四阶段路线与两份 DeepSeek review 的有效设计，替代 rc.2 的 ACP/headless
 条件主稿。**这是未实施计划**，没有因文档归位取得 loader、工具权限、真实模型或生产证明。
 现有共同接口由 [Harness](../implemented/harness-layer.md)、
-[输入](../implemented/input-reliability.md)、[执行合同](../implemented/architecture-contract.md)和
+[输入与完成](../implemented/input-reliability.md)和
 [安装生命周期](../implemented/installation-lifecycle.md)维护。
 G1/G2 与 Codex R2 已交付；DSH 不等待旧 G0-Recursive 强目标恢复，也不以远程 Runtime 为前置。
 

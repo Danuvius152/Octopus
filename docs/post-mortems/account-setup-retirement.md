@@ -209,7 +209,7 @@ receipt/ACK、进程退役、重复中断和不重放断言继续保留。没有
 ## 依据
 
 - 交付提交：`87ce64787cd4a446802c18207de1e28dcebdaee3`。
-- 当前账户与启动合同：[架构约定](../implemented/architecture-contract.md#公开接口与账户配置)、
+- 当前账户与启动合同：[架构约定](../implemented/multi-tenancy.md)、
   [存储格式](../implemented/current-storage-format.md)。迁移接口见
   [导出与导入](../backup-and-migrate.md#account-export-and-import)。
 - 当次本机票、规格及原始日志/JUnit已归档到私有发布记录；临时 `.scratch`

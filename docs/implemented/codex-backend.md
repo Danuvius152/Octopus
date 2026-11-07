@@ -92,7 +92,7 @@ committed identity after its predecessor retires.
 Preparation, possible-send and acceptance evidence live on the original
 submission with separate input/attempt/RPC/thread/turn identities. Their timing,
 late proof and manual recovery rules belong to
-[the input contract](architecture-contract.md#codex-native-input-evidence);
+[the input contract](input-reliability.md#codex-native-input-evidence);
 [current storage](current-storage-format.md#publication-boundary) owns the format
 and finite publication handoff. Acceptance does not prove model consumption.
 
@@ -113,7 +113,7 @@ allow/deny policies remain unsupported. Its argv builder rejects ordinary
 conversation use. One-shots keep the tool-free text worker. Neither is a
 fallback for a failed or unknown ordinary request.
 
-### Native MCP configuration
+## Native MCP configuration
 
 Ordinary App Server inherits the selected credential home's and trusted project's
 native MCP configuration. `_mcp_config_args` supplies per-invocation fields for
@@ -142,7 +142,7 @@ The [0.166.0 observations](../reference/runtime-resource-boundaries-20261103.md#
 cover thread-scoped discovery, residual authentication fields and two identities
 using the same native home without config writes.
 
-### Controller history cost
+## Controller history cost
 
 `_latest_checkpoint` scans the active history segment line by line in
 `asyncio.to_thread`; it does not synchronously read the whole file on the event
@@ -158,7 +158,7 @@ that scale. The 20-second RPC timeout is per RPC, not an overall preparation SLA
 These results do not establish production recovery latency or arbitrary large
 compacted-line safety.
 
-### Native compaction
+## Native compaction
 
 Idle manual compaction precisely resumes the captured thread in the ordinary
 Run, then sends `thread/compact/start` once. Preparation checks model, permissions,
@@ -182,7 +182,7 @@ maintenance outcome, with no final answer or copied summary. Version evidence is
 in [the G0 record](../reference/context-meter-compact-g0.md); product regressions
 use `tests/test_codex_compact.py`.
 
-### Root completion and selected answer
+## Root completion and selected answer
 
 Only the accepted root's real terminal supplies a provider candidate. A final
 text item, model sample, native wait or child terminal cannot finish the request.
@@ -200,7 +200,7 @@ identity determine correlation. That exception cannot excuse reader cutoff,
 another associated effect gap, a missing identity or an already selected failure.
 The original required-items diagnostic retains its origin and full observed gap
 count; raw integrity stays incomplete and no completed item is fabricated. See
-[original-call retirement](architecture-contract.md#mcp-question-retirement).
+[original-call retirement](harness-layer.md#mcp-question-retirement).
 
 Completion obligations follow native producer provenance and item type.
 Uncommitted sampling Message/Reasoning and proven Core WebSearch observations
@@ -271,8 +271,18 @@ Commentary, child text and tool text remain in the transcript and never become
 reply fragments. Complete empty items are retained; a legal empty selection is
 distinct from invalid/missing refs. SessionResult, LiveReply, App ask/SSE/status
 and named delegation share that selection. Legacy records retain their prior
-interpretation. See the [result contract](architecture-contract.md#原请求结果读取)
+interpretation. See the [result contract](input-reliability.md#原请求结果读取)
 for formatting, input uncertainty and failure semantics.
+
+根 completed 而必要工具结果未确认时，canonical 失败说明保留这个区别，不再
+追加“缺少终态”的通用段落；原 Stop、provider 或整体上限原因继续优先。已完整
+记录的工具失败留在工具卡，不自行制造协议收尾失败。诊断位置、重试和采集缺口
+沿原 outcome 的结构化字段供实时与历史展示，浏览器不再重新裁定业务状态。
+
+原生根失败携带的错误正文、provider 错误结构和原 request/attempt/native 来源
+沿既有 recovery 诊断消息保存，位于 terminal 之前。即使 Stop 或 start 等待失败
+已选定业务状态，迟到 provider 错误仍可在刷新后读取；保存诊断不替换已选状态，
+不把错误文本纳入根答案，也不触发重跑。
 
 A terminal summary only adds positive constraints for explicitly completed
 `final_answer` items (positive completion timestamp). After the original ordered
@@ -298,7 +308,7 @@ Native card [saved details](native-subagents.md#saved-app-server-details) read
 only original persisted items. They do not keep this host alive or extend its
 budgets, and cannot reopen native execution after Stop or root terminal.
 
-### Active-root human input
+## Active-root human input
 
 Owner captures the original attempt and the driver's connection/thread/turn
 target. A compatible human input uses `turn/steer` with `expectedTurnId` and its
@@ -315,18 +325,32 @@ intent, attachments, Wiki eligibility, the eight-input pending budget, paused
 backlog exceptions and live status refresh are owned by
 [the steering contract](inline-steering.md#bound-codex-root-and-queue-qualification).
 
-### Native questions and output
+## Native questions and output
 
-The supported native question path accepts `request_user_input` only on the root;
-child approvals can still arrive, including during shutdown. Native question forms
-and structured answers pass through OwnerQuestions and the existing product
-answer UI. The response uses the original native question IDs on the original
-connection. Root terminal, Stop, serverRequest/resolved and connection loss
-revoke reply eligibility immediately, independently of storage/publication
-latency. The final write rechecks that binding; a saved answer is not proof
-that its native response was sent. MCP ask keeps its existing entry and owner,
-and also closes with its originating native run. Full timing and provenance
-belong to [the question contract](architecture-contract.md#native-question-control).
+<a id="native-question-control"></a>
+普通 Codex App Server 的原生用户问题沿同一 PendingQuestion/OwnerQuestions
+保存表单、结构化答案、可信来源和关闭事实，不再从展示文本反推原生答案。
+不可变 binding 同时保留原连接 generation、server request、thread/turn/item、
+request/attempt、产品 question 与原生 question IDs。客户端与服务端 RPC 编号
+分属两个方向；相同编号或新连接复用编号不能取得旧问题的回答资格。
+
+原生 reader 的有界问题交接独立于展示队列，Owner 在发布拥塞期间仍可登记、
+关闭问题并接管控制。根 terminal、Stop、resolved 或断连同步撤销回答资格；
+原 MCP 问题也随原生宿主准入关闭而失效。状态和通知仍由原 Owner 落盘、发布，
+后到登记的已接纳问题保留请求及关闭前缀，不因入口未显示而遗失。
+
+答案先沿原消息保存，再交给原 Harness 的串行完整帧写出口。取得原写锁后，
+最后一个 await 之后复核连接、原问题未 resolved、目标和准入；复核到写帧
+之间不让出。存储期间或等待写锁期间失效的答案不会写出，也不跨连接重放。
+本地已答记录不证明原生接收或模型消费；不增设 ACK 账本。通知是否已显示或
+成功送达不参与实际发送资格判断。产品 deadline 与原生 isBlocking 分别解释。
+展示使用已保存的 resolution/source：账户回答标 You，Agent、System 和系统到期
+分别显示，缺少历史来源时保持 unknown，不从答案正文猜成人类回答。
+
+产品问题的表单校验、来源、已保存结算和交互期限由
+[输入合同](input-reliability.md#问题结算)维护；MCP 的原调用清理另见
+[Harness](harness-layer.md#mcp-question-retirement)。原生 request_user_input 仅接受
+根问题；child approval 仍可能在有限退出期间到达，按下文拒绝策略响应。
 
 `agentMessage.questions` supplies a separate asynchronous reply cue. Live and
 loaded messages show a prominent question card while preserving the original
@@ -376,7 +400,7 @@ interruption after proven retirement. The
 [native output contract](native-subagents.md) owns work identities, display
 windows, bounded caches and late-item semantics.
 
-### Native generated images
+## Native generated images
 
 Generated image records distinguish in-progress, completed and failed, retaining
 failure, revised prompt, generation identity, input-image metadata and native
@@ -396,7 +420,7 @@ explicitly and preserves the valid prefix. There is no media root, automatic
 copy, remote download or regeneration path. Persistent shape and portability
 remain with [current storage](current-storage-format.md).
 
-### Effective configuration and request isolation
+## Effective configuration and request isolation
 
 Saved configuration validation and execution select the same transport, profile
 and driver. App Server text is validated as JSONL rather than placed under exec's
@@ -466,10 +490,10 @@ native skills remain native files. App Server supplies request text inline and
 does not create a shared request-config file. An active late-created child can
 read the original materials and use its original live scoped tools. Retained
 materials do not keep authorization alive after Stop or root terminal. The
-[execution contract](architecture-contract.md#输入完成与资源退休) separates closing
+[execution contract](input-reliability.md#原请求完成与失败交接) separates closing
 admission, late input proof, outcome recording and confirmed resource retirement.
 
-### Native history branching
+## Native history branching
 
 Dialogue and the management driver each compose one `RpcConnection`; management
 does not inherit the conversation Driver or its private turn state. The connection
@@ -523,7 +547,7 @@ and complete-only items, feed the existing file-revert preflight through the
 Harness decoder. Tool/model text cannot fabricate that file-effect provenance.
 External effects and unknown input facts remain; see [rewind](session-rewind.md).
 
-### Error source and recovery
+## Error source and recovery
 
 Only a failed bound root's typed `codexErrorInfo` can establish provider
 authentication rejection: `unauthorized`, or HTTP 401 on the known provider

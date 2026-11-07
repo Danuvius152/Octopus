@@ -110,7 +110,7 @@ turn's error when available. A turn can fail after writing a usable app;
 the entrypoint rule still applies. An unavailable/unconfirmed outcome instead
 produces failed with an explicit reason. Failed result notification cannot
 leave the build permanently building. The shared ownership and completion
-rules are in the [architecture contract](architecture-contract.md#输入完成与资源退休);
+rules are in the [original completion contract](input-reliability.md#原请求完成与失败交接);
 deployment is verified separately.
 
 For App Server, completion follows the bound root and its original resource

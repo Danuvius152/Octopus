@@ -119,7 +119,7 @@ Restoration carries dispatch ordering within the current service generation,
 so delayed lifecycle notifications cannot replace a newer list projection.
 
 Normal report delivery uses the session-owned
-[`admit_return` operation](architecture-contract.md#公共返回接管), preserving the
+[`admit_return` operation](input-reliability.md#公共返回接管), preserving the
 original `research:{job_id}` identity. Normal preparation reads the source job
 and builds its report body only when a new input is still permitted. An existing receipt needs neither
 the report material nor a functioning destination Owner. Research owns its
@@ -220,8 +220,10 @@ recovery, report downloads and foreign-account refusal. No recovery test uses
 a new model input as evidence of a recovered receipt.
 
 Research does not resume an interrupted pipeline on startup, add a new search
-provider, or claim that browser display proves human reading. Current authorization
-and resource retirement follow [the execution contract](architecture-contract.md).
+provider, or claim that browser display proves human reading. Current authority
+follows [account scope](multi-tenancy.md); settlement follows
+[original completion](input-reliability.md#原请求完成与失败交接), and resource exit
+follows [Harness retirement](harness-layer.md#execution-and-resources).
 
 ## Historical evidence
 

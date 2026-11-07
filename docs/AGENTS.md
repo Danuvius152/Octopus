@@ -8,7 +8,8 @@ verification and repository actions.
 
 - Current guides describe current behavior. Architecture explains component
   relationships, state ownership, failures and extension points.
-- `README.md` owns document discovery and generated status indexes;
+- `README.md` owns task navigation; [catalog.md](catalog.md) owns the complete
+  generated contract/plan indexes and version-evidence lists;
   [roadmap.md](roadmap.md) owns upcoming choices, priorities, dependencies and
   start conditions. Detailed designs stay in their topic plans.
 - `implemented/` owns contracts the current code actually follows, by subject:

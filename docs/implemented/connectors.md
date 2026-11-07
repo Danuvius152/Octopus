@@ -22,7 +22,7 @@ connector MCP instance may serve many installations, so cached tokens never bypa
 current installation/account checks. Per-installation coordination and database
 transactions protect different responsibilities: external refresh/binding versus
 atomic installation-and-secret writes. See the
-[account and MCP contract](architecture-contract.md#公开接口与账户配置).
+[account and MCP contract](multi-tenancy.md).
 
 ## OAuth and lifecycle
 
@@ -128,7 +128,7 @@ remain independently scoped work.
 ## Navigation and verification
 
 [Connector setup](../connectors-setup.md) owns operator instructions. The
-[architecture overview](../architecture.md#connector-system-serverconnectors--connector_managerpy)
+[architecture overview](../architecture.md#accounts-agent-configuration-and-providers)
 explains component relationships. Exact route/schema inventories come from
 FastAPI/OpenAPI and the code:
 [manager](../../server/connector_manager.py), [providers](../../server/connectors/),

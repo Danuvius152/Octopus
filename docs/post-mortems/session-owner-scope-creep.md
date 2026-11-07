@@ -124,7 +124,7 @@ App 的有限响应等待同样只结束观察；调用者通过原 request 查�
 真实调用者验证共同语义，再迁移其余路径；不能把“接口先冻结”理解成预建一个
 没有调用者的抽象，或拒绝消费者提供新反例。
 
-BG、Research、Delegation 可以共用[完整返回接管](../implemented/architecture-contract.md#公共返回接管)，
+BG、Research、Delegation 可以共用[完整返回接管](../implemented/input-reliability.md#公共返回接管)，
 正文准备、业务结果和重试节奏仍归来源。命名委派的工作轮、返回输入与实际 carrier
 如何关联，见[三个完成点复盘](session-delegation-completion-boundaries.md)。
 
@@ -169,8 +169,8 @@ parent success 不等于原返回被处理。原测试中的几种构造又避�
 扩成今天的部署结论。原问题、原生完成与领域效果的完整合同仍由所属文档维护：
 
 - [开发范围与完成条件](../../AGENTS.md#scope-and-completion)、[测试政策](../testing.md)。
-- [输入完成与资源退休](../implemented/architecture-contract.md#输入完成与资源退休)、
-  [MCP 原调用退休](../implemented/architecture-contract.md#mcp-原调用退休)。
+- [输入完成与资源退休](../implemented/input-reliability.md#原请求完成与失败交接)、
+  [MCP 原调用退休](../implemented/harness-layer.md#mcp-question-retirement)。
 - [App 后端合同](../implemented/application-backends.md)、
   [计划合同](../implemented/scheduled-runs.md)。
 - [OAuth 责任边界](oauth-repeated-boundary-bugs.md)、

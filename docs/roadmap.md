@@ -8,7 +8,7 @@
 工程收敛的第一、二阶段及 Codex R2 已按各自范围交付：普通 Codex 请求使用
 App Server，Research 使用独立 exec leaf，纯文本调用使用无工具 worker。
 输入接纳、公共返回、问题、业务结果与资源退休分别有明确责任，见
-[架构](architecture.md)及[跨模块合同](implemented/architecture-contract.md)。
+[架构](architecture.md)及[输入与完成合同](implemented/input-reliability.md)。
 
 Codex 当前保证活动根内协作、原生输入接纳证据和根终态后的有界退休；
 任意 post-final 多层递归自动推进仍无保证。

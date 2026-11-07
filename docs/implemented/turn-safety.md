@@ -70,7 +70,7 @@ The UI and history explain this distinction using the captured policy/mode.
 MCP questions retain their default 1800-second question limit and 0-disabled
 setting; legacy unknown-policy and nonblocking native questions keep compatible
 expiry. Unattended work instead records `needs_input` without a long human wait.
-The [original-work policy](architecture-contract.md#原工作交互策略与等待) owns
+The [original-work policy](input-reliability.md#原工作交互策略与等待) owns
 classification and inheritance; browser presence is not an input to it.
 
 ## 4. Interaction with existing paths
@@ -107,6 +107,13 @@ classification and inheritance; browser presence is not an input to it.
   activity. Research already surfaces its own pipeline progress.
 - Per-tool / per-MCP timeouts (finer-grained than the turn) — not needed for
   the hang; revisit only if a specific tool class warrants it.
+
+## 预算协调的归属
+
+Owner 的预算同时影响活动计时、timer 唤醒、问题等待暂停、观测字段和实际退休。
+只抽取到期布尔值仍让调用者协调这些联动；迁走 `_decide` 则连持久结算与重试
+副作用一起迁走。当前无独立消费者或重复纯策略，因此仍由原 Owner 协调，
+不新增预算接口。各等待政策见[输入合同](input-reliability.md#原工作交互策略与等待)。
 
 ## Historical evidence
 

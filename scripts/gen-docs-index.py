@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate current-contract and unfinished-plan indexes in docs/README.md.
+"""Generate current-contract and unfinished-plan indexes in docs/catalog.md.
 
 Each document declares `> **Status:** <status> — <summary>` below its title.
 The directory constrains the status; `--check` detects index drift without
@@ -14,7 +14,7 @@ from itertools import pairwise
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-README = ROOT / "docs" / "README.md"
+CATALOG = ROOT / "docs" / "catalog.md"
 STATUSES = {
     "implemented": {"implemented"},
     "plans": {"proposed", "in-progress", "paused"},
@@ -75,43 +75,43 @@ def render(folder: str, rows: list[tuple[str, str, str, str]]) -> str:
     return "\n".join(out)
 
 
-def replace_indexes(readme: str) -> str:
+def replace_indexes(catalog: str) -> str:
     blocks: list[tuple[int, int, str]] = []
     for folder in STATUSES:
         begin_marker, end_marker = markers(folder)
-        start, end = readme.find(begin_marker), readme.find(end_marker)
-        if readme.count(begin_marker) != 1 or readme.count(end_marker) != 1 or start >= end:
+        start, end = catalog.find(begin_marker), catalog.find(end_marker)
+        if catalog.count(begin_marker) != 1 or catalog.count(end_marker) != 1 or start >= end:
             raise SystemExit(
-                f"docs/README.md needs exactly one ordered {begin_marker} / {end_marker} pair"
+                f"docs/catalog.md needs exactly one ordered {begin_marker} / {end_marker} pair"
             )
         blocks.append((start, end + len(end_marker), render(folder, read_entries(folder))))
     blocks.sort()
     if any(left[1] > right[0] for left, right in pairwise(blocks)):
-        raise SystemExit("docs/README.md index marker regions must not overlap")
+        raise SystemExit("docs/catalog.md index marker regions must not overlap")
     for start, end, block in reversed(blocks):
-        readme = readme[:start] + block + readme[end:]
-    return readme
+        catalog = catalog[:start] + block + catalog[end:]
+    return catalog
 
 
 def main() -> int:
     check = "--check" in sys.argv[1:]
-    current = README.read_text()
+    current = CATALOG.read_text()
     wanted = replace_indexes(current)
     if check:
         if current == wanted:
-            print("docs/README.md indexes are in sync")
+            print("docs/catalog.md indexes are in sync")
             return 0
         print(
-            "docs/README.md indexes are STALE — regenerate with:\n"
+            "docs/catalog.md indexes are STALE — regenerate with:\n"
             "    .venv/bin/python scripts/gen-docs-index.py",
             file=sys.stderr,
         )
         return 1
     if current != wanted:
-        README.write_text(wanted)
-        print("docs/README.md indexes updated")
+        CATALOG.write_text(wanted)
+        print("docs/catalog.md indexes updated")
     else:
-        print("docs/README.md indexes already current")
+        print("docs/catalog.md indexes already current")
     return 0
 
 

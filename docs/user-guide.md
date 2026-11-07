@@ -374,8 +374,10 @@ Applications 中调用 `/apps/{id}/agent/chat` 的应用则使用 SSE，因此�
 工具链见 [local-wsl.md](local-wsl.md#本机测试)。手机隧道仍指向 8000 的
 已发布服务；仅重启后端不会改变独立隧道的网址。
 
-重装依赖、代理配置、完整测试和同步上游的本机细节见
-[local-wsl.md](local-wsl.md)；同步之前应先保存已有源码改动。
+重装依赖见[环境重建](local-wsl.md#环境重建)，代理配置见
+[PATH 与代理](local-wsl.md#path-与代理)，完整测试见
+[验证矩阵](testing.md#test-coverage)及[本机测试条件](local-wsl.md#本机测试)。
+同步上游按[上游同步操作](local-wsl.md#同步原作者更新)，先保存已有源码改动。
 
 ## 8. 配置和数据在哪里
 

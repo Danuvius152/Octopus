@@ -5,7 +5,7 @@
 当前 Monitor 已有用量、进程与 Connector 等观测，普通请求、BG、Research、
 命名委派也各自保留身份。本计划增加的是用户怎样解释工作停在哪里、该采取
 什么动作。当前计时与 TPS 边界见[Codex Monitor 合同](../implemented/codex-performance-monitor.md)，
-退休与业务结果的关系见[执行合同](../implemented/architecture-contract.md)。
+退休与业务结果的关系见[原执行观察](../implemented/input-reliability.md#原执行的观察)。
 
 ## 第一段：从事实得到可解释阶段
 

@@ -23,6 +23,35 @@ creation transaction; the Registry publishes only the completed ledger. There
 is no separate no-jobs layout or later job attachment. This assembly change
 uses the complete current declarations and protocol set.
 
+## 事务与失信边界
+
+主库使用一个写连接和明确的短事务。`Database.transaction()` 统一连接锁、驱动与
+游标结束、总期限及 COMMIT/ROLLBACK；SQL helper 接收事务，不重入公共事务或
+跨调用留下未提交 SQL。接纳、claim、终态结算各自完整提交后才发布成功或外部动作。
+取消等待者与取消已接管命令不同；取消不能丢失仍在运行的驱动操作。
+
+主库使用 FULL，Wiki 权威连接使用 EXTRA。正常 COMMIT 返回确认提交；存储或
+提交结束失信进入统一 fail-stop，不在同代独立回读猜结果、补写或重放业务。
+`RETURNING` 只返回事务内的 SQL 结果，提交前不能当作对外成功证据。
+接受一个权威存储故障中断本代全部会话的代价，以减少失信后多处在线恢复。
+业务冲突、正常取消、认证失败和通知断线仍按各自语义处理，不泛化为 fatal。
+
+## 格式演进与资料保全
+
+演进以实际可用的完整资料为基线，保全账户、知识、文件、密钥、归属和仍有效的
+状态/效果；退出旧 API 或不搬聊天不授予删除源资料的权利。旧格式任务的限定
+清理同时要求已结束、原责任已收束；终态标签和日期不足以证明，不删除仍需的
+receipt、正文、来源、当前任务或未决效果。实际清理另受当前操作授权约束。
+
+长期维护一种当前表示。只在结构或语义改变时推进 marker；纯代码优化不改。
+跨库与文件不是全局事务，部分完成或提交未知保持业务关闭，按持久事实前向恢复；
+不用旧库覆盖新文件，不创建第二份正式知识库。有限转换及专属夹具在交接、验收
+与恢复责任完成后退出，不承诺任意旧库或旧包可以由最新代码直接打开。
+
+`credential_secrets` 唯一保存秘密正文，`recovery_of` 唯一保存恢复后继关系。
+删除物理列或接口要同步真实生产者、消费者与测试，不按同名字段全局删除，
+不把旧 rejected/unknown 改成可执行或已成功事实。
+
 ## Complete record projections
 
 Format 8 adds nullable `sessions.context_state` JSON and
@@ -31,7 +60,7 @@ ContextState verifier checks complete retained facts; Agent revisions must be
 nonnegative integers. Session positional reads and Agent record projections
 include their appended columns. No context history, native transcript or
 additional storage root is created. Observation and binding semantics belong to
-[the context contract](architecture-contract.md#上下文样本与配置绑定).
+[the context contract](model-reasoning.md#上下文样本与配置绑定).
 
 Typed compact payloads/native evidence and maintenance outcomes use existing
 client-submission/message JSON, adding no DDL, format marker or storage root.
@@ -192,7 +221,7 @@ The declaration and `NativeInputEvidence` own its shape;
 the verifier checks typed entries, input association and attempt uniqueness.
 Legacy rows remain `[]`: local write/drain or an old confirmed receipt does not
 become native acceptance or model consumption. Lifecycle and recovery semantics
-are in [the input contract](architecture-contract.md#codex-native-input-evidence).
+are in [the input contract](input-reliability.md#codex-native-input-evidence).
 No additional storage root, execution queue or answer ledger is introduced.
 
 Passive Monitor records use the existing separate bounded metrics store and its
@@ -211,7 +240,7 @@ the same session/request/attempt and report invalid/missing refs explicitly;
 an empty reference list is a legal empty answer. They never repair a bad reference
 from another request, child, turn or session. Typed metadata on ordinary text does
 not require tool provenance. Timing and consumers belong to the
-[execution/result contract](architecture-contract.md#原请求结果读取).
+[execution/result contract](input-reliability.md#原请求结果读取).
 
 Provider failure diagnostics use the existing recovery-message JSON. Its typed
 runtime metadata retains original request/attempt/native source, and
@@ -321,6 +350,19 @@ with the newest binary. This storage-format convergence was independent of
 the historical account-portability work. Current offline export/import is
 implemented; its collection and restoration contract is maintained in
 [account portability](../backup-and-migrate.md#account-export-and-import).
+
+## Wiki 任务表示与恢复资料
+
+任务 items 使用原 JSON 列的版本1与当前状态/执行阶段；业务 Python/SQL 不解释
+历史编码。每批 ExecutionRef 固定原 attempt/session/request，同一 attempt 的多批
+不能混结算。收据精确匹配保留原入队序号，job_id 只作来源坐标；普通删除、替换
+和语义改写仍撤销失效证明。bound 创建证明、applied/indexed、正文及仍需的来源
+和 receipt 独立保全。任务实体缺失时原聊天只保留已提交摘要，不另存请求档案；
+旧 attempt 控制冲突为409。
+
+12/13格式准备、旧标志转换和旧编码任务清退属于一次性历史发布范围，见
+[固定原文](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/implemented/wiki-development-summary.md#L197-L201)。
+终态或日期不授予清理权限；现行格式准入与转换见本文的发布边界。
 
 ## 账户搬迁的开发约定
 

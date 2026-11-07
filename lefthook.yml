@@ -11,7 +11,7 @@
 # - Python in server/ or tests/  → ruff, mypy, and the full hermetic pytest tier
 # - TS in web/src/               → eslint, typecheck, and the vitest suite
 # - routes or pydantic models    → the generated contracts.ts drift check
-# - a plan doc or docs/README.md → the generated plans index drift check
+# - a plan doc or docs/catalog.md → the generated plans index drift check
 # - nothing relevant             → nothing runs
 #
 # During implementation, run focused checks under AGENTS.md; a Git code commit
@@ -70,7 +70,7 @@ pre-commit:
     docs-index:
       tags: docs
       # Current contracts and unfinished plans each own their index metadata.
-      glob: "{docs/README.md,docs/implemented/**/*.md,docs/plans/**/*.md,scripts/gen-docs-index.py}"
+      glob: "{docs/catalog.md,docs/implemented/**/*.md,docs/plans/**/*.md,scripts/gen-docs-index.py}"
       run: .venv/bin/python scripts/gen-docs-index.py --check
       fail_text: "Documentation indexes are stale or invalid. Run '.venv/bin/python scripts/gen-docs-index.py'."
 

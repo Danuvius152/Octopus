@@ -69,7 +69,7 @@ work and asynchronous returns; a machine return does not turn human work into
 an unattended root. Policy controls waiting, without creating permission or a
 new Harness execution state. Human native blocking pauses question/idle expiry;
 Stop, execution termination and the whole-turn cap still close the original
-attempt. See [question ownership](architecture-contract.md#原工作交互策略与等待)
+attempt. See [question ownership](input-reliability.md#原工作交互策略与等待)
 and [watchdogs](turn-safety.md#3-per-turn-watchdog-idle--overall).
 
 Claude renders the composed instructions into its native invocation and can
@@ -82,16 +82,8 @@ reuse, injection or tool authority.
 
 ### Execution and resources
 
-The long-waiting MCP ask handler is async and retains its original host through
-the SDK's saved Request. Its original QuestionOwner, accepted command receipt
-and managed runner own cancellation through exact question settlement and actual
-REST waiter release. SDK cancellation may respond before that retirement; an
-HTTP timeout alone does not prove an accepted create command stopped. All joins
-stay outside Owner, and unconfirmed cleanup blocks shutdown even after the task
-has failed. Other synchronous side-effect tools keep their existing ownership.
-The complete [MCP retirement contract](architecture-contract.md#mcp-question-retirement)
-also separates actual supplied metadata from invocation authority and local
-answer acceptance from provider consumption.
+MCP ask retains the original SDK Request, accepted creation command and waiter
+through [confirmed original-call cleanup](#mcp-question-retirement).
 
 Discovery checks the executable selected for ordinary interaction, using the
 same profile selector as invocation construction. Codex reads
@@ -105,7 +97,7 @@ SessionOwner owns mutable execution state. Managed preparation, spawn, stdin,
 reader and retirement operations report their original results to it. HarnessRun
 retains native resources and bounded event delivery through confirmed retirement.
 Input delivery, committed business outcome, notification and resource exit are
-separate facts under the [execution contract](architecture-contract.md#输入完成与资源退休).
+separate facts under the [execution contract](input-reliability.md#原请求完成与失败交接).
 
 One-shot calls are owned by their original registry Harness. Before the first
 possible suspension it registers the caller and resource operation, retaining
@@ -140,7 +132,7 @@ revokes its run lease and Wiki binding. It leaves the original proof readers and
 resources owned. Starting retirement reuses that closure before starting the
 original cleanup task. Stop can therefore close admission before storage waits
 without losing late native input proof; closure alone is not an exit proof.
-The [execution contract](architecture-contract.md#输入完成与资源退休) owns settlement
+The [execution contract](input-reliability.md#原请求完成与失败交接) owns settlement
 and cancellation timing.
 
 Claude declares `can_steer=True`, `reusable=True` and `can_continue=True`;
@@ -174,7 +166,7 @@ For App Server, spawn and handshake carry no business input. Owner records
 initial `not_sent` before starting preparation; the driver commits possible-send
 evidence before the business frame. The original submission retains these facts
 through Stop and late observations; see
-[native input evidence](architecture-contract.md#codex-native-input-evidence).
+[native input evidence](input-reliability.md#codex-native-input-evidence).
 Native accepted/rejected proof uses the existing cancellation-protected recorder
 and database deadline, so cancelling its reader cannot discard a proof already
 observed. The recorder reports a committed-change signal to the original Owner;
@@ -187,7 +179,7 @@ native requests and notifications; both RPC directions have independent IDs. Exi
 proof tasks preserve observed input acceptance/refusal in order and are joined
 before collection closes. One write lock serializes complete control and
 business frames. Native question replies use that lock's final eligibility
-check, after all prior awaits; see [question ownership](architecture-contract.md#native-question-control).
+check, after all prior awaits; see [question ownership](codex-backend.md#native-question-control).
 
 The native event handoff has a 256-event / 1 MiB serialized payload budget,
 allowing one complete oversized event into an empty queue under the native line
@@ -246,7 +238,7 @@ The run also owns local input-submission evidence and its captured cleanup task.
 `retirement_state` and `wait_retirement()` observe that task without starting
 retirement or changing its original process. A live held host remains pending
 even after a request driver ends; cancellation of the waiter leaves resource
-ownership intact. The [execution observation contract](architecture-contract.md#原执行的观察)
+ownership intact. The [execution observation contract](input-reliability.md#原执行的观察)
 defines the receipt's request/attempt/work scope and consumer lifetime.
 
 Claude uses stream-JSON input and can retain a process between turns. Ordinary
@@ -271,6 +263,45 @@ the logical request's captured configuration and checks current credential
 authorization before spawn. A legal Agent default save does not certify every
 older session's inherited combination; repair and timing follow the model
 settings contract above.
+
+退休责任覆盖启动时捕获的整个进程组；直接 child 退出或管道 EOF 不证明重定向
+输出的后代 writer 已停止。未确认退出仍保留原 backend owner 和配额；请求、
+assignment 或 executing 登记结束不放行 Wiki 重试。正常退出与忽略 SIGTERM 的
+后代分别核验，不能靠丢弃 done task 取得退出证明。
+
+<a id="mcp-question-retirement"></a>
+## MCP 原调用退休
+
+只有 ask 的长等待使用 async。实际 SDK Request 绑定原宿主，原 QuestionOwner
+持有 `McpQuestionCall`，从建题开始保留已认证 scope、原 MCP RPC/session、
+server/tool、实际提供的 metadata 及原 CreateQuestion envelope 回执。metadata
+只作关联，不能授予权限；缺失 callId/native 身份不按名字或顺序补造。
+HTTP POST 结束不证明 envelope 未创建题目；取消标记也由 `_create` 核验，
+已接纳命令最终生成的准确 pending 必须观察并结算。
+
+SDK 可先回复 Request cancelled；handler 在 AnyIO 取消屏蔽内等待原 runner，
+runner 在 Owner 外观察创建结果、通过捕获的原 owner 关闭准确题目，再等待实际
+REST waiter 的 finally 释放，随后传播取消。`ready` 只证明唤醒，不替代 waiter
+退出。run bearer 已退休时也不恢复旧权限或把清理 401 当作完成证明。
+封口 Owner 仍保留未退休 call；失败记录同时阻止自然排空和实际 shutdown，沿
+既有 owner/writer failure 出口传播，不能因 task 回调移除而假成功。
+runner 一旦进入取消或通信失败清理，既有 cancelled 标记阻止后到取消再次打断
+创建回执、关闭持久化或 waiter 释放；真正清理失败仍保留原故障事实。
+
+runner 完成不自行删除登记。原 Owner 在确认实际 task done 和清理成功后消费该
+call，留下原 attempt 内有界的精确清理凭证并确认 consumed；shutdown join 同时
+等待这两个事实。公共退休边界也检查仍登记的 call，包含 Stop 和已选故障路径，
+不能提前确认 execution retired 或释放 App 槽位。
+
+精确清理凭证匹配原 scope、request/attempt、thread/turn 和真实 MCP callId，
+不能按工具名字推断。凭证不伪造 item.completed，本地清理和接纳不证明 provider
+消费。纯 ask 输入缺项的有限成功裁定归[Codex 完成合同](codex-backend.md#root-completion-and-selected-answer)，
+领域消费者继续核验自己的产物、发布或父子交接凭证。
+
+结构化 GET 兼容提供原已保存 resolution 和可读文本；普通 GET 的关闭 404 语义
+保留。单次 408、一个 poll 取消或浏览器断线不取消原工具调用。未知 qid、认证
+失败、不可达或无效响应仍为工具错误；只有准确原记录的已保存结算可证明关闭。
+本地接纳回答、模型实际收到回答和本地资源退出保持不同事实。
 
 ## One-shot, login and transcripts
 

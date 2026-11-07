@@ -1,149 +1,47 @@
 # Octopus 文档导航
 
-本页回答“应该读哪篇”。[路线图](roadmap.md)说明下一步选择、优先级和依赖；
-[架构总览](architecture.md)说明当前组件怎样连接。按下表进入主题正文，
-无需把所有文档逐篇读完。
+本页回答“这个任务先读哪里”。先进入对应章节；当前任务未覆盖时查
+[完整目录](catalog.md)。[路线图](roadmap.md)说明未完成工作的优先级与依赖，
+[架构总览](architecture.md#system-overview)说明组件怎样连接。版本观察、审阅材料
+和历史事故由[目录](catalog.md#版本参考与历史证据)按需进入。
 
 | 位置 | 职责 |
 | --- | --- |
-| 当前指南与 `architecture.md` | 产品使用、组件关系和操作步骤。 |
-| [`implemented/`](implemented/) | 当前代码遵循的合同、边界及必要理由。 |
-| [`plans/`](plans/) | 未完成改变的目标、启动条件、依赖和完成条件。 |
-| [`roadmap.md`](roadmap.md) | 为什么先做、依赖什么、何时值得开始；详细设计链接到主题计划。 |
-| [`testing.md`](testing.md) | 验证政策、测试选择、证据复用和发布门禁。 |
-| [`reference/`](reference/) | 带版本和适用范围的协议观察、实验及反证。 |
-| [`post-mortems/`](post-mortems/) | 对未来诊断有用的事故与工程复盘。 |
-| 账户 workspace | 新临时任务、实验和隔离源码工作副本；见[任务约定](agents/issue-tracker.md)。 |
-| `review/` 与 `.scratch/` | 临时审阅材料与 grill 任务草稿、规格和票据；长期结论归位后清理。 |
+| 指南及 `architecture.md` | 使用、操作步骤与组件责任关系。 |
+| [`implemented/`](implemented/) | 当前代码遵循的领域合同、边界与必要理由，不代表已部署。 |
+| [`plans/`](plans/)与[路线图](roadmap.md) | 未完成目标、启动条件与依赖；计划入表不授予实施权限。 |
+| [`testing.md`](testing.md) / [`local-wsl.md`](local-wsl.md) | 验证政策 / 本机操作。 |
+| [`reference/`](reference/) / [`post-mortems/`](post-mortems/) | 固定版本观察 / 对未来诊断有用的因果证据。 |
+| 账户 workspace、`review/`、`.scratch/` | 临时任务和审阅材料；路径与退出规则见[任务约定](agents/issue-tracker.md)。 |
 
-`implemented` 描述当前代码，不代表生产已经部署；实现、验证与部署分别取证。
-完成计划要提炼当前合同及理由，退出旧执行正文。混合材料先拆分，未完成范围
-留在主题计划。维护方式见[文档规则](AGENTS.md)，提交与推送遵循
-[根仓库规则](../AGENTS.md#repository-and-upstream-maintenance)。
+文档维护先读[文档规则](AGENTS.md)，动作范围遵循[根规则](../AGENTS.md#repository-and-upstream-maintenance)。
+完成计划将当前合同与理由合并回领域 owner，退出旧执行正文；实现、验证和部署分别取证。
 
 ## 按任务查找
 
-| 任务 | 入口 |
-| --- | --- |
-| 组件责任、执行完成、返回接管或资源退休 | [架构](architecture.md)、[跨模块合同](implemented/architecture-contract.md)、[输入可靠性](implemented/input-reliability.md) |
-| 后端、steering、重试或原生子代理 | [Harness](implemented/harness-layer.md)、[Codex](implemented/codex-backend.md)、[轮内引导](implemented/inline-steering.md)、[原生子代理](implemented/native-subagents.md) |
-| Agent 配置、模型或记忆 | [Agent](implemented/agent-refactor.md)、[模型设置](implemented/model-reasoning.md)、[记忆](implemented/memory.md) |
-| 账户、存储演进或搬迁 | [账户合同](implemented/multi-tenancy.md)、[存储与交接](implemented/current-storage-format.md)、[备份与搬迁](backup-and-migrate.md) |
-| 后台命令、定时任务或安装排空 | [BG](implemented/background-tasks.md)、[定时运行](implemented/scheduled-runs.md)、[安装生命周期](implemented/installation-lifecycle.md) |
-| 应用、构建或后端进程 | [应用](implemented/applications.md)、[应用后端](implemented/application-backends.md)、[Agent 访问](implemented/app-agent-access.md) |
-| Wiki、可信知识请求或 Research | [Wiki](implemented/wiki-development-summary.md)、[知识请求](implemented/knowledge-requests.md)、[Research](implemented/native-deep-research.md) |
-| 列表、排序、导航或移动界面 | [列表协调](implemented/frontend-list-reconciliation.md)、[侧栏固定](implemented/sidebar-pins.md)、[手机端](implemented/mobile.md) |
-| 测试、发布或本机操作 | [验证政策](testing.md)、[本机 WSL](local-wsl.md)、[手机公网入口](local-wsl.md#手机公网入口)、[任务生命周期](agents/issue-tracker.md) |
-| 下一步做什么 | [路线图](roadmap.md)；完整未完成清单见下方自动索引。 |
+| 任务 | 首读范围 | 扩读条件 |
+| --- | --- | --- |
+| 理解组件与事实 owner | [组件责任](architecture.md#components)、[故障边界](architecture.md#ownership-and-failure-boundaries) | 改行为再读对应领域合同 |
+| 完成消费者或失败交接 | [原请求完成](implemented/input-reliability.md#原请求完成与失败交接) | 要确认资源退出读[执行观察](implemented/input-reliability.md#原执行的观察)和[Harness](implemented/harness-layer.md#execution-and-resources) |
+| BG/Research/委派返回接管 | [公共返回接管](implemented/input-reliability.md#公共返回接管) | 改材料、重试或恢复才读[BG](implemented/background-tasks.md)、[Research](implemented/native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)或[委派](implemented/agent-collaboration.md#53-reply-delivery-the-original-request-completion) |
+| 输入接纳、恢复或问题 | [输入任务导航](implemented/input-reliability.md) | 改原生写帧或 MCP 清理才读其指向的运行时章节 |
+| Codex MCP 配置 | [Native MCP configuration](implemented/codex-backend.md#native-mcp-configuration) | 涉及输入或恢复保证读[首输入证据](implemented/input-reliability.md#codex-native-input-evidence) |
+| compact 或上下文比例 | [Native compaction](implemented/codex-backend.md#native-compaction) | 改请求接纳读[compact 输入](implemented/input-reliability.md#native-compaction-requests)，改样本消费者读[绑定合同](implemented/model-reasoning.md#上下文样本与配置绑定) |
+| 后端、steer、重试或原生子任务 | [Harness](implemented/harness-layer.md)、[轮内引导](implemented/inline-steering.md) | 按边界进入[Codex 章节](implemented/codex-backend.md)、[瞬态恢复](implemented/harness-transient-retry.md)或[子任务](implemented/native-subagents.md) |
+| Agent 配置、模型或记忆 | [Agent](implemented/agent-refactor.md)、[模型设置](implemented/model-reasoning.md)、[记忆](implemented/memory.md#current-content-ownership) | 凭据变化读[凭据生命周期](implemented/harness-credential-reauth.md) |
+| 账户、格式或搬迁 | [账户](implemented/multi-tenancy.md)、[存储与交接](implemented/current-storage-format.md) | 实际搬迁读[完整操作](backup-and-migrate.md#account-export-and-import) |
+| 后台任务、定时或安装排空 | [BG](implemented/background-tasks.md)、[定时运行](implemented/scheduled-runs.md)、[安装生命周期](implemented/installation-lifecycle.md) | 改原请求完成再读完成合同 |
+| 应用、构建或后端进程 | [应用](implemented/applications.md)、[应用后端](implemented/application-backends.md#6-lifecycle) | 改 App 对话读[Agent 访问](implemented/app-agent-access.md) |
+| 普通 Wiki 查询 | 当前 query 指南与工具（按任务 load_guide） | 开发引擎才读[Wiki 工程导航](implemented/wiki-development-summary.md)；可信工作要求见[知识请求](implemented/knowledge-requests.md) |
+| 前端列表、会话或卡片 | [前端任务导航](implemented/frontend-list-reconciliation.md) | 改可见性读[置顶](implemented/sidebar-pins.md)，移动布局读[手机端](implemented/mobile.md) |
+| 日常验证或文档修改 | [快速检查](testing.md#fast-checks-during-development)、[主题入口](testing.md#topic-regression-entry-points)、[隔离](testing.md#markers-providers-and-isolation) | 提交/发布才读[相应矩阵](testing.md#release-and-documentation-checks)；文档改动核对实际改变的源码事实 |
+| 发布已验证版本 | [自动发布完整操作](local-wsl.md#自动发布) | 环境失效才读[重建](local-wsl.md#环境重建)，手机故障读[公网入口](local-wsl.md#手机公网入口) |
 
 ## 使用与配置指南
 
-- [用户指南](user-guide.md)：本机 WSL 与 Codex 的启动、Agent 和手机访问。
+- [用户指南](user-guide.md)：启动、Agent 和手机访问。
 - [Connector 设置](connectors-setup.md)：浏览器中的 GitHub、Gmail 和自定义 OAuth。
-- [Agent 提示词](agent-prompts.md)：可复制的角色配置快照；编辑文件不会更新已保存配置。
-- [本机测试](local-wsl.md#本机测试)：离线覆盖 Claude Code 与 Codex，日常实机范围为 Codex；门禁由 [testing.md](testing.md)维护。
-- [领域词汇](../GLOSSARY.md)：术语解释；术语存在不代表该能力已承诺或已实现。
-- [Skills 项目配置](agents/issue-tracker.md)：本地任务与 grill 目录；[状态标签](agents/triage-labels.md)与[领域文档规则](agents/domain.md)。
-
-## 当前合同
-
-下方两表由文档标题及首部 `Status` 行生成。新增、移动或更改条目后运行
-`.venv/bin/python scripts/gen-docs-index.py`，用 `--check` 检查同步。
-生成器检查状态与目录归属；维护者负责对照代码核实正文。
-两块标记须唯一、有序且不重叠，结构错误时生成器不写文件。
-
-状态值沿用机器格式：`implemented`＝已实现合同，`proposed`＝提议，
-`in-progress`＝进行中，`paused`＝暂停。计划入表不表示授权实施。
-
-<!-- BEGIN implemented-index (generated by scripts/gen-docs-index.py) -->
-
-| 当前合同 | 状态 | 范围 |
-|---|---|---|
-| [/fork：完整会话与工作目录复制](implemented/session-fork.md) | implemented | 原生历史复制或 API fork、创建不确定性与显式重放降级，保留原会话和文件。 |
-| [Agent 自设计划工具](implemented/schedule-tool.md) | implemented | 按会话作用域创建、列出、改期和暂停所属 Agent 的计划。 |
-| [Agent 记忆：原生文件与内容归属](implemented/memory.md) | implemented | 每个 Agent 的持久 Markdown、角色专属偏好与少量项目入口。 |
-| [Agent 配置与所属会话](implemented/agent-refactor.md) | implemented | 账户所属 Agent 配置、会话继承与归档删除生命周期。 |
-| [Codex 性能与 Monitor 观测](implemented/codex-performance-monitor.md) | implemented | 被动用量与 TPS、原生根及子任务范围、Owner 计时与资源退休阶段。 |
-| [Codex：普通交互与无工具文本调用](implemented/codex-backend.md) | implemented | 普通 App Server 回合、有界恢复、独立 Research exec leaf 与订阅文本 worker。 |
-| [Connector：安装、启用与令牌归属](implemented/connectors.md) | implemented | 账户所属 OAuth 安装、Agent 启用范围与类型化 MCP 工具。 |
-| [Harness 凭据刷新与重新授权](implemented/harness-credential-reauth.md) | implemented | 原 owner 负责主动刷新和拒绝处置，重新授权保留凭据身份。 |
-| [Harness 瞬态错误恢复](implemented/harness-transient-retry.md) | implemented | 仅凭准备或续聊证据有界恢复，缺少输出不授权重放输入。 |
-| [Harness：当前运行时边界](implemented/harness-layer.md) | implemented | 统一公共 Harness、运行时 profile、执行资源所有权与显式能力。 |
-| [Octopus 当前跨模块契约](implemented/architecture-contract.md) | implemented | 当前所有权、输入、完成、资源退休、账户与数据保证；不代表生产部署。 |
-| [会话回退：分支与安全文件还原](implemented/session-rewind.md) | implemented | 在用户消息前分支，重放保留前缀并按选择还原可归属文件改动。 |
-| [侧栏置顶：可见性、排序与提醒](implemented/sidebar-pins.md) | implemented | 置顶独立于归档，选择和详情刷新在原位置更新会话。 |
-| [共享 Wiki：当前契约与设计理由](implemented/wiki-development-summary.md) | implemented | 当前检索、维护、权限、效果证据及恢复边界；后续产品范围单列。 |
-| [前端列表：读取、推送与操作回执契约](implemented/frontend-list-reconciliation.md) | implemented | 应用、计划、会话及 Wiki 任务观察各有业务入口，保留排序、身份和重连边界。 |
-| [原生 Research：流水线、报告与返回归属](implemented/native-deep-research.md) | implemented | 有界原生 leaf，分别记录报告完成、后续处理与资源退休。 |
-| [原生子任务：观测、卡片与详情](implemented/native-subagents.md) | implemented | 原生 helper 观测、App Server 工作卡片与只读已保存详情，含原资源寿命内晚事件。 |
-| [后台任务：命令结果、返回与资源退休](implemented/background-tasks.md) | implemented | 独立命令身份、持久接纳、有界输出、超时取消及原来源返回。 |
-| [命名 Agent 委派：会话与工作轮次](implemented/agent-collaboration.md) | implemented | 同账户异步协作、原回执完成、独立返回诊断与精确轮次取消。 |
-| [回合安全：超时与进程退休](implemented/turn-safety.md) | implemented | 有界 idle 恢复、可选逻辑回合总期限及确认的进程组退休。 |
-| [安装生命周期：准入、自然排空与交接](implemented/installation-lifecycle.md) | implemented | 安装资源归属、领域排空事实、原请求交接收据与正常退出边界。 |
-| [应用后端：运行与进程监督](implemented/application-backends.md) | implemented | 应用脚本、端口、代理与进程组监督，保留代码、数据和依赖的不同归属。 |
-| [应用：托管、构建与删除](implemented/applications.md) | implemented | 账户所属应用的独立构建、后端运行和分阶段删除。 |
-| [当前存储格式与发布交接](implemented/current-storage-format.md) | implemented | 现行完整格式、发布期存量核验与有限转换；验证和生产部署分别取证。 |
-| [手机端 Octopus](implemented/mobile.md) | implemented | 自动收起抽屉、16px 输入、触摸目标与安全区布局。 |
-| [控制台：视觉规范与工作区布局](implemented/console-redesign.md) | implemented | 蓝色工作区、设计 token、两层侧栏和页面式管理入口。 |
-| [模型、推理强度与速度设置](implemented/model-reasoning.md) | implemented | 独立模型、推理强度和 Normal/Fast 控制，保留继承、运行时发现与会话历史。 |
-| [消息时间、输入历史与模型选择](implemented/composer-and-time.md) | implemented | 原始时间戳、仅人工输入历史和会话模型控制。 |
-| [知识请求与异步工作](implemented/knowledge-requests.md) | implemented | 可信来源要求、维护限制、逐层任务派生与原父任务返回合同。 |
-| [计划触发：执行身份与重叠控制](implemented/scheduled-runs.md) | implemented | 计划 fire 的独立身份、重叠保护、触发标记与原执行入口。 |
-| [账户、授权与资料归属](implemented/multi-tenancy.md) | implemented | 账户认证、业务作用域、账户密钥、受管路径与现行隔离边界。 |
-| [轮内输入、流式交互与宿主复用](implemented/inline-steering.md) | implemented | Claude stream-JSON 引导及条件复用；普通 Codex 引导绑定的活动根。 |
-| [输入接纳与显式恢复](implemented/input-reliability.md) | implemented | 持久输入接纳、原生送达证据、结果关联与显式恢复边界。 |
-| [运行中应用与 Agent 的对话](implemented/app-agent-access.md) | implemented | 按应用令牌授权的 Agent 对话、实时返回与原执行完成。 |
-
-<!-- END implemented-index -->
-
-## 未完成计划
-
-计划正文保存当前差距、拟改变行为、启动依赖和完成条件。选择交付范围时读
-[路线图](roadmap.md)，具体设计以所属计划为准。
-
-<!-- BEGIN plans-index (generated by scripts/gen-docs-index.py) -->
-
-| 未完成计划 | 状态 | 范围 |
-|---|---|---|
-| [Agent 协作许可、进度与人工接管](plans/agent-collaboration-controls.md) | proposed | 补调用许可、父卡只读进度和原问题接管，原生 child 控制按 provider 能力单独选择。 |
-| [AI 研究的证据、阅读与可复现实验](plans/ai-research-workflow.md) | proposed | 补完整证据链、阅读写作交接、可观察预算、受控缓存与原身份恢复，复用现有 Research 生命周期。 |
-| [App 使用与维护闭环](plans/application-evolution.md) | proposed | 补齐 App 秘密配置、问题/附件交互与可解释的构建版本恢复。 |
-| [Codex 原生角色映射](plans/codex-native-roles.md) | proposed | 将已保存的角色定义映射到 Codex 原生配置，保全 persona、权限与原生工作身份。 |
-| [Connector 完整结果与写入权限](plans/connector-capabilities.md) | proposed | 补长结果的受限取回和敏感写授权，再按需求扩展 provider 与操作 scope。 |
-| [DeepSeek Harness：正式后端接入计划](plans/deepseek-harness-backend.md) | proposed | 以官方 SDK 和同宿主薄插件接入 DeepSeek；锁版能力门、全部消费者与真实模型验收尚未完成。 |
-| [会话分支、文件归因与安全恢复](plans/session-history-and-recovery.md) | proposed | 补差异预览、dirty 起点与文件效果归因，保全人工修改并保守处理无主副本。 |
-| [会话输入、有效配置与显式改方向](plans/session-input-controls.md) | proposed | 让配置继承、运行中附件和显式改方向具有清楚反馈，沿原接纳与停止语义完成。 |
-| [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
-| [可编辑、可解释的定时任务](plans/schedule-management.md) | proposed | 连通定时任务编辑、原执行历史与跳过原因，并单独选择周期漏跑策略。 |
-| [工作视图、可选 Router 与外部 Channel](plans/agent-router-and-channels.md) | proposed | 先从原工作事实派生只读视图，再按真实输入来源选择 Router 与 Channel。 |
-| [数据保留、依赖与清理预览](plans/data-retention.md) | proposed | 先明确数据分类、引用和保留责任，提供干运行预览，再单独选择清理政策。 |
-| [稳定接口、薄 CLI 与访问凭据](plans/octo-cli.md) | proposed | 围绕真实消费者建立稳定数据接口、薄 CLI、PAT/设备管理与受限 App scope。 |
-| [第二执行环境与 Runtime provider](plans/runtime-providers.md) | proposed | 有真实第二环境需求后，验证文件、网络、历史、取消与资源退休的完整 provider 边界。 |
-| [账户边界：具体剩余行为与产品政策](plans/multi-tenancy-gaps.md) | proposed | OAuth 浏览器绑定与其余账户政策按证据级别独立选择。 |
-| [阶段、故障诊断与可行动告警](plans/observability-and-diagnostics.md) | proposed | 将原执行事实连成可读阶段和故障入口，增加少量可采取行动的告警。 |
-| [运行时执行扩展：暂停范围与恢复条件](plans/runtime-execution-scope.md) | paused | 按已交付 Codex R2 重基准七项执行扩展，保留更强承诺及独立 R06 核验的恢复条件。 |
-
-<!-- END plans-index -->
-
-## 活动审阅材料
-
-- 基于 `0a56386` 的架构精读与 deep module 入门（正文缺失，待补 `review/architecture/Octopus_Architecture_Deep_Dive.html`）：从调用者知识、内部责任和故障测试深入讲解 SessionOwner、HarnessRun、返回接管与 Wiki 快照；包含前后图解、练习和两项待探索的深化候选。这项临时学习材料不代表候选已实施或生产已部署。
-- [基于 `fd7ab9c` 的架构精读](review/architecture/architecture-review-20261102-191500.html)：用七个现行实例解释返回接纳、原请求完成、协议适配、配置捕获、资源退休、前端观察和 Wiki 快照；五项旧候选已有实现，一处 BG 详情观察问题有内存探针复现。提议另行标注；这是临时学习与审阅材料。
-
-## 版本参考与历史证据
-
-- [Claude CLI 捕获](reference/claude-cli-protocol.md)、[Codex exec 捕获](reference/codex-exec-protocol.md)、[系统提示词观察](reference/cli-system-prompt-notes.md)：历史版本样本，各自指向现行合同。
-- [Codex App Server G0](reference/codex-app-server-g0.md)：区分有限范围通过与完整递归反例，不作为新的实机通过声明。
-- [2026-11-03 MCP 与资源边界](reference/runtime-resource-boundaries-20261103.md)：固定 Codex 的原生配置继承/工具发现、controller 扫描与 native 准备、真实 Wiki Store 成本和 256 KiB 支持政策的证据与限制。
-- [2026-09-25 工程整理](post-mortems/2026-09-25-polish-pass.md)：历史缺陷、测量与因果记录，数值和部署范围属于当时版本。
-- [后台结果管线](post-mortems/2026-05-18-bg-pipeline-hardening.md)：四类历史故障；当时 `server/backends/` 现为 `server/harness/`。
-- [SessionOwner 范围遗漏](post-mortems/session-owner-scope-creep.md)：责任切分、消费者交接与目标故障验证；覆盖原调用清理、页面草稿和完成分类。
-- [前端反复修改](post-mortems/frontend-async-state-boundaries.md)：防旧误伤有效结果、等待与确认边界、归档／删除与连接身份，以及页面意图和可见位置的回归经验。
-- [会话／委派的三个完成点](post-mortems/session-delegation-completion-boundaries.md)：子任务结束、返回接纳与父执行处理分别取证等待；保留多子返回、工作轮复用、收束竞争与 ACK 未知的反例。
-- [账户 setup 退役](post-mortems/account-setup-retirement.md)：身份夹具、冷恢复假设及验证范围。
-- [OAuth 连续修复](post-mortems/oauth-repeated-boundary-bugs.md)：登录、刷新、绑定、取消与 UI 的责任断点，以及原登录发布、只读 status 和退休条件。
-- [/research 连续修改](post-mortems/research-completion-boundaries.md)：叶子证据、报告与处理、取消与退休、首次创建及原身份恢复；补充原生完成分类与报告处理的组合反例。
-- [/wiki 证据与范围](post-mortems/wiki-evidence-scope-recovery.md)：意图与权限、原文与终稿证据、来源复核、阅读覆盖及成本验证；明确冷读义务与未测量风险。
-- [Wiki 任务效果、派发与观察](post-mortems/wiki-effects-dispatch-and-observation.md)：原执行结算、派发交接与旧聊天当前观察；原生输入取消收窄仍不能替代效果 receipt。
-
-需要回读已退出的历史正文时，使用固定快照：[旧工程路线](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/plans/engineering-runtime-roadmap.md)、[旧架构候选](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/review/architecture/architecture-review-20261101.html)、[Wiki 修复](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md)、[2026-10-25 关闭的仓库审查](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/review-20261023.md)、[搬迁审查](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/migration-scope-and-portability-20261023.md)。这些快照只证明各自版本与范围。
+- [Agent 提示词](agent-prompts.md)：可复制的角色配置快照；编辑文件不会更新保存配置。
+- [本机测试](local-wsl.md#本机测试)：直接选择 PATH/代理、离线目录或 live 凭据与网络条件。
+- [领域词汇](../GLOSSARY.md)、[任务与 skills 约定](agents/issue-tracker.md)、[状态标签](agents/triage-labels.md)和[领域文档规则](agents/domain.md)。
+- [完整合同与计划目录](catalog.md)：生成索引、活动审阅及固定版本证据；新增或移动正文后运行现有目录生成器。

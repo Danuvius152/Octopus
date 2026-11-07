@@ -50,7 +50,7 @@ shell 和输出结束后先固定原命令结果，再主动对启动时捕获�
 均保留原 owner 和已经固定的结果；后续取消／关停可重入未完成阶段，不重跑命令、
 不重复已确认记录和广播。无法确认退休时，任务继续阻塞安装排空。
 
-父返回以 `bg:{task_id}` 调用[公共返回接管](architecture-contract.md#公共返回接管)，
+父返回以 `bg:{task_id}` 调用[公共返回接管](input-reliability.md#公共返回接管)，
 先确认原 receipt，再按需读取材料和检查原资格。manager 保存命令结果及独立
 `delivery_disposition`／`delivery_error`。明确容量拒绝可以沿原身份重试；永久拒绝
 记 `stopped`，可能已接纳但无确认记 `unknown`。后来的不存在或拒绝不擦掉 unknown；

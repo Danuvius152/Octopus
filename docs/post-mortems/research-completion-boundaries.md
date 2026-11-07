@@ -341,8 +341,8 @@ receipt 已终态但 injection_status 尚未同步的旧记录。新扫描以原
   原返回、配置与恢复责任。
 - [前端观察合同](../implemented/frontend-list-reconciliation.md#research-创建观察与浏览器确认)：
   创建回执、首次建代、快照合并与精确版本确认。
-- [跨模块完成与退休](../implemented/architecture-contract.md#输入完成与资源退休)、
-  [公共返回接管](../implemented/architecture-contract.md#公共返回接管)：session 的责任。
+- [跨模块完成与退休](../implemented/input-reliability.md#原请求完成与失败交接)、
+  [公共返回接管](../implemented/input-reliability.md#公共返回接管)：session 的责任。
 - [SessionOwner 范围失控复盘](session-owner-scope-creep.md)：责任完整与
   故障观察的问题在 Research 再次出现；本次额外暴露内容证据、首次建代、配置选择
   与当前权力的差异，不能只照搬消费者迁移的解释。

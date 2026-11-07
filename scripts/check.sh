@@ -61,7 +61,7 @@ gate_tsc() { cd "$ROOT/web" && bun run typecheck; }
 
 gate_contracts() { "$ROOT/scripts/check-contracts.sh"; }
 
-# docs/README.md's contract and plan tables come from each document's Status line
+# docs/catalog.md's contract and plan tables come from each document's Status line
 # so a new contract or plan cannot be added without appearing in the index.
 gate_docs_index() { "$ROOT/.venv/bin/python" "$ROOT/scripts/gen-docs-index.py" --check; }
 

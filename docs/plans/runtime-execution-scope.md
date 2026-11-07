@@ -5,7 +5,7 @@
 普通 Codex App Server 已交付：每 attempt 宿主与原生根绑定、start/steer 的原生
 接纳证据、活动根内协作、有限尾部保全与有界退休均属当前实现。Claude 已有
 条件进程复用。当前保证见[Codex](../implemented/codex-backend.md)、
-[输入](../implemented/input-reliability.md)与[执行合同](../implemented/architecture-contract.md)。
+[输入与完成](../implemented/input-reliability.md)与[原资源观察](../implemented/input-reliability.md#原执行的观察)。
 不能再把 App Server/HOST 或原七票一概写成“未实施”，也不能据此宣布整包完成。
 
 ## 七项旧执行范围按断言重基准

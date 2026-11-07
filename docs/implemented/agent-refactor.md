@@ -50,14 +50,11 @@ Hard deletion requires no remaining sessions and removes the private memory
 directory. Archive keeps it. Pinning controls visibility independently of
 archive; see [sidebar behavior](sidebar-pins.md).
 
-Archive and hard deletion do not currently offer identical account enforcement.
-Archive rejects a failed scoped lookup before mutation. The DELETE route has a
-known static gap: a failed scoped lookup can proceed to the manager's unscoped
-delete before its final assertion. Under the existing non-system/no-session
-conditions, that may affect a foreign Agent and its memory when its ID is known.
-The repair and no-side-effect acceptance conditions belong to
-[remaining account work](../plans/multi-tenancy-gaps.md); this documentation
-correction does not implement that repair.
+Archive and hard deletion both reject a failed account-scoped lookup before
+mutation. `delete_agent` requires explicit account scope and returns the authorized
+original row for the deletion event. Missing or foreign targets cannot reach row
+or memory deletion. The detailed boundary and regression evidence belong to
+[account ownership](multi-tenancy.md#5-business-ownership).
 
 ## Related contracts and verification
 

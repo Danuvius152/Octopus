@@ -81,10 +81,14 @@ docs/                   Current guides, contracts, unfinished plans and version 
 Read the relevant part of [architecture.md](docs/architecture.md) for component
 relationships. Use [the roadmap](docs/roadmap.md) for future priorities and
 dependencies, and [the documentation index](docs/README.md) to find a topic.
-For completion consumers, failure handoff or retirement, read
-[the execution contract](docs/implemented/architecture-contract.md#输入完成与资源退休):
-business outcome, notification delivery
-and resource retirement have separate authorities.
+For completion consumers or Owner failure takeover, read
+[original-request completion](docs/implemented/input-reliability.md#原请求完成与失败交接).
+For captured execution/exit proof, read
+[execution observation](docs/implemented/input-reliability.md#原执行的观察);
+for process or MCP-call retirement, read
+[Harness resources](docs/implemented/harness-layer.md#execution-and-resources) or
+[MCP retirement](docs/implemented/harness-layer.md#mcp-question-retirement).
+Business outcome, notification delivery and resource retirement have separate authorities.
 
 Persistence changes follow [current storage and publication handoff](docs/implemented/current-storage-format.md).
 New persistent types, relationships or roots must also update
@@ -157,8 +161,8 @@ the service does not publish the development tree.
 - Use the existing Python venv and pip, not uv. Keep fixed application assets
   local; use installed test tools and fail clearly when a dependency is missing.
 - Resolve the nvm JS toolchain and `~/.local/bin` Codex on PATH for noninteractive
-  checks. Current versions, proxies, credential isolation and service procedures
-  live in [local-wsl.md](docs/local-wsl.md).
+  checks. Use [local test setup](docs/local-wsl.md#本机测试) for PATH, proxies and
+  credential isolation, and [service management](docs/local-wsl.md#服务管理) for operations.
 - Read only task-relevant references. For implementation tasks, follow
   [documentation update timing](docs/AGENTS.md#writing-and-maintenance).
   For documentation, persona or memory changes, read those documentation rules

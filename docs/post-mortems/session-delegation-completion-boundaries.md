@@ -61,7 +61,7 @@ running 项、父模型后来成功过一次、聊天最后出现了回复，都
 的一条完整返回；反过来，成功 child 的返回可能一直没有被父模型处理。
 
 业务结论、返回接纳、父处理之外，通知送达和资源退休也各有 owner，不能从上表
-任何一行自动推出。具体合同见[输入完成与资源退休](../implemented/architecture-contract.md#输入完成与资源退休)
+任何一行自动推出。具体合同见[输入完成与资源退休](../implemented/input-reliability.md#原请求完成与失败交接)
 及[命名委派生命周期](../implemented/agent-collaboration.md#52-sub-session-lifecycle)。
 
 ## 推翻旧假设的具体反例
@@ -230,7 +230,7 @@ everything you have written 回传；[实际正文选择][s-body] 在有 `final_
    返回正文并核对结论，不能从 completed 元数据自动产生。
 
 现行行为继续由[委派合同](../implemented/agent-collaboration.md)和
-[公共返回接管](../implemented/architecture-contract.md#公共返回接管)维护；本篇保留
+[公共返回接管](../implemented/input-reliability.md#公共返回接管)维护；本篇保留
 反例、修复理由和回归观察点，不另建第二份运行时合同。
 
 [c-attempt]: https://github.com/Danuvius152/Octopus/commit/0594d873dabc0a90e7208680c5b971001d10d83f

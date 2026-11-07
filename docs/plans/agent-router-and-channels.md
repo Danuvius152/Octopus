@@ -3,7 +3,7 @@
 > **Status:** proposed — 先从原工作事实派生只读视图，再按真实输入来源选择 Router 与 Channel。
 
 当前输入 receipt、命名委派轮次、BG/Research/Wiki 任务各有身份和完成 owner。
-跨来源返回已经通过[公共接管合同](../implemented/architecture-contract.md)关联
+跨来源返回已经通过[公共接管合同](../implemented/input-reliability.md#公共返回接管)关联
 原来源。待解决的是用户怎样跨会话看见“哪些工作等我、结果在哪里、为什么停下”，
 不是再建设一个拥有完成裁决权的 Ledger。
 

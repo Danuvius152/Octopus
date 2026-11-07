@@ -19,15 +19,10 @@ Version-bound protocol observations live in [`reference/`](reference/).
 `server/db/schema.py` (`_SCHEMA`) is the source of truth for
 the data model — this doc describes it conceptually rather than pasting SQL.
 
-The [architecture contract](implemented/architecture-contract.md) owns cross-component
-decisions, conventions and the paused execution scope.
-Obsolete online interfaces, installation-era adoption/rotation and startup
-migration chains have since been retired. Current SessionOwner, transaction,
-authorization and Wiki recovery responsibilities remain the foundation.
-`_SCHEMA` now declares the complete current main layout; startup creates empty
-storage or requires its exact current marker. Publication owns retained-layout
-verification and any finite conversion, as described in the
-[current storage contract](implemented/current-storage-format.md).
+Current contracts stay with their subject owner. The component groups below link
+directly to them; [paused execution increments](plans/runtime-execution-scope.md)
+retain their own dependencies and restart conditions. Current format declarations
+and publication handoff belong to [storage](implemented/current-storage-format.md).
 
 ## System Overview
 
@@ -94,115 +89,132 @@ In development, Vite serves the SPA on port 5173 with HMR and proxies `/api`,
 
 ## Components
 
-### Backend (`server/`)
+Each group names its authority, handoff and failure boundary. Source paths are
+entry points, not a second exhaustive file or API inventory.
 
-| File | Purpose |
-|---|---|
-| `main.py` | FastAPI app + lifespan. Clears the `CLAUDECODE` env var so a nested `claude` subprocess behaves normally. Wires DB, SessionManager, ScheduleRunner, ConnectorManager, AgentManager, the in-process MCP namespaces, the metrics store, optional CloudflareTunnel. Registers routers, `GET /api/backends`, `GET /health`, and the SPA static mount. |
-| `config.py` | Pydantic settings from `.env` (prefix `OCTOPUS_`) — see **Configuration** below. |
-| `auth.py` / `users.py` | Accounts: empty-installation setup → first admin and owned default agent, login → session bearer, invite registration, password change and admin operations. Setup proof is checked only at `/api/auth/setup`; `deps.py` resolves the current business identity and owner. Startup refuses retained pre-account business inputs. |
-| `crypto.py` | Encryption at rest: a server-held **master key** wraps each account's data-encryption key (DEK), which Fernet-encrypts that account's secrets. A password only authenticates. |
-| `models.py` | Pydantic request/response models + enums (`SessionStatus`, `MessageRole`, agent/schedule/connector/credential DTOs). |
-| `session_manager.py` | Session entry points, registration and cross-session quota; delegates mutable per-session behavior to SessionOwner. |
-| `sessions/` | SessionOwner serializes typed message/compact input, execution, question and lifecycle state; managed Harness I/O reports original results. Maintenance effect remains distinct from business status. Completion consumers follow [the execution contract](implemented/architecture-contract.md#输入完成与资源退休): business outcome, notification delivery and retirement have separate authorities. |
-| `harness/` | The single boundary for model/runtime interaction. Native helpers normalize to `SubagentUpdate`: legacy cards retain tool identity, while App Server work keeps typed request/attempt/thread/turn source independently of the display cache. Claude renders saved `agents.subagents` through `--agents`; [native helper contract](implemented/native-subagents.md). |
-| `agent_manager.py` | Agent CRUD (the durable assistant definitions). |
-| `agent_memory.py` | Per-agent native memory provisioning under the owning account's `agents/<id>/memory/`. |
-| `delegations.py` | Named-agent delegation and continuation by `delegation_id` ([design](implemented/agent-collaboration.md)). The original request's completion determines each round's reply or error; question events relay pending questions separately. Owns cycle/depth guards, delivery identity, continuation and descendant cancellation. Completion does not by itself archive an ordinary delegation session or prove its execution has retired. |
-| `scheduler.py` | `ScheduleRunner` — APScheduler runner for recurring prompts, **interval and cron**, fired per agent into fresh auto-archiving sessions. |
-| `schedule_ai.py` | Natural-language `/schedule` parsing — turns "every weekday at 9am" into a cron/interval spec via the agent's own harness (backend-agnostic). |
-| `database.py` / `db/` | SQLite (`aiosqlite`, WAL, FK cascade, `busy_timeout`, `synchronous=FULL`). `db/schema.py` defines current format 8; `PRAGMA user_version` is its sole format marker. Startup matches it before keys or writers; genuinely empty storage creates the complete current DDL directly. Ordinary reopening does not interpret or convert historical data. Publication verifies the full retained structure and current facts after old writers retire, before the candidate starts. Credentials and recovery relationships have one authority in `credential_secrets` and the successor's `recovery_of`. Short transactions confirm the original driver's COMMIT; uncertain storage enters fail-stop. Current input and unfinished-fork recovery remain owned by `SessionManager`. See [current storage and publication](implemented/current-storage-format.md). |
-| `jsonl_parser.py` / `jsonl_writer.py` | Read/write Claude Code JSONL session files for `octopus handoff` (import) and `octopus pull` (export → local `claude --resume`). |
-| `applications.py` | Agent-built applications ([design](implemented/applications.md)): account-owned directories, build sessions (`origin='application'`) and status projection. Progress can mark a build running; the original request's committed completion and entrypoint determine its final status. Direct build-session requests use the same completion observer. Archive keeps rows and files; the name index is live-only. |
-| `app_backends.py` | **Application backends** ([`implemented/application-backends.md`](implemented/application-backends.md)) — an executable `start.sh` at the app root IS the declaration; no manifest. Allocates a port, runs install/start with a **minimal** environment (server credentials are not inherited; same-host code is still trusted), waits for the port to accept, proxies `/apps/{id}/api/*`, reaps when idle. Three directories, three owners: `<slug>/` code (a rebuild rewrites it), `<slug>.data/` the app's own state (never touched), `<slug>.runtime/` installed deps (delete to force a clean reinstall). |
-| `app_agent.py` | Application↔agent conversations ([design](implemented/app-agent-access.md)): resumable app-owned sessions and scoped SSE (`delta`/`message`/`tool`/`question`/`done`/`error`). Original-request completion confirms recording, outcome and notification delivery before `done`; response completion alone does not release the execution slot. |
-| `mcp_http.py` | **The MCP namespaces, served in-process** ([`plans/polish-2026-09.md`](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/polish-2026-09.md) §4 B1) — each tool namespace is mounted at `/mcp/<name>` over streamable-HTTP instead of spawned as a stdio subprocess per session. Both CLIs build the tool name from the config key, so keys are unchanged and `mcp__bg__run` stays `mcp__bg__run`; connectors mount once per *kind* while their key stays per-installation. Replaces 7 subprocesses per session (~39 MB PSS each). |
-| `mcp_identity.py` | Per-session scope for those namespaces. One HTTP endpoint serves every session, so identity travels with the request: master-key signatures identify the session/account/run and each call checks its current authority. Claude passes the bearer as a header, Codex as an env var it names; that asymmetry stops at the profile boundary. |
-| `bg_tasks.py` | Cross-turn background shell tasks: spawn, stream capture (bounded), idle watchdog, cancel, persistence in `bg_tasks`. |
-| `large_prompts.py` | Legacy transport prompt spill over ~100 KB, with a small `Read` pointer to avoid argv `E2BIG`. App Server keeps its input inline in RPC; original input remains persisted. |
-| `attachments.py` / `file_viewer.py` | Account-owned session attachments; working-dir-scoped file reads for the viewer. |
-| `connector_manager.py` + `connectors/` | Connector framework (see below). |
-| `credentials` (`oauth_login.py`, `oauth_credentials.py`, `oauth_providers.py`, `oauth_errors.py`, `codex_login.py`, `codex_credentials.py`) | Stored backend credentials: API keys, OAuth logins, and Codex device-auth in-app login. Original login tasks own acquisition through their acknowledged commit and cleanup; narrow writers handle encryption/persistence, while the Codex operation also coordinates staged auth publication and original target/deletion responsibility. Status observers perform no publication. |
-| `tunnel.py` | `cloudflared tunnel --url` subprocess manager; parses the public URL, monitors, stops gracefully. |
-| `notifiers/` | Notification destinations (webhook), pluggable. |
-| `fork_helpers.py` | Pure helpers for `/rewind`: git-anchor capture at turn-start, side-effect classification over parent rows, safe-revert preflight + git-stash execution. |
-| `research/` | Native deep research orchestration (see below). |
-| `cli.py` | `octopus serve` (`--tunnel`), `octopus handoff`, `octopus pull`. |
+<a id="backend-server"></a>
+### HTTP, WebSocket and scoped tools
 
-### Harness layer (`server/harness/`)
+REST routers translate authenticated requests; WebSocket delivery validates the
+current account and session at its last awaited read before sending a frame.
+In-process HTTP MCP namespaces check current account/session/installation/work/run
+authority per call. A signed retired scope grants no new effect. These entries
+hand commands to domain owners rather than settle work themselves. Contract:
+[account delivery and scope](implemented/multi-tenancy.md#websocket-delivery).
+Source: `routers/`, `deps.py`, `mcp_http.py`, `mcp_identity.py`.
 
-The harness is the **only** place that talks to a model runtime. There is one
-`Harness` class and one `HarnessRun` subprocess engine, configured by a
-`RuntimeProfile` **value** per backend kind — *no per-framework subclasses*
-(design: [`implemented/harness-layer.md`](implemented/harness-layer.md)).
+### Sessions and original requests
 
-| File | Purpose |
-|---|---|
-| `harness.py` | The `Harness` front door (one per backend kind). |
-| `profile.py` | `RuntimeProfile` — the per-backend data record + small collaborators (argv builder, event parser, capability flags). Capabilities (e.g. native memory, premature-exit recovery) are derived from the profile. |
-| `run.py` | `HarnessRun` — universal subprocess + JSONL stream engine, graceful shutdown and PATH discovery incl. nvm. Ordinary lines remain bounded at 4 MiB; the native image reader has a separate [bounded media allowance](implemented/codex-backend.md#native-generated-images). |
-| `driver.py` | Per-run protocol operations: argv rendering, preparation, input encoding and parsing. `ArgvDriver` handles initial EOF; `ClaudeDriver` lives in `claude_code.py`. The profile owns capabilities; HarnessRun retains processes, leases, readers and retirement. |
-| `assembly.py` | Shared per-turn assembly: MCP server selection, system-prompt composition (in-app tools blurb, connectors blurb, memory blurb), working-dir absolutization. |
-| `events.py` | Backend-neutral `HarnessEvent` DTOs (`text`, `thinking`, `tool_use`, `tool_result`, `question_request`, `result`, `error`, `session_started`). |
-| `claude_code.py` | Claude profile — `claude --print --output-format=stream-json` argv, event normalization, JSONL transcript codec, `run_oneshot`. |
-| `codex.py` | Codex assembly helpers, explicit independent Research exec leaf, legacy event parser and `run_oneshot` text-worker entry. The registered ordinary profile is App Server; no exec resume/fallback entry remains. |
-| `codex_app_server.py` | Ordinary G0-pinned stdio RPC driver: preparation, exact native resume, input/root correlation, bidirectional questions, native output and passive scoped measurement. Original submissions, OwnerQuestions and Owner retain input, answer and settlement authority; [scope and limits](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume). |
-| `codex_items.py` | Pure native item conversion and bounded inline-image projection before event queues/storage/WS. Preserves native status and fields without borrowing exec semantics; owns no execution, recovery or persistence. |
-| `native_output.py` | Bounded projection of original native child/work facts. Carries typed source and reconciles final observations after resource retirement, independently of the UI card cache; no scheduler or parent-consumption oracle. |
-| `codex_text.py` | Codex one-shot model-only worker: native authentication/configuration, subscription text HTTP with no tool dispatcher, completed-text result. The common Harness owns admission and process-group retirement; [capability contract](implemented/codex-backend.md#source-and-verification). |
-| `registry.py` | `get_harness(backend)` / `available_backends()` (a kind appears only when its CLI resolves on PATH; `claude-code` is always listed). |
-| `login.py` | `LoginDriver` protocol for in-app credential login flows. |
+One `SessionOwner` serializes input, questions, execution and lifecycle intent;
+`SessionManager` owns entry points, registration, cross-session quota and original
+Owner failure takeover. Managed I/O reports captured request/attempt/work results.
+Consumers follow the original receipt; committed outcome, notification and resource
+exit remain separate. Contract: [original completion](implemented/input-reliability.md#原请求完成与失败交接).
+Source: `session_manager.py`, `sessions/owner_runtime.py`, `sessions/turns.py`.
 
-### In-app MCP servers (`server/mcp_servers/`)
+<a id="harness-layer-serverharness"></a>
+### Harness and native protocols
 
-Normal session turns use in-process streamable-HTTP namespaces, selected from
-the saved agent configuration and the current call scope. Harness assembly
-renders the configuration for each CLI; connector and Wiki tools additionally
-depend on their current bindings and authority. Defaults for newly created
-agents do not replace saved tool selections. Stdio construction remains for
-contexts without a live session scope; it is not the normal per-turn transport.
+`Harness` is the model-runtime boundary. `RuntimeProfile` declares capabilities
+and supplies a per-run driver; drivers interpret wire facts while `HarnessRun`
+owns processes, leases, readers, backpressure and retirement. Claude stream-JSON
+can retain a compatible host; ordinary Codex has one App Server host/root per
+attempt. The constrained Research exec leaf and tool-free text worker retain
+their narrower entry points. Contract: [Harness](implemented/harness-layer.md).
+Source: `harness/harness.py`, `harness/run.py`, `harness/profile.py`.
 
-| Server | Tool(s) | Purpose |
-|---|---|---|
-| `bg.py` | `mcp__bg__run` / `cancel` / `list` | Fire-and-forget shell commands that run **across turns**; the result arrives as a follow-up turn. |
-| `schedule.py` | `mcp__schedule__create` / `list` / `update` / `delete` | Manage durable schedules owned by the authenticated session's agent. |
-| `ask.py` | `mcp__ask__user(questions)` | Structured multiple-choice question rendered as a form in the UI; long-polls for the answer. Caller-aware: when invoked from a delegation-origin session the question is also injected as an `[agent-question:…]` turn into the parent agent's session — same pending queue, two answer producers. Replaces the old permission-prompt hack. |
-| `ask_agent.py` | `mcp__ask_agent__ask` / `cancel` / `answer` / `list` | Agent-to-agent delegation. `ask(request, name=…, delegation_id=…, files=…)` is bimodal: pass `name` to spawn a fresh child session under the named agent, or pass `delegation_id` to continue a prior delegation in the same child session so the target keeps her transcript across rounds; exactly one id is required. `answer` drains a child's pending question with the parent's chosen label; `cancel` stops a delegation (cascade-cancels descendants); `list` enumerates this session's delegations. Same env-injection + bg-task-style follow-up-turn pattern as `bg`. Design: [`implemented/agent-collaboration.md`](implemented/agent-collaboration.md). |
-| `connectors/github.py`, `gmail.py` | typed API tools | Built-in connector tools (see Connectors). |
-| `connectors/custom.py` | generic `request(method, path, …)` | One tool for any user-defined OAuth2 API. |
-| `connectors/_shared.py` | — | Token fetch+cache, 401→reconnect, 32 KB truncation. |
-| `research.py` | `mcp__research__deep_research(question)` | Start a native deep-research job. Thin HTTP shim to `/api/sessions/{sid}/research`; returns `research_id` immediately so the model's turn ends cleanly. See Native Deep Research below. |
+### SQLite and managed files
 
-### Connector system (`server/connectors/` + `connector_manager.py`)
+SQLite owns accepted inputs, exact terminal associations and business state.
+Short transactions confirm COMMIT before success is published; uncertain storage
+enters fail-stop. Format markers admit the exact current layout; publication owns
+retained-data verification and finite conversion. Account file paths and their
+references retain their own owners across fork and deletion. Contract:
+[storage and publication](implemented/current-storage-format.md).
+Source: `db/schema.py`, `db/base.py`, `workspace.py`.
 
-Connectors give an agent OAuth-authorized access to third-party APIs as MCP
-tools. Enablement is **agent-scoped**; setup is **browser-only** (paste the
-OAuth client id/secret in the UI — no env edit, no restart). The OAuth redirect
-URI is derived from the incoming request, so it's correct behind a tunnel.
-Built-ins: **GitHub**, **Gmail**. **Custom** kinds (authorize/token URLs, scopes,
-PKCE, API base) are defined entirely from the browser and backed by a generic
-OAuth provider + the generic `request` tool. See
-[`connectors-setup.md`](connectors-setup.md) and [`implemented/connectors.md`](implemented/connectors.md).
+### Independent work
 
-Per-kind OAuth client creds live in `connector_oauth_clients`; installations in
-`connector_installations` (+ split-secret `connector_installation_secrets`);
-the agent↔installation join is `agent_connectors`; custom kinds in
-`custom_connectors`. The manager handles install upsert, DB→env client-config
-resolution, and server-side token refresh-on-near-expiry behind a per-install lock.
+BG, Research, named delegation and scheduler own their work identities, materials,
+results and cleanup. Session return admission owns original-receipt lookup,
+preparation order, qualification, lawful wake-up and input handoff. Source success
+does not prove parent processing; sources retain retry and diagnostic ownership.
+Contract: [public return admission](implemented/input-reliability.md#公共返回接管).
+Source: `bg_tasks.py`, `research/manager.py`, `delegations.py`, `scheduler.py`.
 
-### Frontend (`web/src/`)
+### Shared Wiki
 
-React 19 + TypeScript (strict) + Vite + zustand + Tailwind v4 + Radix.
+Registry owns registered Store construction, cold recovery and admission; History
+owns file effects; jobs/grants and Worker coordinate authorized attempts and
+settlement. Markdown is content authority; the ledger preserves identity,
+sources, receipts and outbox facts. Root success, cancellation and index readiness
+cannot substitute for each other's evidence. Contract:
+[Wiki engineering tasks](implemented/wiki-development-summary.md).
+Source: `wiki/registry.py`, `wiki/history.py`, `wiki/job_execution.py`.
 
-| Area | Files |
-|---|---|
-| Shell & accounts | `App.tsx`, `SignIn.tsx` (sign-in / create-first-account), `SidebarAccount.tsx` (account row + menu), `AccountPage.tsx` (workspace roots, password, invites, people), `OctopusLogo.tsx`, `SettingsDialog.tsx` |
-| Sidebar (two-level) | `SidebarAgents.tsx` (agents → their sessions), `SidebarApplications.tsx`, `SidebarManage.tsx` (Schedules / Connectors / Harness summary rows), `SidebarSectionHeader.tsx`, `SidebarEdgeToggle.tsx` (collapse), `SortablePins.tsx` (`@dnd-kit` pin reorder). Design: [`implemented/console-redesign.md`](implemented/console-redesign.md), [`implemented/sidebar-pins.md`](implemented/sidebar-pins.md) |
-| Main-area pages (store `mainView`) | `AgentFormPage.tsx` (create/edit agent — prompt/model/backend/credential/tools/connectors/avatar via `EmojiPicker.tsx`), `ApplicationFormPage.tsx`, `SchedulesPage.tsx`, `ConnectorsPage.tsx`, `HarnessPage.tsx`, `MonitorPage.tsx`, `ItemLibrary.tsx` (the **All** tab — every agent/app: pin / open / archive / restore), `PageHeader.tsx` (shared breadcrumb) |
-| Chat | `ChatView.tsx` (virtualized via `react-virtuoso`; Enter-to-send, Esc-interrupt, queued-message badge, per-message "Fork from here"), `MessageBubble.tsx`, `MessageTime.tsx` (hover-for-time), `SlashCommandMenu.tsx` (`/schedule`, `/remember`, `/research`, `/showme`, `/rewind`, `/fork`, `/archive`, `/model`, `/reset`), `ModelPickerDialog.tsx` (`/model`), `ForkDialog.tsx` (message picker + side-effect confirm + optional git-revert), `ArchivedSessionsDialog.tsx` |
-| In-turn cards & tools | `FileViewerDialog.tsx` (`/showme`), `BgTaskChip.tsx` (bg task status), `QuestionPrompt.tsx` (ask form), `MessageBubble.tsx` (historical tool approval records), `AgentDelegationRequestCard.tsx` + `AgentDelegationEventCard.tsx` (delegation status + injected reply/question/error turns), `SubagentCard.tsx` (native sub-agents), `ResearchCard.tsx` (deep-research phase progress) |
-| Backends / creds / apps | `BackendPanel.tsx` (backend pick), `CredentialPicker.tsx`, `AppIcon.tsx`, `ApplicationView.tsx` (app iframe pane) |
-| State | `stores/sessionStore.ts`, `hooks/useWebSocket.ts`, `hooks/useViewportHeight.ts`; `lib/hydrateSession.ts` owns complete/detail/metadata reads, identity, baselines and auxiliary publication; `sessionList` owns target observation invalidation, and views own navigation and ending observation |
+### Applications
+
+ApplicationManager projects a build's original completion plus actual entrypoint
+to status. AppAgent owns scoped conversations, original ask/SSE/status and request
+slots. BackendSupervisor owns process instances, active uses and confirmed cleanup;
+code, durable data and rebuildable runtime have different lifetimes. Failed
+retirement preserves files, identity and deletion responsibility. Contract:
+[applications](implemented/applications.md).
+Source: `applications.py`, `app_agent.py`, `app_backends.py`.
+
+<a id="in-app-mcp-servers-servermcp_servers"></a>
+<a id="connector-system-serverconnectors--connector_managerpy"></a>
+### Accounts, Agent configuration and providers
+
+UserManager and account DEKs own authentication and secrets. AgentManager owns
+saved defaults; SessionOwner captures effective request settings under a short
+configuration lock. Slow preparation releases that lock and rechecks authority
+at effects. ConnectorManager owns each installation's refresh/binding lifecycle;
+cached credentials do not bypass account or installation checks. Contract:
+[configuration capture](implemented/model-reasoning.md#saving-defaults-and-repairing-an-existing-session),
+with [Connector](implemented/connectors.md) owning external grant details.
+Source: `users.py`, `agent_manager.py`, `sessions/configuration.py`, `connector_manager.py`.
+
+<a id="frontend-websrc"></a>
+### Frontend projections
+
+React views consume one Zustand display state. Domain list/read modules own HTTP
+observations, sparse WS events, write receipts and order reconciliation. They bind
+results to account, session, connection, service generation and read lifetime;
+cancelling a read does not cancel server work. Views own navigation and ending
+observation. Contract: [frontend task navigation](implemented/frontend-list-reconciliation.md).
+Source: `web/src/stores/sessionStore.ts`, `web/src/lib/hydrateSession.ts`,
+`web/src/lib/sessionList.ts`, `web/src/hooks/useWebSocket.ts`.
+
+### Installation and service lifetime
+
+InstallationOwner holds exclusive storage ownership; managed supervisor admission
+requires old-writer exit and current recovery. Domains expose their own drain
+blockers. Installation seals those facts and issues the original handoff receipt;
+shutdown and the external service owner still confirm actual exit. Failed or
+partial sealing cannot publish success. Contract:
+[installation lifecycle](implemented/installation-lifecycle.md).
+Source: `service_installation.py`, `service_scope.py`, `service_health.py`.
+
+## Ownership and failure boundaries
+
+Commands, native I/O and notification delivery carry their original identity.
+One real fact has one authority; a read projection, mailbox or resource handle
+does not become another authority. Keep transaction, quota, file-lock and
+receipt responsibilities distinct even when they share a name or timing.
+
+| Fact | Authority | Consumer boundary |
+| --- | --- | --- |
+| Current-generation execution eligibility | Installation/service owner | Capture the actual resource; an old PID grants no stop authority. |
+| Input acceptance, order and claim | Database transaction + original SessionOwner | UI/queues read projections; unknown is not unaccepted. |
+| Business outcome | Exact committed terminal and input association | Notification, parent processing and actual exit require their own proof. |
+| Wiki file effects | History prepared/applied and operation receipts | A model answer or cancelled waiter cannot prove effects. |
+| Saved configuration and secrets | Account/Agent/credential owners | Startup and updates preserve user choices; current authority still applies. |
+
+Ordinary conflict, cancellation, authentication rejection and notification loss
+remain local business outcomes. Authoritative storage/COMMIT uncertainty uses
+[the shared fail-stop boundary](implemented/current-storage-format.md#事务与失信边界);
+the process does not independently reread, repair or replay work in that generation.
 
 ## The agent model
 
@@ -261,9 +273,8 @@ See [model and reasoning settings](implemented/model-reasoning.md).
    resources. Each consumer observes the same original receipt and completion.
    Recording, notification or cleanup failures do not authorize a model replay.
 
-The complete cross-component relationships are in
-[the execution contract](implemented/architecture-contract.md#输入完成与资源退休).
-[Input admission](implemented/input-reliability.md) owns receipts, evidence and
+[Original completion](implemented/input-reliability.md#原请求完成与失败交接) owns
+consumer settlement and failure takeover. [Input admission](implemented/input-reliability.md) owns receipts, evidence and
 explicit recovery; [model settings](implemented/model-reasoning.md) owns capture
 and inheritance; [Harness](implemented/harness-layer.md) and
 [Codex](implemented/codex-backend.md) own transport-specific qualifications.
@@ -294,7 +305,7 @@ until the question is settled and actual waiters are released.
 Historical tool-approval messages remain readable, without restoring the retired
 approval execution path. Current signed MCP scope contains account/session,
 installation, work and run lease; valid signatures do not keep a retired grant
-alive. See [question and control ownership](implemented/architecture-contract.md#native-question-control).
+alive. See [question and control ownership](implemented/codex-backend.md#native-question-control).
 
 ## Auxiliary and background paths
 
@@ -340,7 +351,7 @@ queues or keeping a second activity ledger. Quiesce's original request receipt
 proves successful sealing, while subsequent shutdown and the external service
 owner prove actual exit. Partial sealing does not publish a success marker.
 [Installation lifecycle](implemented/installation-lifecycle.md) owns the full
-contract; [local operations](local-wsl.md) owns systemd/publication commands.
+contract; [local publication](local-wsl.md#自动发布) owns systemd/publication commands.
 
 ### Accounts and isolation
 
@@ -353,8 +364,7 @@ support revocation, and a server-held master key wraps each account's DEK.
 This is application-level isolation for trusted same-host execution, not an OS
 sandbox against hostile tenants or the host administrator. Known scope gaps and
 exceptions are explicit in [the account contract](implemented/multi-tenancy.md)
-and [remaining policy/security work](plans/multi-tenancy-gaps.md), including the
-current Agent DELETE gap; archive and hard deletion cannot be conflated.
+and [remaining policy/security work](plans/multi-tenancy-gaps.md), and archive and hard deletion cannot be conflated.
 
 ### Persistent state and portability
 
@@ -398,7 +408,7 @@ the resources those settings select.
 first administrator on an empty installation; its default is empty. It is not
 business API/WebSocket authentication or a data-encryption key. Accounts use
 bearer tokens; the master key wraps account DEKs. Existing account data and
-configuration follow the [account contract](implemented/architecture-contract.md#公开接口与账户配置).
+configuration follow the [account contract](implemented/multi-tenancy.md).
 Connector OAuth clients resolve in-app configuration before environment fallback;
 their operating instructions are in [connector setup](connectors-setup.md).
 
@@ -409,3 +419,20 @@ orders unfinished choices. Current source contracts do not establish deployment.
 [Testing](testing.md) owns commands, fixture isolation, evidence reuse and release
 gates. Version-bound protocol observations remain in [reference](reference/);
 selected causal incidents remain in [post-mortems](post-mortems/).
+
+## Design decisions and evidence
+
+The current design deepens existing domain owners where real consumers already
+share an operation: original-return admission, resource observation and settlement,
+configuration capture, runtime I/O, Wiki protected operations, frontend reads and
+installation sealing. Each keeps its distinct commit points and failure scope;
+multiple collections or locks alone do not justify a unified task bus or new
+session authority. Add a mechanism only for a demonstrated requirement that the
+current owner cannot satisfy; this is not a permanent technology blacklist.
+
+The [earlier decision comparison](https://github.com/Danuvius152/Octopus/blob/5899c51d8f3b8fd513084e768e089c4a53f6af1a/docs/implemented/architecture-contract.md#既有领域接口的取舍)
+retains the original alternatives and costs. The
+[Owner scope incident](post-mortems/session-owner-scope-creep.md) and
+[account setup retirement](post-mortems/account-setup-retirement.md) retain causal
+evidence. Budget coordination rationale belongs to [turn safety](implemented/turn-safety.md#预算协调的归属).
+These records establish their recorded revision and scope, not current deployment.

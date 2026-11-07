@@ -17,6 +17,7 @@ def index_repo(tmp_path):
         directory = tmp_path / "docs" / folder
         directory.mkdir(parents=True)
         (directory / "example.md").write_text(f"# {folder} example\n\n> **Status:** {status} — Example.\n")
+    (tmp_path / "docs/README.md").write_text("Task navigation stays authored.\n")
     return tmp_path
 
 
@@ -34,27 +35,28 @@ def test_overlapping_index_markers_are_refused_without_writing(index_repo, outer
     inner = "implemented" if outer == "plans" else "plans"
     endings = (inner, outer) if nested else (outer, inner)
     original = "\n".join((_marker(outer), _marker(inner), *(_marker(folder, True) for folder in endings)))
-    readme = index_repo / "docs/README.md"
-    readme.write_text(original)
+    catalog = index_repo / "docs/catalog.md"
+    catalog.write_text(original)
     for args in ((), ("--check",)):
         result = _run(index_repo, *args)
         assert result.returncode != 0, result.stdout
-        assert readme.read_text() == original
+        assert catalog.read_text() == original
 
 
 @pytest.mark.parametrize("first", ["plans", "implemented"])
 def test_both_disjoint_indexes_regenerate_and_check_without_losing_prose(index_repo, first):
     second = "implemented" if first == "plans" else "plans"
-    readme = index_repo / "docs/README.md"
+    catalog = index_repo / "docs/catalog.md"
     original = "\n".join(("Introduction", _marker(first), _marker(first, True),
                           "Keep this paragraph", _marker(second), _marker(second, True), "End"))
-    readme.write_text(original)
+    catalog.write_text(original)
     assert _run(index_repo, "--check").returncode == 1
-    assert readme.read_text() == original
+    assert catalog.read_text() == original
     assert _run(index_repo).returncode == 0
-    rendered = readme.read_text()
+    rendered = catalog.read_text()
     assert "(implemented/example.md)" in rendered and "(plans/example.md)" in rendered
     assert rendered.startswith("Introduction\n") and rendered.endswith("\nEnd")
     assert "\nKeep this paragraph\n" in rendered
     assert _run(index_repo, "--check").returncode == 0
-    assert readme.read_text() == rendered
+    assert catalog.read_text() == rendered
+    assert (index_repo / "docs/README.md").read_text() == "Task navigation stays authored.\n"

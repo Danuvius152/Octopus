@@ -173,7 +173,7 @@ and actual cleanup matter. Their present owners have changed:
   it cannot discharge an unknown write or a still-owned runner.
 
 Current behavior belongs to [background tasks](../implemented/background-tasks.md),
-[input and retirement](../implemented/architecture-contract.md#输入完成与资源退休)
+[input and retirement](../implemented/input-reliability.md#原请求完成与失败交接)
 and [Codex](../implemented/codex-backend.md). The original process and prompt
 regressions remain useful; the mounted-input and consumer cases in
 [test_mcp_input_completion.py](../../tests/test_mcp_input_completion.py) exercise

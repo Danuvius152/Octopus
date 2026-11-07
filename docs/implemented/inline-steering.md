@@ -35,7 +35,7 @@ run while that backlog remains paused; explicit resume restores queued dispatch.
 BG, Research and delegation returns remain separate inputs in successful-admission
 order. They are not automatically batched or converted to native steer. Current
 boundaries are maintained in the
-[execution contract](architecture-contract.md#输入完成与资源退休).
+[execution contract](input-reliability.md#原请求完成与失败交接).
 
 ## Bound Codex root and queue qualification
 
@@ -87,7 +87,7 @@ an earlier RPC timeout awaiting root completion, remains reviewable without a
 restore-and-run action. Requeued input that later runs normally does not retain
 a stale steer notice. Full identity, evidence and
 recovery rules belong to the
-[input contract](architecture-contract.md#codex-native-input-evidence).
+[input contract](input-reliability.md#codex-native-input-evidence).
 
 ## Output and process lifetime
 

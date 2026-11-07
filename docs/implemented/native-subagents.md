@@ -79,7 +79,7 @@ The session keeps the last observation per card identity in memory, bounded to
 `tool_call_id`; App Server cards use `card_id` and typed native provenance.
 A server restart loses this live cache. A missing card or server restart does not
 prove native success; request completion and resource retirement have their own
-[contract](architecture-contract.md#输入完成与资源退休).
+[contract](input-reliability.md#原请求完成与失败交接).
 
 App Server status observations are durable `native_subagent` messages. Complete
 child text and tools retain their original transcript rows, with the body stored
@@ -237,7 +237,7 @@ idle budget. Once execution admission closes, late child items and states retain
 their original association without extending cleanup. The first cancellation
 cause, including parent_timeout, survives a later native interrupted terminal.
 Child bodies and helper status remain separate from the root's selected reply;
-the [result contract](architecture-contract.md#原请求结果读取) owns that selection.
+the [result contract](input-reliability.md#原请求结果读取) owns that selection.
 
 ## 8. Cost
 

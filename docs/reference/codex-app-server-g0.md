@@ -218,7 +218,7 @@ codex_version，与 MCP 的 threadId 一起核对原根。
 证据。为直接观察 MCP 调用，实验局部关闭 CodeMode；这不证明外层 CodeMode
 调用可按名字关联内部 ask。首次使用不受支持的 flat function 格式只列举工具，
 未发生 MCP 调用，已排除在有效证据外。该观察支持
-[原调用窄关联](../implemented/architecture-contract.md#mcp-question-retirement)，
+[原调用窄关联](../implemented/harness-layer.md#mcp-question-retirement)，
 不证明 provider 消费、本地退休或真实模型任务成功。
 
 ## 证据定位与边界

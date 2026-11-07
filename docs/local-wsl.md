@@ -8,7 +8,7 @@
 | 定位配置、密钥和持久资料 | [配置和数据](#配置和数据) |
 | 重建依赖、代理和本地 skills | [环境重建](#环境重建) |
 | 放置临时分析、脚本和工作副本 | [临时任务目录](#临时任务目录) |
-| 选择本机验证环境与凭据 | [本机测试](#本机测试)，门禁规则见 [testing.md](testing.md) |
+| 选择本机验证环境与凭据 | [PATH/代理](#path-与代理)、[离线目录](#离线目录与浏览器)、[live 凭据/网络](#live-凭据与网络) |
 | 管理服务、手机入口或发布 | [服务管理](#服务管理)、[手机公网入口](#手机公网入口)、[自动发布](#自动发布) |
 | 合并上游变化 | [同步原作者更新](#同步原作者更新) |
 
@@ -215,6 +215,8 @@ workspace，测试数据库、账户、服务安装资源和 CLI 输出仍须与
 测试命令、门禁和可选评测统一见 [testing.md](testing.md#test-coverage)：离线覆盖
 Claude Code 与 Codex，日常实机仅 Codex；文档整理只做链接、索引和差异检查。
 
+### 离线目录与浏览器
+
 全量离线使用四个按文件分组的 pytest worker。WSL 的 `/tmp` 是容量有限的 tmpfs；
 需要磁盘空间或运行真实 Codex 时，在 `~/.cache/octopus-tests/` 下创建本轮独立目录，
 将 `TMPDIR` 指向它。不要放进 `~/.octopus` 或账户工作区：子目录仍继承受管安装归属。
@@ -224,8 +226,10 @@ Claude Code 与 Codex，日常实机仅 Codex；文档整理只做链接、索�
 CLI 登录目录与 `TMPDIR` 放在同一本轮运行根下的平行目录，避免辅助程序安装限制。
 
 仓库锁定的 Playwright 1.58.2 尚未提供 Ubuntu 26.04 平台包，本机使用它的
-Ubuntu 24.04 Chromium 构建，并已安装官方浏览器依赖。运行浏览器测试前指定
-平台，同时明确绕过本机代理：
+Ubuntu 24.04 Chromium 构建，并已安装官方浏览器依赖。运行浏览器测试前须完成
+[PATH、代理绕过与 Playwright 平台设置](#path-与代理)。
+
+### PATH 与代理
 
 交互终端已通过 `.bashrc` 加载 PATH、HTTP/HTTPS 代理及本机绕过规则。
 下面 PATH 和 NO_PROXY 的 `export` 用于不会加载 `.bashrc` 的非交互 shell；
@@ -238,6 +242,8 @@ export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
 export no_proxy="$NO_PROXY"
 export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64
 ```
+
+### Live 凭据与网络
 
 research 实机测试需要目录式凭据：临时登录目录链接既有选定 credential 的
 `auth.json`，用 `OCTOPUS_CODEX_HOME_DIR` 指定目录根，并在临时 DB 登记对应
@@ -275,7 +281,7 @@ CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式�
 ```
 
 可选 Wiki 测量、维护意图和自然问答命令见
-[Wiki evaluation method](testing.md#wiki-evaluation-method)，仍使用上述隔离与网络约束。
+[Wiki evaluation method](wiki-evaluation.md#wiki-evaluation-method)，仍使用上述隔离与网络约束。
 
 ## Wiki 文件事件与索引进程
 
@@ -284,19 +290,10 @@ CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式�
 同进程因注册绑定更新而重叠的 Store 租约共享观察器与尚未提交的事件，最后一个
 租约释放后才关闭。需要离线打开 Store 时，应先停止拥有该索引的后端。
 
-当前代码要求 Wiki 格式17、主库格式8；实际运行提交及格式以对应发布验收为准。每库只保留一个
-`PRAGMA user_version` 当前标记，启动、注册及恢复打开时等值匹配，失配在写入前
-拒绝。新空库直接建立完整当前结构；普通重开不解释或转换旧格式。完整存量结构、
-来源、授权、任务、通知/ACK及文章证明由发布交接核验，格式变化须在旧 writer
-退出后、新服务启动前完成有限转换，结构、数据和标记在同一原事务中提交。
-保留原 DB、已有 WAL、配置和正文；索引库中的持久权威不能按缓存删除或补建。
-失配时按原发布计划核验并前向继续，不能只改标记解除拒绝。
-失败保持旧格式或已经完整提交的新格式；COMMIT 无法确认时按原存储合同退出70。
-item 与内部写入 journal 的现有恢复职责、当前派生投影恢复仍保留。文件事件协议仍为1：
-先持久接收，再原子应用身份与索引，最后精确确认。
-删除重建结束旧身份，已匹配重命名/原子保存沿用身份。索引失败保留事件重试；
-接收中断、无法配对的移动或通知溢出会保留不确定状态并返回 503。应核对阶段
-和证据，不能删除队列或用补偿扫描强行伪造 ready。
+格式拒绝或发布转换先查[当前存储格式与交接](implemented/current-storage-format.md)。
+保留原 DB、WAL、配置和正文；账本包含持久权威，不能按缓存删除、补建或只改 marker。
+本节处理文件事件与旧 intent 的操作者动作；Registry 的准入与恢复规则归
+[Wiki 恢复合同](implemented/wiki-development-summary.md#恢复与效果核验)。
 
 外部修改 intent 只接受当前 v2、source-binding protocol 1 及完整的操作字段。
 遇到旧版、不完整或未知的 `external-change.json`，新读取器在写历史、同步和
@@ -314,7 +311,7 @@ schema 及持久协议的已验证代码，或在保留现有状态的基础上�
 制作旧版兼容构建，不维护第二份知识库。不能仅放宽版本检查或恢复旧数据库
 覆盖当前写入。停机期间的
 补偿扫描只能观察最终文件，不能恢复未被观察的瞬时身份历史。实现细节与
-证据边界见[Wiki 运行合同](implemented/wiki-development-summary.md#当前运行合同)。
+证据边界见[Wiki 恢复合同](implemented/wiki-development-summary.md#恢复与效果核验)。
 
 ## 服务管理
 
@@ -353,7 +350,7 @@ Codex 登录位置保持原绑定。共享依赖的改变仍会影响正式服�
 本地开发的 `bun run dev` 使用 5173 端口；8000 提供服务快照的 `web/dist`。
 开发目录改动不会直接出现在 8000，不能靠反复重启把未验收源码带入正式服务。
 
-### 手机公网入口
+## 手机公网入口
 
 本机使用 Cloudflare Quick Tunnel，将公网 HTTPS 请求转到现有的
 `http://127.0.0.1:8000`。入口由独立的用户服务 `octopus-tunnel.service`
@@ -365,7 +362,7 @@ WSL、登录或定时自启，进程退出后也不由 systemd 自动重启。�
 脱离操作终端运行；cloudflared 进程仍在时会自行重连网络，进程退出或 WSL
 关闭后则需要再次明确要求并手动启动。关闭公网入口只停止这个独立服务。
 
-#### 安装与配置
+### 安装与配置
 
 2026-10-30 已安装官方 `cloudflared 2026.10.6` Linux amd64 二进制到
 `~/.local/bin/cloudflared`，与官方发布的 SHA-256 校验一致。下载来源见
@@ -433,7 +430,7 @@ systemctl --user daemon-reload
 systemctl --user is-enabled octopus-tunnel
 ```
 
-#### 手动使用与故障处理
+### 手动使用与故障处理
 
 先确认 `octopus.service` 运行且 `http://127.0.0.1:8000/ready` 返回 200。
 需要开放公网入口且用户已经明确要求时执行：
@@ -485,7 +482,7 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
 电脑、WSL 和服务须持续运行；systemd 不能阻止 Windows 睡眠或 WSL 退出，
 保持 WSL 的方法见[用户指南](user-guide.md#电脑需要保持什么状态)。
 
-### 自动发布
+## 自动发布
 
 本节适用于已授权、完成本机门禁并推送 main 的代码交付；“发布”或“上线”即
 授权执行，用户本次指令优先。提交范围及纯文档动作见

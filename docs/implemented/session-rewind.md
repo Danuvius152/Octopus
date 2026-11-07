@@ -66,7 +66,7 @@ not prove that the other has been prepared.
 
 The reservation spans snapshot, preparation and revert and is released on all
 exit paths. Forks and existing requests follow the shared
-[execution and retirement contract](architecture-contract.md#输入完成与资源退休).
+[execution and retirement contract](input-reliability.md#原请求完成与失败交接).
 A preliminary UI preview cannot authorize later filesystem changes; safe revert
 reruns its preconditions when executed.
 

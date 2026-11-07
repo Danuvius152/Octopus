@@ -6,6 +6,10 @@
 
 Current business execution requires an active account. An empty installation
 supports first-account creation; later registration uses invitation codes.
+The setup proof creates the first administrator, account DEK and owned protected
+Agent as one committed aggregate. A lost setup response goes through normal login,
+not repeated account/key creation. Missing proof or retained pre-account data
+keeps business closed; startup preserves the original material.
 The old pre-account business mode, installation adoption, global access-token
 rotation and its recovery route have been retired. Current account transfer is
 the explicit [offline operation](../backup-and-migrate.md#account-export-and-import).
@@ -57,8 +61,8 @@ The route-to-SQLite barriers in `tests/test_auth_routes.py` cover these races;
 
 HTTP ownership, MCP invocation authority and a running subprocess have distinct
 lifetimes. Revoking login is not proof that an already-running child has retired.
-The [current execution contract](architecture-contract.md) owns admission and
-retirement; the [remaining tenancy proposal](../plans/multi-tenancy-gaps.md) must
+The [input contract](input-reliability.md) owns admission and
+[Harness](harness-layer.md#execution-and-resources) owns resource retirement; the [remaining tenancy proposal](../plans/multi-tenancy-gaps.md) must
 be checked against code before treating any old audit finding as still present.
 
 <a id="websocket-delivery"></a>
@@ -170,6 +174,35 @@ agents and applications under the host user; it is not an OS sandbox against
 hostile tenants or root. Per-tenant execution isolation would require a separate
 design. Application code, durable data and rebuildable dependencies have distinct
 [directory ownership](application-backends.md#3-three-directories-three-owners).
+
+## 附件与长输入归属
+
+新附件和长输入使用账户下 `attachments/<session_id>/` 与
+`large-prompts/<session_id>/`，上传、下载、发送、fork 引用/复制、准备、重试和
+清理使用同一 owner，不逐请求改全局 Settings。存量文件按真实 owner 及引用交接，
+涵盖归档会话、fork 后代和原生 transcript 的绝对路径；归属不明保留。旧 writer
+退休且内容与引用核验完成后才清旧位置，删除会话不证明文件无人使用。正常写入
+遵守安装资源声明，不能补 marker、删有效 marker 或关闭检查绕过归属。
+
+普通 Codex 大输入沿业务 RPC inline；Research exec leaf 保留自己的 argv 字节
+预算与长输入路径，one-shot 使用无工具 worker。各传输核验真实输入边界，不按
+backend 名猜 argv 限制。诊断保留可读上下文，仅掩码秘密；显示裁剪、原文可取、
+实际历史重读和真正丢弃字节分别判断。凭据 home 的发布和清理归
+[凭据合同](harness-credential-reauth.md#codex-device-operation-ownership)。
+
+## MCP 授权与 transport 清理
+
+正式会话使用 HTTP scope；无 session 的 stdio 装配保留参数核验与诊断用途，
+不作为 HTTP 失败后的自动接管，也不豁免当前账户和工具授权。
+
+正确签名的退休 scope 仅可 DELETE 它初始化的确切 transport；完整 scope 含账户、
+会话、installation、work 和 run lease。新 lease 不继承旧 transport 清理权，
+退休 POST 仍拒绝。核验实际 SDK transport 释放，不能只看 HTTP 状态；401 需
+区分 method、route 和 runtime PID，迟到清理拒绝不改写已完成结果。工具启动
+失败可能没有 is_error 回包，缺错误行不证明可用。
+
+canonical 授权根固定比较，访问路径仍解析 symlink；后来的链接不能扩大原授权。
+内部无 owner 的后台查询不等于合法用户身份，按真实调用边界核验。
 
 ## Verification and remaining scope
 

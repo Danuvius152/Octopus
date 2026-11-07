@@ -70,11 +70,11 @@ they cannot be logged and skipped before files are removed. Archived conversatio
 rows are deleted without restoring a model. Development histories are retained;
 application-owned conversations are removed. See the
 [application lifecycle](applications.md#5-rest-surface) for failure, retry and restart.
-See the [architecture contract](architecture-contract.md#输入完成与资源退休)
+See the [original completion contract](input-reliability.md#原请求完成与失败交接)
 for the shared ownership and retirement rules. Deployment is verified separately.
 
 Historical request status uses the shared
-[session result association](architecture-contract.md#原请求结果读取): ordered fragments
+[session result association](input-reliability.md#原请求结果读取): ordered fragments
 from legacy records are joined with two newlines without trimming the whole
 saved reply, including failed outcomes. New App Server status and live replies
 share the selected root items and formatting: ignore empty fragments, join with
