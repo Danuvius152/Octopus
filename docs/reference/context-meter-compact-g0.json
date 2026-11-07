@@ -1,0 +1,1622 @@
+{
+  "evidence_kind": "unmodified_binary_with_synthetic_loopback_provider",
+  "date": "2026-11-07",
+  "octopus_revision": "96fd21734b775bda101127678c4186b4aef4906b",
+  "real_model": false,
+  "product_integration": false,
+  "description": "Contiguous client/server compact interval; original identities and frames retained. Native state and provider request bodies remain in isolated test artifacts. Original overall run failed; protocol assertions separately verified from those artifacts.",
+  "source_revisions": {
+    "0.166.0": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+    "0.167.0": "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a"
+  },
+  "captures": [
+    {
+      "version": "0.166.0",
+      "source_revision": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+      "binary_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
+      "route": "local",
+      "identity": {
+        "thread": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+        "seed_turn": "01a1b49e-ba04-73c0-a77f-d1add2b3409c",
+        "compact_turn": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+        "compact_item": "01a1b49e-bad2-71b1-b1ea-5137863437be",
+        "compact_rpc": "g0:2:4",
+        "followup_turn": "01a1b49e-bb69-7ea3-bf11-a346e4b41d1d"
+      },
+      "effective_config_projection": {
+        "model": "gpt-6.1-sol",
+        "model_provider": "g0",
+        "model_reasoning_effort": "low",
+        "approval_policy": "never",
+        "sandbox_mode": "read-only",
+        "model_context_window": 100000,
+        "model_auto_compact_token_limit": 1000000,
+        "compact_prompt": "Summarize the conversation.",
+        "model_providers": {
+          "g0": {
+            "name": "G0 loopback synthetic provider",
+            "base_url": "http://127.0.0.1:46665/v1",
+            "model_catalog_url": null,
+            "env_key": null,
+            "env_key_instructions": null,
+            "experimental_bearer_token": null,
+            "auth": null,
+            "gateway_oauth": null,
+            "aws": null,
+            "project_id": null,
+            "location": null,
+            "credential_file": null,
+            "wire_api": "responses",
+            "capabilities": {
+              "external_web_access": null,
+              "remote_compaction": "unsupported"
+            },
+            "query_params": null,
+            "http_headers": null,
+            "env_http_headers": null,
+            "request_max_retries": null,
+            "stream_max_retries": null,
+            "stream_idle_timeout_ms": null,
+            "websocket_connect_timeout_ms": null,
+            "requires_openai_auth": false,
+            "supports_websockets": false,
+            "supports_standalone_web_search": false
+          }
+        },
+        "features": {
+          "token_budget": false,
+          "async_compaction": false,
+          "sleep_tool": false,
+          "goals": false,
+          "wake_on_agent_messages": false
+        }
+      },
+      "observed_interval": [
+        {
+          "seq": 8,
+          "generation": 2,
+          "direction": "client",
+          "monotonic_ns": 13073256461810,
+          "frame": {
+            "method": "thread/compact/start",
+            "params": {
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9"
+            },
+            "id": "g0:2:4"
+          }
+        },
+        {
+          "seq": 9,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073256534446,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "turnId": "01a1b49e-ba04-73c0-a77f-d1add2b3409c",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "last": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031663819
+          }
+        },
+        {
+          "seq": 10,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073259086220,
+          "frame": {
+            "id": "g0:2:4",
+            "result": {}
+          }
+        },
+        {
+          "seq": 11,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073262543323,
+          "frame": {
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "status": {
+                "type": "active",
+                "activeFlags": []
+              }
+            },
+            "emittedAtMs": 1794031663825
+          }
+        },
+        {
+          "seq": 12,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073262631716,
+          "frame": {
+            "method": "turn/started",
+            "params": {
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "turn": {
+                "id": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+                "rootTurnId": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+                "items": [],
+                "itemsView": "notLoaded",
+                "status": "inProgress",
+                "error": null,
+                "startedAt": 1794031663,
+                "completedAt": null,
+                "durationMs": null
+              }
+            },
+            "emittedAtMs": 1794031663825
+          }
+        },
+        {
+          "seq": 13,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073264421090,
+          "frame": {
+            "method": "item/started",
+            "params": {
+              "item": {
+                "type": "contextCompaction",
+                "id": "01a1b49e-bad2-71b1-b1ea-5137863437be",
+                "startedAtMs": 1794031663826,
+                "completedAtMs": null
+              },
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "turnId": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+              "startedAtMs": 1794031663826
+            },
+            "emittedAtMs": 1794031663826
+          }
+        },
+        {
+          "seq": 14,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073273148641,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "turnId": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "last": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031663835
+          }
+        },
+        {
+          "seq": 15,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073273245581,
+          "frame": {
+            "method": "account/rateLimits/updated",
+            "params": {
+              "rateLimits": {
+                "limitId": "codex",
+                "limitName": null,
+                "normalModelSlug": null,
+                "primary": null,
+                "secondary": null,
+                "credits": null,
+                "individualLimit": null,
+                "spendControlReached": null,
+                "planType": null,
+                "rateLimitReachedType": null
+              }
+            },
+            "emittedAtMs": 1794031663835
+          }
+        },
+        {
+          "seq": 16,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073276143288,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "turnId": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 2580,
+                  "inputTokens": 2500,
+                  "cachedInputTokens": 400,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 80,
+                  "reasoningOutputTokens": 20
+                },
+                "last": {
+                  "totalTokens": 1340,
+                  "inputTokens": 1300,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031663838
+          }
+        },
+        {
+          "seq": 17,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073276225963,
+          "frame": {
+            "method": "account/rateLimits/updated",
+            "params": {
+              "rateLimits": {
+                "limitId": "codex",
+                "limitName": null,
+                "normalModelSlug": null,
+                "primary": null,
+                "secondary": null,
+                "credits": null,
+                "individualLimit": null,
+                "spendControlReached": null,
+                "planType": null,
+                "rateLimitReachedType": null
+              }
+            },
+            "emittedAtMs": 1794031663838
+          }
+        },
+        {
+          "seq": 18,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073278944949,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "turnId": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 2580,
+                  "inputTokens": 2500,
+                  "cachedInputTokens": 400,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 80,
+                  "reasoningOutputTokens": 20
+                },
+                "last": {
+                  "totalTokens": 12527,
+                  "inputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 0,
+                  "reasoningOutputTokens": 0
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031663841
+          }
+        },
+        {
+          "seq": 19,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073279004286,
+          "frame": {
+            "method": "account/rateLimits/updated",
+            "params": {
+              "rateLimits": {
+                "limitId": "codex",
+                "limitName": null,
+                "normalModelSlug": null,
+                "primary": null,
+                "secondary": null,
+                "credits": null,
+                "individualLimit": null,
+                "spendControlReached": null,
+                "planType": null,
+                "rateLimitReachedType": null
+              }
+            },
+            "emittedAtMs": 1794031663841
+          }
+        },
+        {
+          "seq": 20,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073279724015,
+          "frame": {
+            "method": "item/completed",
+            "params": {
+              "item": {
+                "type": "contextCompaction",
+                "id": "01a1b49e-bad2-71b1-b1ea-5137863437be",
+                "startedAtMs": 1794031663826,
+                "completedAtMs": 1794031663841
+              },
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "turnId": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+              "completedAtMs": 1794031663841
+            },
+            "emittedAtMs": 1794031663842
+          }
+        },
+        {
+          "seq": 21,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073282516627,
+          "frame": {
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "status": {
+                "type": "idle"
+              }
+            },
+            "emittedAtMs": 1794031663845
+          }
+        },
+        {
+          "seq": 22,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13073282589017,
+          "frame": {
+            "method": "turn/completed",
+            "params": {
+              "threadId": "01a1b49e-b9f1-7b21-99c8-b94497a2d2b9",
+              "turn": {
+                "id": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+                "rootTurnId": "01a1b49e-bacd-7c93-bb6e-8738995b9487",
+                "items": [],
+                "itemsView": "notLoaded",
+                "status": "completed",
+                "error": null,
+                "startedAt": 1794031663,
+                "completedAt": 1794031663,
+                "durationMs": 21
+              }
+            },
+            "emittedAtMs": 1794031663845
+          }
+        }
+      ],
+      "provider_request_count": 3,
+      "fresh_resume_consumed_compacted_history": true,
+      "retirements": [
+        {
+          "pid": 59710,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 59830,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 59948,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        }
+      ],
+      "original_overall_outcome": "failed",
+      "original_failure": [
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT github.com:443",
+        "blocked external CONNECT github.com:443",
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT github.com:443"
+      ],
+      "artifact_sha256": {
+        "effective-config.json": "04eca30470b9c27a157fc51828464d7a476543573866bedca49da54e8c17714a",
+        "host-1.jsonl": "7b521de73b7f9462a46cd540c7df45856586106a9594357ba9b4cf6c9bef61af",
+        "host-1.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "host-2.jsonl": "57bb0f4cb77e01b40cc367942c541e5f3cbd5d51ca3b414feee6813bf0d21558",
+        "host-2.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "host-3.jsonl": "6ea932a5f29615e32e5cfb04f5c093f0dd10c22aef3883c401c91b3d149f7c4e",
+        "host-3.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "request-0.json": "5ab59ab759c60b11a0169391340a477a15abafa935eb3f3acdf328515b3be899",
+        "request-0.raw": "67a256cb654477f00437b5b03b8a0e535fe1f48681a8e3a3d41b06be3adf32ca",
+        "request-1.json": "4626921822bf47cd8e3f0198c36af3f4074ec3fb9acd67280c2462e272686e63",
+        "request-1.raw": "edc58421b2dbce3ae23822b5b34bc6e6ba53fd209f82c80714a3428211dc4c85",
+        "request-2.json": "6afe39ece5a6cd3673fd85aac782f169556cac52b1472761579fe42ba401d006",
+        "request-2.raw": "188fc8d638a873c5910829d277d03ab5ee943c741eb39d0fee030fa1216ab4bc",
+        "response-0.sse": "75ff8a1f49a3ed2567a25cc29b2445ca6c6ee4f8489d988ad586b9f9eef74b44",
+        "response-1.sse": "82bc882675e4e95d92eb72e7651aac53437765bf40ce5e8a860cde329c7415af",
+        "response-2.sse": "2818d6926c1d7d300b09c70ccdb3fdf9e711914c10deaf148039724fd2d8de31",
+        "result.json": "06a96c2ef70fab844fa9a709697322b1bb106264b305c5c2b5c750831208646c"
+      }
+    },
+    {
+      "version": "0.166.0",
+      "source_revision": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+      "binary_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
+      "route": "remote",
+      "identity": {
+        "thread": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f",
+        "seed_turn": "01a1b49e-bfda-7271-baea-db78edf8bb2a",
+        "compact_turn": "01a1b49e-c09e-76a1-807e-b6575ccef579",
+        "compact_item": "01a1b49e-c0a3-7f03-b2bd-40571eefe3e4",
+        "compact_rpc": "g0:2:4",
+        "followup_turn": "01a1b49e-c125-7d50-9b9b-4ad060752b50"
+      },
+      "effective_config_projection": {
+        "model": "gpt-6.1-sol",
+        "model_provider": "g0",
+        "model_reasoning_effort": "low",
+        "approval_policy": "never",
+        "sandbox_mode": "read-only",
+        "model_context_window": 100000,
+        "model_auto_compact_token_limit": 1000000,
+        "compact_prompt": "Summarize the conversation.",
+        "model_providers": {
+          "g0": {
+            "name": "G0 loopback synthetic provider",
+            "base_url": "http://127.0.0.1:45175/v1",
+            "model_catalog_url": null,
+            "env_key": null,
+            "env_key_instructions": null,
+            "experimental_bearer_token": null,
+            "auth": null,
+            "gateway_oauth": null,
+            "aws": null,
+            "project_id": null,
+            "location": null,
+            "credential_file": null,
+            "wire_api": "responses",
+            "capabilities": {
+              "external_web_access": null,
+              "remote_compaction": "v2"
+            },
+            "query_params": null,
+            "http_headers": null,
+            "env_http_headers": null,
+            "request_max_retries": null,
+            "stream_max_retries": null,
+            "stream_idle_timeout_ms": null,
+            "websocket_connect_timeout_ms": null,
+            "requires_openai_auth": false,
+            "supports_websockets": false,
+            "supports_standalone_web_search": false
+          }
+        },
+        "features": {
+          "token_budget": false,
+          "async_compaction": false,
+          "sleep_tool": false,
+          "goals": false,
+          "wake_on_agent_messages": false
+        }
+      },
+      "observed_interval": [
+        {
+          "seq": 8,
+          "generation": 2,
+          "direction": "client",
+          "monotonic_ns": 13074745067593,
+          "frame": {
+            "method": "thread/compact/start",
+            "params": {
+              "threadId": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f"
+            },
+            "id": "g0:2:4"
+          }
+        },
+        {
+          "seq": 9,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13074745135268,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f",
+              "turnId": "01a1b49e-bfda-7271-baea-db78edf8bb2a",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "last": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031665307
+          }
+        },
+        {
+          "seq": 10,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13074748080587,
+          "frame": {
+            "id": "g0:2:4",
+            "result": {}
+          }
+        },
+        {
+          "seq": 11,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13074751790866,
+          "frame": {
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f",
+              "status": {
+                "type": "active",
+                "activeFlags": []
+              }
+            },
+            "emittedAtMs": 1794031665314
+          }
+        },
+        {
+          "seq": 12,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13074751886943,
+          "frame": {
+            "method": "turn/started",
+            "params": {
+              "threadId": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f",
+              "turn": {
+                "id": "01a1b49e-c09e-76a1-807e-b6575ccef579",
+                "rootTurnId": "01a1b49e-c09e-76a1-807e-b6575ccef579",
+                "items": [],
+                "itemsView": "notLoaded",
+                "status": "inProgress",
+                "error": null,
+                "startedAt": 1794031665,
+                "completedAt": null,
+                "durationMs": null
+              }
+            },
+            "emittedAtMs": 1794031665314
+          }
+        },
+        {
+          "seq": 13,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13074753575078,
+          "frame": {
+            "method": "item/started",
+            "params": {
+              "item": {
+                "type": "contextCompaction",
+                "id": "01a1b49e-c0a3-7f03-b2bd-40571eefe3e4",
+                "startedAtMs": 1794031665315,
+                "completedAtMs": null
+              },
+              "threadId": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f",
+              "turnId": "01a1b49e-c09e-76a1-807e-b6575ccef579",
+              "startedAtMs": 1794031665315
+            },
+            "emittedAtMs": 1794031665316
+          }
+        },
+        {
+          "seq": 14,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13074765275596,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f",
+              "turnId": "01a1b49e-c09e-76a1-807e-b6575ccef579",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "last": {
+                  "totalTokens": 12426,
+                  "inputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 0,
+                  "reasoningOutputTokens": 0
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031665327
+          }
+        },
+        {
+          "seq": 15,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13074766110197,
+          "frame": {
+            "method": "item/completed",
+            "params": {
+              "item": {
+                "type": "contextCompaction",
+                "id": "01a1b49e-c0a3-7f03-b2bd-40571eefe3e4",
+                "startedAtMs": 1794031665315,
+                "completedAtMs": 1794031665327
+              },
+              "threadId": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f",
+              "turnId": "01a1b49e-c09e-76a1-807e-b6575ccef579",
+              "completedAtMs": 1794031665327
+            },
+            "emittedAtMs": 1794031665328
+          }
+        },
+        {
+          "seq": 16,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13074768841732,
+          "frame": {
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f",
+              "status": {
+                "type": "idle"
+              }
+            },
+            "emittedAtMs": 1794031665331
+          }
+        },
+        {
+          "seq": 17,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13074768920217,
+          "frame": {
+            "method": "turn/completed",
+            "params": {
+              "threadId": "01a1b49e-bfcd-78e2-b5eb-c271649cde6f",
+              "turn": {
+                "id": "01a1b49e-c09e-76a1-807e-b6575ccef579",
+                "rootTurnId": "01a1b49e-c09e-76a1-807e-b6575ccef579",
+                "items": [],
+                "itemsView": "notLoaded",
+                "status": "completed",
+                "error": null,
+                "startedAt": 1794031665,
+                "completedAt": 1794031665,
+                "durationMs": 18
+              }
+            },
+            "emittedAtMs": 1794031665331
+          }
+        }
+      ],
+      "provider_request_count": 3,
+      "fresh_resume_consumed_compacted_history": true,
+      "retirements": [
+        {
+          "pid": 60065,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 60186,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 60306,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        }
+      ],
+      "original_overall_outcome": "failed",
+      "original_failure": [
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT github.com:443",
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT github.com:443",
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT github.com:443"
+      ],
+      "artifact_sha256": {
+        "effective-config.json": "7a7a060053c617f076630fc72d5f7da4309be9a1fabd6eea1a6000715897c9cf",
+        "host-1.jsonl": "8d25b673917eed799c43754fb443e884f0054ce5328b0c0c8185ba28f2a1fa8f",
+        "host-1.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "host-2.jsonl": "a70c7c656ab70152ac65fde58add965cfdbb7a285902871e1c2930a76d393274",
+        "host-2.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "host-3.jsonl": "bd564d03fe7cf40bb064c2ae7c9171ceb6952e3e9d19412040606d042bd906f3",
+        "host-3.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "request-0.json": "0f6455dbf344f2595ed8d3df3fb805d53e8cd04211c7329af73eb554d0b44f04",
+        "request-0.raw": "09877e0e9242d98649920a4259f4bb3c664e3b9d546641929669849000c9d303",
+        "request-1.json": "89ca05282000b31357ac5d8b3df1c58a803fd43a2fc82d9a51a8815075020a39",
+        "request-1.raw": "00e2d38d258ed78f68b4dc271c0997818f9796884eee8a31090460db8128d5ab",
+        "request-2.json": "563c1170a6781b1ea60d66e311663594530c131b0437a9f0bf7c90c0bdbc2acf",
+        "request-2.raw": "8a75244dda182a2b126c9694ea07048915373f91bfe2f57af199abeeceaaf5a4",
+        "response-0.sse": "75ff8a1f49a3ed2567a25cc29b2445ca6c6ee4f8489d988ad586b9f9eef74b44",
+        "response-1.sse": "5e462153b85b087eba840835ff505ca1865fcc2252114f6671f1b95e00aa0acc",
+        "response-2.sse": "2818d6926c1d7d300b09c70ccdb3fdf9e711914c10deaf148039724fd2d8de31",
+        "result.json": "cc8117652a928c64a02a10a5b1850aab332ef17a25271237ba605fa9c3fe5133"
+      }
+    },
+    {
+      "version": "0.167.0",
+      "source_revision": "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
+      "binary_sha256": "cdcb45aaa01d0f14e298985e09465aebccd47f64ecd298aea44814af7b62bbda",
+      "route": "local",
+      "identity": {
+        "thread": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+        "seed_turn": "01a1b49e-c5a4-7612-91a6-15801ac81844",
+        "compact_turn": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+        "compact_item": "01a1b49e-c678-7380-8014-f85f71823ddb",
+        "compact_rpc": "g0:2:4",
+        "followup_turn": "01a1b49e-c703-7061-abe6-d33a775da473"
+      },
+      "effective_config_projection": {
+        "model": "gpt-6.1-sol",
+        "model_provider": "g0",
+        "model_reasoning_effort": "low",
+        "approval_policy": "never",
+        "sandbox_mode": "read-only",
+        "model_context_window": 100000,
+        "model_auto_compact_token_limit": 1000000,
+        "compact_prompt": "Summarize the conversation.",
+        "model_providers": {
+          "g0": {
+            "name": "G0 loopback synthetic provider",
+            "base_url": "http://127.0.0.1:46471/v1",
+            "model_catalog_url": null,
+            "env_key": null,
+            "env_key_instructions": null,
+            "experimental_bearer_token": null,
+            "auth": null,
+            "gateway_oauth": null,
+            "aws": null,
+            "project_id": null,
+            "location": null,
+            "credential_file": null,
+            "wire_api": "responses",
+            "capabilities": {
+              "cyber_access_programs": null,
+              "external_web_access": null,
+              "remote_compaction": "unsupported"
+            },
+            "query_params": null,
+            "http_headers": null,
+            "env_http_headers": null,
+            "request_max_retries": null,
+            "stream_max_retries": null,
+            "stream_idle_timeout_ms": null,
+            "websocket_connect_timeout_ms": null,
+            "requires_openai_auth": false,
+            "supports_websockets": false,
+            "supports_standalone_web_search": false
+          }
+        },
+        "features": {
+          "token_budget": false,
+          "async_compaction": false,
+          "sleep_tool": false,
+          "goals": false,
+          "wake_on_agent_messages": false
+        }
+      },
+      "observed_interval": [
+        {
+          "seq": 8,
+          "generation": 2,
+          "direction": "client",
+          "monotonic_ns": 13076237470396,
+          "frame": {
+            "method": "thread/compact/start",
+            "params": {
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b"
+            },
+            "id": "g0:2:4"
+          }
+        },
+        {
+          "seq": 9,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076237542624,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "turnId": "01a1b49e-c5a4-7612-91a6-15801ac81844",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "last": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031666800
+          }
+        },
+        {
+          "seq": 10,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076240162571,
+          "frame": {
+            "id": "g0:2:4",
+            "result": {}
+          }
+        },
+        {
+          "seq": 11,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076243816685,
+          "frame": {
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "status": {
+                "type": "active",
+                "activeFlags": []
+              }
+            },
+            "emittedAtMs": 1794031666806
+          }
+        },
+        {
+          "seq": 12,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076243899770,
+          "frame": {
+            "method": "turn/started",
+            "params": {
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "turn": {
+                "id": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+                "rootTurnId": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+                "items": [],
+                "itemsView": "notLoaded",
+                "status": "inProgress",
+                "error": null,
+                "startedAt": 1794031666,
+                "completedAt": null,
+                "durationMs": null
+              }
+            },
+            "emittedAtMs": 1794031666806
+          }
+        },
+        {
+          "seq": 13,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076245605329,
+          "frame": {
+            "method": "item/started",
+            "params": {
+              "item": {
+                "type": "contextCompaction",
+                "id": "01a1b49e-c678-7380-8014-f85f71823ddb",
+                "startedAtMs": 1794031666808,
+                "completedAtMs": null
+              },
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "turnId": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+              "startedAtMs": 1794031666808
+            },
+            "emittedAtMs": 1794031666808
+          }
+        },
+        {
+          "seq": 14,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076254794779,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "turnId": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "last": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031666817
+          }
+        },
+        {
+          "seq": 15,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076254892995,
+          "frame": {
+            "method": "account/rateLimits/updated",
+            "params": {
+              "rateLimits": {
+                "limitId": "codex",
+                "limitName": null,
+                "normalModelSlug": null,
+                "primary": null,
+                "secondary": null,
+                "credits": null,
+                "individualLimit": null,
+                "spendControlReached": null,
+                "planType": null,
+                "rateLimitReachedType": null
+              }
+            },
+            "emittedAtMs": 1794031666817
+          }
+        },
+        {
+          "seq": 16,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076258371358,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "turnId": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 2580,
+                  "inputTokens": 2500,
+                  "cachedInputTokens": 400,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 80,
+                  "reasoningOutputTokens": 20
+                },
+                "last": {
+                  "totalTokens": 1340,
+                  "inputTokens": 1300,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031666821
+          }
+        },
+        {
+          "seq": 17,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076258457525,
+          "frame": {
+            "method": "account/rateLimits/updated",
+            "params": {
+              "rateLimits": {
+                "limitId": "codex",
+                "limitName": null,
+                "normalModelSlug": null,
+                "primary": null,
+                "secondary": null,
+                "credits": null,
+                "individualLimit": null,
+                "spendControlReached": null,
+                "planType": null,
+                "rateLimitReachedType": null
+              }
+            },
+            "emittedAtMs": 1794031666821
+          }
+        },
+        {
+          "seq": 18,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076261560541,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "turnId": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 2580,
+                  "inputTokens": 2500,
+                  "cachedInputTokens": 400,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 80,
+                  "reasoningOutputTokens": 20
+                },
+                "last": {
+                  "totalTokens": 12527,
+                  "inputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 0,
+                  "reasoningOutputTokens": 0
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031666824
+          }
+        },
+        {
+          "seq": 19,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076261648926,
+          "frame": {
+            "method": "account/rateLimits/updated",
+            "params": {
+              "rateLimits": {
+                "limitId": "codex",
+                "limitName": null,
+                "normalModelSlug": null,
+                "primary": null,
+                "secondary": null,
+                "credits": null,
+                "individualLimit": null,
+                "spendControlReached": null,
+                "planType": null,
+                "rateLimitReachedType": null
+              }
+            },
+            "emittedAtMs": 1794031666824
+          }
+        },
+        {
+          "seq": 20,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076262383326,
+          "frame": {
+            "method": "item/completed",
+            "params": {
+              "item": {
+                "type": "contextCompaction",
+                "id": "01a1b49e-c678-7380-8014-f85f71823ddb",
+                "startedAtMs": 1794031666808,
+                "completedAtMs": 1794031666824
+              },
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "turnId": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+              "completedAtMs": 1794031666824
+            },
+            "emittedAtMs": 1794031666825
+          }
+        },
+        {
+          "seq": 21,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076265141500,
+          "frame": {
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "status": {
+                "type": "idle"
+              }
+            },
+            "emittedAtMs": 1794031666827
+          }
+        },
+        {
+          "seq": 22,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13076265225758,
+          "frame": {
+            "method": "turn/completed",
+            "params": {
+              "threadId": "01a1b49e-c598-7bc1-89a4-6af70f1fa08b",
+              "turn": {
+                "id": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+                "rootTurnId": "01a1b49e-c672-7a62-87a7-040bb93844bd",
+                "items": [],
+                "itemsView": "notLoaded",
+                "status": "completed",
+                "error": null,
+                "startedAt": 1794031666,
+                "completedAt": 1794031666,
+                "durationMs": 22
+              }
+            },
+            "emittedAtMs": 1794031666827
+          }
+        }
+      ],
+      "provider_request_count": 3,
+      "fresh_resume_consumed_compacted_history": true,
+      "retirements": [
+        {
+          "pid": 60426,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 60548,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 60665,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        }
+      ],
+      "original_overall_outcome": "failed",
+      "original_failure": [
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT github.com:443",
+        "blocked external CONNECT api.github.com:443",
+        "blocked external CONNECT github.com:443",
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT github.com:443"
+      ],
+      "artifact_sha256": {
+        "effective-config.json": "01892f3aaabec05e6e36cc10d86fb5b94e33cfe5355f6d986329f022565acd93",
+        "host-1.jsonl": "78ed9c10ff87b6b4caf4cd54f15ab130988c179ffe31618625e237555392e879",
+        "host-1.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "host-2.jsonl": "b4033b7fb2778a654a10658635b1de14df018d710ec975c16cd54a0248e73cd5",
+        "host-2.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "host-3.jsonl": "9ab9ac7eb391523897cf1ef871c26e1a902277d80f7894aa1c50c213203e1611",
+        "host-3.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "request-0.json": "e7ada21e555004a7ff134db2b2f9ef5c8975c1c244c36dd910fac1f7c076310f",
+        "request-0.raw": "44bd4b57d1d6f2b1e923195cda8c25571cdc4cf27148bf3b6e45f22f67d308ec",
+        "request-1.json": "c6dda075b25fe8a34a4eb5ef30d56942461377ea060338930b89cfc9c04fb488",
+        "request-1.raw": "a31f84a6521c2feb8f49b89144c97ba18e4b2a52cb32d4ffde62e291f3779c99",
+        "request-2.json": "cb31aafc958a41797843489e81f2bdadd0663927d659f87015eab3232c1270d9",
+        "request-2.raw": "8cac2399e37800ca0e5a82935cd702ca1750c031b8712d0fc3c06b2f05919ff8",
+        "response-0.sse": "75ff8a1f49a3ed2567a25cc29b2445ca6c6ee4f8489d988ad586b9f9eef74b44",
+        "response-1.sse": "82bc882675e4e95d92eb72e7651aac53437765bf40ce5e8a860cde329c7415af",
+        "response-2.sse": "2818d6926c1d7d300b09c70ccdb3fdf9e711914c10deaf148039724fd2d8de31",
+        "result.json": "86aa6395d6af57718f2e2925f71833d3d72ebabd8f04fb2551efea4ed1b52495"
+      }
+    },
+    {
+      "version": "0.167.0",
+      "source_revision": "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
+      "binary_sha256": "cdcb45aaa01d0f14e298985e09465aebccd47f64ecd298aea44814af7b62bbda",
+      "route": "remote",
+      "identity": {
+        "thread": "01a1b49e-cb77-7991-813b-a68dfeb6b96a",
+        "seed_turn": "01a1b49e-cb83-7c01-a5e2-c4e9ed215c82",
+        "compact_turn": "01a1b49e-cc54-7653-9f54-18d2c9037eae",
+        "compact_item": "01a1b49e-cc59-7440-9ac7-0f804e4e9ee9",
+        "compact_rpc": "g0:2:4",
+        "followup_turn": "01a1b49e-ccdb-71d3-969a-eba7db55d658"
+      },
+      "effective_config_projection": {
+        "model": "gpt-6.1-sol",
+        "model_provider": "g0",
+        "model_reasoning_effort": "low",
+        "approval_policy": "never",
+        "sandbox_mode": "read-only",
+        "model_context_window": 100000,
+        "model_auto_compact_token_limit": 1000000,
+        "compact_prompt": "Summarize the conversation.",
+        "model_providers": {
+          "g0": {
+            "name": "G0 loopback synthetic provider",
+            "base_url": "http://127.0.0.1:46569/v1",
+            "model_catalog_url": null,
+            "env_key": null,
+            "env_key_instructions": null,
+            "experimental_bearer_token": null,
+            "auth": null,
+            "gateway_oauth": null,
+            "aws": null,
+            "project_id": null,
+            "location": null,
+            "credential_file": null,
+            "wire_api": "responses",
+            "capabilities": {
+              "cyber_access_programs": null,
+              "external_web_access": null,
+              "remote_compaction": "v2"
+            },
+            "query_params": null,
+            "http_headers": null,
+            "env_http_headers": null,
+            "request_max_retries": null,
+            "stream_max_retries": null,
+            "stream_idle_timeout_ms": null,
+            "websocket_connect_timeout_ms": null,
+            "requires_openai_auth": false,
+            "supports_websockets": false,
+            "supports_standalone_web_search": false
+          }
+        },
+        "features": {
+          "token_budget": false,
+          "async_compaction": false,
+          "sleep_tool": false,
+          "goals": false,
+          "wake_on_agent_messages": false
+        }
+      },
+      "observed_interval": [
+        {
+          "seq": 8,
+          "generation": 2,
+          "direction": "client",
+          "monotonic_ns": 13077743310527,
+          "frame": {
+            "method": "thread/compact/start",
+            "params": {
+              "threadId": "01a1b49e-cb77-7991-813b-a68dfeb6b96a"
+            },
+            "id": "g0:2:4"
+          }
+        },
+        {
+          "seq": 9,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13077743384834,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-cb77-7991-813b-a68dfeb6b96a",
+              "turnId": "01a1b49e-cb83-7c01-a5e2-c4e9ed215c82",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "last": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031668305
+          }
+        },
+        {
+          "seq": 10,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13077746021009,
+          "frame": {
+            "id": "g0:2:4",
+            "result": {}
+          }
+        },
+        {
+          "seq": 11,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13077749829744,
+          "frame": {
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "01a1b49e-cb77-7991-813b-a68dfeb6b96a",
+              "status": {
+                "type": "active",
+                "activeFlags": []
+              }
+            },
+            "emittedAtMs": 1794031668312
+          }
+        },
+        {
+          "seq": 12,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13077749905527,
+          "frame": {
+            "method": "turn/started",
+            "params": {
+              "threadId": "01a1b49e-cb77-7991-813b-a68dfeb6b96a",
+              "turn": {
+                "id": "01a1b49e-cc54-7653-9f54-18d2c9037eae",
+                "rootTurnId": "01a1b49e-cc54-7653-9f54-18d2c9037eae",
+                "items": [],
+                "itemsView": "notLoaded",
+                "status": "inProgress",
+                "error": null,
+                "startedAt": 1794031668,
+                "completedAt": null,
+                "durationMs": null
+              }
+            },
+            "emittedAtMs": 1794031668312
+          }
+        },
+        {
+          "seq": 13,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13077751594393,
+          "frame": {
+            "method": "item/started",
+            "params": {
+              "item": {
+                "type": "contextCompaction",
+                "id": "01a1b49e-cc59-7440-9ac7-0f804e4e9ee9",
+                "startedAtMs": 1794031668313,
+                "completedAtMs": null
+              },
+              "threadId": "01a1b49e-cb77-7991-813b-a68dfeb6b96a",
+              "turnId": "01a1b49e-cc54-7653-9f54-18d2c9037eae",
+              "startedAtMs": 1794031668313
+            },
+            "emittedAtMs": 1794031668314
+          }
+        },
+        {
+          "seq": 14,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13077763143824,
+          "frame": {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+              "threadId": "01a1b49e-cb77-7991-813b-a68dfeb6b96a",
+              "turnId": "01a1b49e-cc54-7653-9f54-18d2c9037eae",
+              "tokenUsage": {
+                "total": {
+                  "totalTokens": 1240,
+                  "inputTokens": 1200,
+                  "cachedInputTokens": 200,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 40,
+                  "reasoningOutputTokens": 10
+                },
+                "last": {
+                  "totalTokens": 12426,
+                  "inputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "cacheWriteInputTokens": 0,
+                  "outputTokens": 0,
+                  "reasoningOutputTokens": 0
+                },
+                "modelContextWindow": 95000
+              }
+            },
+            "emittedAtMs": 1794031668325
+          }
+        },
+        {
+          "seq": 15,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13077763974802,
+          "frame": {
+            "method": "item/completed",
+            "params": {
+              "item": {
+                "type": "contextCompaction",
+                "id": "01a1b49e-cc59-7440-9ac7-0f804e4e9ee9",
+                "startedAtMs": 1794031668313,
+                "completedAtMs": 1794031668325
+              },
+              "threadId": "01a1b49e-cb77-7991-813b-a68dfeb6b96a",
+              "turnId": "01a1b49e-cc54-7653-9f54-18d2c9037eae",
+              "completedAtMs": 1794031668325
+            },
+            "emittedAtMs": 1794031668326
+          }
+        },
+        {
+          "seq": 16,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13077766725856,
+          "frame": {
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "01a1b49e-cb77-7991-813b-a68dfeb6b96a",
+              "status": {
+                "type": "idle"
+              }
+            },
+            "emittedAtMs": 1794031668329
+          }
+        },
+        {
+          "seq": 17,
+          "generation": 2,
+          "direction": "server",
+          "monotonic_ns": 13077766806433,
+          "frame": {
+            "method": "turn/completed",
+            "params": {
+              "threadId": "01a1b49e-cb77-7991-813b-a68dfeb6b96a",
+              "turn": {
+                "id": "01a1b49e-cc54-7653-9f54-18d2c9037eae",
+                "rootTurnId": "01a1b49e-cc54-7653-9f54-18d2c9037eae",
+                "items": [],
+                "itemsView": "notLoaded",
+                "status": "completed",
+                "error": null,
+                "startedAt": 1794031668,
+                "completedAt": 1794031668,
+                "durationMs": 18
+              }
+            },
+            "emittedAtMs": 1794031668329
+          }
+        }
+      ],
+      "provider_request_count": 3,
+      "fresh_resume_consumed_compacted_history": true,
+      "retirements": [
+        {
+          "pid": 60785,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 60906,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 61026,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        }
+      ],
+      "original_overall_outcome": "failed",
+      "original_failure": [
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT github.com:443",
+        "blocked external CONNECT api.github.com:443",
+        "blocked external CONNECT chatgpt.com:443",
+        "blocked external CONNECT github.com:443",
+        "blocked external CONNECT github.com:443",
+        "blocked external CONNECT chatgpt.com:443"
+      ],
+      "artifact_sha256": {
+        "effective-config.json": "c60f8ba6cf2d587b4b46f36f80f21bde5195ce2a4fdea14228cb2cb265fac469",
+        "host-1.jsonl": "cc0c3b04cd4872fadbfbcf2e74db77825a0ef957908659e11ee6d402c8624c71",
+        "host-1.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "host-2.jsonl": "69d4097345e2b478442f066808da82bfda3f0207fc5631b571d77b619f214162",
+        "host-2.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "host-3.jsonl": "fc0bc90fd8b1e8f50424c71382bdfe5bee89f636681c78d8c83240f629647106",
+        "host-3.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "request-0.json": "13578a4d255bf24bef4465edf37a982941920150cc2cb682dc64a0942e16f4ce",
+        "request-0.raw": "32ac94d5fdbd1548f622c15d92f075f03d3e2a78902bb0fa8df2109a9fd881b7",
+        "request-1.json": "320e35090dec66cb371feca0576b1e193608c6288026b0bb96a17bb9f495f750",
+        "request-1.raw": "a5f9c2df719c68bf6bfa9ea066376e2896c5612551354a076456d1b5df0d059c",
+        "request-2.json": "3758c3141d07baa28dd88d725db00ac54d17b581afc412bf4e0982cf571c2c99",
+        "request-2.raw": "e015f1bdb7d5912570ce16c1d77ca21d2b901e4d6ceef5190c3d31abd093a285",
+        "response-0.sse": "75ff8a1f49a3ed2567a25cc29b2445ca6c6ee4f8489d988ad586b9f9eef74b44",
+        "response-1.sse": "5e462153b85b087eba840835ff505ca1865fcc2252114f6671f1b95e00aa0acc",
+        "response-2.sse": "2818d6926c1d7d300b09c70ccdb3fdf9e711914c10deaf148039724fd2d8de31",
+        "result.json": "1b572669df8c458af134c6be4ef86707ccbb66aad748b52cd9f6d8e58cedfdce"
+      }
+    }
+  ]
+}

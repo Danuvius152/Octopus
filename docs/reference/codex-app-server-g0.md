@@ -4,6 +4,8 @@
 前两组历史实验未因后续修复而重跑。
 普通 Codex 的现行职责由 [Codex 合同](../implemented/codex-backend.md)维护；
 强目标的恢复条件见[暂停执行范围](../plans/runtime-execution-scope.md)。
+后续上下文采样与 compact 的 0.166/0.167 隔离观察单列在
+[前置协议取证](context-meter-compact-g0.md)，不改写下方历史实验的范围。
 
 | 实验目标 | 当时结果 | 对当前设计的约束 |
 | --- | --- | --- |
