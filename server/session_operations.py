@@ -26,6 +26,16 @@ SessionOperation = Annotated[MessageOperation | CompactOperation, Field(discrimi
 _operation = TypeAdapter(SessionOperation)
 
 
+class NativeCompactCommand(BaseModel):
+    """Original Claude command facts; opaque provider fields retain their shape."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    input_uuid: str = Field(min_length=1)
+    local_command_run: dict[str, Any] | None = None
+    local_command_outcome: dict[str, Any] | None = None
+
+
 class CompactResult(BaseModel):
     """Observed history effects, independent of the request's business status."""
 
@@ -37,6 +47,7 @@ class CompactResult(BaseModel):
     thread_id: str | None = None
     turn_id: str | None = None
     item_ids: list[str] = Field(default_factory=list)
+    native_command: NativeCompactCommand | None = None
 
 
 def decode_payload(value: dict[str, Any]) -> dict[str, Any]:

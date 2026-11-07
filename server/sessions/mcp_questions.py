@@ -154,7 +154,7 @@ def input_gap_receipts(attempt: _Attempt, location: dict[str, Any]) -> list[Inpu
 
 def resolved_input_gap(attempt: _Attempt) -> bool:
     backend, final = attempt.backend, attempt.final_answer
-    if not getattr(backend, "captures_retirement_output", False):
+    if not getattr(getattr(backend, "profile", None), "native_input_evidence", False):
         return False
     root = backend.observed_root
     locations = backend.protocol_locations

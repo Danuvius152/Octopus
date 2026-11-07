@@ -96,11 +96,14 @@ export function presentOutcome(message: Message, transcript: readonly Message[] 
     }) && !outcome.recording_issues?.native_final_missing;
   const compactLabel = outcome.status === "success" ? outcome.compact?.effect === "not_applied" ? "No compaction needed" : "Context compacted"
     : outcome.status === "interrupted" ? "Compaction interrupted" : outcome.status === "unknown" ? "Compaction result unknown" : "Compaction failed";
+  const compactReason = outcome.compact?.reason;
   const compactNote = outcome.compact?.effect === "applied" ? "Native history was compacted. Chat messages are preserved."
     : outcome.compact?.effect === "unknown" ? "Native history changes could not be confirmed. This operation will not be replayed automatically."
-    : outcome.compact?.reason;
+    : undefined;
   return { outcome, label: outcome.operation === "compact" ? compactLabel : labels[outcome.status],
-    primary: outcome.operation === "compact" ? [outcome.message, compactNote].filter(Boolean).join(" ") : outcome.message,
+    primary: outcome.operation === "compact" ? [outcome.message,
+      compactReason && !outcome.message?.includes(compactReason) ? compactReason : undefined,
+      compactNote].filter(Boolean).join(" ") : outcome.message,
     recoveries: Object.values(outcome.recovery).reduce((sum, count) => sum + count, 0),
     outputSaved: saved,
     recordingNote: outcome.recording_integrity === "incomplete"

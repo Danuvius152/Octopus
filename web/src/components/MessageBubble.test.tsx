@@ -47,6 +47,55 @@ it.each(["live", "history"])("keeps compact effect separate from an interrupted 
   expect(view.queryByText("Model output was saved.")).not.toBeInTheDocument();
 });
 
+it.each(["live", "history"])("preserves native compact command details in %s results", async (path) => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const { normalizeMessage } = await import("../lib/turnOutcome");
+  const content = { kind: "outcome", operation: "compact", request_id: "compact-command", status: "failed", recovery: {},
+    message: "Error: No messages to compact", compact: { effect: "unknown", item_ids: [], native_command: {
+      input_uuid: "original-native-input", local_command_run: { command: "compact", args: "" },
+      local_command_outcome: { kind: "failed" },
+    } } };
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "result", session_id: "native-command", seq: 1, terminal: true, is_error: true, content });
+  const message = path === "live" ? useSessionStore.getState().messages["native-command"][0] :
+    normalizeMessage({ role: "system", type: "result", seq: 1, is_error: true, content });
+  const view = render(<MessageBubble sessionId="native-command" message={message} />);
+  expect(view.getByText(/Error: No messages to compact/)).toBeVisible();
+  fireEvent.click(view.getByText("Completion details"));
+  const details = view.getByLabelText("Native command details");
+  expect(details).toBeVisible();
+  expect(details).toHaveTextContent('"input_uuid": "original-native-input"');
+  expect(details).toHaveTextContent('"command": "compact"');
+  expect(details).toHaveTextContent('"kind": "failed"');
+});
+
+it.each([
+  ["live", "failed", "unknown", "local"], ["history", "failed", "unknown", "local"],
+  ["live", "interrupted", "unknown", "local"], ["history", "interrupted", "unknown", "local"],
+  ["live", "failed", "applied", "local"], ["history", "failed", "applied", "local"],
+  ["live", "interrupted", "applied", "local"], ["history", "interrupted", "applied", "local"],
+  ["live", "failed", "unknown", "terminal-errors"], ["history", "failed", "unknown", "terminal-errors"],
+  ["live", "failed", "applied", "terminal-errors"], ["history", "failed", "applied", "terminal-errors"],
+])("shows the native compact reason in %s %s results with %s effects from %s", async (path, status, effect, source) => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const { normalizeMessage } = await import("../lib/turnOutcome");
+  const content = { kind: "outcome", operation: "compact", request_id: "lost-terminal", status, recovery: {},
+    message: status === "interrupted" ? "Stopped by user" : "Backend ended without a terminal result",
+    compact: { effect, reason: source === "terminal-errors"
+      ? "Native hook refused compaction\nNative command cannot continue" : "Native hook refused compaction", item_ids: [],
+    native_command: source === "terminal-errors" ? undefined : {
+      input_uuid: "original-native-input", local_command_outcome: { kind: "failed" },
+    } } };
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "result", session_id: "lost-terminal", seq: 1, terminal: true, is_error: true, content });
+  const message = path === "live" ? useSessionStore.getState().messages["lost-terminal"][0] :
+    normalizeMessage({ role: "system", type: "result", seq: 1, is_error: true, content });
+  const view = render(<MessageBubble sessionId="lost-terminal" message={message} />);
+  expect(view.getByText(/Native hook refused compaction/)).toBeVisible();
+  if (source === "terminal-errors") expect(view.getByText(/Native command cannot continue/)).toBeVisible();
+  expect(view.getByText(effect === "applied" ? /Native history was compacted/ : /Native history changes could not be confirmed/)).toBeVisible();
+});
+
 it("uses a neutral explanation for an unknown historical question closure", () => {
   const view = render(<MessageBubble sessionId="legacy-question" message={{ role: "system", type: "question_closed",
     content: "Legacy transport detail", tool_input: { reason: "unknown_legacy_reason" } }} />);

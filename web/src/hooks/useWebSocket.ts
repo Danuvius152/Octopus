@@ -881,5 +881,8 @@ export function useWebSocket() {
       request_id: target.requestId, attempt_id: target.attemptId });
   }, [sendCommand]);
 
-  return { send, sendMessage, interrupt, answerQuestion, snoozeQuestion };
+  const cancelCompact = useCallback((sessionId: string, requestId: string, generation: string) =>
+    sendCommand({ type: "cancel_compact", session_id: sessionId, request_id: requestId, generation }), [sendCommand]);
+
+  return { send, sendMessage, interrupt, answerQuestion, snoozeQuestion, cancelCompact };
 }

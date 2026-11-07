@@ -120,7 +120,7 @@ and owns readers, backpressure, process groups and retirement. Moving wire
 operations into drivers does not add a second resource owner or settlement path.
 
 `can_observe_context` and `can_compact` are independent profile declarations.
-Ordinary Codex supports both; Claude, exec leaves and one-shot calls do not gain
+Ordinary Codex and Claude declare both; exec leaves and one-shot calls do not gain
 compact capability from a backend name. `HarnessRun.start_compact` requires exact
 resumable history, reusing preparation, authorization, readers and retirement.
 Unsupported drivers refuse it. Compact skips message/attachment/Wiki/replay and
@@ -132,6 +132,15 @@ revokes its run lease and Wiki binding. It leaves the original proof readers and
 resources owned. Starting retirement reuses that closure before starting the
 original cleanup task. Stop can therefore close admission before storage waits
 without losing late native input proof; closure alone is not an exit proof.
+Claude's `retains_retirement_output` is independent of multiplexed RPC support.
+For a possibly sent input, collection remains owned until the original consumer
+finishes the ordered prefix, including context observations and terminal/EOF
+closure. Parser EOF alone cannot release this obligation. Admission closure
+captures it once through retirement; an unstarted spawn or fully consumed held
+stream has no such prefix. The original Owner commits finite late context facts
+under their captured request/attempt, even after its reusable-host pointer is
+detached. Generic JSONL process fixtures do not inherit native history evidence
+merely by borrowing its parser.
 The [execution contract](input-reliability.md#原请求完成与失败交接) owns settlement
 and cancellation timing.
 
@@ -153,6 +162,43 @@ false. It has no ordinary conversation or resume entry. Runtime profiles also
 declare `native_input_evidence`: Owner uses that actual driver contract for
 pre-recording input facts. Synthetic process peers declare their own capabilities;
 backend spelling or a stdin pipe cannot grant native evidence.
+
+<a id="claude-native-compaction"></a>
+
+**Claude native compaction.**
+
+Manual compact retires any previous held writer, then cold resumes the exact
+captured session ID and sends one `/compact` frame with its own input UUID.
+Ordinary messages may still reuse a compatible held host. The separate compact
+operation avoids depending on a prior message's Wiki/instruction spawn signature.
+Known `init.slash_commands` unavailability refuses the command before writing;
+first init may follow the initial input, so it cannot be a universal pre-write
+handshake. A contradictory resumed ID rejects the stream without rebinding the
+product session. Command lifecycle, result and explicitly identified observations
+must match the original UUID/session; a background notification or older input
+cannot end its observation interval.
+
+An original manual `compact_boundary` proves applied history. Automatic
+boundaries update the meter without satisfying a manual request. Neither
+`status=null`, command synthetic usage, boundary pre/post token metadata nor an
+outer success envelope proves a new request sample or a successful no-op.
+`local_command_run`, `local_command_outcome` and native failure text are retained;
+a native local failure vetoes an outer success. An unassociated terminal cannot
+write a new native session ID or replace a previously observed failure reason.
+An associated terminal without result text retains its valid string-list
+`errors`; an already observed local failure reason keeps precedence.
+
+No-op requires the advertised command, matching start/input/session, a complete
+protocol stream, successful native command terminal, no local failure/boundary
+and the affirmative reason `Not enough messages to compact.` It preserves the
+prior sample and clears activity. This is a conditional documented contract:
+the saved 2.1.319 empty-history producer actually failed, so it is not evidence
+that that version produced a successful no-op. EOF/Stop without confirmed
+boundary/no-op keeps unknown effects and invalidates the old sample. The Owner's
+business outcome stays independent of effect. See the
+[version observations](../reference/context-meter-compact-g0.md) and
+[sample contract](model-reasoning.md#上下文样本与配置绑定).
+
 For a reusable host, Wiki scopes bind through its original live run lease so
 compatible later requests can install their own task. A non-reusable run uses
 its original task scope directly, including when its initial input uses stdin.

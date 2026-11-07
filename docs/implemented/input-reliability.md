@@ -9,7 +9,7 @@
 | 读取 App/委派回复正文 | [原请求结果](#原请求结果读取) | 原生 final 完整性归[Codex](codex-backend.md#root-completion-and-selected-answer) |
 | 问题回答、到期或无人值守等待 | [问题结算](#问题结算)、[交互策略](#原工作交互策略与等待) | MCP 清理归[Harness](harness-layer.md#mcp-question-retirement)，原生写帧归[Codex](codex-backend.md#native-question-control) |
 | BG/Research/委派返回 | [公共返回接管](#公共返回接管) | 改来源材料、重试或恢复才读对应领域合同 |
-| compact | [原生维护输入](#native-compaction-requests) | 协议及效果证据归[Codex](codex-backend.md#native-compaction) |
+| compact | [原生维护输入](#native-compaction-requests) | 协议及效果证据归[Codex](codex-backend.md#native-compaction)或[Claude](harness-layer.md#claude-native-compaction) |
 
 The database owns the complete accepted input and its execution status.
 SessionOwner decides when it can run. Acceptance commits the text,
@@ -445,12 +445,23 @@ hides that frontend prompt. Question answers remain in the conversation history.
 
 ## Native compaction requests
 
-The current source admits compact only in idle, resumable Codex sessions. Other
-runtimes, absent history and busy sessions receive explicit refusals. This slice
-does not release the planned Claude or busy-queue behavior. The original Owner
-applies ownership, readiness, reservations, capacity, quota and retired-writer
-gates, then execution reloads its durable payload. No prompt, attachments, Wiki
-task, history replay or continuation/retry is manufactured.
+Codex App Server and Claude stream-JSON admit compact for resumable native
+history, both idle and busy. The original Owner applies ownership, readiness,
+reservations, capacity, quota and retired-writer gates, then execution reloads
+its durable payload. Unsupported runtimes/environments and absent history are
+refused. No prompt, attachments, Wiki task, history replay or continuation/retry
+is manufactured.
+
+The existing pending queue retains its ordinary order. Its sole selection point
+first applies paused/priority eligibility, then chooses an eligible compact ahead
+of ordinary inputs. Current work, its original human question and its owned
+resources finish before native compact starts; independent BG/research/delegation
+jobs are not a barrier. New inputs after compact admission queue rather than
+steer. Previously admitted steer keeps its delivery eligibility; one proven
+unaccepted and returned to the ordinary queue follows compact in its original
+order. Automatic compaction updates observations without completing a pending
+manual request. Compact does not implicitly Resume paused backlog or take an
+extra execution slot while pending.
 
 HTTP and WS accept `operation: {kind: "compact"}` with `client_request_id`.
 Same ID/payload returns the original fact; different content/kind conflicts.
@@ -463,10 +474,12 @@ draft for confirmation. Leaving the view cancels observation and releases its
 local request slot, without stopping the admitted native operation. Account
 changes discard transient notices rather than transferring them to a new owner.
 
-Claim and possible-send commit before business I/O. ACK and exact root proof are
-independent facts; neither means completion. Committed root evidence can end
-startup without ACK, so the RPC timeout does not interrupt an already proven
-execution. Original turn deadlines, finite collection and Run retirement apply.
+Claim commits before business I/O. Codex additionally persists possible-send,
+ACK and exact root proof as independent facts; none means completion. Committed
+root evidence can end startup without ACK, so the RPC timeout does not interrupt
+an already proven execution. Claude uses the original pipe write and command
+identity, without manufacturing RPC evidence. Original turn deadlines, finite
+collection and Run retirement apply.
 The terminal's native admission-close time is checked against overall/idle
 budgets even after Owner storage waits; expiry preserves its original timeout
 reason without granting compact a message continuation or retry.
@@ -483,11 +496,23 @@ pending/proven-unsent work, preserves unknown or terminal facts and never replay
 Admission and the recovery transaction reject compact as a `recovery_of` source.
 Saved maintenance records remain read-only.
 
+`cancel_compact` uses the existing correlated WS command/receipt path with its
+client command ID, session, request and service generation. It removes only the
+matching pending compact. After claim it returns `already_started` and directs
+the user to Stop; neither mailbox admission nor the handler retires the current
+run. A stale, foreign or wrong-operation target cannot cancel another input.
+Queue UI reads the authoritative dispatch snapshot, retaining the item until a
+server replacement arrives. Refresh and other tabs observe the same claim;
+local cancellation progress is not another queue authority.
+
 The composer recognizes exact argument-free `/compact`, allowing surrounding
 whitespace. Arguments show usage; prose mentions stay normal messages. Confirmed
 acceptance clears only matching original account/session/draft command text;
 attachments, uploads and later drafts remain. Status uses existing dispatch,
 result and saved-input surfaces, without a separate retry workflow.
+Claude's native failure reason and command outcome remain visible in live and
+historical results, including EOF/Stop and an applied effect. An unassociated
+terminal supplies a separate diagnostic and cannot change native history.
 
 <a id="codex-native-input-evidence"></a>
 ## Codex 首输入证据与准备边界

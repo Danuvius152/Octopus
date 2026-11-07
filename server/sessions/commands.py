@@ -73,8 +73,24 @@ async def _process_owned_command(manager: SessionManager, session: Session, data
     if owner is not None and owner.control_conflicts(data):
         return {**response, "code": "command_conflict", "message": "Command identity is owned by a different in-flight operation"}
     stale = {**response, "code": "stale_command", "message": "The execution target changed. Refresh this conversation before trying again."}
-    if operation not in ("interrupt", "answer_question", "snooze_question"):
+    if operation not in ("interrupt", "answer_question", "snooze_question", "cancel_compact"):
         result = {**response, "code": "invalid_command", "message": "Unsupported command"}
+    elif operation == "cancel_compact":
+        from .owner_runtime import CancelRequest
+
+        request_id = data.get("request_id")
+        if (not isinstance(request_id, str) or not request_id
+                or data.get("generation") != manager.dispatch_snapshot(sid)["generation"]):
+            result = stale
+        else:
+            runtime = manager._session_owners[id(session)].runtime
+            execution = runtime.current
+            if (execution is not None and execution.request.request_id == request_id
+                    and execution.request.operation == "compact"):
+                result = {**response, "code": "already_started", "message": "Compaction already started. Use Stop to interrupt it."}
+            else:
+                cancelled, _ = await runtime.handle(CancelRequest(request_id, pending_only=True))
+                result = {**response, "accepted": True} if cancelled else stale
     elif (manager.get_session(sid) is not session or "request_id" not in data or "attempt_id" not in data
           or "generation" in data and data["generation"] != manager.dispatch_snapshot(sid)["generation"]):
         result = stale

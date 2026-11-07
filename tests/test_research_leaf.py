@@ -12,7 +12,18 @@ import pytest
 
 from server.harness import Harness, get_harness
 from server.research.leaf import LeafRetirementError, run_web_leaf
+from tests.claude_runtime import PEER
 from tests.harness_profiles import process_profile
+
+
+async def test_unowned_claude_leaf_keeps_echoed_input_terminal_and_cost(tmp_path):
+    profile = process_profile(get_harness("claude-code").profile, binary=sys.executable,
+        build_turn_argv=lambda context: (
+            [sys.executable, "-u", str(PEER), str(tmp_path)], {"cwd": context.working_dir}))
+    result = await run_web_leaf(Harness(profile), prompt="Read synthetic source",
+        working_dir=str(tmp_path), credential=None, model=None, timeout=.5)
+    assert result.error is None
+    assert result.text == "Native answer" and result.cost == .002
 
 
 @pytest.mark.parametrize("ending", ["zero_exit", "error_exit", "success"])

@@ -123,7 +123,7 @@ const definitions = [
   event("submission", { ...inSession, client_request_id: id, accepted: boolean, message: maybeText, code: maybeText,
     canonical_request_id: maybeText, canonical_client_request_id: maybeText,
     state: optional(nullable(oneOf("unknown"))), execution: optional(execution) }),
-  event("command_receipt", { ...inSession, client_command_id: id, operation: oneOf("interrupt", "answer_question", "snooze_question"),
+  event("command_receipt", { ...inSession, client_command_id: id, operation: oneOf("interrupt", "answer_question", "snooze_question", "cancel_compact"),
     accepted: boolean, message: maybeText, code: maybeText }),
   event("attempt_started", { ...inSession, request_id: id, attempt_id: id }),
   event("dispatch_state", { ...inSession, dispatch_state: dispatch }),

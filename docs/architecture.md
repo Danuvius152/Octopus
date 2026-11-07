@@ -258,6 +258,11 @@ See [model and reasoning settings](implemented/model-reasoning.md).
    settings under the configuration lock. Slow credential/attachment preparation
    runs outside that lock, and current authority is checked at the actual effect.
    Legal Agent-default edits can leave an old session needing explicit repair.
+   An eligible compact is selected from that same queue after current work and
+   its resources retire, ahead of ordinary backlog without changing its order.
+   Previously admitted steer retains delivery eligibility; later inputs queue.
+   Pending-only cancellation cannot interrupt a claimed operation. See
+   [compaction inputs](implemented/input-reliability.md#native-compaction-requests).
 3. `HarnessRun` owns the original process group, checked I/O and retirement.
    Claude uses stream-JSON and can conditionally retain a compatible host;
    ordinary Codex owns one App Server host/root per attempt and later requests

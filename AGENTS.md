@@ -172,9 +172,9 @@ the service does not publish the development tree.
 
 ### Issue tracker
 
-This project uses local Markdown files as its issue tracker. Grill tasks keep
-intermediate artifacts and derived specs/tickets in `.scratch/<task>/`; other
-new temporary tasks default to the account workspace. Read
+This project uses local Markdown files as its issue tracker. Grill documents
+and their derived specs/tickets stay in `.scratch/<task>/`. All other temporary
+artifacts, including grill logs and scripts, use the account workspace. Read
 [local task conventions](docs/agents/issue-tracker.md) before publishing or
 fetching specs, tickets or maps. Routine work does not require tickets.
 
@@ -191,9 +191,10 @@ unfinished formal plans in `docs/plans/`. Read
 
 ### Local tasks
 
-Use the account workspace by default for new temporary tasks, experiments and
-isolated source worktrees; grill task material follows the directory convention
-above. Edit deliverable code in the selected repository checkout or worktree.
+Use the account workspace for temporary artifacts, experiments and isolated
+source worktrees; only grill documents and their derived specs/tickets use
+the `.scratch/` exception above. Edit deliverable code in the selected
+repository checkout or worktree.
 Test runtime state follows its separate isolation rules; the test cache is not
 a general development directory.
 

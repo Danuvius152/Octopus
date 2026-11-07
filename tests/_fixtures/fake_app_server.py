@@ -374,7 +374,7 @@ for line in frames():
     if method == "turn/steer":
         with (root / "native-steers.jsonl").open("a") as handle:
             handle.write(json.dumps(frame) + "\n")
-        if mode == "steer_reject":
+        if mode == "steer_reject" or (root / "native-steer-reject").exists():
             send({"id": frame["id"], "error": {"code": -32600, "message": "Target stopped before accepting input"}})
         elif mode == "steer_internal_error":
             send({"id": frame["id"], "error": {"code": -32603, "message": "Unspecified error after input submission"}})

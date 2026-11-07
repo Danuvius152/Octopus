@@ -11,7 +11,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ContextInvalidationReason = Literal["configuration_changed", "native_context_changed", "compacted", "operation_unconfirmed"]
-ContextObservationKind = Literal["sample", "compaction_started", "compacted", "invalidated"]
+ContextObservationKind = Literal["sample", "compaction_started", "compaction_finished", "compacted", "invalidated"]
 
 
 class ContextRecord(BaseModel):

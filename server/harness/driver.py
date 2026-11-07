@@ -40,6 +40,9 @@ class RunDriver(ABC):
 
     input_in_argv: bool
     multiplexed = False
+    # Some JSONL runtimes also report irreversible history changes while
+    # retiring. Their finite reader must outlive Stop without adopting RPC.
+    retains_retirement_output = False
     stdout_line_limit_bytes: int | None = None
 
     def __init__(self, profile: RuntimeProfile) -> None:
@@ -71,6 +74,10 @@ class RunDriver(ABC):
 
     async def start_compact(self, io: HarnessRun, context: TurnContext) -> None:
         raise RuntimeError(f"{self.profile.backend} does not support native compaction")
+
+    @property
+    def compaction_available(self) -> bool:
+        return self.profile.can_compact
 
     @property
     def compact_result(self) -> CompactResult:

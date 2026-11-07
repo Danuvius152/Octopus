@@ -160,7 +160,8 @@ compacted-line safety.
 
 ## Native compaction
 
-Idle manual compaction precisely resumes the captured thread in the ordinary
+Manual compaction selected after current work/resource retirement precisely
+resumes the captured thread in the ordinary
 Run, then sends `thread/compact/start` once. Preparation checks model, permissions,
 cwd and controls, without injecting controller/turn instructions, sending user
 text or falling back to exec/new history. Request/attempt/connection/thread/RPC
@@ -181,6 +182,9 @@ is unconfirmed, never inferred no-op. Product chat keeps its messages plus a sys
 maintenance outcome, with no final answer or copied summary. Version evidence is
 in [the G0 record](../reference/context-meter-compact-g0.md); product regressions
 use `tests/test_codex_compact.py`.
+Busy selection, pending-only cancellation and paused backlog remain with the
+original [input Owner](input-reliability.md#native-compaction-requests), rather
+than another backend queue.
 
 ## Root completion and selected answer
 

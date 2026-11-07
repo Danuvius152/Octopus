@@ -68,6 +68,11 @@ Inspection validates operation/evidence kinds and independent ACK/root facts;
 withdrawn compact with possible or confirmed execution fails verification.
 Legacy message digests and flat decoding stay unchanged. Restore grants no
 execution authority; see [input reliability](input-reliability.md#native-compaction-requests).
+Claude's additive `compact.native_command` retains the original input UUID and
+raw local-command run/outcome JSON alongside its native reason. Full backup and
+history reads preserve those facts, including failed/interrupted + applied;
+account transfer still excludes them with chats. No new format version or
+conversion is required for this JSON addition.
 
 Publication from verified format 7 uses a finite handoff after the original
 writer retires and starts remain masked. The handoff accepts only the complete

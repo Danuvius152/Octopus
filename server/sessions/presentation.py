@@ -24,8 +24,11 @@ def session_info(
         can_steer, can_observe_context, supports_compact = profile.can_steer, profile.can_observe_context, profile.can_compact
     except ValueError:
         can_steer = can_observe_context = supports_compact = False
+    held = getattr(get("_run"), "backend", None)
+    unavailable_environment = held is not None and not getattr(held, "can_compact", True)
     compact_reason = ("This runtime does not support native compaction." if not supports_compact else
                       "Archived conversations are read-only." if archived else
+                      "This native environment does not advertise compaction." if unavailable_environment else
                       "No resumable native history is available to compact." if not get("claude_session_id") or get("fork_needs_replay") else None)
     return SessionInfo.model_validate({
         "id": get("id"), "name": get("name"), "working_dir": get("working_dir"),

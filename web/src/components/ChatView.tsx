@@ -26,7 +26,7 @@ import type { ClientSubmissionStatus } from "../api";
 import { WikiJobCards } from "./WikiJobCards";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
 import { MessageBubble } from "./MessageBubble";
-import { DispatchQueue } from "./DispatchQueue";
+import { DispatchQueue, type CancelCompact } from "./DispatchQueue";
 import { ContextMeter } from "./ContextMeter";
 import { CommandNotices } from "./CommandNotices";
 import { SessionAuxiliaryNotice } from "./SessionAuxiliaryNotice";
@@ -87,6 +87,7 @@ interface Props {
     recoveryOfClientId?: string
   ) => void | Promise<SubmissionReply>;
   interrupt: (sessionId: string) => void | Promise<SubmissionReply>;
+  cancelCompact?: CancelCompact;
   answerQuestion: (
     sessionId: string,
     questionId: string,
@@ -123,6 +124,7 @@ function chatMessageKey(message: Message): string {
 export function ChatView({
   sendMessage,
   interrupt,
+  cancelCompact,
   answerQuestion,
   snoozeQuestion,
   connected,
@@ -363,7 +365,8 @@ export function ChatView({
   // other. Attachments always queue, so the label follows that too.
   const canSteer =
     !!activeSession?.can_steer && pendingAttachments.length === 0 &&
-    (!activeSessionId || dispatchStates[activeSessionId]?.active_operation !== "compact");
+    (!activeSessionId || (dispatchStates[activeSessionId]?.active_operation !== "compact" &&
+      !dispatchStates[activeSessionId]?.items.some((item) => item.operation === "compact")));
 
   useEffect(() => {
     for (const [requestId, draft] of submittedDrafts.current) {
@@ -1541,7 +1544,8 @@ export function ChatView({
         </div>
       )}
 
-      {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} archived={isArchived} readOnly={isArchived || transcriptDamaged} />}
+      {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} archived={isArchived}
+        readOnly={isArchived || transcriptDamaged} onCancelCompact={cancelCompact} />}
       {activeSessionId && <CommandNotices sessionId={activeSessionId} />}
       {activeSessionId && <SessionAuxiliaryNotice sessionId={activeSessionId} />}
 

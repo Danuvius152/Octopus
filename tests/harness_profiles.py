@@ -4,10 +4,17 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
+from server.harness.claude_code import ClaudeDriver
 from server.harness.codex import CODEX_WEB_LEAF
 from server.harness.driver import ArgvDriver
 from server.harness.profile import RuntimeProfile, TurnContext
 from server.submission_models import NativeInputEvidence
+
+
+class JsonlProcessDriver(ClaudeDriver):
+    """Borrow JSONL input/parsing without claiming native history observations."""
+
+    retains_retirement_output = False
 
 
 def process_profile(profile: RuntimeProfile, **changes: Any) -> RuntimeProfile:
@@ -25,6 +32,8 @@ def process_profile(profile: RuntimeProfile, **changes: Any) -> RuntimeProfile:
             transient_error_codes=CODEX_WEB_LEAF.transient_error_codes,
             stale_session_patterns=CODEX_WEB_LEAF.stale_session_patterns)
     selected.update(changes)
+    if selected.get("new_driver", profile.new_driver) is ClaudeDriver:
+        selected["new_driver"] = JsonlProcessDriver
     return replace(profile, **selected)
 
 

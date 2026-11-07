@@ -35,6 +35,27 @@ it("reports disconnected controls and correlates Stop with its attempt", async (
   expect(useSessionStore.getState().controlCommands[payload.client_command_id]).toBeUndefined();
 });
 
+it.each([true, false])("keeps pending cancel bound to the captured request and consumes its %s receipt", async (accepted) => {
+  const { result } = renderHook(useWebSocket);
+  const socket = Socket.instances[0];
+  const pending = result.current.cancelCompact("s", "pending-original", "original-service");
+  const payload = JSON.parse(socket.send.mock.calls[0][0]);
+  expect(payload).toMatchObject({ type: "cancel_compact", session_id: "s", request_id: "pending-original", generation: "original-service" });
+  expect(payload).not.toHaveProperty("attempt_id");
+  act(() => socket.onmessage?.({ data: JSON.stringify({ type: "command_receipt", operation: "cancel_compact", session_id: "s",
+    client_command_id: payload.client_command_id, accepted, ...(accepted ? {} : {
+      code: "already_started", message: "Compaction already started. Use Stop to interrupt it.",
+    }) }) }));
+  const reply = await pending;
+  expect(reply.accepted).toBe(accepted);
+  if (!accepted) {
+    expect(reply.code).toBe("already_started");
+    render(<CommandNotices sessionId="s" />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Compaction already started. Use Stop");
+  }
+  expect(socket.send).toHaveBeenCalledTimes(1);
+});
+
 it.each([
   ["g", "next-request", "a2"], ["g", "r", "a2"], ["g", "r", null], ["g", null, null], ["new-service", "r2", "a2"],
 ])("hydrates a coherent Stop target %s / %s / %s before sending the control", async (generation, requestId, attemptId) => {

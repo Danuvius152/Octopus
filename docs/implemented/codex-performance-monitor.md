@@ -6,6 +6,10 @@
 
 Monitor compares models using ordinary Octopus Codex sessions. It sends no benchmark requests. The user approved **effective output TPS (including reasoning)** after reviewing other tools. This replaces the earlier Q2/Q7 restriction to a proven server generation clock. No server decoder or isolated hidden-reasoning speed is claimed.
 
+The composer's [context sample](model-reasoning.md#上下文样本与配置绑定) is a
+separate current-window observation. It neither replaces cumulative usage nor
+adds another counted model response, and Monitor totals do not feed the ring.
+
 ## 2. Formula
 
 ```text

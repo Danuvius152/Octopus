@@ -400,13 +400,16 @@ it("keeps a withdrawn receipt read-only when the server does not allow input rec
 });
 
 describe("shared Wiki without a composer switch", () => {
-  it("labels ordinary input during compact as queued", () => {
+  it.each(["pending", "running"])("labels ordinary input during %s compact as queued", (phase) => {
     const { input, sendMessage } = setup();
     act(() => useSessionStore.setState({ sessions: [{ ...session, status: "running", can_steer: true }],
       dispatchStates: { [session.id]: { generation: "compact-service", revision: 1, paused: false,
-        active_request_id: "compact-original", active_operation: "compact", items: [] } } }));
+        active_request_id: phase === "running" ? "compact-original" : "message-current",
+        active_operation: phase === "running" ? "compact" : "message", items: phase === "running" ? [] : [{
+          request_id: "compact-original", operation: "compact", source: "human", summary: "/compact", priority: false,
+        }] } } }));
     fireEvent.change(input, { target: { value: "Continue later" } });
-    expect(screen.getByText("Compacting native context…")).toBeVisible();
+    expect(screen.getByText(phase === "running" ? "Compacting native context…" : "Waiting to compact after current work")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Send to running turn" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Queue message" }));
     expect(sendMessage).toHaveBeenCalledWith(session.id, "Continue later", undefined, undefined);

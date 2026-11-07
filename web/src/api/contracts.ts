@@ -3712,6 +3712,7 @@ export interface components {
             turn_id?: string | null;
             /** Item Ids */
             item_ids?: string[];
+            native_command?: components["schemas"]["NativeCompactCommand"] | null;
         };
         /** CompactSearchItem */
         CompactSearchItem: {
@@ -4857,6 +4858,22 @@ export interface components {
             service_tiers?: string[];
             /** Default Service Tier */
             default_service_tier?: string | null;
+        };
+        /**
+         * NativeCompactCommand
+         * @description Original Claude command facts; opaque provider fields retain their shape.
+         */
+        NativeCompactCommand: {
+            /** Input Uuid */
+            input_uuid: string;
+            /** Local Command Run */
+            local_command_run?: {
+                [key: string]: unknown;
+            } | null;
+            /** Local Command Outcome */
+            local_command_outcome?: {
+                [key: string]: unknown;
+            } | null;
         };
         /**
          * NativeDetailPage

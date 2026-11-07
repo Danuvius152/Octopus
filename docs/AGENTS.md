@@ -26,8 +26,9 @@ verification and repository actions.
   their version, method, observed result and limits; link current contracts.
   Historical evidence does not determine today's implementation or deployment.
 - `review/`, repository `.scratch/` and the account workspace are temporary.
-  Grill intermediate artifacts and their derived specs/tickets use `.scratch/`;
-  other new tasks and isolated worktrees default to the account workspace under
+  Only grill documents and their derived specs/tickets use `.scratch/`;
+  logs, scripts and all other temporary artifacts use the account workspace,
+  including those from grill tasks. Follow
   [local task conventions](agents/issue-tracker.md). Preserve active paths until
   their consumers can be updated safely. Test state has separate roots.
   Transfer useful decisions, reasons, applicability and regression evidence to

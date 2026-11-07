@@ -37,7 +37,7 @@ function App() {
 }
 
 function AuthenticatedApp() {
-  const { sendMessage, interrupt, answerQuestion, snoozeQuestion } =
+  const { sendMessage, interrupt, answerQuestion, snoozeQuestion, cancelCompact } =
     useWebSocket();
   // Re-asked when the bearer changes, which includes claiming the install.
   const token = useSessionStore((s) => s.token);
@@ -152,6 +152,7 @@ function AuthenticatedApp() {
           <ChatView
             sendMessage={sendMessage}
             interrupt={interrupt}
+            cancelCompact={cancelCompact}
             answerQuestion={answerQuestion}
             snoozeQuestion={snoozeQuestion}
             connected={connected}

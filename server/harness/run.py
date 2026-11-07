@@ -261,6 +261,8 @@ class HarnessRun:
         self.protocol_locations: list[dict[str, Any]] = []
         self._stdout_line_number = 0
         self._stream_closed: bool = False
+        self._output_released = False
+        self._retirement_output: bool | None = None
         self._stream_failure: HarnessEvent | None = None
         # A bound provider terminal must survive presentation overflow too.
         # It is delivered once, after the accepted finite output prefix.
@@ -285,7 +287,10 @@ class HarnessRun:
 
     @property
     def captures_retirement_output(self) -> bool:
-        return self._driver.multiplexed
+        if self._retirement_output is not None:
+            return self._retirement_output
+        return self._driver.multiplexed or bool(
+            self._driver.retains_retirement_output and self.input_may_have_run and not self._output_released)
 
     @property
     def process_group_id(self) -> int | None:
@@ -504,6 +509,10 @@ class HarnessRun:
     @property
     def compact_result(self) -> CompactResult:
         return self._driver.compact_result
+
+    @property
+    def can_compact(self) -> bool:
+        return self._driver.compaction_available
 
     def close_stdin(self) -> None:
         """Give the captured process EOF; the run retains retirement ownership."""
@@ -788,6 +797,7 @@ class HarnessRun:
         self._event_queue = deque()
         self._event_bytes = 0
         self._stream_closed = False
+        self._output_released = False
         self._event_changed.set()
         self.protocol_issues.clear()
         self._provider_terminal = None
@@ -798,6 +808,7 @@ class HarnessRun:
 
     async def write_turn_input(self, prompt: str) -> None:
         """Write the initial input after the owner has opened its reader."""
+        self.operation = "message"
         await self.send_input(prompt)
 
     def bind_wiki_task(self, task_id: str | None) -> None:
@@ -835,7 +846,11 @@ class HarnessRun:
                 if self._driver.multiplexed:
                     self._tool_context = None
                     self._tool_identity_tracker = None
-                    self._driver.release_output()
+                # Parser closure can precede the Owner's consumption by many
+                # frames. Only returning from the original ordered handoff
+                # releases the finite-prefix collection obligation.
+                self._output_released = True
+                self._driver.release_output()
                 return
             else:
                 self._event_changed.clear()
@@ -848,11 +863,15 @@ class HarnessRun:
         starts at its existing boundary so late native input evidence survives.
         """
         if not self._lease_closed:
+            # Capture this original input's collection obligation once. An
+            # unstarted spawn or a consumed held stream has no active prefix;
+            # parser closure cannot revoke the original consumer's join.
+            self._retirement_output = self.captures_retirement_output
             self.admission_closed_at = time.monotonic()
         self._lease_closed = True
         if self._question_wake is not None:
             self._question_wake()
-        if not self._driver.multiplexed:
+        if not self.captures_retirement_output:
             self._tool_context = None
         self.invalidate_activity()
         from ..mcp_identity import revoke_run
@@ -869,7 +888,7 @@ class HarnessRun:
         return self._stop_task
 
     def _retirement_finished(self, task: asyncio.Task[None]) -> None:
-        if not self._driver.multiplexed:
+        if not self.captures_retirement_output:
             return
         error = None if task.cancelled() else task.exception()
         if task.cancelled() or error is not None:
@@ -1021,7 +1040,7 @@ class HarnessRun:
         ):
             if task is None:
                 continue
-            if self._driver.multiplexed and name == "stdout reader" and not task.done():
+            if self.captures_retirement_output and name == "stdout reader" and not task.done():
                 # Native delivery never waits for presentation. Let the original
                 # reader parse the finite pipe prefix after execution admission
                 # is revoked; raw drain below is only descriptor cleanup.

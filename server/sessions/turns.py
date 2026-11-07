@@ -373,10 +373,15 @@ class TurnsMixin(SessionManagerBase):
     def _eligible_request(session: Session) -> int | None:
         if session._admission_closed:
             return None
-        return next((
-            i for i, item in enumerate(session._pending_queue)
-            if not session._dispatch_paused or item.priority
-        ), None)
+        first = None
+        for i, item in enumerate(session._pending_queue):
+            if session._dispatch_paused and not item.priority:
+                continue
+            if item.operation == "compact":
+                return i
+            if first is None:
+                first = i
+        return first
 
 
     async def start_message(
@@ -1007,7 +1012,7 @@ class TurnsMixin(SessionManagerBase):
         A held process's stderr can arrive after its original turn ended.
         Neither a read offset nor clearing a buffer establishes attribution.
         """
-        if getattr(attempt.backend, "captures_retirement_output", False):
+        if getattr(getattr(attempt.backend, "profile", None), "native_input_evidence", False):
             # Native retry classification consumes only the original root's
             # provider failure (or preparation refusal), never stderr, tools
             # or child diagnostics. A native notification alone is not failure.
@@ -1062,7 +1067,7 @@ class TurnsMixin(SessionManagerBase):
         """
         if turn.operation == "compact":
             return None
-        native = getattr(attempt.backend, "captures_retirement_output", False)
+        native = getattr(getattr(attempt.backend, "profile", None), "native_input_evidence", False)
         if native and (attempt.preparation_failed or attempt.backend.native_terminal_status == "failed"):
             failure = cls._failure_blob(attempt)
             if not turn.harness.is_transient_error(failure, code=attempt.failure_code):
@@ -1287,7 +1292,7 @@ class TurnsMixin(SessionManagerBase):
 
         from .mcp_questions import resolved_input_gap
         if getattr(attempt.backend, "protocol_issues", None) and (
-                attempt.failed or getattr(attempt.backend, "captures_retirement_output", False)):
+                attempt.failed or getattr(getattr(attempt.backend, "profile", None), "native_input_evidence", False)):
             if not turn.settlement.protocol_issues and resolved_input_gap(attempt):
                 return _Decision.stop({"code": "input_cancelled_recording_gap"})
             return _Decision.stop({"code": "protocol_incomplete"})

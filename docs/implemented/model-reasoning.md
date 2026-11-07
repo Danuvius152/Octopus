@@ -168,12 +168,32 @@ Codex App Server使用精确绑定根turn的`last.totalTokens`和同通知有效
 不得生成比例；采样时间只表示该原生样本被产品记录，不承诺逐字实时预算。
 同turn模型reroute使旧模型/窗口配对失效，不能用后续无模型身份的通知自行恢复。
 
+Claude取最近合格根assistant请求的`input_tokens + cache_read_input_tokens +
+cache_creation_input_tokens`，不含output，也不累加工具前后或同消息的重复内容块。
+分母仅取result.modelUsage中与该assistant实际model完全同键的有效contextWindow；
+不使用Agent模型别名、canonical计价名、首个map项或默认窗口。缺分母仍可保存
+可信分子，但比例未知。实际模型改变先使旧配对失效，即使新usage缺失或非法；
+同模型的坏usage不覆盖最近可信值，同消息后续可信细化可恢复。
+
+Claude在发送前登记opening输入UUID及同attempt已送出的steer UUID；根assistant
+须证明原输入来源，排除child、旧opening、无身份的后继根通知和旧消息重放。
+消息身份与可补窗的数值候选分别有界保留；result不能为压缩前候选补窗复活旧值。
+原生输入关联不等于Owner写权限：无Owner的Research leaf仍可接收其真实终态和
+费用，但没有会话圆环写权限。原task-notification终态不能关闭新输入的观察。
+
 自动压缩按item身份和有序观察区间收集候选。started保留有说明的压缩前样本并
 标记正在压缩；completed与可证明的原生重算候选一次提交，否则stale。锁版
 重算的五项明细均为零，但合成满窗delta也可能具有此形状；累计total等于window
 且total/last明细全零的歧义通知不产生比例或post候选。完整通知去重跨item边界
 保留，rate-limit重发不能解除stale或刷新采样时间。缺completed影响观测有效性，
 不为普通消息新增普遍完成义务；此观察不创建手动压缩请求。
+
+Claude的compacting状态展示最后压缩前样本，boundary切断旧候选并持久stale；
+pre_tokens/post_tokens不是最近根请求的input/cache分子。下个合格请求及精确窗口
+到齐才恢复比例。boundary后迟到终态不再抹掉新样本；重复boundary不推进状态。
+只有完整肯定no-op可保留有效样本并清除活动。自动压缩开始后若无boundary就
+terminal、EOF或Stop，由原driver有限收尾报告operation_unconfirmed，Owner清除
+活动并持久待更新；status=null和累计result都不能解除失效。
 
 实际准备捕获不可变binding并随准备结果交回Owner，重试沿原配置合同，不在慢
 准备后重读新默认值。配置保存、样本接纳及已有快照对齐使用短configuration lock，

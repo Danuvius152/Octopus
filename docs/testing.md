@@ -45,14 +45,26 @@ subprocesses, declare their actual driver/capabilities through
 `tests/harness_profiles.py::process_profile`; replacing argv alone cannot change
 a native profile into an argv peer.
 
-Manual compact regressions in `tests/test_codex_compact.py` use authenticated
-HTTP/WS and the original Owner, SQLite and Harness with a controlled framed
-stdio peer. They distinguish ACK/root/effect/terminal, including a proven root
+Manual compact regressions in `tests/test_codex_compact.py`,
+`tests/test_claude_compact.py` and `tests/test_queued_compact.py` use public
+session/admission/control APIs, authenticated HTTP/WS where applicable, and the
+original Owner, SQLite and Harness with controlled stdio peers. They distinguish
+ACK/root/effect/terminal, including a proven Codex root
 that outlives the lost-ACK RPC deadline, pre-write proof, late Stop effects,
 recording failure and non-replay after restart. These are product protocol
 checks, not live-provider or production-release evidence. Composer and result
 tests cover original-ID GET confirmation, account/session/draft protection and
 attachments without duplicating the server state machine.
+Claude fixtures consume the saved 2.1.319 frame shapes; documented successful
+no-op is explicitly conditional synthetic evidence, not an observed outcome of
+that binary. `tests/claude_runtime.py` retains the real ClaudeDriver, unlike
+generic `process_profile` JSONL peers which borrow parsing without declaring
+native history collection. Terminal/EOF-before-Owner-consumption barriers verify
+Stop saves the finite boundary, invalidation and effect under the original input.
+The shared queue cases cover previous steer, native rejection, human questions,
+actual process retirement, independent BG returns, claim/cancel and paused quota.
+`queued-compaction.spec.ts` checks both backends across tabs/refresh using a
+mocked authoritative server; it proves browser reconciliation, not provider I/O.
 
 ## Fast checks during development
 
@@ -190,6 +202,7 @@ boundaries to verification without maintaining a second per-file inventory.
 | Changed boundary | Contract | Representative checks |
 | --- | --- | --- |
 | Native start, delivery and recovery | [Codex](implemented/codex-backend.md), [input evidence](implemented/input-reliability.md#codex-native-input-evidence) | `test_codex_app_server_submission.py`, `test_codex_native_recovery.py` |
+| Context sample, native compact and busy selection | [Samples](implemented/model-reasoning.md#上下文样本与配置绑定), [compact Owner](implemented/input-reliability.md#native-compaction-requests), [Claude](implemented/harness-layer.md#claude-native-compaction) | `test_session_context.py`, `test_claude_context.py`, `test_codex_compact.py`, `test_claude_compact.py`, `test_queued_compact.py`, `context-meter.spec.ts`, `queued-compaction.spec.ts` |
 | Original request settlement and failure takeover | [Completion](implemented/input-reliability.md#原请求完成与失败交接) | `test_terminal_recording.py`, `test_session_owner_failure.py` |
 | App/build/schedule/Wiki/delegation completion | [Result selection](implemented/input-reliability.md#原请求结果读取) and each domain owner | `test_codex_app_server_results.py`, `test_unattended_domain_consumers.py` |
 | Native output, images and child details | [Codex items](implemented/codex-backend.md#native-questions-and-output), [children](implemented/native-subagents.md), [Monitor](implemented/codex-performance-monitor.md) | `test_codex_native_items.py`, `native-output.spec.ts`, `native-items.spec.ts` |

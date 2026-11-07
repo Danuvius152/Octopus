@@ -195,16 +195,18 @@ CODEX_HOME="$octopus_skills_home" codex plugin list --marketplace mattpocock --j
 
 ## 临时任务目录
 
-新的一般临时任务使用当前账户的 `~/.octopus/users/<user_id>/workspace/<task>/`。
-分析材料、规格票据、调试脚本、临时实验、交接和任务产物放在同一任务目录；需要
-隔离开发时，Git worktree 可放其 `worktree/` 子目录。Octopus 的 grill 中间
-产物与其后续规格、票据沿用仓库 `.scratch/<task>/`；其他临时任务和新建隔离
-工作树仍默认放账户 workspace。正式代码仍在选定仓库或工作树内修改。
-具体目录选择、生命周期与票据格式见[本地任务约定](agents/issue-tracker.md)。
+临时任务材料使用当前账户的 `~/.octopus/users/<user_id>/workspace/<task>/`。
+唯一的仓库 `.scratch/<task>/` 例外是 grill 讨论、设计等文档及其派生规格、
+票据和任务地图，现有这些文档保持原路径。grill 实施、验证产生的日志、脚本、
+实验输出、下载源码、审查报告、patch 和 manifest 同样写入账户 workspace。
+同一 grill 任务在两处使用相同任务名，以链接关联文档和工作产物，不复制文件。
+需要隔离开发时，Git worktree 可放 workspace 任务目录的 `worktree/` 子目录；
+正式代码仍在选定仓库或工作树内修改。目录选择、生命周期与票据格式见
+[本地任务约定](agents/issue-tracker.md)。
 
-除上述 grill 任务外，`.scratch/` 和 `.cache/octopus-worktrees/` 不作为新任务的
-默认目录；已有活动任务先保留路径与引用，完成后再清理。`docs/review/` 仍可放
-当次审阅报告。
+新建普通临时任务、审查报告和隔离工作树均使用账户 workspace。已有非文档
+产物若仍被活动进程、审查或恢复引用，先保留原路径，待可安全更新消费者时迁移；
+新增产物立即按上述分工写入。
 这里的目录选择不改变框架的账户路径、应用输出或受管发布目录。
 
 下面的测试目录约束针对运行数据，而非源码存放位置：即使源码工作树位于

@@ -20,9 +20,10 @@ follow [docs/AGENTS.md](../AGENTS.md).
 
 ## During a design discussion
 
-Grill intermediate artifacts, including unsettled terms and decision notes,
-belong in `.scratch/<task>/`. Derived specs and tickets stay with that task.
-Follow [issue-tracker.md](issue-tracker.md) for task paths and lifecycle.
+Grill discussion documents, including unsettled terms and decision notes,
+belong in `.scratch/<task>/` with their derived specs and tickets. Other
+temporary artifacts use the account workspace. Follow
+[issue-tracker.md](issue-tracker.md) for task paths and lifecycle.
 
 Use established glossary terms when naming a domain concept. Resolve and
 record terminology changes in the scope authorized for the task; task-local

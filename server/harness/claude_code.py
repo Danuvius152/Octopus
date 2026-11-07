@@ -19,10 +19,19 @@ import json
 import logging
 import os
 import re
+import uuid
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..context_models import (
+    ContextObservation,
+    ContextObservationKind,
+    ContextReading,
+    ContextSource,
+)
 from ..models import MessageContent
+from ..session_operations import CompactResult, NativeCompactCommand
 from .driver import RunDriver
 from .events import (
     HarnessCredential,
@@ -271,22 +280,335 @@ class ClaudeDriver(RunDriver):
     """Claude's stream-json input, including held turns and steering."""
 
     input_in_argv = False
+    retains_retirement_output = True
+
+    def __init__(self, profile: RuntimeProfile) -> None:
+        super().__init__(profile)
+        self._generation = str(uuid.uuid4())
+        self._session_id: str | None = None
+        self._identity: tuple[str, str] | None = None
+        self._input_ids: set[str] = set()
+        self._opening_id: str | None = None
+        self._context_seq = 0
+        self._sample: ContextObservation | None = None
+        self._last_message_id: str | None = None
+        self._message_ids: deque[str] = deque(maxlen=256)
+        self._boundaries: deque[str] = deque(maxlen=256)
+        self._compacting = False
+        self._compact_requested = False
+        self._compact_input_id: str | None = None
+        self._compact_started = False
+        self._compact_items: list[str] = []
+        self._compact_command: NativeCompactCommand | None = None
+        self._compact_reason: str | None = None
+        self._compact_terminal: str | None = None
+        self._compact_io: HarnessRun | None = None
+        self._slash_commands: set[str] | None = None
+        self._compact_binding_rejected = False
+
+    def begin_turn(self) -> None:
+        super().begin_turn()
+        self._identity = None
+        self._input_ids.clear()
+        self._opening_id = None
+        self._context_seq = 0
+        self._sample = None
+        self._last_message_id = None
+        self._message_ids.clear()
+        self._compacting = False
+        self._compact_requested = False
+        self._compact_input_id = None
+        self._compact_started = False
+        self._compact_items.clear()
+        self._compact_command = None
+        self._compact_reason = None
+        self._compact_terminal = None
+        self._compact_io = None
+        self._compact_binding_rejected = False
+
+    async def begin_input(self, io: HarnessRun, resume_id: str | None) -> None:
+        self._session_id = resume_id
 
     async def start_input(self, io: HarnessRun, context: TurnContext) -> None:
         await io.send_input(context.prompt)
 
+    async def start_compact(self, io: HarnessRun, context: TurnContext) -> None:
+        if not context.resume_id or context.resume_id != self._session_id or context.operation != "compact":
+            raise ValueError("Compaction requires its exact original Claude history")
+        if not self.compaction_available:
+            raise ValueError("This Claude environment does not advertise native compact")
+        self._compact_io = io
+        self._compact_requested = True
+        self._compact_input_id = str(uuid.uuid4())
+        self._compact_command = NativeCompactCommand(input_uuid=self._compact_input_id)
+        await io.send_input("/compact", input_id=self._compact_input_id)
+
+    @property
+    def steering_open(self) -> bool:
+        return not self._compact_requested
+
+    @property
+    def compact_result(self) -> CompactResult:
+        sent = self._compact_io is not None and self._compact_io.input_may_have_run
+        return CompactResult(effect="applied" if self._compact_items else "unknown"
+            if sent and not self._confirmed_noop() else "not_applied",
+            connection_generation=self._generation, thread_id=self._session_id,
+            reason=self._compact_reason, item_ids=list(self._compact_items), native_command=self._compact_command)
+
+    @property
+    def compaction_available(self) -> bool:
+        return self.profile.can_compact and (self._slash_commands is None or "compact" in self._slash_commands)
+
+    def _confirmed_noop(self) -> bool:
+        # The fixed producer did not demonstrate a successful no-op. This
+        # conditional contract combines command/source/complete-stream proof
+        # with the official command documentation's affirmative reason.
+        return bool(self._compact_terminal == "completed" and self._compact_started and not self._compact_items
+                    and self._slash_commands is not None and "compact" in self._slash_commands
+                    and self._compact_io is not None and not self._compact_io.protocol_issues
+                    and self._compact_reason == "Not enough messages to compact.")
+
+    @property
+    def native_terminal_status(self) -> str | None:
+        return self._compact_terminal
+
+    def _local_command(self, obj: dict[str, Any]) -> None:
+        run, outcome = obj.get("local_command_run"), obj.get("local_command_outcome")
+        if (not self._compact_started or self._compact_command is None or obj.get("session_id") != self._session_id
+                or obj.get("parent_tool_use_id") or not isinstance(run, dict)
+                or run.get("command") != "compact" or run.get("args") != ""
+                or ("user_message_uuid" in obj or "user_message_uuids" in obj) and not self._matches_input(obj)):
+            return
+        previous = self._compact_command.local_command_outcome
+        if previous is not None and previous.get("kind") == "failed":
+            # Later command text or the outer success envelope cannot revoke
+            # an already observed native failure of this original command.
+            return
+        self._compact_command = self._compact_command.model_copy(update={
+            "local_command_run": run, "local_command_outcome": outcome if isinstance(outcome, dict) else None})
+        message = obj.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), list):
+            text = "\n".join(block["text"] for block in message["content"]
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
+            self._compact_reason = text or self._compact_reason
+
+    def _compact_end(self, obj: dict[str, Any], out: ParseOutput) -> None:
+        local = self._compact_command.local_command_outcome if self._compact_command else None
+        local_failed = isinstance(local, dict) and local.get("kind") == "failed"
+        associated = self._matches_input(obj)
+        recognized = associated and self._compact_started and self.compaction_available and obj.get("local_command") == "compact"
+        success = recognized and obj.get("subtype") == "success" and not obj.get("is_error") and not local_failed
+        if associated:
+            self._compact_terminal = "completed" if success else "failed"
+            reason = obj.get("result")
+            if not isinstance(reason, str) or not reason:
+                errors = obj.get("errors")
+                reason = "\n".join(errors) if isinstance(errors, list) and all(isinstance(error, str) for error in errors) else None
+            if isinstance(reason, str) and reason and (not local_failed or not self._compact_reason):
+                self._compact_reason = reason
+        else:
+            diagnostic = "Native compaction terminal could not be associated with the original input."
+            self._compact_reason = self._compact_reason or diagnostic
+            out.events.insert(0, HarnessEvent(type="collection_error", is_error=True,
+                content=diagnostic, error_code="native_compact_unassociated", raw=obj))
+        for event in out.events:
+            if event.type == "result":
+                if not associated:
+                    # Failure evidence has no permission to redirect the
+                    # admitted history through the common result consumer.
+                    event.session_id = None
+                event.is_error = not success
+                event.content = self._compact_reason
+                if not success:
+                    event.error_code = "native_compact_failed"
+
     async def send_input(self, io: HarnessRun, text: str, *, input_id: str | None = None) -> str:
         # Claude deduplicates command UUIDs. Every frame, including a held
         # process's next opening input, needs a fresh identity.
-        import uuid
-
         input_id = input_id or str(uuid.uuid4())
+        try:
+            identity = io.input_identity
+        except RuntimeError:
+            # Direct, unowned Harness consumers have no session observation
+            # authority. Sending their input remains supported.
+            identity = None
+        if self._opening_id is None:
+            self._identity = identity
+            self._opening_id = input_id
+        self._input_ids.add(input_id)
         line = json.dumps({
             "type": "user", "uuid": input_id, "parent_tool_use_id": None,
             "message": {"role": "user", "content": text},
         }) + "\n"
         await io.write_input(line.encode())
         return input_id
+
+    def _matches_input(self, obj: dict[str, Any]) -> bool:
+        ids = obj.get("user_message_uuids")
+        supplied = set(ids) if isinstance(ids, list) and all(isinstance(x, str) for x in ids) else set()
+        single = obj.get("user_message_uuid")
+        if isinstance(single, str):
+            supplied.add(single)
+        return bool(supplied and supplied <= self._input_ids
+                    and obj.get("session_id") == self._session_id and not obj.get("parent_tool_use_id"))
+
+    def _context_event(self, reading: ContextReading | None, model: str | None, message_id: str | None,
+                       *, reading_source: ContextSource | None = None,
+                       kind: ContextObservationKind = "sample", raw: dict[str, Any] | None = None) -> HarnessEvent:
+        assert self._identity is not None and self._session_id is not None
+        self._context_seq += 1
+        source = ContextSource(request_id=self._identity[0], attempt_id=self._identity[1],
+            connection_generation=self._generation, native_turn_id=self._opening_id,
+            native_sample_id=message_id, observation_seq=self._context_seq)
+        return HarnessEvent(type="context_observation", raw=raw, context=ContextObservation(
+            backend="claude-code", native_session_id=self._session_id, actual_model=model,
+            source=source, reading=reading, reading_source=reading_source, kind=kind,
+            compacting=self._compacting))
+
+    def _input_sample(self, obj: dict[str, Any]) -> list[HarnessEvent]:
+        if self._compact_requested or self._identity is None or not self._matches_input(obj):
+            return []
+        message = obj.get("message") or {}
+        if not isinstance(message, dict):
+            return []
+        model, mid, usage = message.get("model"), message.get("id"), message.get("usage")
+        if not isinstance(model, str) or not model or model == "<synthetic>":
+            return []
+        mid = mid if isinstance(mid, str) and mid else None
+        if mid is not None and mid in self._message_ids and self._last_message_id != mid:
+            return []
+        if mid is not None and mid not in self._message_ids:
+            self._message_ids.append(mid)
+        self._last_message_id = mid
+        if self._compacting:
+            return []
+        previous = self._sample
+        if previous is not None and previous.actual_model != model:
+            self._sample = None
+        # A proven root model change is meaningful even without a usable
+        # numeric reading. The Owner compares it to the durable prior sample,
+        # including one restored before this host existed.
+        if mid is None or not isinstance(usage, dict):
+            return [self._context_event(None, model, mid)]
+        values = [usage.get("input_tokens"), usage.get("cache_read_input_tokens", 0),
+                  usage.get("cache_creation_input_tokens", 0)]
+        if any(type(value) is not int or not 0 <= value <= 9007199254740991 for value in values):
+            return [self._context_event(None, model, mid)]
+        used = sum(values)
+        if used > 9007199254740991:
+            return [self._context_event(None, model, mid)]
+        reading = ContextReading(used_tokens=used, basis="claude_last_request_input")
+        if (previous is not None and previous.source.native_sample_id == mid
+                and previous.actual_model == model and previous.reading == reading):
+            return []
+        event = self._context_event(reading, model, mid)
+        self._sample = event.context
+        return [event]
+
+    def _complete_sample(self, obj: dict[str, Any]) -> list[HarnessEvent]:
+        sample = self._sample
+        if (self._compacting or sample is None or not self._matches_input(obj)
+                or sample.actual_model in {"default", *self.profile.models}):
+            return []
+        models = obj.get("modelUsage")
+        usage = models.get(sample.actual_model) if isinstance(models, dict) else None
+        capacity = usage.get("contextWindow") if isinstance(usage, dict) else None
+        if type(capacity) is not int or not 0 < capacity <= 9007199254740991:
+            return []
+        assert sample.reading is not None and sample.actual_model is not None
+        reading = sample.reading.model_copy(update={"capacity_tokens": capacity, "capacity_basis": "runtime_model_window"})
+        return [self._context_event(reading, sample.actual_model, sample.source.native_sample_id or "",
+                                   reading_source=sample.source)]
+
+    def _context_boundary(self, obj: dict[str, Any]) -> list[HarnessEvent]:
+        if (self._identity is None or obj.get("session_id") != self._session_id
+                or obj.get("parent_tool_use_id")
+                or ("user_message_uuid" in obj or "user_message_uuids" in obj) and not self._matches_input(obj)):
+            return []
+        subtype = obj.get("subtype")
+        if subtype == "status" and obj.get("status") == "compacting" and not self._compacting:
+            self._sample = None
+            self._compacting = True
+            return [self._context_event(None, None, obj.get("uuid"), kind="compaction_started", raw=obj)]
+        if subtype == "compact_boundary":
+            identifier, metadata = obj.get("uuid"), obj.get("compact_metadata")
+            if (not isinstance(identifier, str) or not identifier or identifier in self._boundaries
+                    or not isinstance(metadata, dict) or metadata.get("trigger") not in {"auto", "manual"}):
+                return []
+            self._boundaries.append(identifier)
+            if self._compact_requested and self._compact_started and metadata["trigger"] == "manual":
+                self._compact_items.append(identifier)
+            self._sample = None
+            self._last_message_id = None
+            self._compacting = False
+            return [self._context_event(None, None, identifier, kind="compacted", raw=obj)]
+        return []
+
+    def _finish_context(self) -> list[HarnessEvent]:
+        if not self._compacting or self._identity is None or self._session_id is None:
+            return []
+        self._compacting = False
+        self._sample = None
+        return [self._context_event(None, None, None,
+            kind="compaction_finished" if self._confirmed_noop() else "invalidated")]
+
+    def retirement_events(self, reason: str, *, reconcile: bool = False) -> list[HarnessEvent]:
+        # This is observation of the original input, never another request.
+        return self._finish_context()
+
+    def receive(self, obj: dict[str, Any]) -> ParseOutput:
+        if self._compact_binding_rejected:
+            return ParseOutput(activity=False)
+        kind = obj.get("type")
+        if (kind == "command_lifecycle" and self._compact_requested and obj.get("session_id") == self._session_id
+                and obj.get("command_uuid") == self._compact_input_id and obj.get("state") == "started"):
+            self._compact_started = True
+            return ParseOutput()
+        origin = obj.get("origin")
+        if (kind == "result" and self._opening_id is not None and isinstance(origin, dict)
+                and origin.get("kind") == "task-notification" and not self._matches_input(obj)):
+            # Native background wakes have their own origin. Their untagged
+            # terminal cannot close a newly opened human input or its meter.
+            return ParseOutput(activity=False)
+        if kind == "system" and obj.get("subtype") == "init":
+            sid = obj.get("session_id")
+            if self._compact_requested and sid != self._session_id:
+                # An explicit wrong resume disproves this stream's authority
+                # over the admitted history. Retire it without rebinding or
+                # adopting later frames from the contradictory host.
+                self._compact_binding_rejected = True
+                self._compact_reason = "Claude resumed a different native session; compaction effects are unconfirmed."
+                return ParseOutput(events=[*self._finish_context(), HarnessEvent(type="result", is_error=True,
+                    content=self._compact_reason, error_code="native_history_changed", raw=obj)], end_of_stream=True)
+            if self._session_id is None and isinstance(sid, str) and sid:
+                self._session_id = sid
+            commands = obj.get("slash_commands")
+            if sid == self._session_id and isinstance(commands, list) and all(isinstance(x, str) for x in commands):
+                self._slash_commands = set(commands)
+        if (kind == "result" and self._input_ids and ("user_message_uuid" in obj or "user_message_uuids" in obj)
+                and not self._matches_input(obj)):
+            # An explicitly unrelated held-host result cannot terminate this
+            # opening input or lend its cumulative model map to its sample.
+            return ParseOutput(activity=False)
+        out = super().receive(obj)
+        if kind == "system":
+            out.events.extend(self._context_boundary(obj))
+        elif kind == "assistant":
+            if self._compact_requested:
+                self._local_command(obj)
+                out.events.clear()
+            else:
+                out.events.extend(self._input_sample(obj))
+        elif kind in {"stream_event", "user"} and self._compact_requested:
+            out.events.clear()
+        elif kind == "result":
+            if self._compact_requested:
+                self._compact_end(obj, out)
+            out.events[:0] = self._complete_sample(obj) + self._finish_context()
+            self._identity = None
+            self._opening_id = None
+            self._sample = None
+        return out
 
 
 # ------------------------------------------------------------------ turn argv
@@ -966,6 +1288,8 @@ CLAUDE_CODE = RuntimeProfile(
     # inline-steering.md §10, with the fork suites as the standing gate.
     new_driver=ClaudeDriver,
     can_steer=True,
+    can_observe_context=True,
+    can_compact=True,
     reusable=True,
     can_continue=True,
     build_turn_argv=build_turn_argv,

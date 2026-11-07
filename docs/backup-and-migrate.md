@@ -67,6 +67,9 @@ Compact payloads, native ACK/root evidence and effect-bearing maintenance outcom
 follow existing sessions/messages/client_submissions ownership. Complete backups
 preserve them; account archives exclude them with old chats. Neither restoration
 path resumes or replays compaction, and no new collection root is introduced.
+This includes Claude's original command UUID, raw local-command outcome and
+failure reason; a restored maintenance result retains its separate effect and
+business status rather than authorizing another native operation.
 
 Structured Question resolutions live in existing chat-message JSON, with no
 additional collection root. They follow the same chat exclusion in account

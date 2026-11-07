@@ -26,7 +26,7 @@
 | BG/Research/委派返回接管 | [公共返回接管](implemented/input-reliability.md#公共返回接管) | 改材料、重试或恢复才读[BG](implemented/background-tasks.md)、[Research](implemented/native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)或[委派](implemented/agent-collaboration.md#53-reply-delivery-the-original-request-completion) |
 | 输入接纳、恢复或问题 | [输入任务导航](implemented/input-reliability.md) | 改原生写帧或 MCP 清理才读其指向的运行时章节 |
 | Codex MCP 配置 | [Native MCP configuration](implemented/codex-backend.md#native-mcp-configuration) | 涉及输入或恢复保证读[首输入证据](implemented/input-reliability.md#codex-native-input-evidence) |
-| compact 或上下文比例 | [Native compaction](implemented/codex-backend.md#native-compaction) | 改请求接纳读[compact 输入](implemented/input-reliability.md#native-compaction-requests)，改样本消费者读[绑定合同](implemented/model-reasoning.md#上下文样本与配置绑定) |
+| compact 或上下文比例 | [compact 输入](implemented/input-reliability.md#native-compaction-requests)、[样本与绑定](implemented/model-reasoning.md#上下文样本与配置绑定) | 改原生协议读[Codex](implemented/codex-backend.md#native-compaction)或[Claude](implemented/harness-layer.md#claude-native-compaction) |
 | 后端、steer、重试或原生子任务 | [Harness](implemented/harness-layer.md)、[轮内引导](implemented/inline-steering.md) | 按边界进入[Codex 章节](implemented/codex-backend.md)、[瞬态恢复](implemented/harness-transient-retry.md)或[子任务](implemented/native-subagents.md) |
 | Agent 配置、模型或记忆 | [Agent](implemented/agent-refactor.md)、[模型设置](implemented/model-reasoning.md)、[记忆](implemented/memory.md#current-content-ownership) | 凭据变化读[凭据生命周期](implemented/harness-credential-reauth.md) |
 | 账户、格式或搬迁 | [账户](implemented/multi-tenancy.md)、[存储与交接](implemented/current-storage-format.md) | 实际搬迁读[完整操作](backup-and-migrate.md#account-export-and-import) |

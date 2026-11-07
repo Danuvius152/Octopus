@@ -17,6 +17,33 @@ beforeEach(() => useSessionStore.setState({
 }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+it("cancels only the captured pending compact and waits for the server queue", async () => {
+  const pending = { ...dispatch, active_request_id: "original", active_operation: "message" as const, items: [
+    { request_id: "compact-original", operation: "compact" as const, source: "human", summary: "/compact", priority: false },
+    { request_id: "message-original", operation: "message" as const, source: "bg", summary: "Background return", priority: false },
+  ] };
+  useSessionStore.getState().applyDispatchState("session", pending);
+  const cancel = vi.fn(async () => ({ accepted: true }));
+  render(<DispatchQueue sessionId="session" onCancelCompact={cancel} />);
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Cancel pending compaction" })));
+  expect(cancel).toHaveBeenCalledExactlyOnceWith("session", "compact-original", "service-current");
+  expect(screen.getByText("/compact")).toBeVisible();
+  expect(screen.getByText("Waiting to compact after current work")).toBeVisible();
+  expect(screen.getAllByRole("button")).toHaveLength(1);
+  act(() => handleWsMessage({ type: "dispatch_state", session_id: "session", dispatch_state: {
+    ...pending, revision: 4, items: [pending.items[1]],
+  } }));
+  expect(screen.queryByText("/compact")).toBeNull();
+  expect(screen.getByText("Background return")).toBeVisible();
+});
+
+it("shows running compact without offering pending cancel", () => {
+  useSessionStore.getState().applyDispatchState("session", { ...dispatch, active_request_id: "compact-original", active_operation: "compact" });
+  render(<DispatchQueue sessionId="session" onCancelCompact={vi.fn()} />);
+  expect(screen.getByText("Compacting native context…")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Cancel pending compaction" })).toBeNull();
+});
+
 it("keeps a real recording conflict visible without offering a saving retry", () => {
   useSessionStore.getState().applyDispatchState("session", dispatch);
   handleWsMessage({ type: "recording_failed", session_id: "session", terminal: false,

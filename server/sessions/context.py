@@ -77,12 +77,16 @@ class ContextMixin(SessionManagerBase):
 
     async def _accept_context(self, session: Session, attempt: _Attempt, event: HarnessEvent) -> None:
         observation, captured = event.context, attempt.context_binding
-        if (observation is None or captured is None or session._run.backend is not attempt.backend
-                or session._run.request is None or not attempt.backend.profile.can_observe_context):
+        owner = self._session_owners.get(id(session))
+        execution = owner.runtime.current if owner is not None else None
+        # Detaching a reusable host on Stop does not retire the original
+        # execution's finite evidence reader. That execution owns this commit.
+        if (observation is None or captured is None or execution is None or execution.attempt is not attempt
+                or not attempt.backend.profile.can_observe_context):
             return
         source = observation.source
         if (source.attempt_id != attempt.attempt_id or source.observation_seq <= attempt.context_observation_seq
-                or source.request_id != session._run.request.request_id):
+                or source.request_id != execution.request.request_id):
             return
         attempt.context_observation_seq = source.observation_seq
         assert self.db is not None
@@ -98,6 +102,10 @@ class ContextMixin(SessionManagerBase):
                     or target.native_session_id != observation.native_session_id):
                 return
             state = session.context_state
+            if observation.kind == "compaction_finished":
+                if state is not None and state.activity is not None:
+                    await self._save_context(session, state.model_copy(update={"revision": state.revision + 1, "activity": None}))
+                return
             if observation.kind == "compaction_started":
                 if state is None:
                     state = ContextState(revision=1, binding_revision=current.binding_revision,
@@ -111,6 +119,10 @@ class ContextMixin(SessionManagerBase):
                     "compacted" if observation.kind == "compacted" else observation.invalidation_reason)
             reading = observation.reading
             if reading is None:
+                if (observation.kind == "sample" and observation.actual_model is not None
+                        and state is not None and state.sample is not None
+                        and state.sample.actual_model != observation.actual_model):
+                    state = invalidate_context(state, target, "native_context_changed")
                 if state is not None and observation.compacting:
                     state = state.model_copy(update={"activity": "compacting"})
                 await self._save_context(session, state)

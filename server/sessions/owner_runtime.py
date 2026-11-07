@@ -114,6 +114,7 @@ class Interrupt:
 class CancelRequest:
     request_id: str
     cause: Literal["user", "shutdown"] = "user"
+    pending_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -443,7 +444,8 @@ class OwnerRuntime:
             return False
         return bool(getattr(execution.attempt.backend, "captures_retirement_output", False) and (
             isinstance(command, Interrupt)
-            or isinstance(command, CancelRequest) and command.request_id == execution.request.request_id
+            or isinstance(command, CancelRequest) and not command.pending_only
+            and command.request_id == execution.request.request_id
             or isinstance(command, CorrelatedControl)
             and current_interrupt(self.owner.manager, self.owner.session, command.data, command.user_id)))
 
@@ -526,12 +528,14 @@ class OwnerRuntime:
             return interrupted
         if isinstance(command, CancelRequest):
             removed = [item for item in (*session._pending_queue, *session._steer_queue)
-                       if item.request_id == command.request_id]
+                       if item.request_id == command.request_id and (not command.pending_only or item.operation == "compact")]
+            if command.pending_only and not removed:
+                return False, None
             session._pending_queue[:] = [item for item in session._pending_queue if item not in removed]
             session._steer_queue[:] = [item for item in session._steer_queue if item not in removed]
             for request in removed:
                 await self.complete(request, reason="shutdown" if command.cause == "shutdown" else "withdrawn")
-            if self.current is not None and self.current.request.request_id == command.request_id:
+            if not command.pending_only and self.current is not None and self.current.request.request_id == command.request_id:
                 original = self.current
                 await self._interrupt(command.cause)
                 return True, original.retired
@@ -755,10 +759,11 @@ class OwnerRuntime:
                 raise CompactInProgress(active.request_id, original["client_id"])
             if not get_harness(session.backend).runtime_profile(None).can_compact:
                 raise CompactUnavailable("This runtime does not support native compaction.")
+            held = session._run.backend
+            if held is not None and not held.can_compact:
+                raise CompactUnavailable("This native environment does not advertise compaction.")
             if not session.claude_session_id or session.fork_needs_replay:
                 raise CompactUnavailable("No resumable native history is available to compact.")
-            if self.current is not None or session._pending_queue:
-                raise SessionAdmissionBusy("Compaction currently requires an idle conversation.")
             request.native_session_id = session.claude_session_id
             payload["native_session_id"] = request.native_session_id
         else:
@@ -800,6 +805,7 @@ class OwnerRuntime:
                 and await self._steer_configuration_matches(session, agent)
                 and request.wiki_mode in {None, "auto"} and session._run.wiki_mode in {None, "auto"}
                 and (not session._dispatch_paused or self.current.request.priority)
+                and not any(item.operation == "compact" for item in session._pending_queue)
                 and not any(item.source == "human" and (not session._dispatch_paused or item.priority)
                             for item in session._pending_queue)
                 and len(session._steer_queue) + int(self.steer is not None and self.steer.write is not None) < _MAX_PENDING_STEERS)
@@ -1628,7 +1634,7 @@ class OwnerRuntime:
         backend, reused = prepared.backend, False
         held = session._run.backend
         if held is not None:
-            if (held.reusable and held.is_alive()
+            if (execution.request.operation == "message" and held.reusable and held.is_alive()
                     and held.spawn_signature(session.working_dir, prepared.credential)
                     == backend.spawn_signature(session.working_dir, prepared.credential)):
                 backend, reused = held, True
@@ -1920,7 +1926,8 @@ class OwnerRuntime:
         issues = {**settlement.protocol_issues, **getattr(attempt.backend, "protocol_issues", {})}
         from .mcp_questions import resolved_input_gap
         input_only = not settlement.protocol_issues and resolved_input_gap(attempt)
-        recording_failed = (bool(issues) and not input_only if getattr(attempt.backend, "captures_retirement_output", False)
+        recording_failed = (bool(issues) and not input_only
+                            if getattr(getattr(attempt.backend, "profile", None), "native_input_evidence", False)
                             else bool(issues.get("fatal_protocol_error")))
         effect_unknown = execution.request.operation == "compact" and attempt.backend.compact_result.effect == "unknown"
         failed = attempt.failed or attempt.timeout is not None or recording_failed or effect_unknown

@@ -6,20 +6,31 @@ There is no external issue tracker; a GitHub Git remote does not change that.
 
 ## Task directory
 
-Grill discussion drafts and intermediate artifacts use `.scratch/<task>/` in
-this repository. A spec, tickets or map derived from that discussion stay in
-the same task directory. Existing grill tasks keep their current paths.
+Grill documents use `.scratch/<task>/` in this repository: discussion drafts,
+design and terminology notes, and derived specs, tickets and maps. Keep
+existing grill documents at their current paths.
 
-Other new temporary tasks default to `<account-workspace>/<task>/`. Resolve
-the account workspace from the session/account context; the local layout is in
-[local-wsl.md](../local-wsl.md#临时任务目录). A user-specified task directory
-takes precedence. Use one directory per task, not copies in both roots.
+All other temporary artifacts use `<account-workspace>/<task>/`, including
+those produced while implementing or verifying a grill task: logs, debugging
+and verification scripts, experiment output, downloaded sources, review
+reports, patches and manifests. A Markdown extension alone does not make an
+artifact a grill document. Ordinary temporary tasks also use this workspace.
+Resolve the account workspace from the session/account context; the local
+layout is in [local-wsl.md](../local-wsl.md#临时任务目录). A user-specified task
+directory takes precedence.
+
+Use the same task name in both roots when a grill task needs working artifacts.
+Link its `.scratch/` documents to the workspace evidence instead of duplicating
+files. For example, `.scratch/context-meter-compact/spec.md` stays in the
+repository, while verification logs and scripts use
+`<account-workspace>/context-meter-compact/`. Set output paths explicitly when
+running from the repository or reading a `.scratch/` ticket.
 
 ## Placement
 
-Keep temporary analysis, specs, tickets, investigation scripts, experiments,
-handoffs and task artifacts together in the selected task directory. New
-isolated source worktrees default to the account workspace; edit deliverable
+Keep each artifact in its assigned root above; a grill document's location
+does not determine where its implementation or verification output is written.
+New isolated source worktrees default to the account workspace; edit deliverable
 code in the selected repository checkout or worktree. Reusable product code
 and regression tests belong in that repository.
 
@@ -30,11 +41,12 @@ isolated test-state root. Test launchers must still select independent state and
 provider homes. `~/.cache/octopus-tests/` is a local testing location, not the
 default for source worktrees or general task materials.
 
-Preserve existing tasks while processes, review links or recovery depend on
-their paths. Moving an active task requires updating those consumers, not just
-moving files. `docs/review/` remains available for requested temporary review
-reports; managed application/research output and private publication resources
-keep their owners.
+Preserve existing artifacts while processes, review links or recovery depend
+on their paths. Move older non-document artifacts from `.scratch/` or
+`docs/review/` to the workspace once those consumers can be updated safely;
+write new artifacts to the assigned root immediately. Moving an active task
+requires updating its scripts and references, not just moving files. Managed
+application/research output and private publication resources keep their owners.
 
 ## Files and operations
 

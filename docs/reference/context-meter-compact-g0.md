@@ -199,16 +199,30 @@ argv 发出所需字段。现在以以上 2.1.319 原始流核对实际结果；
 [验证规则](../testing.md#markers-providers-and-isolation)维护，本次用户指定的
 离线专项不扩大日常实机范围。
 
-## 后续验证责任
+## 产品离线验证与边界
+
+以上生产者取证保留其固定版本及方法。后续产品适配已经落入现行
+[采样合同](../implemented/model-reasoning.md#上下文样本与配置绑定)、
+[维护输入](../implemented/input-reliability.md#native-compaction-requests)及
+[Claude协议](../implemented/harness-layer.md#claude-native-compaction)；下表区分
+原始观察与产品消费回归，不把离线通过写成真实模型或生产发布证明。
 
 | 证据 | 本次范围 | 后续责任 |
 | --- | --- | --- |
-| G0-C1 / C3 | 两版空闲 local/remote V2 的精确恢复、完成与安装后样本；真实模型未验证 | 产品 driver 关联与单次发送由 Codex compact 切片验证 |
-| G0-C2 | 源码不保证 ACK 先到；真实轨迹均 ACK 先到 | framed peer 验证逆序、丢 ACK、准备失败、无 item 的失败终态 |
-| G0-C4 | handler 替换活动任务的源码依据 | Owner 验证自然收束后发送、队列优先级、Stop 与取消 |
-| G0-C5 | 已读自动/async/token-budget 源码；本次关闭后二者且未触发自动压缩 | 实际启用分支与多 item、未安装候选由后续后端切片验证 |
-| G0-A1 | CLI 2.1.319 的根用量/精确模型窗口/父身份原始流及本地命令结果；产品适配未实现 | 后票验证同 ID 去重、晚到/子样本排除、别名歧义、自动 boundary 与持久化 |
-| G0-A2 / S1 | 尚无产品实现 | 后续 Claude Harness 和 Owner/DB/HTTP/WS 回归 |
+| G0-C1 / C3 | 两版空闲 local/remote V2 的精确恢复、完成与安装后样本；非真实模型 | `test_codex_compact.py`关联、单次发送、原thread续聊 |
+| G0-C2 | 源码不保证 ACK 先到；原始轨迹均 ACK 先到 | `test_codex_compact.py`逆序、丢 ACK、原根超出RPC期限、准备失败和无item失败终态 |
+| G0-C4 | handler 替换活动任务的源码依据 | `test_queued_compact.py`双后端真实Owner/进程自然收束、旧steer、问题、单队列选择、Stop及cancel竞争 |
+| G0-C5 | 已读自动/async/token-budget源码；本次原始实验关闭后二者 | `test_session_context.py`及原生item回归覆盖多item、未安装候选、合成满窗和boundary时序，不声称另做实际自动触发 |
+| G0-A1 | CLI 2.1.319根usage/精确窗口/父身份原始流及本地命令结果 | `test_claude_context.py`UUID关联、同ID细化/去重、旧/子样本排除、模型变化、自动boundary及持久化 |
+| G0-A2 / S1 | 2.1.319原流中的成功边界及原生失败；成功no-op仍是条件合同 | `test_claude_compact.py`真实ClaudeDriver/Owner/SQLite/Harness检查精确resume、原始错误、有限Stop、parser先结束后Owner消费及备份恢复；无新Claude live |
+
+格式7→8的实际生产交接已随提交
+[`f2a1cdc4e182`](https://github.com/Danuvius152/Octopus/commit/f2a1cdc4e1829328ed6d47c3a31d695c96ecba3b)
+完成：原writer退出后有限转换，交接前后2411条消息及保存的Agent/Session保全，
+完整格式8检查、匹配服务/资产与浏览器通过。专属转换及其测试在恢复责任结束后
+退役，没有删除生产持久资料。这是该次实际交接记录，不能证明后续开发树已部署，
+也不授权重新执行转换；当前备份/账户恢复范围由
+[存储合同](../implemented/current-storage-format.md#complete-record-projections)维护。
 
 协议可达性、产品模拟验证、真实模型和生产发布分别报告；历史 G0、源码及本次
 受控 provider 不能替代未执行项。验证复用遵守 [testing.md](../testing.md)。

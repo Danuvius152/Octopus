@@ -78,11 +78,14 @@ function OutcomeResult({ message, sessionId, onRestoreInput, restoreInputDisable
       {label}{message.cost != null ? ` · $${message.cost.toFixed(4)}` : ""}
     </span>
     {primary && <div className="max-w-[85%] whitespace-pre-wrap break-words text-sm">{primary}</div>}
-    {(outcome.native_status || recordingNote || recoveries > 0 || outputSaved) &&
+    {(outcome.native_status || outcome.compact?.native_command || recordingNote || recoveries > 0 || outputSaved) &&
       <details className="max-w-[85%] text-xs text-muted-foreground">
         <summary className="cursor-pointer">Completion details</summary>
         {recoveries > 0 && <p>{recoveries} {recoveries === 1 ? "recovery" : "recoveries"}</p>}
         {outcome.native_status && <p>Native: {outcome.native_status}</p>}
+        {outcome.compact?.native_command && <pre aria-label="Native command details" className="whitespace-pre-wrap break-all">
+          {JSON.stringify(outcome.compact.native_command, null, 2)}
+        </pre>}
         {outputSaved && <p>Model output was saved.</p>}
         {recordingNote && <p>{recordingNote}</p>}
         {outcome.recording_issues && Object.keys(outcome.recording_issues).length > 0 &&
