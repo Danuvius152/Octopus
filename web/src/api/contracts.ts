@@ -3583,12 +3583,19 @@ export interface components {
             disposition?: string | null;
             /** State */
             state?: "unknown" | null;
+            /** Canonical Request Id */
+            canonical_request_id?: string | null;
+            /** Canonical Client Request Id */
+            canonical_client_request_id?: string | null;
         };
         /** ClientSubmissionRequest */
         ClientSubmissionRequest: {
             /** Client Request Id */
             client_request_id: string;
-            /** Content */
+            /**
+             * Content
+             * @default
+             */
             content: string;
             /** Attachment Ids */
             attachment_ids?: string[];
@@ -3596,6 +3603,8 @@ export interface components {
             wiki_mode?: ("auto" | "read" | "maintain") | null;
             /** Recovery Of Client Id */
             recovery_of_client_id?: string | null;
+            /** Operation */
+            operation?: (components["schemas"]["MessageOperation"] | components["schemas"]["CompactOperation"]) | null;
         };
         /** ClientSubmissionStatus */
         ClientSubmissionStatus: {
@@ -3607,15 +3616,16 @@ export interface components {
             request_id: string;
             /**
              * Operation
-             * @constant
+             * @enum {string}
              */
-            operation: "message";
+            operation: "message" | "compact";
             /** Accepted */
             accepted: boolean;
             /** Disposition */
             disposition?: string | null;
             execution: components["schemas"]["SubmissionExecution"];
-            input?: components["schemas"]["SubmissionInput"] | null;
+            /** Input */
+            input?: components["schemas"]["SubmissionInput"] | components["schemas"]["CompactOperation"] | null;
             outcome?: components["schemas"]["TurnOutcome"] | null;
             /** Message */
             message?: string | null;
@@ -3636,9 +3646,9 @@ export interface components {
             request_id: string;
             /**
              * Operation
-             * @constant
+             * @enum {string}
              */
-            operation: "message";
+            operation: "message" | "compact";
             execution: components["schemas"]["SubmissionExecution"];
             /** Preview */
             preview: string;
@@ -3673,6 +3683,35 @@ export interface components {
             /** Message */
             message?: string | null;
             credential?: components["schemas"]["CredentialInfo"] | null;
+        };
+        /** CompactOperation */
+        CompactOperation: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "compact";
+        };
+        /**
+         * CompactResult
+         * @description Observed history effects, independent of the request's business status.
+         */
+        CompactResult: {
+            /**
+             * Effect
+             * @enum {string}
+             */
+            effect: "applied" | "not_applied" | "unknown";
+            /** Reason */
+            reason?: string | null;
+            /** Connection Generation */
+            connection_generation?: string | null;
+            /** Thread Id */
+            thread_id?: string | null;
+            /** Turn Id */
+            turn_id?: string | null;
+            /** Item Ids */
+            item_ids?: string[];
         };
         /** CompactSearchItem */
         CompactSearchItem: {
@@ -4191,9 +4230,9 @@ export interface components {
             request_id: string;
             /**
              * Operation
-             * @constant
+             * @enum {string}
              */
-            operation: "message";
+            operation: "message" | "compact";
             /** Source */
             source: string;
             /** Summary */
@@ -4221,7 +4260,7 @@ export interface components {
             /** Active Request Id */
             active_request_id?: string | null;
             /** Active Operation */
-            active_operation?: "message" | null;
+            active_operation?: ("message" | "compact") | null;
             /**
              * Items
              * @default []
@@ -4750,6 +4789,20 @@ export interface components {
             /** Created At */
             created_at?: string | null;
         };
+        /** MessageOperation */
+        MessageOperation: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "message";
+            /** Content */
+            content: string;
+            /** Attachment Ids */
+            attachment_ids: string[];
+            /** Wiki Mode */
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
+        };
         /**
          * MessagePage
          * @description A page of older transcript, oldest-first (polish-2026-09.md §4 B2).
@@ -4857,7 +4910,7 @@ export interface components {
              * @default start
              * @enum {string}
              */
-            kind: "start" | "steer";
+            kind: "start" | "steer" | "compact";
             /** Connection Generation */
             connection_generation?: string | null;
             /** Target Turn Id */
@@ -4875,7 +4928,12 @@ export interface components {
              */
             state: "not_sent" | "unknown" | "accepted" | "rejected";
             /** Acceptance Source */
-            acceptance_source?: ("start_response" | "user_message" | "steer_response") | null;
+            acceptance_source?: ("start_response" | "user_message" | "steer_response" | "compact_response" | "compact_started") | null;
+            /**
+             * Acknowledged
+             * @default false
+             */
+            acknowledged: boolean;
             /**
              * Controller
              * @default not_needed
@@ -5496,6 +5554,18 @@ export interface components {
              */
             can_steer: boolean;
             /**
+             * Can Observe Context
+             * @default false
+             */
+            can_observe_context: boolean;
+            /**
+             * Can Compact
+             * @default false
+             */
+            can_compact: boolean;
+            /** Compact Unavailable Reason */
+            compact_unavailable_reason?: string | null;
+            /**
              * Can Fork
              * @default false
              */
@@ -5610,6 +5680,18 @@ export interface components {
              * @default false
              */
             can_steer: boolean;
+            /**
+             * Can Observe Context
+             * @default false
+             */
+            can_observe_context: boolean;
+            /**
+             * Can Compact
+             * @default false
+             */
+            can_compact: boolean;
+            /** Compact Unavailable Reason */
+            compact_unavailable_reason?: string | null;
             /**
              * Can Fork
              * @default false
@@ -5948,9 +6030,9 @@ export interface components {
             /**
              * Operation
              * @default message
-             * @constant
+             * @enum {string}
              */
-            operation: "message";
+            operation: "message" | "compact";
             /** Request Id */
             request_id: string;
             /**
@@ -5985,6 +6067,7 @@ export interface components {
             final_answer?: components["schemas"]["FinalAnswerRef"] | null;
             /** Native Status */
             native_status?: ("completed" | "failed" | "interrupted") | null;
+            compact?: components["schemas"]["CompactResult"] | null;
         };
         /** UpdateConnectorRequest */
         UpdateConnectorRequest: {

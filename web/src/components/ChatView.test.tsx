@@ -272,6 +272,7 @@ it("retains an unconfirmed draft after a missing receipt and confirms the origin
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
     expect(request).toHaveBeenCalledWith(statusUrl, {
       method: "GET", headers: { Authorization: "Bearer confirmation-account" },
+      signal: expect.any(AbortSignal),
     });
     expect(screen.getByRole("button", { name: "Restore draft" })).toBeDisabled();
     expect(screen.getByText("Keep the original input")).toBeInTheDocument();
@@ -357,6 +358,7 @@ it("can read admission status while the WebSocket is disconnected", async () => 
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
     expect(request).toHaveBeenCalledWith(statusUrl, {
       method: "GET", headers: { Authorization: "Bearer confirmation-account" },
+      signal: expect.any(AbortSignal),
     });
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Retain this input")).not.toBeInTheDocument();
@@ -398,6 +400,165 @@ it("keeps a withdrawn receipt read-only when the server does not allow input rec
 });
 
 describe("shared Wiki without a composer switch", () => {
+  it("labels ordinary input during compact as queued", () => {
+    const { input, sendMessage } = setup();
+    act(() => useSessionStore.setState({ sessions: [{ ...session, status: "running", can_steer: true }],
+      dispatchStates: { [session.id]: { generation: "compact-service", revision: 1, paused: false,
+        active_request_id: "compact-original", active_operation: "compact", items: [] } } }));
+    fireEvent.change(input, { target: { value: "Continue later" } });
+    expect(screen.getByText("Compacting native context…")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Send to running turn" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Queue message" }));
+    expect(sendMessage).toHaveBeenCalledWith(session.id, "Continue later", undefined, undefined);
+  });
+
+  it.each(["unchanged", "edited", "switched", "returned", "account"])("submits exact compact and protects the %s draft", async (change) => {
+    let finish!: (response: Response) => void;
+    const fetch = vi.fn((_url: string, init?: RequestInit) => init?.method === "POST"
+      ? new Promise<Response>((resolve) => { finish = resolve; }) : Promise.resolve(Response.json({ items: [] })));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const { input, send, sendMessage } = setup();
+      fireEvent.change(input, { target: { value: "  /compact  " } });
+      fireEvent.click(send);
+      expect(sendMessage).not.toHaveBeenCalled();
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+      const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+      expect(url).toContain(`/api/sessions/${session.id}/submissions`);
+      expect(JSON.parse(init.body as string)).toEqual({ client_request_id: expect.any(String), operation: { kind: "compact" } });
+      expect(input).toHaveValue("  /compact  ");
+      if (change === "edited") fireEvent.change(input, { target: { value: "My next question" } });
+      if (change === "switched" || change === "returned") {
+        act(() => useSessionStore.setState({ sessions: [session, { ...session, id: "other" }], activeSessionId: "other" }));
+        if (change === "returned") act(() => useSessionStore.setState({ activeSessionId: session.id }));
+      }
+      if (change === "account") {
+        act(() => useSessionStore.getState().setToken("new-account"));
+        act(() => useSessionStore.setState({ sessions: [session], activeSessionId: session.id }));
+        fireEvent.change(screen.getByRole("textbox"), { target: { value: "New account draft" } });
+      }
+      await act(async () => finish(Response.json({ accepted: true, operation: "compact", request_id: "native-compact" })));
+      expect(screen.getByRole("textbox")).toHaveValue(change === "unchanged" ? "" : change === "edited" ? "My next question" :
+        change === "account" ? "New account draft" : "  /compact  ");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("only confirms a lost compact receipt with GET and never posts again", async () => {
+    const requests: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push({ url, init });
+      if (init?.method === "POST") throw new Error("Receipt lost");
+      return Response.json({ accepted: true, operation: "compact", request_id: "original" });
+    }));
+    try {
+      const { input, send, sendMessage } = setup();
+      fireEvent.change(input, { target: { value: "/compact" } });
+      fireEvent.click(send);
+      await waitFor(() => expect(input).toHaveValue(""));
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(requests.map(({ init }) => init?.method)).toEqual(["POST", "GET"]);
+      expect(requests[1].url).toBe(requests[0].url + "/" + JSON.parse(requests[0].init?.body as string).client_request_id);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it.each(["post", "body", "get"])("bounds a hanging compact %s and keeps the original confirmation identity", async (phase) => {
+    vi.useFakeTimers();
+    const requests: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push({ url, init });
+      if (init?.method === "POST") {
+        if (phase === "post") return await new Promise<Response>(() => {});
+        if (phase === "body") return new Response(new ReadableStream());
+        throw new Error("Receipt lost");
+      }
+      return phase === "get" ? await new Promise<Response>(() => {}) : Response.json({ accepted: true, operation: "compact" });
+    }));
+    try {
+      const { input, send, sendMessage } = setup();
+      fireEvent.change(input, { target: { value: "/compact" } });
+      fireEvent.click(send);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+      expect(requests.map(({ init }) => init?.method)).toEqual(["POST", "GET"]);
+      const original = JSON.parse(requests[0].init?.body as string).client_request_id;
+      expect(requests[1].url).toBe(requests[0].url + "/" + original);
+      expect(sendMessage).not.toHaveBeenCalled();
+      if (phase === "get") {
+        expect(input).toHaveValue("/compact");
+        expect(screen.getByRole("button", { name: "Retry admission confirmation" })).toBeVisible();
+        fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" }));
+        await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+        expect(screen.getByRole("button", { name: "Retry admission confirmation" })).not.toBeDisabled();
+        expect(requests[2].url).toBe(requests[1].url);
+        expect(requests.map(({ init }) => init?.method)).toEqual(["POST", "GET", "GET"]);
+        act(() => useSessionStore.setState({ sessions: [session, { ...session, id: "other" }], activeSessionId: "other" }));
+        fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+        expect(requests.filter(({ init }) => init?.method === "POST")).toHaveLength(2);
+      } else expect(input).toHaveValue("");
+    } finally { vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it.each(["session", "account"])("ends a hanging compact observer when the %s changes and allows the new view's request", async (change) => {
+    vi.useFakeTimers();
+    const requests: RequestInit[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      requests.push(init!);
+      return requests.length === 1 ? await new Promise<Response>(() => {}) : Response.json({ accepted: true, operation: "compact" });
+    }));
+    try {
+      const { input, send } = setup();
+      fireEvent.change(input, { target: { value: "/compact" } });
+      fireEvent.click(send);
+      if (change === "account") act(() => useSessionStore.getState().setToken("new-owner"));
+      const nextSession = { ...session, id: change === "session" ? "other-session" : session.id };
+      act(() => useSessionStore.setState({ sessions: [session, nextSession], activeSessionId: nextSession.id }));
+      expect(requests[0].signal?.aborted).toBe(true);
+      const nextInput = screen.getByRole("textbox");
+      fireEvent.change(nextInput, { target: { value: "/compact" } });
+      expect(nextInput).toHaveValue("/compact");
+      expect(screen.getByRole("button", { name: "Send message" })).not.toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(requests.filter((init) => init.method === "POST")).toHaveLength(2);
+      expect(nextInput).toHaveValue("");
+    } finally { vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it("keeps an unconfirmed compact command and checks the original ID on explicit confirmation", async () => {
+    let confirmed = false;
+    const requests: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push({ url, init });
+      if (init?.method === "POST") throw new Error("Receipt lost");
+      return confirmed ? Response.json({ accepted: true, operation: "compact", request_id: "original" }) : new Response("Missing", { status: 404 });
+    }));
+    try {
+      const { input, send, sendMessage } = setup();
+      fireEvent.change(input, { target: { value: "/compact" } });
+      fireEvent.click(send);
+      const confirm = await screen.findByRole("button", { name: "Retry admission confirmation" });
+      expect(input).toHaveValue("/compact");
+      fireEvent.click(send);
+      expect(requests.filter(({ init }) => init?.method === "POST")).toHaveLength(1);
+      confirmed = true;
+      fireEvent.click(confirm);
+      await waitFor(() => expect(input).toHaveValue(""));
+      expect(requests.map(({ init }) => init?.method)).toEqual(["POST", "GET", "GET"]);
+      expect(sendMessage).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("shows compact usage for arguments and treats a prose mention as a message", () => {
+    const { input, send, sendMessage } = setup();
+    fireEvent.change(input, { target: { value: "/compact custom summary" } });
+    fireEvent.click(send);
+    expect(screen.getByRole("alert")).toHaveTextContent("Usage: /compact (no arguments).");
+    expect(input).toHaveValue("/compact custom summary");
+    expect(sendMessage).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "What does /compact do?" } });
+    fireEvent.click(send);
+    expect(sendMessage).toHaveBeenCalledWith(session.id, "What does /compact do?", undefined, undefined);
+  });
+
   it.each(["请结合共享知识解释这个问题", ...commandCases.map(({ message }) => message)])(
     "sends the original request without an implicit Wiki mode: %s", (message) => {
       const { input, send, sendMessage } = setup();
@@ -466,6 +627,32 @@ describe("session-owned attachment drafts", () => {
   const complete = (index: number, id: string) => act(async () => uploads[index].finish(new Response(JSON.stringify({
     id, filename: "evidence.txt", size: 17, mime_type: "text/plain",
   }))));
+
+  it.each(["uploading", "ready"])("compacts without sending or clearing %s attachments", async (phase) => {
+    const { input, send, sendMessage } = setup();
+    pick();
+    if (phase === "ready") await complete(0, "keep-file");
+    const upload = globalThis.fetch;
+    const requests: RequestInit[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/submissions")) {
+        requests.push(init!);
+        return Response.json({ accepted: true, operation: "compact" });
+      }
+      return upload(url, init);
+    }));
+    fireEvent.change(input, { target: { value: "/compact" } });
+    expect(send).not.toBeDisabled();
+    fireEvent.click(send);
+    await waitFor(() => expect(input).toHaveValue(""));
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(JSON.parse(requests[0].body as string).operation).toEqual({ kind: "compact" });
+    expect(screen.getByText("evidence.txt")).toBeVisible();
+    if (phase === "uploading") await complete(0, "keep-file");
+    fireEvent.change(input, { target: { value: "Read preserved file" } });
+    fireEvent.click(send);
+    expect(sendMessage).toHaveBeenCalledWith(session.id, "Read preserved file", ["keep-file"], undefined);
+  });
 
   it("reuploads a ready A file for B and never sends A's id", async () => {
     const { input, send, sendMessage } = setup();
@@ -586,7 +773,7 @@ it("restores a server-saved input without sending, then explicitly sends a new r
     if (url.endsWith("/submissions")) return Response.json({ items: [{ client_request_id: "old-client", request_id: "old-request", execution,
       preview: "Recover this input", attachment_count: 0 }], next_cursor: null });
     if (url.endsWith("/submissions/old-client")) return Response.json({ session_id: session.id, client_request_id: "old-client", request_id: "old-request",
-      accepted: true, execution, input: { content: "Recover this input", attachment_ids: [], attachments: [] } });
+      accepted: true, execution, input: { kind: "message", content: "Recover this input", attachment_ids: [], attachments: [] } });
     return Response.json([]);
   }));
   const { input, send, sendMessage } = setup(async () => ({ accepted: true }));

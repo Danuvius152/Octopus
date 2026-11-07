@@ -27,12 +27,13 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from ..aio import complete_cleanup
 from ..config import settings
 from ..diagnostics import DiagnosticStream, diagnostic_text, exception_diagnostic
 from ..process_groups import group_exists, wait_group_exit
+from ..session_operations import CompactResult
 from ..submission_models import NativeInputEvidence
 from . import assembly
 from .driver import ActiveTurnRef, SteerNotAccepted
@@ -332,11 +333,15 @@ class HarnessRun:
         working_dir: str,
         resume_id: str | None = None,
         credential: HarnessCredential | None = None,
+        *, operation: Literal["message", "compact"] = "message",
     ) -> None:
         if self._process is not None:
             raise RuntimeError("HarnessRun already started")
         if self._lease_closed:
             raise RuntimeError("HarnessRun has been retired")
+        if operation == "compact" and (not self.profile.can_compact or not resume_id):
+            raise ValueError("Native compaction requires a supported runtime and exact history")
+        self.operation = operation
 
         self._diagnostic_secrets = (settings.auth_token, credential.secret if credential else "")
         self.credential = credential
@@ -350,6 +355,7 @@ class HarnessRun:
         async def prepare() -> tuple[TurnContext, list[str], dict[str, Any]]:
             await self._driver.begin_input(self, resume_id)
             context = self._make_context(prompt, working_dir, resume_id, credential)
+            context.operation = operation
             argv, kwargs = self._driver.build_argv(context)
             self._private_settings = kwargs.pop("private_settings", None)
             argv, kwargs = prepare_spawn(argv, kwargs)
@@ -486,7 +492,18 @@ class HarnessRun:
             self._read_stderr(), name=f"{self._profile.backend}-stderr"
         )
 
-        await self._driver.start_input(self, ctx)
+        if operation == "compact":
+            await self._driver.start_compact(self, ctx)
+        else:
+            await self._driver.start_input(self, ctx)
+
+    async def start_compact(self, working_dir: str, resume_id: str | None,
+                            credential: HarnessCredential | None = None) -> None:
+        await self.start("", working_dir, resume_id, credential, operation="compact")
+
+    @property
+    def compact_result(self) -> CompactResult:
+        return self._driver.compact_result
 
     def close_stdin(self) -> None:
         """Give the captured process EOF; the run retains retirement ownership."""

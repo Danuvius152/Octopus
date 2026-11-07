@@ -16,16 +16,18 @@ from tests.test_ws_delivery import runtime as runtime
 client = api.client
 
 
-async def test_compact_is_not_admitted_during_message_type_preparation(client, tmp_path):
+async def test_compact_without_native_history_is_refused_without_message_or_wiki_work(client, tmp_path):
     manager = api.session_manager
     agent = await manager.db.get_system_agent()
-    session = await manager.create_session(agent["id"], "No compact yet", str(tmp_path), backend="codex")
+    session = await manager.create_session(agent["id"], "No native history", str(tmp_path), backend="codex")
     response = await client.post(f"/api/sessions/{session.id}/submissions", json={
         "client_request_id": "unsupported-compact", "operation": {"kind": "compact"},
     })
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["accepted"] is False and response.json()["code"] == "compact_unavailable"
     assert await manager.db.get_client_submission(session.id, "unsupported-compact") is None
     assert manager.dispatch_snapshot(session.id)["items"] == []
+    assert await manager.db.load_messages(session.id) == []
 
 
 async def accepted_read_input(manager, session, *, damage=None):

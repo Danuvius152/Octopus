@@ -41,6 +41,7 @@ def _submission(row) -> dict[str, Any]:
         result[key] = json.loads(result[key]) if result[key] is not None else None
     if result["payload"] is not None:
         result["payload"] = decode_payload(result["payload"])
+    result["native_inputs"] = [NativeInputEvidence.model_validate(item).model_dump() for item in result["native_inputs"]]
     return result
 
 
@@ -55,7 +56,7 @@ class ClientSubmissionsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             row = await tx.fetch_one(
                 "SELECT native_inputs,execution_state,EXISTS(SELECT 1 FROM messages m "
-                "WHERE m.session_id=i.session_id AND m.terminal_request_id=COALESCE(i.execution_owner,i.request_id)) "
+                "WHERE m.session_id=i.session_id AND m.terminal_request_id=COALESCE(i.execution_owner,i.request_id)),payload "
                 "FROM client_submissions i WHERE session_id=? AND request_id=?",
                 (session_id, request_id),
             )
@@ -63,6 +64,9 @@ class ClientSubmissionsMixin(DatabaseBase):
                 raise ValueError("Native input has no original submission")
             if evidence.input_id != request_id:
                 raise ValueError("Native input identity does not match its submission")
+            operation = decode_payload(json.loads(row[3]))["operation"]
+            if (operation["kind"] == "compact") != (evidence.kind == "compact"):
+                raise ValueError("Native evidence kind does not match its original operation")
             entries = [NativeInputEvidence.model_validate(item) for item in json.loads(row[0])]
             previous = next((item for item in entries if item.attempt_id == evidence.attempt_id), None)
             if row[1] == "pending" and (evidence.state != "not_sent" or entries and previous is None and any(
@@ -86,6 +90,8 @@ class ClientSubmissionsMixin(DatabaseBase):
                 await tx.execute("UPDATE client_submissions SET process_group=? WHERE session_id=? AND request_id=?",
                                  (process_group, session_id, request_id))
             if previous is not None:
+                if previous.acknowledged and not evidence.acknowledged:
+                    raise ValueError("Native compaction acknowledgment cannot be lost")
                 transitions = {"not_sent": {"not_sent", "unknown", "rejected"}, "unknown": {"unknown", "accepted", "rejected"},
                                "accepted": {"accepted"}, "rejected": {"rejected"}}
                 if evidence.state not in transitions[previous.state]:
@@ -231,6 +237,7 @@ class ClientSubmissionsMixin(DatabaseBase):
             if recovery_of:
                 original = await self._get_client_submission(tx, session_id, recovery_of)
                 if (original is None or original["payload"] is None
+                        or original["payload"]["operation"]["kind"] != "message" or decode_payload(payload)["operation"]["kind"] != "message"
                         or original["execution_state"] != "withdrawn" or original["dismissed"]
                         or original["terminal"] is not None and not (original["native_inputs"] and original["delivery_state"] == "none")):
                     raise InputRecoveryUnavailable("This input is not available for recovery. Review its current status.")

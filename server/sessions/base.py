@@ -198,8 +198,22 @@ def fork_info_fields(
     }
 
 
+@dataclass(kw_only=True)
+class RequestIdentity:
+    source: str = "human"
+    priority: bool = False
+    request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    delivery_id: str | None = None
+    started: bool = False
+    work_id: str | None = None
+    order: int = 0
+    question_session_id: str | None = None
+    question_id: str | None = None
+    queued_event: dict[str, Any] | None = field(default=None, repr=False)
+
+
 @dataclass
-class QueuedPrompt:
+class QueuedPrompt(RequestIdentity):
     """A user turn waiting to run.
 
     Carries both the raw prompt text and any attachments the user
@@ -214,20 +228,23 @@ class QueuedPrompt:
     wiki_mode: str | None = None
     trusted_request: str | None = None
     knowledge_context: KnowledgeContext | None = None
-    source: str = "human"
-    priority: bool = False
-    request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    delivery_id: str | None = None
-    started: bool = False
-    work_id: str | None = None
-    order: int = 0
-    question_session_id: str | None = None
-    question_id: str | None = None
-    queued_event: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def summary(self) -> str:
         return self.prompt[:1000]
+
+
+@dataclass
+class CompactRequest(RequestIdentity):
+    operation: Literal["compact"] = field(default="compact", init=False)
+    native_session_id: str | None = None
+
+    @property
+    def summary(self) -> str:
+        return "/compact"
+
+
+SessionRequest = QueuedPrompt | CompactRequest
 
 
 @dataclass
@@ -319,7 +336,7 @@ class ActiveRun:
     Identities come from the existing request, settlement, attempt and backend.
     """
 
-    request: QueuedPrompt | None = None
+    request: SessionRequest | None = None
     # Selected before backend initialization and retained for terminal identity.
     settlement: _Settlement | None = None
     backend: HarnessRun | None = field(default=None, repr=False)

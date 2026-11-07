@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from ..context_models import ContextBinding
 from ..harness import Harness, HarnessCredential, HarnessEvent, HarnessRun
 from ..models import FinalAnswerRef, MessageContent, TurnOutcome
+from ..session_operations import OperationKind
 
 if TYPE_CHECKING:
     from .mcp_questions import InputCleanup
@@ -130,6 +131,7 @@ class _Turn:
     # A conversation observed during this logical turn, usable only by a
     # protocol that supports continuation. It is not proof of safe replay.
     continuation_id: str | None = None
+    operation: OperationKind = "message"
 
 
 @dataclass

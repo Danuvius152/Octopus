@@ -1,3 +1,29 @@
+import { accountFetch } from "./accountFetch";
+
+/** One HTTP receipt observation, including its body; timeout never resends work. */
+export async function readSubmission<T>(url: string, init: RequestInit): Promise<T> {
+  const controller = new AbortController();
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+  });
+  const cancel = () => controller.abort(init.signal?.reason);
+  init.signal?.addEventListener("abort", cancel, { once: true });
+  const deadline = setTimeout(() => controller.abort(new DOMException("Submission confirmation timed out.", "TimeoutError")), 30_000);
+  try {
+    if (init.signal?.aborted) cancel();
+    return await Promise.race([cancelled, (async () => {
+      controller.signal.throwIfAborted();
+      const response = await accountFetch(url, { ...init, signal: controller.signal });
+      if (!response.ok) throw new Error(`Submission confirmation failed (${response.status}).`);
+      return await response.json() as T;
+    })()]);
+  } finally {
+    clearTimeout(deadline);
+    init.signal?.removeEventListener("abort", cancel);
+    controller.abort();
+  }
+}
+
 export interface SubmissionReply {
   accepted: boolean;
   message?: string;

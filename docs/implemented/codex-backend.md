@@ -158,6 +158,30 @@ that scale. The 20-second RPC timeout is per RPC, not an overall preparation SLA
 These results do not establish production recovery latency or arbitrary large
 compacted-line safety.
 
+### Native compaction
+
+Idle manual compaction precisely resumes the captured thread in the ordinary
+Run, then sends `thread/compact/start` once. Preparation checks model, permissions,
+cwd and controls, without injecting controller/turn instructions, sending user
+text or falling back to exec/new history. Request/attempt/connection/thread/RPC
+facts precede possible-send and business write. Run proof that stdin.write was
+never reached can refine the original marker to rejected; a failed drain cannot.
+
+Empty ACK records acceptance without inventing a turn. After possible-send,
+the selected thread's first `turn/started` binds the compact root; conflicting
+roots fail. Committed root proof releases startup independently of ACK, preserving
+slow operations under original turn deadlines. Late RPC errors cannot erase
+execution. Ordinary inputs retain their response/user-message proof rules.
+
+Completed root contextCompaction items prove effects. Existing observations
+atomically install a reliable earlier recompute with its boundary; automatic
+items retain their completion-obligation policy. Effect survives failed or
+interrupted outcomes and finite Stop collection. Success without effect evidence
+is unconfirmed, never inferred no-op. Product chat keeps its messages plus a system
+maintenance outcome, with no final answer or copied summary. Version evidence is
+in [the G0 record](../reference/context-meter-compact-g0.md); product regressions
+use `tests/test_codex_compact.py`.
+
 ### Root completion and selected answer
 
 Only the accepted root's real terminal supplies a provider candidate. A final

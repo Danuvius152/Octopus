@@ -43,6 +43,7 @@ def verify_main(db: sqlite3.Connection) -> int:
     from .context_models import ContextState
     from .db.schema import _SCHEMA, CURRENT_VERSION
     from .delegations import _PersistedRound
+    from .session_operations import decode_payload
     from .submission_models import NativeInputEvidence
 
     version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -78,11 +79,17 @@ def verify_main(db: sqlite3.Connection) -> int:
     except ValidationError:
         raise RuntimeError("Primary database contains an invalid current delegation snapshot") from None
     try:
-        for request_id, raw in db.execute("SELECT request_id,native_inputs FROM client_submissions"):
+        for request_id, raw, payload, execution in db.execute("SELECT request_id,native_inputs,payload,execution_state FROM client_submissions"):
             entries = [NativeInputEvidence.model_validate(item) for item in json.loads(raw)]
             if (any(item.input_id != request_id for item in entries)
                     or len({item.attempt_id for item in entries}) != len(entries)):
                 raise ValueError("Native evidence belongs to a different input or repeats an attempt")
+            operation = decode_payload(json.loads(payload))["operation"] if payload is not None else None
+            if operation is not None and operation["kind"] == "compact":
+                if any(item.kind != "compact" for item in entries):
+                    raise ValueError("Compaction contains ordinary message evidence")
+                if execution == "withdrawn" and any(item.state in {"accepted", "unknown"} for item in entries):
+                    raise ValueError("A possibly executed compaction cannot be withdrawn")
     except (ValueError, TypeError):
         raise RuntimeError("Primary database contains invalid current native input evidence") from None
     return version

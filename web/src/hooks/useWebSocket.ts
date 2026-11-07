@@ -555,6 +555,9 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
           // Carried from the session it replaces: same agent, same backend,
           // so the same harness capability.
           can_steer: prev?.can_steer ?? false,
+          can_observe_context: prev?.can_observe_context ?? false,
+          can_compact: false,
+          compact_unavailable_reason: "No resumable native history is available to compact.",
           fork_is_full_copy: false,
           archived: false,
         });

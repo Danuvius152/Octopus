@@ -42,6 +42,7 @@ from ..models import (
     SessionStatus,
     TurnOutcome,
 )
+from ..session_operations import CompactResult
 from ..submission_models import NativeInputEvidence
 from .base import (
     _MAX_PENDING_STEERS,
@@ -51,6 +52,7 @@ from .base import (
     PendingInput,
     QueuedPrompt,
     Session,
+    SessionRequest,
     _augment_prompt_with_attachments,
     logger,
 )
@@ -90,7 +92,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Submit:
-    request: QueuedPrompt
+    request: SessionRequest
     steerable: bool = False
     client_id: str | None = None
     attachments: tuple[dict[str, Any], ...] = ()
@@ -337,7 +339,7 @@ class RuntimeDeadline:
 
 @dataclass
 class Execution:
-    request: QueuedPrompt
+    request: SessionRequest
     settlement: _Settlement
     completed: asyncio.Future[None]
     retired: asyncio.Future[None]
@@ -508,6 +510,10 @@ class OwnerRuntime:
             for request in (*session._pending_queue, *session._steer_queue):
                 request.priority = False
             interrupted = await self._interrupt(command.cause, retain_unstarted=True)
+            for compact_pending in tuple(session._pending_queue):
+                if compact_pending.operation == "compact":
+                    session._pending_queue.remove(compact_pending)
+                    await self.complete(compact_pending, reason="withdrawn")
             # A queued unattended solver has one opportunity, bounded by Stop.
             # Settle its original input; the child observes that same receipt.
             for queued_input in tuple(session._pending_queue):
@@ -693,25 +699,28 @@ class OwnerRuntime:
                 or any(resource.backend.work_id == work_id for resource in session._run.retirements.values()))
 
     @staticmethod
-    def _unattended_question_return(request: QueuedPrompt) -> bool:
-        return bool(request.question_session_id and request.question_id and request.knowledge_context is not None
+    def _unattended_question_return(request: SessionRequest) -> bool:
+        return bool(request.operation == "message" and request.question_session_id and request.question_id and request.knowledge_context is not None
                     and request.knowledge_context.interaction_policy == "unattended")
 
     async def _submit(self, command: Submit) -> SubmissionReceipt:
         from ..knowledge import for_entry
         from ..mcp_identity import work_is_open
-        from ..session_operations import MessageOperation
+        from ..session_operations import CompactOperation, MessageOperation
         from .client_submissions import input_digest
 
         session, manager, request = self.owner.session, self.owner.manager, command.request
         database = manager.input_database()
-        submitted: dict[str, Any] = {"content": request.prompt, "attachment_ids": request.attachment_ids,
-                                    "wiki_mode": request.wiki_mode}
-        operation = MessageOperation.model_validate({"kind": request.operation, **submitted})
+        submitted: dict[str, Any] = ({"content": request.prompt, "attachment_ids": request.attachment_ids,
+                                     "wiki_mode": request.wiki_mode} if request.operation == "message" else {"kind": "compact"})
+        operation = (MessageOperation.model_validate({"kind": request.operation, **submitted})
+                     if request.operation == "message" else CompactOperation(kind="compact"))
         if command.recovery_of:
             submitted["recovery_of_client_id"] = command.recovery_of
         digest = input_digest(submitted)
-        payload: dict[str, Any] = {"operation": operation.model_dump(), "attachments": list(command.attachments)}
+        payload: dict[str, Any] = {"operation": operation.model_dump()}
+        if request.operation == "message":
+            payload["attachments"] = list(command.attachments)
         if command.recovery_of:
             payload["recovery_of_client_id"] = command.recovery_of
         client_id = command.client_id or (
@@ -734,38 +743,57 @@ class OwnerRuntime:
         if session._forking or (session._archive_reservation is not None
                 and not (session._dispatch_paused and self._auto_archive_operation is not None)):
             raise SessionAdmissionBusy(f"Session {session.id} is busy (forking or archiving)")
-        request.knowledge_context = request.knowledge_context or for_entry(
-            session, request.prompt if request.trusted_request is None else request.trusted_request,
-            request_id=request.request_id, selected=request.wiki_mode,
-            interaction_policy="human" if request.source == "human" else
-                "unattended" if request.source in {"schedule", "wiki"} else None,
-        )
-        if request.source == "schedule":
-            # A definition's authoring policy is not the policy of its later
-            # autonomous fire. Child/return contexts otherwise inherit intact.
-            request.knowledge_context = replace(request.knowledge_context, interaction_policy="unattended")
-        if request.knowledge_context.origin.user_id != session.user_id:
-            raise ValueError("Request knowledge belongs to another account")
-        if command.recovery_of:
-            from ..submission_models import InputRecoveryUnavailable
+        if request.operation == "compact":
+            from ..submission_models import CompactInProgress, CompactUnavailable
 
-            original = await database.get_client_submission(session.id, command.recovery_of)
-            context = saved_context(session.id, original) if original else None
-            if context is None or context.origin.user_id != session.user_id:
-                raise InputRecoveryUnavailable("The original input has no verifiable request context; it cannot be recovered.")
-            limits = request.knowledge_context.maintenance.restrict(context.maintenance)
-            request.knowledge_context = replace(
-                request.knowledge_context, maintenance=limits,
-                mode=request.knowledge_context.mode if limits.may_submit else "read",
+            active = next((item for item in (
+                *((self.current.request,) if self.current is not None else ()), *session._pending_queue,
+            ) if item.operation == "compact"), None)
+            if active is not None:
+                original = await database.get_submission_for_request(session.id, active.request_id)
+                assert original is not None
+                raise CompactInProgress(active.request_id, original["client_id"])
+            if not get_harness(session.backend).runtime_profile(None).can_compact:
+                raise CompactUnavailable("This runtime does not support native compaction.")
+            if not session.claude_session_id or session.fork_needs_replay:
+                raise CompactUnavailable("No resumable native history is available to compact.")
+            if self.current is not None or session._pending_queue:
+                raise SessionAdmissionBusy("Compaction currently requires an idle conversation.")
+            request.native_session_id = session.claude_session_id
+            payload["native_session_id"] = request.native_session_id
+        else:
+            request.knowledge_context = request.knowledge_context or for_entry(
+                session, request.prompt if request.trusted_request is None else request.trusted_request,
+                request_id=request.request_id, selected=request.wiki_mode,
+                interaction_policy="human" if request.source == "human" else
+                    "unattended" if request.source in {"schedule", "wiki"} else None,
             )
-        request.wiki_mode = request.knowledge_context.mode
-        request.trusted_request = request.knowledge_context.trusted_request
-        if session._dispatch_paused and self._unattended_question_return(request):
-            return SubmissionReceipt.closed(request.request_id, "withdrawn")
+            if request.source == "schedule":
+                # A fire retains its original unattended policy.
+                request.knowledge_context = replace(request.knowledge_context, interaction_policy="unattended")
+            if request.knowledge_context.origin.user_id != session.user_id:
+                raise ValueError("Request knowledge belongs to another account")
+            if command.recovery_of:
+                from ..submission_models import InputRecoveryUnavailable
+
+                original = await database.get_client_submission(session.id, command.recovery_of)
+                context = saved_context(session.id, original) if original else None
+                if context is None or context.origin.user_id != session.user_id:
+                    raise InputRecoveryUnavailable("The original input has no verifiable request context; it cannot be recovered.")
+                limits = request.knowledge_context.maintenance.restrict(context.maintenance)
+                request.knowledge_context = replace(
+                    request.knowledge_context, maintenance=limits,
+                    mode=request.knowledge_context.mode if limits.may_submit else "read",
+                )
+            request.wiki_mode = request.knowledge_context.mode
+            request.trusted_request = request.knowledge_context.trusted_request
+            if session._dispatch_paused and self._unattended_question_return(request):
+                return SubmissionReceipt.closed(request.request_id, "withdrawn")
         request.priority = session._dispatch_paused and request.source == "human"
         if request.source == "human":
             manager._check_turn_quota(session)
-        steering = (command.steerable and request.source == "human" and self.current is not None
+        steering = (command.steerable and request.operation == "message" and request.source == "human" and self.current is not None
+                and self.current.request.operation == "message"
                 and session._steer_open and not request.attachment_ids
                 and self.current.attempt is not None
                 and getattr(self.current.attempt.backend, "steering_open", True)
@@ -786,11 +814,11 @@ class OwnerRuntime:
         if not steering:
             snapshot["items"].append({
                 "request_id": request.request_id, "source": request.source, "operation": request.operation,
-                "summary": request.prompt[:1000], "priority": request.priority,
+                "summary": request.summary, "priority": request.priority,
             })
         queued = not steering and (self.current is not None or session._dispatch_paused)
         notification = ({
-            "type": "queued", "session_id": session.id, "content": request.prompt,
+            "type": "queued", "session_id": session.id, "content": request.summary,
             "request_id": request.request_id, "queue_length": len(session._pending_queue) + 1,
             "dispatch_state": snapshot,
         } if queued else {"type": "dispatch_state", "session_id": session.id, "dispatch_state": snapshot})
@@ -804,8 +832,10 @@ class OwnerRuntime:
 
         payload.update(source=request.source, delivery_id=request.delivery_id, work_id=request.work_id,
                        question_session_id=request.question_session_id, question_id=request.question_id,
-                       trusted_request=request.trusted_request, knowledge=encode(request.knowledge_context),
                        priority=request.priority, order=request.order)
+        if request.operation == "message":
+            assert request.knowledge_context is not None
+            payload.update(trusted_request=request.trusted_request, knowledge=encode(request.knowledge_context))
         created, row = await database.admit_client_submission(
             session.id, client_id, digest, request.request_id, payload=payload,
             receipt={"accepted": True, "disposition": disposition}, recovery_of=command.recovery_of,
@@ -832,7 +862,7 @@ class OwnerRuntime:
         return receipt
 
     @staticmethod
-    def _pending_input(request: QueuedPrompt) -> PendingInput:
+    def _pending_input(request: SessionRequest) -> PendingInput:
         return PendingInput(request.request_id, request.source, request.summary, request.work_id,
                             request.priority, request.order, request.queued_event, operation=request.operation)
 
@@ -883,6 +913,7 @@ class OwnerRuntime:
             recording_integrity="incomplete" if settlement.protocol_issues else "complete",
             recording_issues=dict(settlement.protocol_issues),
             recording_locations=list(settlement.protocol_locations),
+            compact=CompactResult(effect="not_applied") if execution.request.operation == "compact" else None,
         )
         settlement.outcome = outcome
         settlement.stored = MessageContent(
@@ -932,10 +963,15 @@ class OwnerRuntime:
             if attempt is not None:
                 self._capture_recording(execution)
                 root = getattr(attempt.backend, "observed_root", None)
-                if attempt.final_answer is None and root is not None:
+                if execution.request.operation == "message" and attempt.final_answer is None and root is not None:
                     attempt.final_answer = FinalAnswerRef(thread_id=root.thread_id, turn_id=root.turn_id)
                 assert settlement.outcome is not None
                 settlement.outcome.final_answer = attempt.final_answer.model_copy(deep=True) if attempt.final_answer is not None else None
+                if execution.request.operation == "compact":
+                    settlement.outcome.final_answer = None
+                    settlement.outcome.compact = attempt.backend.compact_result
+                    if settlement.outcome.compact.effect == "unknown":
+                        await self.owner.manager._unconfirmed_context_owned(session)
                 native_status = getattr(attempt.backend, "native_terminal_status", None)
                 if native_status in {"completed", "failed", "interrupted"}:
                     settlement.outcome.native_status = native_status
@@ -1010,7 +1046,7 @@ class OwnerRuntime:
                 if execution.attempt.backend.native_end_reason == "process_ended":
                     execution.attempt.backend.native_end_reason = "service_shutdown" if cause == "shutdown" else "user_stop"
                 execution.attempt.backend.retire()
-        if not execution.request.started and retain_unstarted:
+        if not execution.request.started and retain_unstarted and execution.request.operation == "message":
             execution.request.priority = False
             session._pending_queue.append(self._pending_input(execution.request))
             session._pending_queue.sort(key=lambda request: request.order)
@@ -1074,7 +1110,7 @@ class OwnerRuntime:
         return task
 
     def completion(
-        self, request: QueuedPrompt | PendingInput, *, settlement: _Settlement | None = None,
+        self, request: SessionRequest | PendingInput, *, settlement: _Settlement | None = None,
         reason: str | None = None, actual_request_id: str | None = None,
         notification_state: Literal["delivered", "failed", "unavailable"] = "delivered",
         owner_ended: bool = False,
@@ -1139,7 +1175,7 @@ class OwnerRuntime:
     def end_completions(self) -> None:
         """Manager takes over only the ended writer's original observations."""
         session, manager, execution = self.owner.session, self.owner.manager, self.current
-        inputs: dict[str, PendingInput | QueuedPrompt] = {
+        inputs: dict[str, PendingInput | SessionRequest] = {
             request.request_id: request for request in (*session._pending_queue, *session._steer_queue)
         }
         if execution is not None:
@@ -1179,7 +1215,7 @@ class OwnerRuntime:
             observation._driver.set_result(None)
 
     async def complete(
-        self, request: QueuedPrompt | PendingInput, *, settlement: _Settlement | None = None,
+        self, request: SessionRequest | PendingInput, *, settlement: _Settlement | None = None,
         reason: str | None = None, actual_request_id: str | None = None,
         published: bool = True,
         execution: Execution | None = None,
@@ -1377,7 +1413,8 @@ class OwnerRuntime:
             configured = capture_configuration(session)
             request = replace(execution.request)
             if get_harness(configured.backend).runtime_profile(None).native_input_evidence:
-                native_input = NativeInputEvidence(input_id=request.request_id, attempt_id=uuid.uuid4().hex)
+                native_input = NativeInputEvidence(input_id=request.request_id, attempt_id=uuid.uuid4().hex,
+                    kind="compact" if request.operation == "compact" else "start")
                 # Establish preparation evidence before Stop may settle this
                 # input. Later protocol observations refine the same attempt.
                 await manager.input_database().record_native_input(session.id, request.request_id, native_input)
@@ -1455,11 +1492,15 @@ class OwnerRuntime:
             if execution.terminal is not None and (execution.terminal.delivered or execution.terminal.error is not None):
                 await self._finish(execution)
 
-    async def _prepare_input(self, configured: Session, request: QueuedPrompt) -> _PreparedInput | None:
+    async def _prepare_input(self, configured: Session, request: SessionRequest) -> _PreparedInput | None:
         manager = self.owner.manager
         if not await claim_input(manager, configured.id, request.request_id):
             return None
         await require_retired_writers(manager, configured.id)
+        if request.operation == "compact":
+            if not request.native_session_id or configured.claude_session_id != request.native_session_id:
+                raise ValueError("The original native history is no longer available to compact")
+            return _PreparedInput((), (), None, None)
         if configured.user_id is None:
             raise AttachmentUnavailable()
         files = await asyncio.to_thread(validate_message_attachments, configured.id, request.attachment_ids,
@@ -1475,6 +1516,14 @@ class OwnerRuntime:
         from ..wiki.tasks import command_prompt, tasks
 
         session, manager, request = self.owner.session, self.owner.manager, execution.request
+        if request.operation == "compact":
+            self.notify_status(SessionStatus.running)
+            diagnostic = execution.preparation_diagnostic = PreparationDiagnostic()
+            execution.operation = self.task(self._prepare_run(capture_configuration(session), "", [], diagnostic,
+                compact=True), f"request-prepare-{request.request_id}")
+            execution.phase = "prepare"
+            self.owner.wake()
+            return
         knowledge = request.knowledge_context
         assert knowledge is not None
         mode = tasks.mode_for(session, knowledge.mode, request_id=request.request_id)
@@ -1510,7 +1559,8 @@ class OwnerRuntime:
         execution.phase = "prepare"
         self.owner.wake()
 
-    async def _prepare_run(self, configured: Session, prompt: str, copied: list[MessageContent], diagnostic: PreparationDiagnostic) -> _PreparedRun:
+    async def _prepare_run(self, configured: Session, prompt: str, copied: list[MessageContent], diagnostic: PreparationDiagnostic,
+                           *, compact: bool = False) -> _PreparedRun:
         manager = self.owner.manager
         configured, agent = await manager.capture_request_configuration(configured)
         harness = get_harness(configured.backend)
@@ -1533,12 +1583,12 @@ class OwnerRuntime:
                 configured.backend, inherited=not bool(getattr(configured, error.field)),
             )) from error
         connectors = await manager._load_connectors(agent)
-        if configured.fork_needs_replay:
+        if configured.fork_needs_replay and not compact:
             prompt = fork_helpers.wrap_for_fork_replay(prompt, copied)
         if configured.user_id is None:
             raise ValueError("The session has no file owner")
         backend = manager._make_run(configured, agent, connectors)
-        if not isinstance(backend, HarnessRun) or not backend.profile.inline_large_inputs:
+        if not compact and (not isinstance(backend, HarnessRun) or not backend.profile.inline_large_inputs):
             prompt = await asyncio.to_thread(spill_if_large, configured.id, prompt, user_id=configured.user_id)
         if configured.agent_id:
             from ..agent_memory import ensure_agent_dirs
@@ -1573,6 +1623,7 @@ class OwnerRuntime:
                 prepared.prompt, get_harness(prepared.configured.backend),
                 prepared.configured.credential_id or (prepared.agent or {}).get("credential_id"),
                 execution.settlement,
+                operation=execution.request.operation,
             )
         backend, reused = prepared.backend, False
         held = session._run.backend
@@ -1604,6 +1655,9 @@ class OwnerRuntime:
             # A prior attempt may commit its history before its reader is
             # cancelled. The next writer resumes that fact, not a lost event.
             session.claude_session_id = await database.get_session_resume_id(session.id)
+            if execution.request.operation == "compact" and session.claude_session_id != execution.request.native_session_id:
+                await self._failed(execution, ValueError("The original native history changed before compaction"), "native_history_changed")
+                return
 
             async def record_input(evidence):
                 await database.record_native_input(session.id, evidence.input_id, evidence,
@@ -1656,6 +1710,7 @@ class OwnerRuntime:
         execution.operation = self.task(self._start_original(
             backend, prepared.prompt, reused, prepared.configured.working_dir,
             session.claude_session_id, prepared.credential, session._run.wiki_task_id,
+            compact=execution.request.operation == "compact",
         ), f"runtime-start-{attempt.attempt_id}")
         execution.phase = "start"
         self._arm_deadline(execution)
@@ -1663,10 +1718,13 @@ class OwnerRuntime:
     async def _start_original(
         self, backend: HarnessRun, prompt: str, reused: bool, working_dir: str,
         resume_id: str | None, credential: HarnessCredential | None, wiki_task_id: str | None,
+        *, compact: bool = False,
     ) -> None:
         if hasattr(backend, "bind_wiki_task"):
             backend.bind_wiki_task(wiki_task_id)
-        if reused:
+        if compact:
+            await backend.start_compact(working_dir, resume_id, credential=credential)
+        elif reused:
             if hasattr(backend, "write_turn_input"):
                 await backend.write_turn_input(prompt)
             else:
@@ -1780,7 +1838,7 @@ class OwnerRuntime:
                     await self._failed(execution, error, "backend_exception")
                     return
             else:
-                session._steer_open = bool(attempt.backend.can_steer and attempt.result is None)
+                session._steer_open = bool(execution.request.operation == "message" and attempt.backend.can_steer and attempt.result is None)
                 execution.phase = "stream"
                 group = getattr(attempt.backend, "process_group_id", None)
                 if isinstance(group, int) and manager.db is not None:
@@ -1864,8 +1922,11 @@ class OwnerRuntime:
         input_only = not settlement.protocol_issues and resolved_input_gap(attempt)
         recording_failed = (bool(issues) and not input_only if getattr(attempt.backend, "captures_retirement_output", False)
                             else bool(issues.get("fatal_protocol_error")))
-        failed = attempt.failed or attempt.timeout is not None or recording_failed
+        effect_unknown = execution.request.operation == "compact" and attempt.backend.compact_result.effect == "unknown"
+        failed = attempt.failed or attempt.timeout is not None or recording_failed or effect_unknown
         reason = detail.get("message")
+        if effect_unknown and not reason:
+            reason = "Native compaction effects could not be confirmed; this operation will not run again automatically."
         raw = attempt.result.content if attempt.result else attempt.error_text
         if failed and raw:
             reason = f"{reason}\n{raw}" if reason else raw
@@ -1949,7 +2010,7 @@ class OwnerRuntime:
             message=diagnostic_text(str(error), secrets=(settings.auth_token, credential.secret if credential else "")),
             code=error.code if isinstance(error, AttachmentUnavailable) else code,
             rejected_input={"content": execution.request.prompt, "attachment_ids": execution.request.attachment_ids}
-                if isinstance(error, AttachmentUnavailable) else None,
+                if isinstance(error, AttachmentUnavailable) and execution.request.operation == "message" else None,
             defer_recording=native,
         )
         if native:
@@ -2086,6 +2147,7 @@ class OwnerRuntime:
                 return
             target = getattr(attempt.backend, "active_turn", None)
             request = await load_pending_input(manager, session.id, session._steer_queue[0])
+            assert request.operation == "message"
             prepared = self.task(self._prepare_steer(
                 capture_configuration(session), replace(request), session._run.knowledge_context,
                 execution.request.request_id,

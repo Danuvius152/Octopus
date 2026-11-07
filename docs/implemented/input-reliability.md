@@ -119,11 +119,12 @@ existing overlap policy.
 
 ## Saved inputs
 
-New durable payloads retain an explicit `MessageOperation` under `operation`,
-including the submitted content, attachment IDs and Wiki mode. The original
+New durable payloads retain an explicit `message | compact` under `operation`.
+Messages contain submitted content, attachment IDs and Wiki mode; compact has
+only its kind and separately captures the original native history. The original
 MessageOperation is distinct from the effective execution KnowledgeContext.
 Pending items, admission/status, dispatch, outcomes and completion readers carry
-the operation kind; current supported kind is `message`. App answers, managed
+the operation kind. App answers, managed
 work and notifications consume message completions under their existing scope.
 An explicit malformed/unknown operation is rejected rather than decoded as text.
 
@@ -132,6 +133,52 @@ their rows and original three-field input digest are unchanged. Existing IDs
 therefore retain their deduplication and recovery relationships. Execution reads
 the durable operation, not a second queued copy of its body. Public ordinary
 message submission fields keep their existing HTTP shape.
+
+### Native compaction requests
+
+The current source admits compact only in idle, resumable Codex sessions. Other
+runtimes, absent history and busy sessions receive explicit refusals. This slice
+does not release the planned Claude or busy-queue behavior. The original Owner
+applies ownership, readiness, reservations, capacity, quota and retired-writer
+gates, then execution reloads its durable payload. No prompt, attachments, Wiki
+task, history replay or continuation/retry is manufactured.
+
+HTTP and WS accept `operation: {kind: "compact"}` with `client_request_id`.
+Same ID/payload returns the original fact; different content/kind conflicts.
+A new ID during an active compact is refused with `compact_in_progress` and
+canonical request/client IDs, without an alias row or false acceptance. Lost
+receipts permit GET confirmation of the original ID, never automatic POST/resend.
+Each HTTP observation, including its response body, has a 30-second limit. POST
+expiry only permits the original-ID GET; GET expiry retains the identity and
+draft for confirmation. Leaving the view cancels observation and releases its
+local request slot, without stopping the admitted native operation. Account
+changes discard transient notices rather than transferring them to a new owner.
+
+Claim and possible-send commit before business I/O. ACK and exact root proof are
+independent facts; neither means completion. Committed root evidence can end
+startup without ACK, so the RPC timeout does not interrupt an already proven
+execution. Original turn deadlines, finite collection and Run retirement apply.
+The terminal's native admission-close time is checked against overall/idle
+budgets even after Owner storage waits; expiry preserves its original timeout
+reason without granting compact a message continuation or retry.
+
+Maintenance outcomes have no final answer. `compact.effect` is applied,
+not_applied or unknown independently of success, failed or interrupted. Stop can
+retain interrupted + applied; unknown effects invalidate the old context sample.
+A reliable post sample installed with its boundary stays valid. Success without
+effect evidence is unconfirmed; no-op needs affirmative native evidence.
+
+Stop withdraws pending/dequeued-unstarted compact; Resume cannot revive it.
+Ordinary messages during compact queue instead of steering. Startup withdraws
+pending/proven-unsent work, preserves unknown or terminal facts and never replays.
+Admission and the recovery transaction reject compact as a `recovery_of` source.
+Saved maintenance records remain read-only.
+
+The composer recognizes exact argument-free `/compact`, allowing surrounding
+whitespace. Arguments show usage; prose mentions stay normal messages. Confirmed
+acceptance clears only matching original account/session/draft command text;
+attachments, uploads and later drafts remain. Status uses existing dispatch,
+result and saved-input surfaces, without a separate retry workflow.
 
 Review shows the saved text, attachment metadata and the reason an outcome
 is unknown. Restore only fills the composer. The user's send creates a new

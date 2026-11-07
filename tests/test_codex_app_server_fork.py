@@ -100,6 +100,25 @@ async def test_rewind_at_steer_uses_product_seq_and_keeps_native_sources(native_
     assert sent.endswith("Explicit new branch request\n</continue-from-here>")
 
 
+async def test_compact_in_native_fork_preserves_product_history_and_fork_metadata(fork_source):
+    runtime, _ = fork_source
+    manager, database, parent, mode, _, _ = runtime
+    branch = await manager.duplicate_session(parent.id, user_id=parent.user_id)
+    metadata = branch.fork_metadata
+    assert json.loads(metadata)["full_copy"]
+    original = await database.load_messages(branch.id)
+    mode[0] = "compact_ack_first"
+    receipt = await manager.start_compact(branch.id, client_request_id="fork-compact")
+    completion = await asyncio.wait_for(receipt.wait(), 4)
+    assert completion.outcome.status == "success" and completion.outcome.compact.effect == "applied"
+    assert branch.fork_metadata == metadata
+    assert (await database.load_messages(branch.id))[:len(original)] == original
+    await wait_dispatch_idle(manager, branch.id)
+    await manager.archive_session(branch.id, replace=False)
+    restored = await manager.unarchive_session(branch.id, branch.user_id)
+    assert restored.fork_metadata == metadata
+
+
 async def test_full_fork_saves_actual_native_id_without_starting_a_turn(fork_source, tmp_path):
     runtime, receipt = fork_source
     manager, database, parent, mode, starts, _ = runtime

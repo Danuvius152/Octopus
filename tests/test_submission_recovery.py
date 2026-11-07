@@ -129,7 +129,7 @@ async def test_malformed_explicit_operation_cannot_fall_back_to_legacy_message(t
         async with db.transaction(write=True) as tx:
             await tx.execute("INSERT INTO client_submissions(session_id,client_id,payload_sha256,request_id,payload) "
                              "VALUES('retained-operation','bad','saved-digest','bad',?)", (json.dumps(payload),))
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueError if operation == {"kind": "compact"} else ValidationError):
             await db.get_client_submission("retained-operation", "bad")
         async with db.transaction(write=False) as tx:
             raw = await tx.fetch_one("SELECT payload FROM client_submissions WHERE session_id='retained-operation' AND client_id='bad'")

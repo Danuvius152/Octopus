@@ -45,6 +45,15 @@ subprocesses, declare their actual driver/capabilities through
 `tests/harness_profiles.py::process_profile`; replacing argv alone cannot change
 a native profile into an argv peer.
 
+Manual compact regressions in `tests/test_codex_compact.py` use authenticated
+HTTP/WS and the original Owner, SQLite and Harness with a controlled framed
+stdio peer. They distinguish ACK/root/effect/terminal, including a proven root
+that outlives the lost-ACK RPC deadline, pre-write proof, late Stop effects,
+recording failure and non-replay after restart. These are product protocol
+checks, not live-provider or production-release evidence. Composer and result
+tests cover original-ID GET confirmation, account/session/draft protection and
+attachments without duplicating the server state machine.
+
 ### Fast checks during development
 
 Get feedback on each change promptly with the smallest relevant test set:

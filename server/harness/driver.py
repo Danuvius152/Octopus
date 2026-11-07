@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..session_operations import CompactResult
 from .profile import ParseOutput, RuntimeProfile, TurnContext
 
 if TYPE_CHECKING:
@@ -67,6 +68,13 @@ class RunDriver(ABC):
 
     @abstractmethod
     async def start_input(self, io: HarnessRun, context: TurnContext) -> None: ...
+
+    async def start_compact(self, io: HarnessRun, context: TurnContext) -> None:
+        raise RuntimeError(f"{self.profile.backend} does not support native compaction")
+
+    @property
+    def compact_result(self) -> CompactResult:
+        return CompactResult(effect="not_applied", reason="No native compaction was sent")
 
     async def send_input(self, io: HarnessRun, text: str, *, input_id: str | None = None) -> str:
         raise RuntimeError(f"{self.profile.backend} does not take input on stdin")

@@ -35,6 +35,7 @@ describe("sessionStore", () => {
         backend: "claude-code" as const,
         can_fork: true,
           can_steer: false,
+        can_observe_context: false, can_compact: false,
         fork_is_full_copy: false,
       },
     ];
@@ -86,6 +87,7 @@ describe("sessionStore", () => {
         backend: "claude-code" as const,
         can_fork: true,
           can_steer: false,
+        can_observe_context: false, can_compact: false,
         fork_is_full_copy: false,
       },
     ]);

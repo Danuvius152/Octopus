@@ -18,7 +18,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from .events import HarnessCredential, HarnessEvent
 from .fork import ForkCleanup, ForkCopy, ForkPrepare
@@ -116,6 +116,7 @@ class TurnContext:
     # Request-specific trusted instructions; excluded from stable controller
     # comparison and delivered separately on a resumed Codex thread.
     turn_instructions: str = ""
+    operation: Literal["message", "compact"] = "message"
 
 
 @dataclass
@@ -245,6 +246,8 @@ class RuntimeProfile:
     # Native root usage, with identity and a runtime window; independent of
     # steering, invocation or the cumulative performance measurements.
     can_observe_context: bool = False
+    # Native history maintenance through this profile's normal owned Run.
+    can_compact: bool = False
     tool_policy: ToolPolicySupport = field(default_factory=ToolPolicySupport)
     # Request instructions have a native per-turn channel on some adapters;
     # otherwise they are fixed in the process's composed system prompt.

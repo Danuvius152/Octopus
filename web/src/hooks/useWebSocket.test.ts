@@ -16,7 +16,8 @@ it.each(["question_answer", "question_closed"])("retains %s resolution facts fro
 it("restores the original session and rejects a delayed archive projection", () => {
   const original: SessionInfo = { id: "woken-original", name: "Original", archived: false,
     working_dir: "/work", status: "idle", created_at: "now", message_count: 0, transcript_integrity: "ok",
-    origin: "user", backend: "codex", can_steer: true, can_fork: true, fork_is_full_copy: false };
+    origin: "user", backend: "codex", can_steer: true, can_fork: true, fork_is_full_copy: false,
+    can_observe_context: true, can_compact: false };
   useSessionStore.setState({ sessions: [], archivedSessions: [original], activeSessionId: "another-session", sessionMembership: {} });
   const dispatch = { generation: "wake-service", revision: 12, paused: true, active_request_id: null, active_operation: null, items: [] };
   handleWsMessage({ type: "session_unarchived", session_id: original.id, session: original, dispatch_state: dispatch });

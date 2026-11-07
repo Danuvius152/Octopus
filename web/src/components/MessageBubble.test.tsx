@@ -32,6 +32,21 @@ it.each(["missing", "other-request", "other-attempt", "commentary", "other-root"
   },
 );
 
+it.each(["live", "history"])("keeps compact effect separate from an interrupted business outcome in %s records", async (path) => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const { normalizeMessage } = await import("../lib/turnOutcome");
+  const content = { kind: "outcome", operation: "compact", request_id: "compact-original", status: "interrupted",
+    recovery: {}, compact: { effect: "applied", item_ids: ["native-compact-item"] }, final_answer: null };
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "result", session_id: "compact", seq: 2, terminal: true, is_error: true, content });
+  const message = path === "live" ? useSessionStore.getState().messages.compact[0] :
+    normalizeMessage({ role: "system", type: "result", seq: 2, is_error: true, content });
+  const view = render(<MessageBubble sessionId="compact" message={message} />);
+  expect(view.getByText("Compaction interrupted")).toBeVisible();
+  expect(view.getByText("Native history was compacted. Chat messages are preserved.")).toBeVisible();
+  expect(view.queryByText("Model output was saved.")).not.toBeInTheDocument();
+});
+
 it("uses a neutral explanation for an unknown historical question closure", () => {
   const view = render(<MessageBubble sessionId="legacy-question" message={{ role: "system", type: "question_closed",
     content: "Legacy transport detail", tool_input: { reason: "unknown_legacy_reason" } }} />);

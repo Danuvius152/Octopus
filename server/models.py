@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from .config import settings
 from .context_models import ContextState
-from .session_operations import OperationKind
+from .session_operations import CompactResult, OperationKind
 
 
 class SessionStatus(str, Enum):
@@ -139,6 +139,9 @@ class SessionInfo(BaseModel):
     # send button will actually do — claiming "Queue message" when the message
     # will steer is worse than not saying anything.
     can_steer: bool = False
+    can_observe_context: bool = False
+    can_compact: bool = False
+    compact_unavailable_reason: str | None = None
     # Session tree-rewind / fork (session-rewind.md §4). Exactly five
     # fork-related fields are exposed; fork_status, fork_needs_replay and the
     # raw fork_metadata blob are server-internal.
@@ -218,6 +221,7 @@ class TurnOutcome(BaseModel):
     recording_locations: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
     final_answer: FinalAnswerRef | None = None
     native_status: Literal["completed", "failed", "interrupted"] | None = None
+    compact: CompactResult | None = None
 
 
 class ToolReceipt(BaseModel):

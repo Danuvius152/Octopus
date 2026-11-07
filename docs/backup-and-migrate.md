@@ -63,6 +63,11 @@ binding/revision relationships. Neither restoration path revives an attempt or
 permits replay; there is no additional collection root. See
 [context storage](implemented/current-storage-format.md#complete-record-projections).
 
+Compact payloads, native ACK/root evidence and effect-bearing maintenance outcomes
+follow existing sessions/messages/client_submissions ownership. Complete backups
+preserve them; account archives exclude them with old chats. Neither restoration
+path resumes or replays compaction, and no new collection root is introduced.
+
 Structured Question resolutions live in existing chat-message JSON, with no
 additional collection root. They follow the same chat exclusion in account
 archives. A complete consistent backup retains that JSON and its original form

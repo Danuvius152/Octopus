@@ -2,7 +2,7 @@ import type { Message } from "../stores/sessionStore";
 import type { components } from "../api/contracts";
 
 export interface TurnOutcome {
-  operation?: "message";
+  operation?: "message" | "compact";
   status: "success" | "failed" | "interrupted" | "unknown";
   request_id?: string;
   message?: string;
@@ -11,6 +11,7 @@ export interface TurnOutcome {
   recovery: Record<string, number>;
   final_answer?: components["schemas"]["FinalAnswerRef"] | null;
   native_status?: "completed" | "failed" | "interrupted" | null;
+  compact?: components["schemas"]["CompactResult"] | null;
   recording_integrity?: "complete" | "incomplete";
   recording_issues?: Record<string, number>;
   recording_locations?: Record<string, unknown>[];
@@ -40,18 +41,19 @@ function text(value: unknown): string | undefined {
 export function normalizeMessage(message: MessageInput): Message {
   const data = record(message.content);
   if (message.type === "result") {
-    const valid = data.kind === "outcome" && (data.operation === undefined || data.operation === "message") &&
+    const valid = data.kind === "outcome" && (data.operation === undefined || data.operation === "message" || data.operation === "compact") &&
       ["success", "failed", "interrupted"].includes(String(data.status));
     const recovery = Object.fromEntries(Object.entries(record(data.recovery))
       .filter(([, count]) => typeof count === "number" && Number.isInteger(count) && count >= 0)) as Record<string, number>;
     const outcome: TurnOutcome = message.outcome ?? {
-      operation: data.operation === undefined || data.operation === "message" ? "message" : undefined,
+      operation: data.operation === "compact" ? "compact" : "message",
       status: valid ? data.status as TurnOutcome["status"] : message.is_error ? "failed" : "unknown",
       request_id: text(data.request_id),
       message: text(data.message) ?? text(message.content),
       code: text(data.code), provider_code: text(data.provider_code), recovery,
       final_answer: data.final_answer as TurnOutcome["final_answer"],
       native_status: data.native_status as TurnOutcome["native_status"],
+      compact: data.compact as TurnOutcome["compact"],
       recording_integrity: data.recording_integrity as TurnOutcome["recording_integrity"],
       recording_issues: data.recording_issues as TurnOutcome["recording_issues"],
       recording_locations: Array.isArray(data.recording_locations)
@@ -92,7 +94,13 @@ export function presentOutcome(message: Message, transcript: readonly Message[] 
           && native.turn_id === answer.turn_id && native.root_turn_id === answer.turn_id
           && Boolean(native.item_id) && native.phase === "final_answer";
     }) && !outcome.recording_issues?.native_final_missing;
-  return { outcome, label: labels[outcome.status], primary: outcome.message,
+  const compactLabel = outcome.status === "success" ? outcome.compact?.effect === "not_applied" ? "No compaction needed" : "Context compacted"
+    : outcome.status === "interrupted" ? "Compaction interrupted" : outcome.status === "unknown" ? "Compaction result unknown" : "Compaction failed";
+  const compactNote = outcome.compact?.effect === "applied" ? "Native history was compacted. Chat messages are preserved."
+    : outcome.compact?.effect === "unknown" ? "Native history changes could not be confirmed. This operation will not be replayed automatically."
+    : outcome.compact?.reason;
+  return { outcome, label: outcome.operation === "compact" ? compactLabel : labels[outcome.status],
+    primary: outcome.operation === "compact" ? [outcome.message, compactNote].filter(Boolean).join(" ") : outcome.message,
     recoveries: Object.values(outcome.recovery).reduce((sum, count) => sum + count, 0),
     outputSaved: saved,
     recordingNote: outcome.recording_integrity === "incomplete"

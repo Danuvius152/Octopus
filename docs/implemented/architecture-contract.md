@@ -768,6 +768,20 @@ post-final 多层递归自动闭合。原七项执行扩展按具体行为重基
 - 热迁移、任意跨版本导入、双机同步、账户合并、额外 backend 和阅读器集成按各自
   产品需求另定范围，不借文档合并恢复暂停项目或新增实施授权。
 
+## 原生维护请求
+
+`compact`复用原Owner、持久输入和HarnessRun，不携带普通正文、附件或知识上下文。
+Owner接纳/结算，Run持有进程与有限收集/退休，driver报告ACK、root、终态和历史效果。
+效果与业务结论独立，Stop不承诺回滚。可靠post sample与边界原子更新；未知效果
+使旧样本待更新。
+
+通用completion仍完成compact自己的原收据；App进度/完成及Wiki、Research、
+delegation、schedule、BG按原message/work结算。普通回答通知与fork首次业务轮次
+清理也只消费message。维护是无final_answer的系统记录，不生成assistant摘要或
+重放指令。完整接纳/恢复合同归[输入可靠性](input-reliability.md#native-compaction-requests)，
+协议归[Codex合同](codex-backend.md#native-compaction)。当前仅接入空闲Codex，
+Claude与忙时排队尚未接入，不构成整项特性的发布验收。
+
 ## 上下文样本与配置绑定
 
 `sessions.context_state`保存最近可信原生root样本及其适用范围，与Monitor累计

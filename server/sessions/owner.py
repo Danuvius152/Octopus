@@ -185,7 +185,8 @@ class SessionOwner:
         if asyncio.current_task() is self.task:
             return await self.runtime.handle(command)
         self.require_available()
-        size = (len(command.request.prompt.encode("utf-8")) + len(command.request.attachment_ids) * 64
+        size = ((len(command.request.prompt.encode("utf-8")) + len(command.request.attachment_ids) * 64
+                 if command.request.operation == "message" else 128)
                 if isinstance(command, Submit) else
                 len(json.dumps((command.data, command.source.details()), ensure_ascii=True).encode("ascii")) + 128
                 if isinstance(command, CorrelatedControl) else 128)

@@ -25,6 +25,7 @@ from ..context_models import (
     ContextReading,
     ContextSource,
 )
+from ..session_operations import CompactResult
 from ..submission_models import NativeInputEvidence
 from . import codex_rpc
 from .codex import (
@@ -91,7 +92,7 @@ def profile(base: RuntimeProfile) -> RuntimeProfile:
                    activity_observer=None, prepare_resume=None, can_steer=True,
                    native_input_evidence=True, tools_prompt=_OCTOPUS_SYSTEM_PROMPT_CODEX,
                    injects_memory_prompt=True, can_fork=True, fork_prepare=_fork_prepare_replay,
-                   reusable=False, can_continue=True, can_observe_context=True, stale_session_patterns=(),
+                   reusable=False, can_continue=True, can_observe_context=True, can_compact=True, stale_session_patterns=(),
                    auth_error_patterns=(), transient_error_patterns=_CODEX_TRANSIENT_ERROR_PATTERNS,
                    transient_error_codes=("server_overloaded", "native_provider_transient"), inline_large_inputs=True,
                    fork_copy=fork_copy, fork_cleanup=fork_cleanup)
@@ -258,6 +259,10 @@ class AppServerDriver(RunDriver):
         self._context_items: dict[str, ContextObservation | None] = {}
         self._context_signature: str | None = None
         self._context_model_ambiguous = False
+        self._compacted_items: set[str] = set()
+        # Only committed root evidence releases compact's startup wait. The
+        # original RPC acknowledgment remains a separate durable fact.
+        self._compact_root_proven = asyncio.Event()
 
     def continue_configuration(self, previous: RunDriver) -> None:
         if not isinstance(previous, AppServerDriver):
@@ -460,7 +465,7 @@ class AppServerDriver(RunDriver):
     @property
     def observed_root(self) -> ActiveTurnRef | None:
         evidence = self._input
-        if evidence is None or evidence.state != "accepted":
+        if evidence is None or evidence.state != "accepted" or evidence.turn_id is None:
             return None
         assert evidence.thread_id and evidence.turn_id
         return ActiveTurnRef(self._rpc.generation, evidence.attempt_id, evidence.thread_id, evidence.turn_id)
@@ -471,7 +476,17 @@ class AppServerDriver(RunDriver):
 
     @property
     def steering_open(self) -> bool:
-        return self.active_turn is not None
+        return self._input is not None and self._input.kind != "compact" and self.active_turn is not None
+
+    @property
+    def compact_result(self) -> CompactResult:
+        evidence = self._input
+        return CompactResult(
+            effect="applied" if self._compacted_items else "not_applied"
+                if evidence is None or evidence.state in {"not_sent", "rejected"} else "unknown",
+            connection_generation=evidence.connection_generation if evidence else None,
+            thread_id=evidence.thread_id if evidence else None, turn_id=evidence.turn_id if evidence else None,
+            item_ids=sorted(self._compacted_items))
 
     async def steer(self, io: HarnessRun, text: str, *, input_id: str | None,
                     target: ActiveTurnRef | None) -> str:
@@ -553,6 +568,7 @@ class AppServerDriver(RunDriver):
         self._preparation_mode = "resume" if resume_id else "new"
         request_id, attempt_id = io.input_identity
         self._input = NativeInputEvidence(input_id=request_id, attempt_id=attempt_id, thread_id=resume_id,
+                                          kind="compact" if io.operation == "compact" else "start",
                                           connection_generation=self._rpc.generation)
         await self._record()
 
@@ -593,13 +609,23 @@ class AppServerDriver(RunDriver):
                 if business:
                     await self._record(rpc_id=request.identifier, state="unknown")
                     self._submitted_at = time.monotonic()
-                    await self._io.write_input(request.data)
+                    try:
+                        await self._io.write_input(request.data)
+                    except (Exception, asyncio.CancelledError):
+                        # The Run marks possible execution immediately before
+                        # stdin.write. Authorization/lock failures before that
+                        # point prove this original business input was unsent.
+                        if not self._io.input_may_have_run and self._input is not None and self._input.state == "unknown":
+                            await self._record(state="rejected")
+                        raise
                 else:
                     if controller_change:
                         await self._record(controller="unknown")
                     await self._io.authorize_input()
                     await self._io.write_control(request.data)
                 async with asyncio.timeout(codex_rpc.RPC_TIMEOUT):
+                    if business and self._input is not None and self._input.kind == "compact":
+                        return await self._wait_compact_start(request.response)
                     return await request.response
             except TimeoutError as error:
                 if business:
@@ -609,7 +635,24 @@ class AppServerDriver(RunDriver):
                     ) from error
                 raise
 
+    async def _wait_compact_start(self, response: asyncio.Future[dict[str, Any]]) -> dict[str, Any]:
+        root = asyncio.create_task(self._compact_root_proven.wait(), name="compact-root-proof")
+        try:
+            await asyncio.wait((response, root), return_when=asyncio.FIRST_COMPLETED)
+            return response.result() if response.done() else {}
+        finally:
+            root.cancel()
+            await asyncio.gather(root, return_exceptions=True)
+
     async def start_input(self, io: HarnessRun, context: TurnContext) -> None:
+        await self._start(io, context)
+
+    async def start_compact(self, io: HarnessRun, context: TurnContext) -> None:
+        if not context.resume_id or context.operation != "compact":
+            raise ValueError("Compaction requires its exact original native history")
+        await self._start(io, context)
+
+    async def _start(self, io: HarnessRun, context: TurnContext) -> None:
         assert self._input is not None
         request_id = self._input.input_id
         try:
@@ -672,14 +715,14 @@ class AppServerDriver(RunDriver):
                     observer.invalidate("metrics_preparation_cutoff")
                     await observer.close(deadline=asyncio.get_running_loop().time())
             await io._emit(HarnessEvent(type="session_started", session_id=thread_id))
-            if context.resume_id:
+            if context.resume_id and context.operation == "message":
                 checkpoint = await asyncio.to_thread(_latest_checkpoint, thread["path"], thread_id)
                 if checkpoint != controller:
                     await self._request("thread/inject_items", {"threadId": thread_id, "items": [{
                         "type": "message", "role": "developer", "content": [{"type": "input_text", "text": controller}],
                     }]}, controller_change=True)
                     await self._record(controller="confirmed")
-            if context.turn_instructions:
+            if context.turn_instructions and context.operation == "message":
                 await self._request("thread/inject_items", {"threadId": thread_id, "items": [{
                     "type": "message", "role": "developer", "content": [{"type": "input_text", "text": turn_message(context.turn_instructions)}],
                 }]}, controller_change=True)
@@ -694,6 +737,9 @@ class AppServerDriver(RunDriver):
             raise HarnessPreparationError(str(error), error_code=
                 "native_preparation_failed" if code == "native_turn_failed" else code) from error
         self._prepared_at = time.monotonic()
+        if context.operation == "compact":
+            await self._request("thread/compact/start", {"threadId": thread_id}, business=True)
+            return
         await self._request("turn/start", {"threadId": thread_id,
             "input": [{"type": "text", "text": context.prompt}], "clientUserMessageId": request_id,
             "collaborationMode": {"mode": "default", "settings": {
@@ -706,14 +752,17 @@ class AppServerDriver(RunDriver):
             raise NativeProtocolError("Native start acceptance has no turn identity")
         if self._input.turn_id is not None and self._input.turn_id != turn_id:
             raise NativeProtocolError("Conflicting accepted native root identities")
-        if self._input.state != "accepted":
+        if self._input.turn_id is None:
             self._accepted_at = time.monotonic()
             self._input = NativeInputEvidence.model_validate({**self._input.model_dump(), "turn_id": turn_id,
-                "state": "accepted", "acceptance_source": source})
+                "state": "accepted", "acceptance_source": self._input.acceptance_source or source})
 
             def completed() -> None:
                 assert self._input is not None
-                self._rpc.resolve(self._input.rpc_id or "", {"turn": {"id": turn_id}})
+                if self._input.kind != "compact":
+                    self._rpc.resolve(self._input.rpc_id or "", {"turn": {"id": turn_id}})
+                else:
+                    self._compact_root_proven.set()
 
             self._save_proof(self._input, completed)
             assert self._input.thread_id is not None
@@ -812,7 +861,10 @@ class AppServerDriver(RunDriver):
                 return ParseOutput()
             output = ParseOutput()
             if "error" in obj:
-                if identifier == self._input.rpc_id and (obj["error"] or {}).get("code") in {-32600, -32602}:
+                if identifier == self._input.rpc_id and self._input.kind == "compact" and self._input.state == "accepted":
+                    raise NativeProtocolError("Native compaction RPC failed after execution was observed: " + json.dumps(obj["error"]))
+                if (identifier == self._input.rpc_id and self._input.state != "accepted"
+                        and (obj["error"] or {}).get("code") in {-32600, -32602}):
                     self._input = self._input.model_copy(update={"state": "rejected"})
 
                     def rejected_start() -> None:
@@ -826,7 +878,19 @@ class AppServerDriver(RunDriver):
                 if not isinstance(result, dict):
                     raise NativeProtocolError("Malformed native RPC response")
                 if identifier == self._input.rpc_id:
-                    output = self._bind(result.get("turn", {}).get("id"), "start_response")
+                    if self._input.kind == "compact":
+                        if result != {}:
+                            raise NativeProtocolError("Malformed native compact acknowledgment")
+                        self._input = NativeInputEvidence.model_validate({**self._input.model_dump(),
+                            "state": "accepted", "acknowledged": True,
+                            "acceptance_source": self._input.acceptance_source or "compact_response"})
+
+                        def compact_ack() -> None:
+                            self._rpc.resolve(identifier, {})
+
+                        self._save_proof(self._input, compact_ack)
+                    else:
+                        output = self._bind(result.get("turn", {}).get("id"), "start_response")
                 else:
                     self._rpc.receive(obj)
             return output
@@ -899,6 +963,9 @@ class AppServerDriver(RunDriver):
             if obj["method"] not in {"turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta", "error"}:
                 return ParseOutput()
             self._buffer_frame(obj)
+            if (self._input.kind == "compact" and self._input.rpc_id is not None
+                    and params.get("threadId") == self._input.thread_id and obj["method"] == "turn/started"):
+                return self._bind((params.get("turn") or {}).get("id"), "compact_started")
             item = params.get("item") or {}
             if (obj["method"] == "item/completed" and item.get("type") == "userMessage"
                     and item.get("clientId") == self._input.input_id):
@@ -1082,6 +1149,8 @@ class AppServerDriver(RunDriver):
                     self._context_items[item["id"]] = None
                     output.events.append(self._context_event("compaction_started"))
                 elif method == "item/completed":
+                    if self._input.kind == "compact":
+                        self._compacted_items.add(item["id"])
                     candidate = self._context_items.pop(item["id"], None)
                     output.events.append(self._context_event("compacted",
                         candidate.reading if candidate else None,

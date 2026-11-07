@@ -96,6 +96,37 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     }, session_scoped=False)
                 from ..attachments import AttachmentUnavailable
 
+                if "operation" in data:
+                    from pydantic import ValidationError
+
+                    from ..sessions.client_submissions import (
+                        submit_client_compact,
+                        submit_client_message,
+                    )
+                    from ..submission_models import ClientSubmissionRequest
+                    from ..wiki.tasks import explicit_mode
+
+                    try:
+                        request = ClientSubmissionRequest.model_validate({key: value for key, value in data.items()
+                            if key not in {"type", "session_id"}})
+                        session = session_manager.get_session(session_id) if isinstance(session_id, str) else None
+                        if session is None or session.user_id != user_id:
+                            raise ValueError("Session not found")
+                        operation = request.session_operation()
+                        if operation.kind == "compact":
+                            response = await submit_client_compact(session_manager, session.id, client_request_id)
+                        else:
+                            if not operation.content.strip() and not operation.attachment_ids:
+                                raise ValueError("Supply message content or attachments")
+                            response = await submit_client_message(session_manager, session.id, operation.content,
+                                operation.attachment_ids, client_request_id,
+                                wiki_mode=explicit_mode(operation.content, operation.wiki_mode),
+                                recovery_of_client_id=request.recovery_of_client_id)
+                        delivery.offer({"type": "submission", **response}, session_scoped=False)
+                    except (ValidationError, ValueError) as error:
+                        reject(str(error), code="admission_refused")
+                    continue
+
                 recovery_of = data.get("recovery_of_client_id")
                 if recovery_of is not None and (not isinstance(recovery_of, str) or not recovery_of or len(recovery_of) > 128):
                     reject("Invalid recovery identity", code="invalid_recovery_identity")

@@ -127,6 +127,14 @@ The shared run checks authority immediately before spawn and business writes,
 and owns readers, backpressure, process groups and retirement. Moving wire
 operations into drivers does not add a second resource owner or settlement path.
 
+`can_observe_context` and `can_compact` are independent profile declarations.
+Ordinary Codex supports both; Claude, exec leaves and one-shot calls do not gain
+compact capability from a backend name. `HarnessRun.start_compact` requires exact
+resumable history, reusing preparation, authorization, readers and retirement.
+Unsupported drivers refuse it. Compact skips message/attachment/Wiki/replay and
+automatic continuation paths. Driver history effects remain distinct from the
+Owner's outcome; see [input reliability](input-reliability.md#native-compaction-requests).
+
 `HarnessRun.close_admission()` synchronously closes new input/tool admission and
 revokes its run lease and Wiki binding. It leaves the original proof readers and
 resources owned. Starting retirement reuses that closure before starting the

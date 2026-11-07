@@ -59,7 +59,7 @@ import { useSessionFork } from "../hooks/useSessionFork";
 import { observeOlderMessages } from "../lib/transcript";
 import { selectSession } from "../lib/selectSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
-import { newSubmissionId, type QuestionCommandTarget, type SubmissionReply } from "../lib/submission";
+import { newSubmissionId, readSubmission, type QuestionCommandTarget, type SubmissionReply } from "../lib/submission";
 import { MAX_ATTACHMENTS_PER_MESSAGE, useDraftAttachments, type PendingAttachment } from "../hooks/useDraftAttachments";
 
 const EMPTY_MESSAGES: Message[] = [];
@@ -143,6 +143,7 @@ export function ChatView({
     recoveryOfClientId?: string;
     uncertain?: { id: string };
     confirming?: boolean;
+    compactDraft?: { accountGeneration: number; revision: number };
   }[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Fork dialog (session-rewind.md §6.1-6.2). `null` = closed; `{}` = the
@@ -162,6 +163,14 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
+  const composerRevision = useRef(0);
+  const compactSending = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    compactSending.current?.abort();
+    compactSending.current = null;
+  }, [activeSessionId, accountGeneration]);
+  useEffect(() => { composerRevision.current += 1; }, [input, activeSessionId, accountGeneration]);
   const contextSnapshot = useSessionStore((s) => activeSessionId ? s.contextStates[activeSessionId] : null);
   const contextState = contextSnapshot?.state;
   const researchCreations = useRef(new Set<AbortController>());
@@ -217,7 +226,7 @@ export function ChatView({
   const isArchived = !!activeSession?.archived;
   const transcriptDamaged = activeSession?.transcript_integrity === "duplicate_seq";
   const restoreSavedInput = useCallback((saved: ClientSubmissionStatus, files: File[]) => {
-    if (!activeSessionId || saved.session_id !== activeSessionId || input.length || pendingAttachments.length || isArchived || transcriptDamaged || !saved.input) return;
+    if (!activeSessionId || saved.session_id !== activeSessionId || input.length || pendingAttachments.length || isArchived || transcriptDamaged || !saved.input || saved.input.kind !== "message") return;
     setInput(saved.input.content);
     addFiles(files);
     setRequiredAttachmentCount(saved.input.attachment_ids.length);
@@ -353,7 +362,8 @@ export function ChatView({
   // (inline-steering.md §12) — the button must not promise one and do the
   // other. Attachments always queue, so the label follows that too.
   const canSteer =
-    !!activeSession?.can_steer && pendingAttachments.length === 0;
+    !!activeSession?.can_steer && pendingAttachments.length === 0 &&
+    (!activeSessionId || dispatchStates[activeSessionId]?.active_operation !== "compact");
 
   useEffect(() => {
     for (const [requestId, draft] of submittedDrafts.current) {
@@ -685,17 +695,66 @@ export function ChatView({
     }
   };
 
+  const clearCompactCommand = (draft: { sessionId: string; text: string; compactDraft?: { accountGeneration: number; revision: number } }) => {
+    const state = useSessionStore.getState();
+    if (mounted.current && draft.compactDraft && state.accountGeneration === draft.compactDraft.accountGeneration &&
+        state.activeSessionId === draft.sessionId && composerRevision.current === draft.compactDraft.revision) {
+      setInput((current) => current === draft.text ? "" : current);
+    }
+  };
+
+  const submitCompact = async () => {
+    if (!activeSessionId || compactSending.current) return;
+    if (rejectedDrafts.some((draft) => draft.sessionId === activeSessionId && draft.compactDraft && draft.uncertain)) {
+      setSubmissionError("Confirm the original compaction request before submitting it again.");
+      return;
+    }
+    let id: string;
+    try { id = newSubmissionId(); }
+    catch (error) { setSubmissionError(error instanceof Error ? error.message : "Secure randomness is unavailable."); return; }
+    const state = useSessionStore.getState();
+    const draft = { id, sessionId: activeSessionId, text: input, attachments: [],
+      compactDraft: { accountGeneration: state.accountGeneration, revision: composerRevision.current } };
+    const url = `${window.location.origin}/api/sessions/${encodeURIComponent(draft.sessionId)}/submissions`;
+    const headers = { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" };
+    const current = () => mounted.current && useSessionStore.getState().accountGeneration === draft.compactDraft.accountGeneration;
+    const observer = new AbortController();
+    compactSending.current = observer;
+    setSubmissionError("");
+    try {
+      let reply: { accepted: boolean; message?: string; state?: string };
+      try {
+        reply = await readSubmission(url, { method: "POST", headers, signal: observer.signal,
+          body: JSON.stringify({ client_request_id: id, operation: { kind: "compact" } }) });
+      } catch {
+        if (observer.signal.aborted || !current()) throw new Error("Compaction admission is unconfirmed. Check the original request before sending again.");
+        // A lost receipt never authorizes a second native operation.
+        reply = await readSubmission(`${url}/${encodeURIComponent(id)}`, { method: "GET", headers, signal: observer.signal });
+      }
+      if (!current()) return;
+      if (reply.accepted) clearCompactCommand(draft);
+      else if (reply.state === "unknown") throw new Error(reply.message || "Compaction admission is unconfirmed.");
+      else if (useSessionStore.getState().activeSessionId === draft.sessionId) setSubmissionError(reply.message || "Compaction was not accepted.");
+    } catch (error) {
+      if (current()) setRejectedDrafts((drafts) => [...drafts, { ...draft, uncertain: { id },
+        reason: error instanceof Error ? error.message : "Compaction admission is unconfirmed." }]);
+    } finally { if (compactSending.current === observer) compactSending.current = null; }
+  };
+
   const confirmSubmission = async (draft: typeof rejectedDrafts[number]) => {
     if (!draft.uncertain || draft.confirming) return;
     setRejectedDrafts((drafts) => drafts.map((item) => item.id === draft.id ? { ...item, confirming: true } : item));
     const original = draft.uncertain;
     try {
       const token = useSessionStore.getState().token;
-      const response = await fetch(`${window.location.origin}/api/sessions/${encodeURIComponent(draft.sessionId)}/submissions/${encodeURIComponent(original.id)}`, {
+      const reply = await readSubmission<ClientSubmissionStatus>(`${window.location.origin}/api/sessions/${encodeURIComponent(draft.sessionId)}/submissions/${encodeURIComponent(original.id)}`, {
         method: "GET", headers: { Authorization: `Bearer ${token}` },
       });
-      if (!response.ok) throw new Error(`Status lookup failed (${response.status}).`);
-      const reply = await response.json() as ClientSubmissionStatus;
+      if (draft.compactDraft && reply.accepted) {
+        clearCompactCommand(draft);
+        setRejectedDrafts((drafts) => drafts.filter((item) => item.id !== draft.id));
+        return;
+      }
       const unknown = reply.state === "unknown" || reply.execution.state === "unknown";
       const withdrawn = reply.execution.state === "withdrawn";
       const recoverable = withdrawn && !unknown && reply.execution.recoverable_input;
@@ -715,6 +774,11 @@ export function ChatView({
   const handleSend = async () => {
     if (!activeSessionId) return;
     const trimmed = input.trim();
+    if (/^\/compact(?:\s|$)/.test(trimmed)) {
+      if (trimmed !== "/compact") { setSubmissionError("Usage: /compact (no arguments)."); return; }
+      await submitCompact();
+      return;
+    }
     // Allow attachment-only turns — if the user attached files and
     // didn't type anything, we still want to send.
     if (!trimmed && readyAttachmentIds.length === 0) return;
@@ -1648,7 +1712,7 @@ export function ChatView({
                   className="btn btn-send size-9 shrink-0 rounded-full p-0"
                   onClick={handleSend}
                   disabled={
-                    hasUploadInFlight ||
+                    (hasUploadInFlight && !/^\/compact(?:\s|$)/.test(input.trim())) ||
                     (!input.trim() && readyAttachmentIds.length === 0)
                   }
                   aria-label={

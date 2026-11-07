@@ -39,10 +39,12 @@ from ..service_health import ServiceUnavailable
 from .base import (
     _BACKEND_RETIRE_TIMEOUT,
     _DELTA_FLUSH_SECONDS,
+    CompactRequest,
     PendingQuestion,
     QueuedPrompt,
     Session,
     SessionManagerBase,
+    SessionRequest,
     _split_tool_list,
     logger,
 )
@@ -253,7 +255,7 @@ class TurnsMixin(SessionManagerBase):
 
 
     @staticmethod
-    def _new_receipt(session: Session, queued: QueuedPrompt, disposition: str = "accepted") -> SubmissionReceipt:
+    def _new_receipt(session: Session, queued: SessionRequest, disposition: str = "accepted") -> SubmissionReceipt:
         future: asyncio.Future[RequestCompletion] = asyncio.get_running_loop().create_future()
         session._request_completions[queued.request_id] = future
         observation = RequestObservation(queued.request_id, queued.work_id, asyncio.get_running_loop().create_future())
@@ -419,6 +421,13 @@ class TurnsMixin(SessionManagerBase):
         )
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
         return await owner.call_runtime(Submit(queued, steerable, client_request_id, tuple(files), recovery_of_client_id, schedule))
+
+    async def start_compact(self, session_id: str, *, client_request_id: str) -> SubmissionReceipt:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionAdmissionClosed(f"Session {session_id} not found")
+        owner = self._session_owners.get(id(session)) or self._session_owner(session)
+        return await owner.call_runtime(Submit(CompactRequest(), client_id=client_request_id))
 
     async def source_receipt(self, source: str, delivery_id: str, *, session_id: str | None = None) -> tuple[str, SubmissionReceipt] | None:
         """Confirm the original acceptance even after its target or caller retires."""
@@ -797,7 +806,8 @@ class TurnsMixin(SessionManagerBase):
         # First fork turn produced a result: drop the ephemeral fork state so
         # turn 2+ behaves like a normal resumed session (session-rewind.md
         # §5.3.2/§5.6.5).
-        await self._clear_fork_first_turn_state(session)
+        if session._run.request is None or session._run.request.operation == "message":
+            await self._clear_fork_first_turn_state(session)
 
     @staticmethod
     def _capture_error_text(attempt: _Attempt, event: HarnessEvent) -> None:
@@ -1050,6 +1060,8 @@ class TurnsMixin(SessionManagerBase):
         captured conversation and the adapter's continuation contract permit
         another input, with no exactly-once claim for external operations.
         """
+        if turn.operation == "compact":
+            return None
         native = getattr(attempt.backend, "captures_retirement_output", False)
         if native and (attempt.preparation_failed or attempt.backend.native_terminal_status == "failed"):
             failure = cls._failure_blob(attempt)
@@ -1263,6 +1275,12 @@ class TurnsMixin(SessionManagerBase):
         decision = await self._timeout_decision(session, turn, attempt)
         if decision is not None:
             return decision
+
+        if turn.operation == "compact":
+            # Preserve the common deadline decision above, while refusing every
+            # message continuation/replay path for this original maintenance.
+            return auth or _Decision.stop({"code": "compact_unconfirmed"}
+                if attempt.backend.compact_result.effect == "unknown" else {})
 
         if auth is not None:
             return auth

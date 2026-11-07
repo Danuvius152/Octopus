@@ -32,6 +32,13 @@ class ContextMixin(SessionManagerBase):
             await self._save_context(session, invalidate_context(session.context_state,
                 context_target(session, agent), "native_context_changed", binding=True))
 
+    async def _unconfirmed_context_owned(self, session: Session) -> None:
+        assert self.db is not None
+        async with self.db.configuration_lock:
+            agent = await self._load_agent(session)
+            await self._save_context(session, invalidate_context(session.context_state,
+                context_target(session, agent), "operation_unconfirmed"))
+
     async def context_snapshot(self, session: Session) -> tuple[ContextState | None, bool]:
         # Diagnostic reads do not depend on the execution writer's progress.
         # Return committed facts and their display qualification together;

@@ -61,7 +61,8 @@ const session: Guard<SessionInfo> = fields({
   message_count: integer, transcript_integrity: oneOf("ok", "duplicate_seq"), claude_session_id: maybeText,
   credential_id: maybeText, agent_id: maybeText, origin: text, backend, ...settings,
   parent_session_id: maybeText, delegation_request: maybeText, app_id: maybeText,
-  can_steer: boolean, can_fork: boolean, forked_from_session_id: maybeText, fork_after_seq: maybeNumber,
+  can_steer: boolean, can_observe_context: boolean, can_compact: boolean, compact_unavailable_reason: maybeText,
+  can_fork: boolean, forked_from_session_id: maybeText, fork_after_seq: maybeNumber,
   fork_prefilled_prompt: maybeText, fork_revert_record: optional(nullable(fields({ ran: boolean, files: array(text),
     stash_ref: maybeText, status: text, refused_reason: maybeText, error: maybeText }))),
   fork_is_full_copy: boolean, archived: boolean,
@@ -74,10 +75,11 @@ const delegation: Guard<Delegation & { work_id: string }> = fields({
   terminal_disposition: optional(nullable(terminalDisposition)), terminal_delivery_error: maybeText,
 });
 const nativeInput: Guard<Dto["NativeInputEvidence"]> = fields({
-  version: oneOf(1), transport: oneOf("codex-app-server"), attempt_id: id, input_id: id, kind: oneOf("start", "steer"),
+  version: oneOf(1), transport: oneOf("codex-app-server"), attempt_id: id, input_id: id, kind: oneOf("start", "steer", "compact"),
   connection_generation: maybeText, target_turn_id: maybeText, rpc_id: maybeText, thread_id: maybeText, turn_id: maybeText,
   state: oneOf("not_sent", "unknown", "accepted", "rejected"),
-  acceptance_source: optional(nullable(oneOf("start_response", "user_message", "steer_response"))),
+  acceptance_source: optional(nullable(oneOf("start_response", "user_message", "steer_response", "compact_response", "compact_started"))),
+  acknowledged: boolean,
   controller: oneOf("not_needed", "unknown", "confirmed"),
 });
 const execution: Guard<Dto["SubmissionExecution"]> = fields({
@@ -90,11 +92,16 @@ const researchReceipt: Guard<NonNullable<ResearchJob["delivery_receipt"]>> = fie
   error: maybeText, browser_confirmed_version: optional(integer), browser_confirmed_at: optional(text),
 });
 const finalAnswer: Guard<Dto["FinalAnswerRef"]> = fields({ thread_id: id, turn_id: id, message_seqs: optional(array(integer)) });
-const outcome: Guard<Pick<Dto["TurnOutcome"], "kind" | "operation" | "request_id" | "status" | "message" | "code" | "provider_code" | "recovery" | "final_answer" | "native_status">> = fields({
-  kind: oneOf("outcome"), operation: oneOf("message"), request_id: id, status: oneOf("success", "failed", "interrupted"),
+const compactResult: Guard<Dto["CompactResult"]> = fields({
+  effect: oneOf("applied", "not_applied", "unknown"), reason: maybeText,
+  connection_generation: maybeText, thread_id: maybeText, turn_id: maybeText, item_ids: optional(array(id)),
+});
+const outcome: Guard<Pick<Dto["TurnOutcome"], "kind" | "operation" | "request_id" | "status" | "message" | "code" | "provider_code" | "recovery" | "final_answer" | "native_status" | "compact">> = fields({
+  kind: oneOf("outcome"), operation: oneOf("message", "compact"), request_id: id, status: oneOf("success", "failed", "interrupted"),
   message: maybeText, code: maybeText, provider_code: maybeText,
   recovery: optional(countMap), final_answer: optional(nullable(finalAnswer)),
   native_status: optional(nullable(oneOf("completed", "failed", "interrupted"))),
+  compact: optional(nullable(compactResult)),
   recording_integrity: optional(oneOf("complete", "incomplete")), recording_issues: optional(countMap),
   recording_locations: optional(array(record)),
 });
@@ -114,6 +121,7 @@ const definitions = [
   event("context_state", { ...inSession, generation: id,
     context_state: ((value: unknown): value is ContextState | null => readContextState(value) !== undefined) }),
   event("submission", { ...inSession, client_request_id: id, accepted: boolean, message: maybeText, code: maybeText,
+    canonical_request_id: maybeText, canonical_client_request_id: maybeText,
     state: optional(nullable(oneOf("unknown"))), execution: optional(execution) }),
   event("command_receipt", { ...inSession, client_command_id: id, operation: oneOf("interrupt", "answer_question", "snooze_question"),
     accepted: boolean, message: maybeText, code: maybeText }),

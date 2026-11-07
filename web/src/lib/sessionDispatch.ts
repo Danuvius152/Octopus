@@ -4,8 +4,8 @@ export interface DispatchState {
   revision: number;
   paused: boolean;
   active_request_id: string | null;
-  active_operation: "message" | null;
-  items: { request_id: string; operation: "message"; source: string; summary: string; priority: boolean }[];
+  active_operation: "message" | "compact" | null;
+  items: { request_id: string; operation: "message" | "compact"; source: string; summary: string; priority: boolean }[];
 }
 
 export interface ActiveAttempt { request_id: string; attempt_id: string }
@@ -27,9 +27,9 @@ export function readDispatchState(value: unknown): DispatchState | null {
       !Number.isInteger(data.revision) || data.revision < 0 ||
       typeof data.paused !== "boolean" ||
       !(data.active_request_id === null || typeof data.active_request_id === "string") ||
-      !(data.active_request_id === null ? data.active_operation === null : data.active_operation === "message") ||
+      !(data.active_request_id === null ? data.active_operation === null : ["message", "compact"].includes(data.active_operation ?? "")) ||
       !Array.isArray(data.items) || !data.items.every((item) => item &&
-        item.operation === "message" &&
+        ["message", "compact"].includes(item.operation) &&
         typeof item.request_id === "string" && typeof item.source === "string" &&
         typeof item.summary === "string" && typeof item.priority === "boolean")) return null;
   return data;

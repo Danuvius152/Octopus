@@ -27,7 +27,8 @@
           "recording_issues": {},
           "recording_locations": [],
           "final_answer": null,
-          "native_status": null
+          "native_status": null,
+          "compact": null
         },
         "is_error": false
       }
@@ -58,7 +59,8 @@
       "recording_issues": {},
       "recording_locations": [],
       "final_answer": null,
-      "native_status": null
+      "native_status": null,
+      "compact": null
     },
     "is_error": false
   }

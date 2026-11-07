@@ -20,9 +20,13 @@ def session_info(
     backend = get("backend") or "claude-code"
     try:
         config = RunConfig()
-        can_steer = get_harness(backend).runtime_profile(config).can_steer
+        profile = get_harness(backend).runtime_profile(config)
+        can_steer, can_observe_context, supports_compact = profile.can_steer, profile.can_observe_context, profile.can_compact
     except ValueError:
-        can_steer = False
+        can_steer = can_observe_context = supports_compact = False
+    compact_reason = ("This runtime does not support native compaction." if not supports_compact else
+                      "Archived conversations are read-only." if archived else
+                      "No resumable native history is available to compact." if not get("claude_session_id") or get("fork_needs_replay") else None)
     return SessionInfo.model_validate({
         "id": get("id"), "name": get("name"), "working_dir": get("working_dir"),
         "status": SessionStatus.idle if archived else get("status"), "created_at": get("created_at"),
@@ -33,6 +37,8 @@ def session_info(
         "model": get("model"), "reasoning_effort": get("reasoning_effort"), "service_tier": get("service_tier"),
         "parent_session_id": get("parent_session_id"), "delegation_request": get("delegation_request"),
         "app_id": get("app_id"), "archived": archived, "can_steer": can_steer,
+        "can_observe_context": can_observe_context, "can_compact": compact_reason is None,
+        "compact_unavailable_reason": compact_reason,
         **fork_info_fields(
             backend=backend, forked_from_session_id=get("forked_from_session_id"),
             fork_after_seq=get("fork_after_seq"), fork_metadata=get("fork_metadata"),

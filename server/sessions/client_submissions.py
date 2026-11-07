@@ -15,13 +15,15 @@ if TYPE_CHECKING:
     from ..database import Database
     from ..knowledge import KnowledgeContext
     from . import SessionManager
-    from .base import PendingInput, QueuedPrompt
+    from .base import PendingInput, SessionRequest
 
 logger = logging.getLogger(__name__)
 
 
 def input_digest(payload: dict[str, Any]) -> str:
     """Identity covers the submitted content; attachment bytes are saved too."""
+    if payload.get("kind") == "compact":
+        return hashlib.sha256(b'{"kind":"compact"}').hexdigest()
     value = {key: payload[key] for key in ("content", "attachment_ids", "wiki_mode")}
     if payload.get("recovery_of_client_id"):
         value["recovery_of_client_id"] = payload["recovery_of_client_id"]
@@ -109,8 +111,8 @@ def _files(session_id: str, identifiers: list[str], *, user_id: str) -> list[dic
     return result
 
 
-async def load_pending_input(manager: SessionManager, session_id: str, pending: PendingInput) -> QueuedPrompt:
-    from .base import QueuedPrompt
+async def load_pending_input(manager: SessionManager, session_id: str, pending: PendingInput) -> SessionRequest:
+    from .base import CompactRequest, QueuedPrompt
 
     row = await manager.input_database().get_submission_for_request(session_id, pending.request_id)
     # Stop can retain an unstarted original claim in this process's queue.
@@ -123,6 +125,9 @@ async def load_pending_input(manager: SessionManager, session_id: str, pending: 
         raise ValueError("The queued input is no longer pending")
     payload = row["payload"]
     operation = payload["operation"]
+    if operation["kind"] == "compact":
+        return CompactRequest(request_id=row["request_id"], priority=pending.priority, order=payload["order"],
+                              native_session_id=payload["native_session_id"])
     context = saved_context(session_id, row)
     session = manager.get_session(session_id)
     if context is None or session is None or context.origin.user_id != session.user_id:
@@ -173,21 +178,52 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
         result.update(accepted=False, state="unknown", code="admission_unknown",
                       message="Admission is not yet confirmed. Confirm this same submission identity before sending new work.")
     elif state == "withdrawn":
-        result["message"] = ("This retained input has no verifiable request context. Review the original record; it cannot be recovered."
+        result["message"] = ("This compaction was withdrawn before execution. It will not run again automatically."
+                             if result["operation"] == "compact" else
+                             "This retained input has no verifiable request context. Review the original record; it cannot be recovered."
                              if context is None else
                              "This input was withdrawn before execution. You can restore it and send it again.")
     if any(item.get("kind") == "steer" and item["state"] == "accepted" for item in row["native_inputs"]):
         result["message"] = "The native runtime accepted this input. Model processing is unconfirmed; the root result does not prove this instruction was consumed."
     if include_input and row["payload"] is not None:
         payload = row["payload"]
-        result["input"] = {**payload["operation"], "attachments": payload.get("attachments", []),
-                           "wiki_mode": context.mode if context else None}
+        result["input"] = (payload["operation"] if payload["operation"]["kind"] == "compact" else
+            {**payload["operation"], "attachments": payload.get("attachments", []), "wiki_mode": context.mode if context else None})
     return result
 
 
 async def submission_status(manager: SessionManager, session_id: str, client_id: str) -> dict[str, Any] | None:
     row = await manager.input_database().get_client_submission(session_id, client_id)
     return status_from_row(session_id, row) if row is not None else None
+
+
+async def submit_client_compact(manager: SessionManager, session_id: str, client_id: str) -> dict[str, Any]:
+    from ..submission_models import CompactInProgress
+
+    base = {"session_id": session_id, "client_request_id": client_id}
+    try:
+        existing = await manager.input_database().get_client_submission(session_id, client_id)
+        if existing is not None:
+            if existing["payload_sha256"] != input_digest({"kind": "compact"}):
+                return {**base, "accepted": False, "code": "submission_conflict",
+                        "message": "This submission identity already belongs to different input."}
+            return status_from_row(session_id, existing)
+        receipt = await manager.start_compact(session_id, client_request_id=client_id)
+        if not receipt.accepted:
+            return {**base, "accepted": False, "disposition": receipt.disposition,
+                    "message": "This conversation is closed to new operations."}
+        result = await submission_status(manager, session_id, client_id)
+        assert result is not None
+        return result
+    except CompactInProgress as error:
+        return {**base, "accepted": False, "code": error.code, "message": str(error),
+                "canonical_request_id": error.request_id, "canonical_client_request_id": error.client_id}
+    except (QuotaExceeded, ValueError) as error:
+        return {**base, "accepted": False, "code": getattr(error, "code", "admission_refused"), "message": str(error)}
+    except Exception:
+        logger.exception("Compaction admission is unconfirmed session=%s client=%s", session_id, client_id)
+        return {**base, "accepted": False, "state": "unknown", "code": "admission_unknown",
+                "message": "Compaction admission is unconfirmed. Confirm this original submission; it will not be resent automatically."}
 
 
 async def submit_client_message(manager: SessionManager, session_id: str, content: str, attachment_ids: list[str],
@@ -232,7 +268,7 @@ async def claim_input(manager: SessionManager, session_id: str, request_id: str,
     stored = await database.get_submission_for_request(session_id, request_id)
     if stored is not None:
         payload = stored["payload"]
-        if payload is not None:
+        if payload is not None and payload["operation"]["kind"] == "message":
             session = manager.get_session(session_id)
             if session is None or session.user_id is None:
                 raise AttachmentUnavailable()

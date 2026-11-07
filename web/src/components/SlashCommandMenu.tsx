@@ -25,6 +25,7 @@ export interface SlashCommand {
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
+  { name: "/compact", description: "Compact this conversation's native context (no arguments)", Icon: IconBrain },
   { name: "/wiki", hint: "[maintain] <task>", description: "Optional Wiki command — lookup is always available; maintain sends work to Weber", Icon: IconFile },
   {
     name: "/schedule",

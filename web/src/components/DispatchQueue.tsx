@@ -18,6 +18,7 @@ export function DispatchQueue({ sessionId, readOnly = false, archived = false }:
   const [error, setError] = useState("");
   const items = snapshot?.items ?? [];
   const paused = snapshot?.paused ?? false;
+  const compacting = snapshot?.active_operation === "compact";
 
   const resume = async () => {
     const store = useSessionStore.getState();
@@ -39,10 +40,11 @@ export function DispatchQueue({ sessionId, readOnly = false, archived = false }:
 
   if (archived) return null;
   if (!snapshot && !unavailable) return <p role="status" className="px-4 py-2 text-xs text-muted-foreground">Loading queue state…</p>;
-  if (!unavailable && !paused && items.length === 0) return null;
+  if (!unavailable && !paused && items.length === 0 && !compacting) return null;
   return <div className="queue-list shrink-0 border-t border-border bg-muted/30 px-4 py-2 text-xs space-y-1"
     aria-label="Queued messages">
     {unavailable && <p role="alert" className="text-destructive">Queue state unavailable. Current processing state could not be confirmed.</p>}
+    {compacting && <p role="status">Compacting native context…</p>}
     <div className="queue-list-label flex flex-wrap items-center justify-between gap-2 text-muted-foreground mb-2">
       <span>{paused ? `Paused · ${items.length} pending` : `Queued (${items.length}) — will fire after the current turn`}</span>
       {paused && !readOnly && <Button type="button" size="sm" variant="outline"

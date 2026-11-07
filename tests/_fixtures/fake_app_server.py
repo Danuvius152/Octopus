@@ -117,7 +117,7 @@ def frames():
                         send({"id": "unexpected-request", "method": "item/tool/requestUserInput", "params": {"threadId": identifier}})
                     else:
                         send({"__raw_stdout": "{unreadable native frame"})
-                if mode == "control_stop_tail":
+                if mode in {"control_stop_tail", "compact_stop_tail"}:
                     for frame in json.loads((root / "native-stop-tail.json").read_text()):
                         send(frame)
                 return
@@ -247,6 +247,48 @@ for line in frames():
                 handle.write(json.dumps({"type": "response_item", "payload": item}) + "\n")
         if mode == "controller_lost":
             continue
+    if method == "thread/compact/start":
+        assert params == {"threadId": thread_id} and history.exists()
+        with (root / "native-compacts.jsonl").open("a") as handle:
+            handle.write(json.dumps(frame) + "\n")
+        turn_id = "compact-turn"
+        if mode in {"compact_ack_first", "compact_ack_only", "compact_control", "compact_stop_tail"}:
+            send({"id": frame["id"], "result": {}})
+        if mode == "compact_ack_only":
+            continue
+        send({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id}}})
+        if mode == "compact_disconnect":
+            break
+        if mode == "compact_error_after_root":
+            send({"id": frame["id"], "error": {"code": -32600, "message": "Native failed after starting work"}})
+            continue
+        if mode == "compact_conflicting_root":
+            send({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": "unexpected-root"}}})
+            continue
+        if mode in {"compact_no_effect", "compact_native_failed"}:
+            send({"id": frame["id"], "result": {}})
+            send({"method": "turn/completed", "params": {"threadId": thread_id,
+                "turn": {"id": turn_id, "status": "failed" if mode == "compact_native_failed" else "completed",
+                    **({"error": {"message": "Native capacity exhausted", "codexErrorInfo": "serverOverloaded"}}
+                        if mode == "compact_native_failed" else {})}}})
+            continue
+        send({"method": "item/started", "params": {"threadId": thread_id, "turnId": turn_id,
+            "item": {"id": "compact-item", "type": "contextCompaction"}}})
+        if mode in {"compact_control", "compact_stop_tail", "compact_root_only"}:
+            continue
+        with history.open("a") as handle:
+            handle.write(json.dumps({"type": "compacted", "payload": {"message": "Native summary"}}) + "\n")
+        send({"method": "thread/tokenUsage/updated", "params": {"threadId": thread_id, "turnId": turn_id,
+            "tokenUsage": {"total": {"totalTokens": 90000}, "modelContextWindow": 1000,
+                "last": {"totalTokens": 120, "inputTokens": 0, "outputTokens": 0,
+                    "cachedInputTokens": 0, "cacheWriteInputTokens": 0, "reasoningOutputTokens": 0}}}})
+        send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id,
+            "item": {"id": "compact-item", "type": "contextCompaction"}}})
+        if mode not in {"compact_ack_first", "compact_lost_ack"}:
+            send({"id": frame["id"], "result": {}})
+        send({"method": "turn/completed", "params": {"threadId": thread_id,
+            "turn": {"id": turn_id, "status": "completed"}}})
+        continue
     if method == "turn/start":
         if params.get("collaborationMode"):
             controls = params["collaborationMode"]["settings"]
@@ -308,7 +350,9 @@ for line in frames():
                         event_params.pop("turnId")
                     send({"method": "item/" + phase, "params": event_params})
         send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id,
-            "item": {"type": "agentMessage", "id": "answer-" + turn_id, "phase": "final_answer", "text": "Native answer"}}})
+            "item": {"type": "agentMessage", "id": "answer-" + turn_id, "phase": "final_answer",
+                "text": "Native answer after compaction" if any(json.loads(line).get("type") == "compacted"
+                    for line in history.read_text().splitlines()) else "Native answer"}}})
         if mode == "late_bad_item":
             send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id,
                 "item": {"type": "unsupportedNewItem", "id": "bad-item"}}})
@@ -360,7 +404,7 @@ for line in frames():
         continue
     if method == "turn/interrupt":
         send({"id": frame["id"], "result": {}})
-        if mode != "control_stop_tail":
+        if mode not in {"control_stop_tail", "compact_stop_tail"}:
             send({"method": "turn/completed", "params": {"threadId": thread_id,
                 "turn": {"id": params["turnId"], "status": "interrupted"}}})
         continue

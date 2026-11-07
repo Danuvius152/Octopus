@@ -33,6 +33,13 @@ include their appended columns. No context history, native transcript or
 additional storage root is created. Observation and binding semantics belong to
 [the context contract](architecture-contract.md#上下文样本与配置绑定).
 
+Typed compact payloads/native evidence and maintenance outcomes use existing
+client-submission/message JSON, adding no DDL, format marker or storage root.
+Inspection validates operation/evidence kinds and independent ACK/root facts;
+withdrawn compact with possible or confirmed execution fails verification.
+Legacy message digests and flat decoding stay unchanged. Restore grants no
+execution authority; see [input reliability](input-reliability.md#native-compaction-requests).
+
 Publication from verified format 7 uses a finite handoff after the original
 writer retires and starts remain masked. The handoff accepts only the complete
 verified source declarations and physical layouts, preserves every original

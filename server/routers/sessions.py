@@ -252,15 +252,21 @@ async def wiki_jobs(
              response_model_exclude_none=True)
 async def submit_input(session_manager: SessionMgr, session_id: str, request: ClientSubmissionRequest,
                        user_id: ScopeUser = None, _: str = Depends(verify_token)):
-    from ..sessions.client_submissions import submit_client_message
+    from ..sessions.client_submissions import (
+        submit_client_compact,
+        submit_client_message,
+    )
     from ..wiki.tasks import explicit_mode
 
     _own_session(session_manager, session_id, user_id)
-    if not request.content.strip() and not request.attachment_ids:
+    operation = request.session_operation()
+    if operation.kind == "compact":
+        return await submit_client_compact(session_manager, session_id, request.client_request_id)
+    if not operation.content.strip() and not operation.attachment_ids:
         raise HTTPException(422, "Supply message content or attachments")
     return await submit_client_message(
-        session_manager, session_id, request.content, request.attachment_ids, request.client_request_id,
-        wiki_mode=explicit_mode(request.content, request.wiki_mode), recovery_of_client_id=request.recovery_of_client_id,
+        session_manager, session_id, operation.content, operation.attachment_ids, request.client_request_id,
+        wiki_mode=explicit_mode(operation.content, operation.wiki_mode), recovery_of_client_id=request.recovery_of_client_id,
     )
 
 
@@ -278,8 +284,8 @@ async def get_recoverable_inputs(session_manager: SessionMgr, session_id: str,
         status = status_from_row(session_id, row, include_input=False)
         items.append({"client_request_id": row["client_id"], "request_id": row["request_id"],
                       "operation": status["operation"],
-                      "execution": status["execution"], "preview": row["payload"]["operation"]["content"][:200],
-                      "attachment_count": len(row["payload"]["operation"]["attachment_ids"])})
+                      "execution": status["execution"], "preview": row["payload"]["operation"].get("content", "/compact")[:200],
+                      "attachment_count": len(row["payload"]["operation"].get("attachment_ids", []))})
     return {"items": items, "next_cursor": cursor}
 
 
