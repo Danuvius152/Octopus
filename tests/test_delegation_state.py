@@ -141,7 +141,7 @@ async def test_one_execution_consumes_multiple_owned_returns_only_after_confirme
     child, _parent, _agent = await _save_conversation(db, owner=owner)
     for index, request in enumerate(("initial", "return-a", "return-b")):
         created, _ = await db.admit_client_submission(child, request, request, request,
-            payload={"source": "delegation", "work_id": "round-a", "order": index,
+            payload={"content": request, "attachment_ids": [], "source": "delegation", "work_id": "round-a", "order": index,
                      "delivery_id": None if index == 0 else f"agent-terminal:leaf-{index}"}, receipt={})
         assert created
         assert await db.claim_client_submission(child, request, "initial", "same-execution")

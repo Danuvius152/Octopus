@@ -14,7 +14,7 @@ beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);
   useSessionStore.getState().setToken("receipt-test");
   useSessionStore.setState({ controlCommands: {}, activeAttempts: { s: { request_id: "r", attempt_id: "a" } },
-    dispatchGeneration: "g", dispatchStates: { s: { generation: "g", revision: 1, active_request_id: "r", paused: false, items: [] } } });
+    dispatchGeneration: "g", dispatchStates: { s: { generation: "g", revision: 1, active_request_id: "r", active_operation: "message" as const, paused: false, items: [] } } });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -38,7 +38,8 @@ it("reports disconnected controls and correlates Stop with its attempt", async (
 it.each([
   ["g", "next-request", "a2"], ["g", "r", "a2"], ["g", "r", null], ["g", null, null], ["new-service", "r2", "a2"],
 ])("hydrates a coherent Stop target %s / %s / %s before sending the control", async (generation, requestId, attemptId) => {
-  const dispatch = { generation, revision: 2, active_request_id: requestId, paused: false, items: [] };
+  const dispatch = { generation, revision: 2, active_request_id: requestId,
+    active_operation: requestId === null ? null : "message" as const, paused: false, items: [] };
   const active = attemptId === null ? null : { request_id: requestId, attempt_id: attemptId };
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "s", messages: [], dispatch_state: dispatch, active_attempt: active })));
   const { result } = renderHook(useWebSocket);
@@ -164,7 +165,7 @@ it("keeps live card completions across delayed reconnect responses and accepts n
   const finish = async (status: string, newJobs = false) => {
     await act(async () => {
       waiting.get("/api/sessions/s")!(Response.json({ messages: [], active_attempt: null,
-        dispatch_state: { generation: "g", revision: 1, active_request_id: "r", paused: false, items: [] }, subagents: [
+        dispatch_state: { generation: "g", revision: 1, active_request_id: "r", active_operation: "message" as const, paused: false, items: [] }, subagents: [
         { task_id: "child", tool_call_id: "call", status, summary: "snapshot" },
       ] }));
       waiting.get("/api/sessions/s/bg-tasks")!(Response.json(newJobs

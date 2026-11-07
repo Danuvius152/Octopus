@@ -6,6 +6,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .config import settings
+from .context_models import ContextState
+from .session_operations import OperationKind
 
 
 class SessionStatus(str, Enum):
@@ -204,6 +206,7 @@ class FinalAnswerRef(BaseModel):
 
 class TurnOutcome(BaseModel):
     kind: Literal["outcome"] = "outcome"
+    operation: OperationKind = "message"
     request_id: str
     status: Literal["success", "failed", "interrupted"]
     message: str | None = None
@@ -281,6 +284,7 @@ class PendingQuestionInfo(BaseModel):
 
 class DispatchQueueItem(BaseModel):
     request_id: str
+    operation: OperationKind
     source: str
     summary: str
     priority: bool = False
@@ -291,6 +295,7 @@ class DispatchState(BaseModel):
     revision: int = 0
     paused: bool = False
     active_request_id: str | None = None
+    active_operation: OperationKind | None = None
     items: list[DispatchQueueItem] = []
 
 
@@ -350,6 +355,9 @@ class NativeDetailPage(BaseModel):
 
 
 class SessionDetail(SessionInfo):
+    context_state: ContextState | None = None
+    context_generation: str | None = None
+    context_pending: bool = False
     messages: list[MessageContent] = []
     active_attempt: dict[str, str] | None = None
     # The transcript is windowed to the most recent MESSAGE_WINDOW messages:

@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from ..session_operations import decode_payload
 from ..submission_models import InputRecoveryUnavailable, NativeInputEvidence
 from .applications import require_application_writable
 from .base import DatabaseBase
@@ -38,6 +39,8 @@ def _submission(row) -> dict[str, Any]:
     result = dict(zip((*_COLUMNS, "recovered_by", "terminal"), row, strict=True))
     for key in ("payload", "receipt", "terminal", "native_inputs"):
         result[key] = json.loads(result[key]) if result[key] is not None else None
+    if result["payload"] is not None:
+        result["payload"] = decode_payload(result["payload"])
     return result
 
 
@@ -167,7 +170,7 @@ class ClientSubmissionsMixin(DatabaseBase):
                 (session_id, request_id, request_id),
             )
             return {"original": _submission(original), "owner": owner[0], "inputs": [
-                {"request_id": row[0], "payload": json.loads(row[1]) if row[1] is not None else None,
+                {"request_id": row[0], "payload": decode_payload(json.loads(row[1])) if row[1] is not None else None,
                  "receipt": json.loads(row[2]) if row[2] is not None else None, "delivery_state": row[3],
                  "seq": row[4], "content": json.loads(row[5]) if row[5] is not None else None,
                  "tool_input": json.loads(row[6]) if row[6] is not None else None}
@@ -330,6 +333,18 @@ class ClientSubmissionsMixin(DatabaseBase):
                 "SELECT 1 FROM json_each(native_inputs) WHERE json_extract(value,'$.state') NOT IN ('not_sent','rejected'))",
                 (datetime.now(UTC).isoformat(),),
             )
+            # Classify each newly interrupted writer once, before changing it
+            # to unknown. Old unknown rows cannot invalidate a newer sample on
+            # every subsequent restart. Ordinary messages may auto-compact too.
+            from ..context_models import ContextState, invalidate_context
+
+            for session_id, raw in await tx.fetch_all(
+                "SELECT id,context_state FROM sessions WHERE context_state IS NOT NULL AND EXISTS ("
+                "SELECT 1 FROM client_submissions i WHERE i.session_id=sessions.id AND i.execution_state='running')",
+            ):
+                state = ContextState.model_validate_json(raw)
+                stale = invalidate_context(state, state.binding_target, "operation_unconfirmed")
+                await tx.execute("UPDATE sessions SET context_state=? WHERE id=?", (stale.model_dump_json(), session_id))
             await tx.execute(
                 "UPDATE client_submissions SET reason_code=CASE WHEN delivery_state='unknown' THEN reason_code "
                 "WHEN execution_state='pending' "

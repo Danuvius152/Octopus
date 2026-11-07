@@ -45,9 +45,22 @@ async def create_steered_job(env, *, unconfirmed=False):
 
 
 @pytest.mark.parametrize("cold", [False, True])
-async def test_confirmed_steer_is_preserved_by_the_actual_wiki_return(steering, cold):
+@pytest.mark.parametrize("legacy", [None, "root", "steer"])
+async def test_confirmed_steer_is_preserved_by_the_actual_wiki_return(steering, cold, legacy):
     env = steering
     jobs, job, original, steer, correction = await create_steered_job(env)
+    if legacy is not None:
+        # Retained-format fixture: older messages can coexist with new inline
+        # messages in the same execution snapshot, including after restart.
+        request = original if legacy == "root" else steer
+        row = await env.db.get_submission_for_request(env.session.id, request.request_id)
+        payload = dict(row["payload"])
+        operation = payload.pop("operation")
+        operation.pop("kind")
+        payload.update(operation)
+        async with env.db.transaction(write=True) as tx:
+            await tx.execute("UPDATE client_submissions SET payload=? WHERE session_id=? AND request_id=?",
+                             (json.dumps(payload), env.session.id, request.request_id))
     manager = env.manager
     if cold:
         await manager.stop_all_held_processes()
@@ -70,7 +83,7 @@ async def test_confirmed_steer_is_preserved_by_the_actual_wiki_return(steering, 
         rows = await cursor.fetchall()
         assert len(rows) == 1
         payload = json.loads(rows[0][1])
-        assert job["id"] in payload["content"]
+        assert job["id"] in payload["operation"]["content"]
         assert payload["knowledge"] == encode(effective)
         receipt = await manager.source_receipt("wiki", payload["delivery_id"], session_id=env.session.id)
         assert receipt is not None

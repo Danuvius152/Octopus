@@ -18,7 +18,7 @@ it("restores the original session and rejects a delayed archive projection", () 
     working_dir: "/work", status: "idle", created_at: "now", message_count: 0, transcript_integrity: "ok",
     origin: "user", backend: "codex", can_steer: true, can_fork: true, fork_is_full_copy: false };
   useSessionStore.setState({ sessions: [], archivedSessions: [original], activeSessionId: "another-session", sessionMembership: {} });
-  const dispatch = { generation: "wake-service", revision: 12, paused: true, active_request_id: null, items: [] };
+  const dispatch = { generation: "wake-service", revision: 12, paused: true, active_request_id: null, active_operation: null, items: [] };
   handleWsMessage({ type: "session_unarchived", session_id: original.id, session: original, dispatch_state: dispatch });
   expect(useSessionStore.getState().sessions).toEqual([original]);
   expect(useSessionStore.getState().archivedSessions).toEqual([]);
@@ -141,7 +141,7 @@ describe("archive replacement settings", () => {
 
 it("applies the nested server dispatch frame for an idle Stop and a remote Resume", () => {
   useSessionStore.setState({ dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [], dispatchUnavailable: {} });
-  const paused = { generation: "server-wire", revision: 1, paused: true, active_request_id: null, items: [] };
+  const paused = { generation: "server-wire", revision: 1, paused: true, active_request_id: null, active_operation: null, items: [] };
   handleWsMessage({ type: "dispatch_state", session_id: "idle-stop", dispatch_state: paused });
   expect(useSessionStore.getState().dispatchStates["idle-stop"]).toEqual(paused);
   const resumed = { ...paused, revision: 2, paused: false };
@@ -152,7 +152,7 @@ it("applies the nested server dispatch frame for an idle Stop and a remote Resum
 it("loads the replacement session's actual queue after an archive broadcast", async () => {
   useSessionStore.setState({ token: "archive-test", activeSessionId: "archived-old", dispatchStates: {}, dispatchUnavailable: {},
     sessions: [{ id: "archived-old", name: "Archived" } as SessionInfo] });
-  const dispatch = { generation: "archive-service", revision: 0, paused: false, active_request_id: null, items: [] };
+  const dispatch = { generation: "archive-service", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] };
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "archive-replacement", messages: [], dispatch_state: dispatch, active_attempt: null })));
   handleWsMessage({ type: "session_archived", old_session_id: "archived-old", new_session_id: "archive-replacement", name: "Archived" });
   await vi.waitFor(() => expect(useSessionStore.getState().dispatchStates["archive-replacement"]).toEqual(dispatch));
@@ -179,8 +179,8 @@ it("ignores a superseded socket's close and open after a new bearer connects", (
 it("uses authoritative queue snapshots and rejects duplicate or older revisions", () => {
   useSessionStore.setState({ dispatchUnavailable: {} });
   const snapshot = {
-    generation: "service-a", revision: 3, paused: true, active_request_id: null,
-    items: [{ request_id: "bg-1", source: "bg", summary: "completed command", priority: false }],
+    generation: "service-a", revision: 3, paused: true, active_request_id: null, active_operation: null,
+    items: [{ request_id: "bg-1", operation: "message" as const, source: "bg", summary: "completed command", priority: false }],
   };
   handleWsMessage({ type: "queued", session_id: "dispatch-test", content: "legacy event text", dispatch_state: snapshot });
   expect(useSessionStore.getState().dispatchStates["dispatch-test"].items[0].summary).toBe("completed command");
@@ -208,7 +208,7 @@ it("shows an expired delivery notice without fabricating a model turn", () => {
 it("keeps the same failed outcome through live delivery, reload and duplicate frames", () => {
   useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
   const outcome = {
-    kind: "outcome", request_id: "request-1", status: "failed",
+    kind: "outcome", operation: "message", request_id: "request-1", status: "failed",
     message: "Selected model is at capacity", provider_code: "server_overloaded",
     recovery: { transient: 2, idle: 0, stale_session: 0, premature_exit: 0 },
   };

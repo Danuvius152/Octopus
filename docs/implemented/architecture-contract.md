@@ -768,6 +768,53 @@ post-final 多层递归自动闭合。原七项执行扩展按具体行为重基
 - 热迁移、任意跨版本导入、双机同步、账户合并、额外 backend 和阅读器集成按各自
   产品需求另定范围，不借文档合并恢复暂停项目或新增实施授权。
 
+## 上下文样本与配置绑定
+
+`sessions.context_state`保存最近可信原生root样本及其适用范围，与Monitor累计
+消耗分开。状态为unknown/valid/stale，样本带原request、attempt、连接代次、原生
+thread/turn和观察序号；独立revision表达完整替换顺序，binding revision表达配置
+或原生上下文边界。失效保留历史样本，不把旧值恢复为当前比例；NULL表示尚无
+上下文事实。详情在同一次短配置锁读取中捕获已提交state及非持久的context_pending
+展示资格，不创建或等待执行Owner；NULL无事实直接返回。绑定尚未对齐或原Owner
+已失败时pending为true，保留样本供历史详情，但不显示为当前比例。需要对齐时
+只唤醒已有Owner，不承诺即时通知；后续合法Owner建立后沿原路径对齐。原Owner
+仍是唯一持久写者，纯读不制造revision或采样时间，历史诊断读取不依赖其命令推进。
+
+Codex App Server使用精确绑定根turn的`last.totalTokens`和同通知有效window，
+排除child、旧turn/连接、resume replay和重复通知，不将累计total作为采样序号。
+观测不累加、不估算聊天字符、不更新业务活动时钟。缺窗口时只保留实际用量，
+不得生成比例；采样时间只表示该原生样本被产品记录，不承诺逐字实时预算。
+同turn模型reroute使旧模型/窗口配对失效，不能用后续无模型身份的通知自行恢复。
+
+自动压缩按item身份和有序观察区间收集候选。started保留有说明的压缩前样本并
+标记正在压缩；completed与可证明的原生重算候选一次提交，否则stale。锁版
+重算的五项明细均为零，但合成满窗delta也可能具有此形状；累计total等于window
+且total/last明细全零的歧义通知不产生比例或post候选。完整通知去重跨item边界
+保留，rate-limit重发不能解除stale或刷新采样时间。缺completed影响观测有效性，
+不为普通消息新增普遍完成义务；此观察不创建手动压缩请求。
+
+实际准备捕获不可变binding并随准备结果交回Owner，重试沿原配置合同，不在慢
+准备后重读新默认值。配置保存、样本接纳及已有快照对齐使用短configuration lock，
+锁内不等待另一Owner、模型或通知。会话配置与失效同事务；Agent默认backend/
+model/credential实际改变及凭据删除在原事务推进`context_settings_revision`。
+依赖任一默认设置时保守纳入完整Agent版本，明确覆盖全部相关值时不依赖它；
+名称、头像及不改变上下文绑定的effort/speed不推进该版本。继承A→B→A仍失效，
+丢通知也不能跳过版本比较。首次原生ID补全不淘汰证明该ID的原attempt；已知ID
+替换、清除或reset推进失效边界，旧attempt的晚到样本不能重新配对当前配置。
+
+启动在开放准入前，随原输入恢复事务对本次可能已发送的未完成执行保存失效，
+覆盖普通消息中的自动压缩。明确未发送/被拒及纯pending保留其不同证据；旧
+unknown行不在每次重启反复抹掉后来取得的新有效样本。归档详情只展示历史，
+unarchive先对齐；fork沿新会话/原生身份建立自己的适用范围，不继承当前百分比。
+完整备份、搬迁和有限转换范围见[存储合同](current-storage-format.md#complete-record-projections)。
+
+界面在Attach file旁以圆弧和数字共同表示剩余；颜色按未取整占用70%/90%分级，
+超窗剩余显示0%并在详情保留原值。未知/待更新不显示有效比例。只读详情解释
+token、模型、采样时间与估计来源，触控和键盘可打开，触发器的名称、值和状态
+可由辅助技术区分。此观测入口当前消费Codex事件，不添加压缩按钮或计数请求。
+HTTP/WS合并归[会话读取合同](frontend-list-reconciliation.md#会话打开与辅助数据)，
+锁版字段与时序依据见[协议记录](../reference/context-meter-compact-g0.md)。
+
 ## 决策与历史证据
 
 ### 既有领域接口的取舍

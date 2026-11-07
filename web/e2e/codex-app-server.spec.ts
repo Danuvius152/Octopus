@@ -70,6 +70,17 @@ test("App Server preserves native history and original submissions across reload
   const first = await send(`Remember the phrase ${phrase}. Reply with that exact phrase. Do not use any tools or helpers.`);
   await expect(page.locator(".msg-assistant .msg-content").last()).toContainText(phrase);
   const firstNative = first.nativeInput;
+  const observed = await (await request.get(`${API}/sessions/${sessionId}`, { headers })).json() as components["schemas"]["SessionDetail"];
+  expect(observed.context_state).toMatchObject({ validity: "valid", sample: {
+    backend: "codex", native_session_id: firstNative.thread_id,
+    source: { request_id: first.final.request_id, native_turn_id: firstNative.turn_id },
+  } });
+  expect(observed.context_state?.sample?.used_tokens).toBeGreaterThanOrEqual(0);
+  await page.getByRole("button", { name: /^Context remaining: / }).click();
+  const contextDetails = page.getByRole("dialog", { name: "Context details" });
+  await expect(contextDetails).toBeVisible();
+  await expect(contextDetails).toContainText("tokens");
+  await page.keyboard.press("Escape");
 
   async function reloadOriginalSession() {
     await page.reload();
@@ -80,6 +91,8 @@ test("App Server preserves native history and original submissions across reload
 
   await reloadOriginalSession();
   await expect(page.locator(".msg-assistant .msg-content").last()).toContainText(phrase);
+  const restored = await (await request.get(`${API}/sessions/${sessionId}`, { headers })).json() as components["schemas"]["SessionDetail"];
+  expect(restored.context_state).toEqual(observed.context_state);
   // A retry of the browser's original identity returns the original receipt.
   const retry = await request.post(`${API}/sessions/${sessionId}/submissions`, { headers, data: first.body });
   expect(retry.ok()).toBeTruthy();

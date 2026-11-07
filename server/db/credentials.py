@@ -234,6 +234,7 @@ class CredentialsMixin(DatabaseBase):
             return row
 
     async def _delete_credential(self, tx: Transaction, credential_id: str) -> bool:
+        await tx.execute("UPDATE agents SET context_settings_revision=context_settings_revision+1 WHERE credential_id=?", (credential_id,))
         # Session bindings predate the credential FK. Clear them in the
         # deletion's transaction, so a rejected delete leaves defaults
         # intact just like the agent FK does.

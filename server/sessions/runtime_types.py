@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..context_models import ContextBinding
 from ..harness import Harness, HarnessCredential, HarnessEvent, HarnessRun
 from ..models import FinalAnswerRef, MessageContent, TurnOutcome
 
@@ -60,6 +61,8 @@ class _Attempt:
     reused: bool
     attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     credential: HarnessCredential | None = None
+    context_binding: ContextBinding | None = None
+    context_observation_seq: int = 0
     result: HarnessEvent | None = None
     final_answer: FinalAnswerRef | None = None
     # Consumed by this original Owner only after the actual MCP runner exits.

@@ -2,7 +2,7 @@
 
 > **Status:** implemented — 现行完整格式、发布期存量核验与有限转换；验证和生产部署分别取证。
 
-The main database uses format **7**, and Wiki uses format **17**. Each database
+The main database uses format **8**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -24,6 +24,25 @@ is no separate no-jobs layout or later job attachment. This assembly change
 uses the complete current declarations and protocol set.
 
 ## Complete record projections
+
+Format 8 adds nullable `sessions.context_state` JSON and
+`agents.context_settings_revision INTEGER NOT NULL DEFAULT 0`. The typed
+ContextState verifier checks complete retained facts; Agent revisions must be
+nonnegative integers. Session positional reads and Agent record projections
+include their appended columns. No context history, native transcript or
+additional storage root is created. Observation and binding semantics belong to
+[the context contract](architecture-contract.md#上下文样本与配置绑定).
+
+Publication from verified format 7 uses a finite handoff after the original
+writer retires and starts remain masked. The handoff accepts only the complete
+verified source declarations and physical layouts, preserves every original
+column and relationship, and adds both columns and marker 8 in one transaction.
+New fields begin as NULL and 0; no historical sample is fabricated. A fresh
+complete format-8 inspection reconciles uncertain COMMIT and never resets facts
+already written in format 8. Unknown layouts fail closed. Startup does not run
+the conversion, and old code cannot reopen the new format. The deployment's
+frozen handoff and its exclusive tests retire only after forward recovery and
+publication acceptance are complete; they are not a general migration chain.
 
 Complete-record SELECTs for agents, applications, background tasks, research
 jobs, connector installations, custom connectors and credentials use explicit
@@ -171,7 +190,7 @@ No additional storage root, execution queue or answer ledger is introduced.
 
 Passive Monitor records use the existing separate bounded metrics store and its
 JSON detail fields. Native phases, response scope, provider snapshots and Owner
-clock projections do not add a main-database column or change format 7. They do
+clock projections do not add a main-database column or alter the main format. They do
 not restore input or execution authority. Their collection and deduplication
 contract belongs to [Monitor](codex-performance-monitor.md).
 

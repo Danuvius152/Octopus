@@ -11,7 +11,7 @@ import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { sessions } from "../lib/sessionList";
 
 const sid = "question-lifecycle";
-const emptyDispatch = { generation: "service-a", revision: 0, paused: false, items: [], active_request_id: null };
+const emptyDispatch = { generation: "service-a", revision: 0, paused: false, items: [], active_request_id: null, active_operation: null };
 const question = { question: "Proceed?", options: [{ label: "Yes" }, { label: "No" }] };
 const requested = {
   type: "question_request", session_id: sid, seq: 1, question_id: "q1",
@@ -182,7 +182,7 @@ it.each(["deletion", "account-change"])("discards an in-flight answer on confirm
 });
 
 it("projects owner snooze across an older snapshot without resetting the original question", async () => {
-  const dispatch = { ...emptyDispatch, revision: 1, active_request_id: "r1" };
+  const dispatch = { ...emptyDispatch, revision: 1, active_request_id: "r1", active_operation: "message" as const };
   const optional = { ...requested, interaction_policy: "human", wait_mode: "optional", snoozed: false };
   handleWsMessage({ type: "dispatch_state", session_id: sid, dispatch_state: dispatch });
   handleWsMessage(optional);
@@ -208,7 +208,7 @@ it("shows the original human blocking policy from live events and a refreshed sn
   act(() => {
     useSessionStore.setState({ pendingQuestions: {}, messages: {}, lastAppliedSeq: {} });
     applySessionSnapshot(sid, {
-      dispatch_state: { ...emptyDispatch, revision: 1, active_request_id: "r1" },
+      dispatch_state: { ...emptyDispatch, revision: 1, active_request_id: "r1", active_operation: "message" as const },
       active_attempt: { request_id: "r1", attempt_id: "a1" }, next_message_seq: 2,
       messages: [{ role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: {
         questions: [question], deadline: null, interaction_policy: "human", wait_mode: "blocking",
@@ -288,7 +288,7 @@ it("closes the live form and renders the same closure after history reload and r
 });
 
 it("keeps an already closed question closed when an old pending snapshot arrives", async () => {
-  const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1" };
+  const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1", active_operation: "message" as const };
   handleWsMessage({ type: "dispatch_state", session_id: sid, dispatch_state: dispatch });
   handleWsMessage(requested);
   renderChat();
@@ -338,7 +338,7 @@ it("keeps a newer WebSocket question answerable when the earlier HTTP refetch co
       ? sessionRows : url.endsWith("/submissions") ? { items: [] } : []))));
   useSessionStore.setState({ token: "question-test-token" });
   useSessionStore.setState({ sessions: sessionRows, activeSessionId: sid });
-  const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1" };
+  const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1", active_operation: "message" as const };
   handleWsMessage({ type: "dispatch_state", session_id: sid, dispatch_state: dispatch });
 
   function ConnectedChat() {
@@ -390,7 +390,7 @@ it("retains the newer live form while keeping a resolved question out of an olde
 });
 
 it("clears live questions on a service generation change and rejects the retired snapshot", async () => {
-  const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1" };
+  const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1", active_operation: "message" as const };
   handleWsMessage({ type: "dispatch_state", session_id: sid, dispatch_state: dispatch });
   handleWsMessage(requested);
   renderChat();

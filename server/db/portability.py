@@ -32,6 +32,9 @@ def read_account(source: sqlite3.Connection, user_id: str, *, key: str) -> dict[
     if len(rows["users"]) != 1 or not rows["users"][0]["dek_wrapped"]:
         raise ValueError("The selected account or its data key is missing")
     dek = decrypt(rows["users"][0]["dek_wrapped"], key)
+    for row in rows["agents"]:
+        # Target configuration starts a new authority; source chat is excluded.
+        row["context_settings_revision"] = 0
     for row in rows["backend_credentials"]:
         if row["auth_type"] == "oauth":
             row.update(status="needs_reconnect", needs_reconnect=1, token_expires_at=None, last_refresh_error_code=None)

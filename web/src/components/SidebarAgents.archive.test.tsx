@@ -5,7 +5,7 @@ import { useSessionStore, type Agent, type SessionInfo } from "../stores/session
 
 const agent = { id: "ag1", name: "Octo", backend: "codex", is_system: true, pinned: true, archived: false } as Agent;
 const session = { id: "s1", name: "ideas", status: "running", agent_id: "ag1", backend: "codex", origin: "user", archived: false } as SessionInfo;
-const dispatch = { generation: "service", revision: 1, paused: false, items: [], active_request_id: null };
+const dispatch = { generation: "service", revision: 1, paused: false, items: [], active_request_id: null, active_operation: null };
 
 beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);

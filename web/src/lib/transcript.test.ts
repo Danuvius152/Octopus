@@ -47,7 +47,7 @@ describe("applyTranscript", () => {
   it("accepts a reserved terminal that arrives after the stored snapshot", () => {
     applyTranscript("s1", { messages: [msg(0)], next_message_seq: 1 });
     handleWsMessage({ type: "result", session_id: "s1", seq: 1, terminal: true,
-      content: { kind: "outcome", request_id: "reserved", status: "success" } });
+      content: { kind: "outcome", operation: "message", request_id: "reserved", status: "success" } });
     expect(useSessionStore.getState().messages.s1.map((row) => row.seq)).toEqual([0, 1]);
     expect(useSessionStore.getState().lastAppliedSeq.s1).toBe(1);
   });

@@ -3605,6 +3605,11 @@ export interface components {
             client_request_id: string;
             /** Request Id */
             request_id: string;
+            /**
+             * Operation
+             * @constant
+             */
+            operation: "message";
             /** Accepted */
             accepted: boolean;
             /** Disposition */
@@ -3629,6 +3634,11 @@ export interface components {
             client_request_id: string;
             /** Request Id */
             request_id: string;
+            /**
+             * Operation
+             * @constant
+             */
+            operation: "message";
             execution: components["schemas"]["SubmissionExecution"];
             /** Preview */
             preview: string;
@@ -3868,6 +3878,100 @@ export interface components {
             /** Grant Stamp */
             grant_stamp: string;
         };
+        /** ContextBinding */
+        ContextBinding: {
+            /** Native Session Id */
+            native_session_id: string | null;
+            /** Effective Config Key */
+            effective_config_key: string;
+            /** Agent Settings Revision */
+            agent_settings_revision: number | null;
+            /** Binding Revision */
+            binding_revision: number;
+        };
+        /** ContextInvalidation */
+        ContextInvalidation: {
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "configuration_changed" | "native_context_changed" | "compacted" | "operation_unconfirmed";
+            /** Observed At */
+            observed_at: string;
+        };
+        /** ContextSample */
+        ContextSample: {
+            /** Used Tokens */
+            used_tokens?: number | null;
+            /** Capacity Tokens */
+            capacity_tokens?: number | null;
+            /** Used Ratio */
+            used_ratio?: number | null;
+            /**
+             * Basis
+             * @enum {string}
+             */
+            basis: "codex_last_total" | "codex_recomputed_estimate" | "claude_last_request_input" | "provider_ratio";
+            /** Capacity Basis */
+            capacity_basis?: "runtime_model_window" | null;
+            /** Backend */
+            backend: string;
+            /** Native Session Id */
+            native_session_id: string;
+            /** Actual Model */
+            actual_model: string | null;
+            binding: components["schemas"]["ContextBinding"];
+            source: components["schemas"]["ContextSource"];
+            /** Observed At */
+            observed_at: string;
+        };
+        /** ContextSource */
+        ContextSource: {
+            /** Request Id */
+            request_id: string;
+            /** Attempt Id */
+            attempt_id: string;
+            /** Connection Generation */
+            connection_generation: string | null;
+            /** Native Turn Id */
+            native_turn_id: string | null;
+            /** Native Sample Id */
+            native_sample_id?: string | null;
+            /** Observation Seq */
+            observation_seq: number;
+        };
+        /** ContextState */
+        ContextState: {
+            /**
+             * Version
+             * @default 1
+             * @constant
+             */
+            version: 1;
+            /** Revision */
+            revision: number;
+            /** Binding Revision */
+            binding_revision: number;
+            binding_target: components["schemas"]["ContextTarget"];
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "unknown" | "valid" | "stale";
+            invalidation?: components["schemas"]["ContextInvalidation"] | null;
+            sample?: components["schemas"]["ContextSample"] | null;
+            /** Activity */
+            activity?: "compacting" | null;
+        };
+        /** ContextTarget */
+        ContextTarget: {
+            /** Native Session Id */
+            native_session_id: string | null;
+            /** Effective Config Key */
+            effective_config_key: string;
+            /** Agent Settings Revision */
+            agent_settings_revision: number | null;
+        };
         /** CreateAgentScheduleRequest */
         CreateAgentScheduleRequest: {
             /** Wiki Mode */
@@ -4085,6 +4189,11 @@ export interface components {
         DispatchQueueItem: {
             /** Request Id */
             request_id: string;
+            /**
+             * Operation
+             * @constant
+             */
+            operation: "message";
             /** Source */
             source: string;
             /** Summary */
@@ -4111,6 +4220,8 @@ export interface components {
             paused: boolean;
             /** Active Request Id */
             active_request_id?: string | null;
+            /** Active Operation */
+            active_operation?: "message" | null;
             /**
              * Items
              * @default []
@@ -5406,6 +5517,14 @@ export interface components {
              * @default false
              */
             archived: boolean;
+            context_state?: components["schemas"]["ContextState"] | null;
+            /** Context Generation */
+            context_generation?: string | null;
+            /**
+             * Context Pending
+             * @default false
+             */
+            context_pending: boolean;
             /**
              * Messages
              * @default []
@@ -5757,14 +5876,19 @@ export interface components {
         };
         /** SubmissionInput */
         SubmissionInput: {
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "message";
             /** Content */
             content: string;
             /** Attachment Ids */
             attachment_ids: string[];
-            /** Attachments */
-            attachments: components["schemas"]["SavedAttachment"][];
             /** Wiki Mode */
             wiki_mode?: ("auto" | "read" | "maintain") | null;
+            /** Attachments */
+            attachments: components["schemas"]["SavedAttachment"][];
         };
         /** SubmissionRecoveryPage */
         SubmissionRecoveryPage: {
@@ -5821,6 +5945,12 @@ export interface components {
              * @constant
              */
             kind: "outcome";
+            /**
+             * Operation
+             * @default message
+             * @constant
+             */
+            operation: "message";
             /** Request Id */
             request_id: string;
             /**

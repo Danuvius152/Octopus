@@ -119,6 +119,20 @@ existing overlap policy.
 
 ## Saved inputs
 
+New durable payloads retain an explicit `MessageOperation` under `operation`,
+including the submitted content, attachment IDs and Wiki mode. The original
+MessageOperation is distinct from the effective execution KnowledgeContext.
+Pending items, admission/status, dispatch, outcomes and completion readers carry
+the operation kind; current supported kind is `message`. App answers, managed
+work and notifications consume message completions under their existing scope.
+An explicit malformed/unknown operation is rejected rather than decoded as text.
+
+Legacy flat messages normalize only when read from retained-input storage;
+their rows and original three-field input digest are unchanged. Existing IDs
+therefore retain their deduplication and recovery relationships. Execution reads
+the durable operation, not a second queued copy of its body. Public ordinary
+message submission fields keep their existing HTTP shape.
+
 Review shows the saved text, attachment metadata and the reason an outcome
 is unknown. Restore only fills the composer. The user's send creates a new
 input whose single `recovery_of` link identifies its source; source eligibility

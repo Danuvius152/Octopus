@@ -17,12 +17,12 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
   vi.stubGlobal("WebSocket", Socket);
   const sid = "overflow-session";
   const outcome = {
-    kind: "outcome", request_id: "selected-request", status: "completed", message: "Finished",
+    kind: "outcome", operation: "message", request_id: "selected-request", status: "completed", message: "Finished",
     recovery: { transient: 0, idle: 0, stale_session: 0, premature_exit: 0 },
   };
   const dispatch = {
-    generation: "service-current", revision: 4, paused: true, active_request_id: null,
-    items: [{ request_id: "pending-bg", source: "bg", summary: "Queued result", priority: false }],
+    generation: "service-current", revision: 4, paused: true, active_request_id: null, active_operation: null,
+    items: [{ request_id: "pending-bg", operation: "message" as const, source: "bg", summary: "Queued result", priority: false }],
   };
   const question = { question_id: "live-question", questions: [{ header: "Next", question: "Continue?", options: [] }] };
   const task = { id: "exact-bg-task", session_id: sid, status: "completed", command: "run tests" };

@@ -44,7 +44,7 @@ it("leaves malformed control and submission receipts pending until their valid o
   vi.stubGlobal("WebSocket", Socket);
   useSessionStore.getState().setToken("validation-test");
   useSessionStore.setState({ dispatchGeneration: "g", activeAttempts: { s: { request_id: "r", attempt_id: "a" } },
-    dispatchStates: { s: { generation: "g", revision: 1, paused: false, active_request_id: "r", items: [] } } });
+    dispatchStates: { s: { generation: "g", revision: 1, paused: false, active_request_id: "r", active_operation: "message" as const, items: [] } } });
   const { result } = renderHook(useWebSocket);
   const socket = Socket.instances[0];
   const control = result.current.interrupt("s");
@@ -77,7 +77,7 @@ it("rejects a malformed archive before changing generation, membership, lists or
   vi.stubGlobal("fetch", fetch);
   const before = useSessionStore.getState();
   handleWsMessage({ type: "session_archived", old_session_id: "s", new_session_id: 7,
-    dispatch_state: { generation: "new-service", revision: 100, paused: false, active_request_id: null, items: [] } });
+    dispatch_state: { generation: "new-service", revision: 100, paused: false, active_request_id: null, active_operation: null, items: [] } });
   expect(useSessionStore.getState()).toBe(before);
   expect(fetch).not.toHaveBeenCalled();
 });

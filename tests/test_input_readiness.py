@@ -123,7 +123,7 @@ async def test_ready_sources_execute_only_after_the_saved_claim_commits(not_read
         await asyncio.wait_for(claimed.wait(), 2)
         row = await database.get_submission_for_request(session.id, receipt.request_id)
         assert receipt.accepted and row["execution_state"] == "running"
-        assert row["payload"]["source"] == source and row["payload"]["content"] == "Saved original input"
+        assert row["payload"]["source"] == source and row["payload"]["operation"]["content"] == "Saved original input"
         assert starts == []
         release.set()
         completion = await asyncio.wait_for(receipt.wait(), 3)

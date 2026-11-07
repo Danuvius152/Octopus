@@ -16,6 +16,18 @@ from tests.test_ws_delivery import runtime as runtime
 client = api.client
 
 
+async def test_compact_is_not_admitted_during_message_type_preparation(client, tmp_path):
+    manager = api.session_manager
+    agent = await manager.db.get_system_agent()
+    session = await manager.create_session(agent["id"], "No compact yet", str(tmp_path), backend="codex")
+    response = await client.post(f"/api/sessions/{session.id}/submissions", json={
+        "client_request_id": "unsupported-compact", "operation": {"kind": "compact"},
+    })
+    assert response.status_code == 422
+    assert await manager.db.get_client_submission(session.id, "unsupported-compact") is None
+    assert manager.dispatch_snapshot(session.id)["items"] == []
+
+
 async def accepted_read_input(manager, session, *, damage=None):
     """An accepted current read input keeps its original payload and digest."""
     context = admit(session_id=session.id, request_id="old-request", user_id=session.user_id,
@@ -186,7 +198,7 @@ async def test_concurrent_recovery_of_read_only_input_has_one_new_owner(client, 
         assert contexts[0].maintenance.may_submit is False
         old = await manager.db.get_client_submission(session.id, "old-client")
         assert old["recovered_by"] == accepted[0]["client_request_id"]
-        assert old["payload"]["wiki_mode"] == "read"
+        assert old["payload"]["operation"]["wiki_mode"] == "read"
     finally:
         release.set()
         await manager.stop_all_held_processes()
@@ -301,7 +313,7 @@ async def test_explicit_auto_preserves_public_command_interpretation_and_retry_i
         assert submitted.status_code == 200 and submitted.json()["accepted"], submitted.text
         await asyncio.wait_for(starts.get(), 3)
         saved = await manager.db.get_client_submission(session.id, "same-auto")
-        assert saved["payload"]["wiki_mode"] == original_control
+        assert saved["payload"]["operation"]["wiki_mode"] == original_control
         assert decode_context(saved["payload"]["knowledge"]).mode == expected
         repeated = await client.post(f"/api/sessions/{session.id}/submissions", json=body)
         assert repeated.json()["request_id"] == submitted.json()["request_id"]

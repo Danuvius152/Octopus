@@ -2,6 +2,7 @@ import type { Message } from "../stores/sessionStore";
 import type { components } from "../api/contracts";
 
 export interface TurnOutcome {
+  operation?: "message";
   status: "success" | "failed" | "interrupted" | "unknown";
   request_id?: string;
   message?: string;
@@ -39,11 +40,12 @@ function text(value: unknown): string | undefined {
 export function normalizeMessage(message: MessageInput): Message {
   const data = record(message.content);
   if (message.type === "result") {
-    const valid = data.kind === "outcome" &&
+    const valid = data.kind === "outcome" && (data.operation === undefined || data.operation === "message") &&
       ["success", "failed", "interrupted"].includes(String(data.status));
     const recovery = Object.fromEntries(Object.entries(record(data.recovery))
       .filter(([, count]) => typeof count === "number" && Number.isInteger(count) && count >= 0)) as Record<string, number>;
     const outcome: TurnOutcome = message.outcome ?? {
+      operation: data.operation === undefined || data.operation === "message" ? "message" : undefined,
       status: valid ? data.status as TurnOutcome["status"] : message.is_error ? "failed" : "unknown",
       request_id: text(data.request_id),
       message: text(data.message) ?? text(message.content),

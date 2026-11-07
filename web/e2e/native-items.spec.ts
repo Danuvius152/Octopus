@@ -32,7 +32,7 @@ test("native failures, hook provenance and original image paths survive WS and h
     } else if (pathname === `/api/sessions/${session.id}`) data = { ...session, messages,
       next_message_seq: messages.length + 1, oldest_loaded_seq: messages[0]?.seq ?? null, has_more_messages: false,
       pending_questions: [], subagents: [], dispatch_state: {
-        generation: "native-items-service", revision: 1, paused: false, active_request_id: null, items: [] } };
+        generation: "native-items-service", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [] } };
     await route.fulfill({ json: data });
   });
   await page.routeWebSocket("**/ws?*", (ws) => { socket = ws; });

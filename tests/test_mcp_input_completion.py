@@ -145,7 +145,7 @@ async def test_exact_input_gap_keeps_named_delegation_original_result_consumptio
         async with asyncio.timeout(3):
             while (delivered := await database.get_source_submission("delegation", f"agent-terminal:{work.work_id}", session_id=parent.id)) is None:
                 await asyncio.sleep(0)
-        assert delivered["payload"]["content"].endswith("One delegated answer")
+        assert delivered["payload"]["operation"]["content"].endswith("One delegated answer")
         assert (await database.read_session_result(child.id, pending.request_id)).outcome.status == "success"
         assert len(starts) == 1
     finally:

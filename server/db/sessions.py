@@ -352,7 +352,7 @@ class SessionsMixin(DatabaseBase):
                 "credential_id, archived, agent_id, origin, backend, "
                 "parent_session_id, delegation_request, forked_from_session_id, "
                 "fork_after_seq, fork_needs_replay, fork_metadata, "
-                "fork_revert_record, fork_status, app_id, model, user_id, reasoning_effort, service_tier "
+                "fork_revert_record, fork_status, app_id, model, user_id, reasoning_effort, service_tier, context_state "
                 "FROM sessions"
             )
             clauses = [] if include_archived else ["archived = 0"]
@@ -389,6 +389,7 @@ class SessionsMixin(DatabaseBase):
                     "user_id": row[20],
                     "reasoning_effort": row[21],
                     "service_tier": row[22],
+                    "context_state": row[23],
                 }
                 for row in rows
             ]
@@ -822,6 +823,7 @@ class SessionsMixin(DatabaseBase):
                 "model",
                 "reasoning_effort",
                 "service_tier",
+                "context_state",
                 # Fork columns (session-rewind.md §4). fork_metadata is
                 # nullable+clearable (set to None to clear after first turn);
                 # the others are written across the §5.1 saga.
@@ -840,7 +842,7 @@ class SessionsMixin(DatabaseBase):
             # (Vera review BLOCKING #1). Other columns omitted by the caller are
             # left untouched. Model, effort and credential overrides clear to
             # NULL to restore inheritance.
-            nullable = {"fork_metadata", "claude_session_id", "model", "reasoning_effort", "credential_id", "service_tier"}
+            nullable = {"fork_metadata", "claude_session_id", "model", "reasoning_effort", "credential_id", "service_tier", "context_state"}
             bool_fields = {"archived", "fork_needs_replay"}
             updates: dict[str, Any] = {}
             for k, v in fields.items():

@@ -151,7 +151,7 @@ describe("application list observations", () => {
     list.connect({ ...source, socket: {} });
     list.receive({ type: "application_updated", application: row("stale", { status: "failed", session_id: "old-build" }) }, source);
     body.resolve({ id: "build", messages: [], next_message_seq: 1, pending_questions: [],
-      dispatch_state: { generation: "service-a", revision: 1, paused: false, active_request_id: null, items: [] } });
+      dispatch_state: { generation: "service-a", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [] } });
     await flush();
     expect(rows().map((item) => item.id)).toEqual(["a"]);
     expect(useSessionStore.getState().sessions).toEqual([]);

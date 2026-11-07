@@ -114,7 +114,7 @@ async def test_parent_terminal_waits_for_the_last_authorized_admission_transacti
         await job_notifications.dispatch(jobs, returning.manager)
         replies = await return_inputs(returning.manager, returning.original.id)
         assert len(replies) == 1
-        summary = replies[0][1]["content"]
+        summary = replies[0][1]["operation"]["content"]
         assert first["id"] in summary and late["id"] in summary
         await wait_return(returning.manager, returning.original.id, replies[0][1])
     finally:
@@ -184,7 +184,7 @@ async def test_same_chat_later_request_reusing_completed_job_receives_its_own_re
     replies = await return_inputs(returning.manager, returning.original.id)
     assert len(replies) == 2
     assert len({payload["delivery_id"] for _, payload in replies}) == 2
-    assert [json.loads(payload["content"].split("\n")[-1])["origin_request_id"] for _, payload in replies] == [
+    assert [json.loads(payload["operation"]["content"].split("\n")[-1])["origin_request_id"] for _, payload in replies] == [
         returning.receipt.request_id, next_request.request_id,
     ]
     await wait_return(returning.manager, returning.original.id, replies[1][1])

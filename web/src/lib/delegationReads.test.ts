@@ -57,7 +57,7 @@ it.each(["cancel", "service", "account"])("does not apply a late response after 
   const read = observeDelegations("parent");
   if (change === "cancel") read.cancel();
   else if (change === "account") useSessionStore.getState().setToken("other");
-  else useSessionStore.getState().applyDispatchState("other", { generation: "new", revision: 0, paused: false, active_request_id: null, items: [] });
+  else useSessionStore.getState().applyDispatchState("other", { generation: "new", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] });
   response.resolve(Response.json([round("retired", "completed")]));
   await read.done;
   expect(useSessionStore.getState().delegations.parent?.some((item) => item.work_id === "retired")).toBeFalsy();

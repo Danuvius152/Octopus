@@ -32,7 +32,7 @@ test("optional input pauses only on user interaction and both pages read the pau
       messages: [{ role: "assistant", type: "question_request", seq, tool_use_id: question.question_id, tool_input: question }],
       next_message_seq: seq + 1, oldest_loaded_seq: seq, has_more_messages: false,
       active_attempt: { request_id: "request", attempt_id: "attempt" }, pending_questions: [question], subagents: [],
-      dispatch_state: { generation: "service", revision: seq, paused: false, active_request_id: "request", items: [] } };
+      dispatch_state: { generation: "service", revision: seq, paused: false, active_request_id: "request", active_operation: "message" as const, items: [] } };
     await route.fulfill({ json: data });
   });
   const open = async (browser: Page) => {

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..models import TurnOutcome
+from ..session_operations import OperationKind
 from .observation import RequestObservation
 
 if TYPE_CHECKING:
@@ -23,6 +24,7 @@ class RequestCompletion:
     recording_state: Literal["committed", "failed", "unconfirmed", "none"] = "none"
     reason: str | None = None
     notification_state: Literal["delivered", "failed", "unavailable"] = "delivered"
+    operation: OperationKind = "message"
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class SubmissionReceipt:
     request_id: str
     _completion: asyncio.Future[RequestCompletion] = field(repr=False, compare=False)
     execution: RequestObservation | None = field(default=None, repr=False, compare=False)
+    operation: OperationKind = "message"
 
     @classmethod
     def closed(cls, request_id: str, reason: Literal["shutdown", "withdrawn"]) -> SubmissionReceipt:
@@ -103,6 +106,7 @@ def receipt_for_input(row: dict[str, Any], future: asyncio.Future[RequestComplet
                       execution: RequestObservation | None = None) -> SubmissionReceipt:
     """Observe durable admission without creating an Owner or dispatching work."""
     request_id = row["request_id"]
+    operation: OperationKind = row["payload"]["operation"]["kind"] if row["payload"] else "message"
     if future is None:
         terminal = row["terminal"] if row["delivery_state"] != "unknown" else None
         future = asyncio.get_running_loop().create_future()
@@ -112,8 +116,10 @@ def receipt_for_input(row: dict[str, Any], future: asyncio.Future[RequestComplet
             outcome=TurnOutcome(**terminal) if terminal is not None else None,
             recording_state="committed" if terminal is not None else "none", reason=row["reason_code"],
             notification_state="unavailable",
+            operation=operation,
         ))
-    return SubmissionReceipt("duplicate" if row["receipt"] and row["receipt"]["accepted"] else "closed", request_id, future, execution)
+    return SubmissionReceipt("duplicate" if row["receipt"] and row["receipt"]["accepted"] else "closed",
+                             request_id, future, execution, operation=operation)
 
 
 def observed_input_receipt(row: dict[str, Any], session: Session | None) -> SubmissionReceipt:

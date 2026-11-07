@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .models import FinalAnswerRef, TurnOutcome
+from .session_operations import OperationKind
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,13 @@ class SessionResult:
     missing: str | None = None
     message_seqs: tuple[int, ...] = ()
 
+    @property
+    def operation(self) -> OperationKind:
+        return self.outcome.operation if self.outcome is not None else "message"
+
     def reply_text(self) -> str:
+        if self.operation != "message":
+            return ""
         return _reply_text(self.fragments)
 
 
@@ -123,6 +130,8 @@ class LiveReply:
             else:
                 if outcome.request_id != self.request_id:
                     self.missing = "terminal_invalid"
+                elif outcome.operation != "message":
+                    self.missing = "operation_mismatch"
                 elif outcome.final_answer is not None:
                     selected = referenced_fragments(outcome.final_answer, self.request_id, self.attempt_id,
                                                     self._native_rows, event.get("seq"))

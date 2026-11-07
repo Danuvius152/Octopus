@@ -242,6 +242,9 @@ class RuntimeProfile:
     # Resume a captured conversation with a new continuation input. This
     # neither replays the original input nor guarantees exactly-once effects.
     can_continue: bool = False
+    # Native root usage, with identity and a runtime window; independent of
+    # steering, invocation or the cumulative performance measurements.
+    can_observe_context: bool = False
     tool_policy: ToolPolicySupport = field(default_factory=ToolPolicySupport)
     # Request instructions have a native per-turn channel on some adapters;
     # otherwise they are fixed in the process's composed system prompt.

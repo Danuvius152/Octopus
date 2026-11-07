@@ -54,8 +54,12 @@ async def test_cancelled_notice_waiter_detaches_while_the_original_sql_is_pendin
         await asyncio.gather(waiter, return_exceptions=True)
 
 
-async def test_owner_failure_wakes_original_question_poll_and_refuses_new_commands(notices, monkeypatch):
+@pytest.mark.parametrize("with_context", [False, True])
+async def test_owner_failure_wakes_original_question_poll_and_refuses_new_commands(notices, monkeypatch, with_context):
     manager, session, client = notices
+    if with_context:
+        await manager.update_session_configuration(session.id, {"model": "context-fixture"}, session.user_id)
+        assert session.context_state is not None and session.context_state.validity == "stale"
     qid = await manager.create_pending_question(session.id, [{"question": "Original question"}])
     assert qid is not None
     poll = asyncio.create_task(manager.wait_for_question_answer(session.id, qid, timeout=3))
@@ -74,9 +78,10 @@ async def test_owner_failure_wakes_original_question_poll_and_refuses_new_comman
         with pytest.raises(SessionOwnerUnavailable):
             await manager.retain_result_notice(session.id, "new-command", "Do not restart the owner")
         assert manager.get_pending_questions(session.id) == ()
-        detail = await client.get(f"/api/sessions/{session.id}")
+        detail = await asyncio.wait_for(client.get(f"/api/sessions/{session.id}"), 2)
         assert detail.status_code == 200
         assert [row["type"] for row in detail.json()["messages"]] == ["question_request"]
+        assert detail.json()["context_pending"] is with_context
     finally:
         await asyncio.gather(poll, return_exceptions=True)
 
@@ -118,8 +123,12 @@ async def test_delete_joins_the_original_notice_command_before_removing_its_row(
         await asyncio.gather(notice, *([deletion] if deletion else []), return_exceptions=True)
 
 
-async def test_command_capacity_refuses_before_acceptance_and_keeps_owned_commands(notices, monkeypatch):
+@pytest.mark.parametrize("with_context", [False, True])
+async def test_command_capacity_refuses_before_acceptance_and_keeps_owned_commands(notices, monkeypatch, with_context):
     manager, session, client = notices
+    if with_context:
+        await manager.update_session_configuration(session.id, {"model": "context-fixture"}, session.user_id)
+        assert session.context_state is not None and session.context_state.validity == "stale"
     entered, release = asyncio.Event(), asyncio.Event()
     has_notice = manager.db.has_delivery_notice
 
@@ -143,8 +152,9 @@ async def test_command_capacity_refuses_before_acceptance_and_keeps_owned_comman
         refused = next(iter(done))
         with pytest.raises(SessionMailboxFull, match="command capacity"):
             await refused
-        detail = await client.get(f"/api/sessions/{session.id}")
+        detail = await asyncio.wait_for(client.get(f"/api/sessions/{session.id}"), 2)
         assert detail.status_code == 200 and detail.json()["message_count"] == 0
+        assert detail.json()["context_pending"] is False
         release.set()
         assert await asyncio.wait_for(first, 3)
         accepted = [task for task in waiting if task is not refused]

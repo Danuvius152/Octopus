@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 from ..aio import complete_cleanup
+from ..context_models import align_context, context_target, invalidate_context
 from ..credential_bindings import validate_credential_binding
 from ..db.credentials import CredentialOwnerUnavailable
 from ..harness import all_backends, get_harness, has_backend, model_settings
@@ -26,6 +27,14 @@ class ConfigurationMixin(SessionManagerBase):
         return self.db.configuration_lock
 
     async def capture_request_configuration(self, context: Session) -> tuple[Session, dict[str, Any] | None]:
+        from .owner_runtime import CaptureConfiguration
+
+        current = self.get_session(context.id, context.user_id)
+        if current is None:
+            raise SessionConfigurationError("Session not found", 404)
+        return await self._session_owner(current).call_runtime(CaptureConfiguration(context))
+
+    async def _capture_request_configuration(self, context: Session) -> tuple[Session, dict[str, Any] | None]:
         """Keep original request context; capture defaults after lock acquisition.
 
         Credential refresh, connectors and other slow preparation run after
@@ -43,16 +52,18 @@ class ConfigurationMixin(SessionManagerBase):
                 raise SessionConfigurationError("Session not found", 404)
             if defaults._admission_closed:
                 raise SessionConfigurationError("Session admission is closed", 409)
-            return configured, agent
+            await self._align_context_locked(defaults, agent)
+            return replace(configured, context_state=defaults.context_state), agent
 
     async def update_session_configuration(
         self, session_id: str, fields: dict[str, Any], user_id: str | None = None,
     ) -> Session:
-        async def save() -> Session:
-            async with self.configuration_lock:
-                return await self._save_session_configuration(session_id, fields, user_id)
+        from .owner_runtime import UpdateConfiguration
 
-        return await complete_cleanup(save())
+        session = self.get_session(session_id, user_id)
+        if session is None:
+            raise SessionConfigurationError("Session not found", 404)
+        return await self._session_owner(session).call_runtime(UpdateConfiguration(dict(fields), user_id))
 
     async def _save_session_configuration(
         self, session_id: str, fields: dict[str, Any], user_id: str | None,
@@ -92,9 +103,19 @@ class ConfigurationMixin(SessionManagerBase):
                 raise SessionConfigurationError("Session name cannot be empty")
             updates["name"] = name
         if updates:
+            agent = await self._load_agent(session)
+            target = context_target(replace(session, **updates), agent)
+            state = align_context(session.context_state, target)
+            if state is None and context_target(session, agent) != target:
+                state = invalidate_context(None, target, "configuration_changed", binding=True)
+            updates["context_state"] = state.model_dump_json() if state else None
             await self.db.update_session_field(session_id, **updates)
             for key, value in updates.items():
-                setattr(session, key, value)
+                if key != "context_state":
+                    setattr(session, key, value)
+            if state != session.context_state:
+                session.context_state = state
+                self._session_owner(session).runtime.context_changed()
         return session
 
     async def delete_credential_binding(self, credential_id: str, user_id: str | None) -> dict[str, Any] | None:
@@ -129,4 +150,7 @@ class ConfigurationMixin(SessionManagerBase):
                         live.credential_id = None
                 return row
 
-        return await complete_cleanup(remove())
+        row = await complete_cleanup(remove())
+        if row is not None:
+            self.wake_contexts(None, user_id)
+        return row

@@ -8,6 +8,7 @@ import type { QuestionDraft } from "../lib/questionDrafts";
 import { normalizeMessage, type MessageInput } from "../lib/turnOutcome";
 import { readActiveAttempt, readDispatchState, type ActiveAttempt, type DispatchState } from "../lib/sessionDispatch";
 import { nativeItemKey } from "../lib/nativeOutput";
+import { readContextState, type ContextState } from "../lib/sessionContext";
 import type {
   AgentRead as ApiAgentRead,
   ApplicationRead as ApiApplicationRead,
@@ -186,6 +187,8 @@ export interface Identity {
 type DispatchReadStart = Pick<SessionStore, "accountGeneration" | "dispatchGeneration" | "dispatchStates" | "executionObservations">;
 
 interface SessionStore {
+  contextStates: Record<string, { generation: string; state: ContextState | null; pending: boolean }>;
+  applyContextState: (sessionId: string, generation: string, value: unknown, start?: DispatchReadStart, pending?: boolean) => boolean;
   activeAttempts: Record<string, ActiveAttempt>;
   setActiveAttempt: (sessionId: string, attempt: ActiveAttempt | null) => void;
   // Live execution observations, including absent -> present -> absent.
@@ -528,7 +531,7 @@ function dispatchUpdate(s: SessionStore, sessionId: string, snapshot: DispatchSt
   return {
     dispatchGeneration: snapshot.generation,
     ...(changed ? { activeAttempts: {}, executionObservations: {}, closedQuestionIds: {}, pendingQuestions: {},
-      sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingItems: {} } : {}),
+      sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingItems: {}, contextStates: {} } : {}),
     retiredDispatchGenerations: changed ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
     // Equal revision confirms content and invalidates earlier read failures.
     dispatchStates: { ...(changed ? {} : s.dispatchStates),
@@ -538,6 +541,29 @@ function dispatchUpdate(s: SessionStore, sessionId: string, snapshot: DispatchSt
 }
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
+  contextStates: {},
+  applyContextState: (sessionId, generation, value, start, pending = false) => {
+    const state = readContextState(value);
+    if (state === undefined || typeof pending !== "boolean") return false;
+    let applied = false;
+    set((s) => {
+      if (start && start.accountGeneration !== s.accountGeneration || s.retiredDispatchGenerations.includes(generation)
+          || s.dispatchGeneration !== null && generation !== s.dispatchGeneration) return s;
+      const previous = s.contextStates[sessionId];
+      if (previous?.generation === generation) {
+        const before = previous.state?.revision ?? 0;
+        const incoming = state?.revision ?? 0;
+        if (before > incoming || before === incoming && (!pending || previous.pending)) return s;
+        if (before === incoming) {
+          applied = true;
+          return { contextStates: { ...s.contextStates, [sessionId]: { ...previous, pending: true } } };
+        }
+      }
+      applied = true;
+      return { contextStates: { ...s.contextStates, [sessionId]: { generation, state, pending } } };
+    });
+    return applied;
+  },
   activeAttempts: {},
   executionObservations: {},
   setActiveAttempt: (sessionId, attempt) => set((s) => ({
@@ -732,6 +758,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     questionDrafts: Object.fromEntries(Object.entries(s.questionDrafts).filter(([, draft]) => draft.sessionId !== id)),
     streamingText: dropKey(s.streamingText, id), streamingItems: dropKey(s.streamingItems, id),
     subagents: dropKey(s.subagents, id), dispatchStates: dropKey(s.dispatchStates, id),
+    contextStates: dropKey(s.contextStates, id),
     dispatchUnavailable: dropKey(s.dispatchUnavailable, id), sessionMembership: dropKey(s.sessionMembership, id),
     oldestSeq: dropKey(s.oldestSeq, id), hasMoreMessages: dropKey(s.hasMoreMessages, id),
     messageWindows: dropKey(s.messageWindows, id), lastAppliedSeq: dropKey(s.lastAppliedSeq, id),

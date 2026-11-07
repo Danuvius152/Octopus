@@ -40,6 +40,7 @@ def verify_main(db: sqlite3.Connection) -> int:
     """Require the complete current layout without the startup upgrade path."""
     from pydantic import ValidationError
 
+    from .context_models import ContextState
     from .db.schema import _SCHEMA, CURRENT_VERSION
     from .delegations import _PersistedRound
     from .submission_models import NativeInputEvidence
@@ -59,10 +60,18 @@ def verify_main(db: sqlite3.Connection) -> int:
         UNION ALL SELECT 1 FROM client_submissions
         WHERE execution_state NOT IN ('pending','running','done','withdrawn','unknown')
           OR reason_code='legacy_rejected'
-          OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.wiki_mode')='off' ELSE 0 END
+          OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.wiki_mode')='off'
+              OR json_extract(payload,'$.operation.wiki_mode')='off' ELSE 0 END
         LIMIT 1""").fetchone()
     if invalid:
         raise RuntimeError("Primary database contains inputs outside the current contract")
+    if db.execute("SELECT 1 FROM agents WHERE typeof(context_settings_revision)!='integer' OR context_settings_revision<0 LIMIT 1").fetchone():
+        raise RuntimeError("Primary database contains an invalid context settings revision")
+    try:
+        for (raw,) in db.execute("SELECT context_state FROM sessions WHERE context_state IS NOT NULL"):
+            ContextState.model_validate_json(raw)
+    except (ValueError, TypeError):
+        raise RuntimeError("Primary database contains an invalid current context snapshot") from None
     try:
         for row in db.execute("SELECT delegation_state FROM sessions WHERE delegation_state IS NOT NULL"):
             _PersistedRound.model_validate_json(row[0])

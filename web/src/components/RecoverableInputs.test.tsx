@@ -6,9 +6,9 @@ import { handleWsMessage } from "../hooks/useWebSocket";
 import { RecoverableInputs } from "./RecoverableInputs";
 
 const execution = { state: "withdrawn" as const, delivery_state: "none" as const, state_version: 2, execution_owner_request_id: "request", recoverable_input: true };
-const item: ClientSubmissionSummary = { client_request_id: "original", request_id: "request", execution, preview: "Saved original", attachment_count: 0 };
+const item: ClientSubmissionSummary = { client_request_id: "original", request_id: "request", operation: "message", execution, preview: "Saved original", attachment_count: 0 };
 const saved: ClientSubmissionStatus = { session_id: "s", client_request_id: "original", request_id: "request", accepted: true,
-  execution, input: { content: "Saved original in full 中文", attachment_ids: [], attachments: [] } };
+  operation: "message", execution, input: { kind: "message", content: "Saved original in full 中文", attachment_ids: [], attachments: [] } };
 
 it("distinguishes native acceptance from processing when execution is unknown", async () => {
   const native = { ...item, execution: { ...execution, state: "unknown", recoverable_input: false,
@@ -42,7 +42,7 @@ it.each(["empty", "pending", "unknown"])("clears a %s notice once the server con
   else await screen.findByText(previous === "pending" ? "Added to active turn · acceptance pending" : "Execution result unknown");
   accepted = true;
   act(() => handleWsMessage({ type: "dispatch_state", session_id: "s", dispatch_state: {
-    generation: "steer-evidence-service", revision: 10, paused: false, active_request_id: "root", items: [],
+    generation: "steer-evidence-service", revision: 10, paused: false, active_request_id: "root", active_operation: "message" as const, items: [],
   } }));
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   await waitFor(() => expect(screen.queryByRole("region", { name: "Saved inputs" })).toBeNull());

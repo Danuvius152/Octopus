@@ -88,7 +88,7 @@ it("does not launch the captured deferred fork when idle arrives before reset co
     const store = useSessionStore.getState();
     store.removePendingQuestion(session.id, "original");
     store.updateSessionStatus(session.id, "idle");
-    store.applyDispatchState(session.id, { generation: "service-a", revision: 1, paused: false, active_request_id: null, items: [] });
+    store.applyDispatchState(session.id, { generation: "service-a", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [] });
   });
   expect(requests.mock.calls.some(([url]) => url.endsWith("/duplicate"))).toBe(false);
   await act(async () => resolve(Response.json({ status: "ok" })));

@@ -40,7 +40,7 @@ async def test_terminal_selects_ordered_fragments_and_preserves_empty_and_whites
 async def test_confirmed_inline_input_reads_actual_carrier_but_unknown_input_does_not(database):
     for request in ("confirmed", "unknown"):
         await database.admit_client_submission("session", request, request, request,
-            payload={"content": request}, receipt={"accepted": True})
+            payload={"content": request, "attachment_ids": []}, receipt={"accepted": True})
         await database.claim_client_submission("session", request, owner="carrier", generation="test")
         await database.set_steer_delivery("session", request, confirmed=request == "confirmed")
     await database.append_message(session_id="session", seq=0, role="assistant", type="text", content="carrier body",

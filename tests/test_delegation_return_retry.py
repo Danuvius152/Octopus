@@ -561,7 +561,7 @@ async def test_live_question_return_preserves_full_answer_instructions(work_runt
             await asyncio.sleep(.01)
     queued = manager.dispatch_snapshot(parent.id)["items"]
     row = await manager.db.get_submission_for_request(parent.id, queued[0]["request_id"])
-    prompt = row["payload"]["content"]
+    prompt = row["payload"]["operation"]["content"]
     assert "[agent-question:Worker" in prompt
     assert f"delegation={rec.delegation_id}" in prompt and f"question_id={question_id}" in prompt
     assert "mcp__ask_agent__answer" in prompt and "answer_agent_question" not in prompt

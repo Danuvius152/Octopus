@@ -329,7 +329,7 @@ async def test_snapshot_watermark_uses_exact_loaded_rows_during_recording(runtim
     receipt = await manager.start_message(session.id, "Original input", request_id="recording-replay")
     try:
         await asyncio.wait_for(entered.wait(), 5)
-        snapshot = await get_session(manager, session.id, user_id=None)
+        snapshot = await asyncio.wait_for(get_session(manager, session.id, user_id=None), 2)
         assert [row.content for row in snapshot.messages] == ["Original input", "ready"]
         assert snapshot.next_message_seq == 2
         assert terminal_projection(snapshot) == replay["before"]

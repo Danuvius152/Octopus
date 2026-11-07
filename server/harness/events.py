@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..context_models import ContextObservation
 from ..credential_use import CredentialUse
 
 
@@ -173,6 +174,7 @@ class HarnessEvent:
     # the Task/collab tool call and its result, already persisted
     # (native-subagents.md §4).
     type: str  # text | text_delta | thinking | tool_use | tool_result | result | error | question_request | session_started | subagent
+    context: ContextObservation | None = field(default=None, repr=False, kw_only=True)
     content: str | None = None
     tool_name: str | None = None
     tool_input: dict[str, Any] | None = None

@@ -134,7 +134,7 @@ def transition(jobs, job_id, reference, phase, *, recording_state=None, disposit
 
 def require_completion(reference, completion):
     request_id = reference["request_id"]
-    if (completion.input_request_id != request_id or completion.request_id != request_id
+    if (completion.operation != "message" or completion.input_request_id != request_id or completion.request_id != request_id
             or completion.outcome is not None and completion.outcome.request_id != request_id):
         raise WikiError("Original worker completion request does not match its prepared intent", 409)
 

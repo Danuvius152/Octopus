@@ -75,7 +75,7 @@ it("does not restore schedules deleted during a slash-command creation", async (
   const old = { id: "old", name: "old", enabled: true } as ReturnType<typeof useSessionStore.getState>["schedules"][number];
   useSessionStore.setState({ sessions: [{ ...session, agent_id: "owner" }], activeSessionId: session.id, schedules: [old] });
   useSessionStore.getState().applyDispatchState(session.id, {
-    generation: "schedule-service", revision: 1, paused: false, active_request_id: null, items: [],
+    generation: "schedule-service", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [],
   });
   let finish!: (response: Response) => void;
   let serverRows = [old];
@@ -105,8 +105,8 @@ it("does not restore schedules deleted during a slash-command creation", async (
 
 it("keeps correction separate from paused results and resumes only on the explicit button", async () => {
   const paused = {
-    generation: "service-ui", revision: 1, paused: true, active_request_id: "correction",
-    items: [{ request_id: "bg-1", source: "bg", summary: "background result", priority: false }],
+    generation: "service-ui", revision: 1, paused: true, active_request_id: "correction", active_operation: "message" as const,
+    items: [{ request_id: "bg-1", operation: "message" as const, source: "bg", summary: "background result", priority: false }],
   };
   useSessionStore.getState().applyDispatchState(session.id, paused);
   const resume = vi.fn(async () => new Response(JSON.stringify({ ...paused, revision: 2, paused: false })));
@@ -128,7 +128,7 @@ it("keeps correction separate from paused results and resumes only on the explic
 it("shows pause independently while a correction runs, including an empty pending queue", () => {
   useSessionStore.setState({ sessions: [{ ...session, status: "running" }] });
   useSessionStore.getState().applyDispatchState(session.id, {
-    generation: "service-ui", revision: 1, paused: true, active_request_id: "correction", items: [],
+    generation: "service-ui", revision: 1, paused: true, active_request_id: "correction", active_operation: "message" as const, items: [],
   });
   const sendMessage = vi.fn();
   render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()}
@@ -142,7 +142,7 @@ it("shows pause independently while a correction runs, including an empty pendin
 
 it("keeps the queue paused and reports a failed resume", async () => {
   useSessionStore.getState().applyDispatchState(session.id, {
-    generation: "service-ui", revision: 1, paused: true, active_request_id: null, items: [],
+    generation: "service-ui", revision: 1, paused: true, active_request_id: null, active_operation: null, items: [],
   });
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: "Turn quota exceeded" }), { status: 429 })));
   setup();
@@ -542,7 +542,7 @@ describe("session-owned attachment drafts", () => {
 
   const recordQueuedFailure = () => act(() => useSessionStore.getState().addMessage(session.id, {
     role: "system", type: "result",
-    content: { kind: "outcome", request_id: "accepted-files", status: "failed", code: "attachment_unavailable",
+    content: { kind: "outcome", operation: "message", request_id: "accepted-files", status: "failed", code: "attachment_unavailable",
       message: "Some attachments are unavailable. Re-upload the files in this conversation.", recovery: {} },
     tool_input: { rejected_input: { content: "Queued complete input", attachment_ids: ["lost-file"] } },
   }));

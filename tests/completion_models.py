@@ -16,6 +16,7 @@ from functools import partial
 
 from server.knowledge import encode
 from server.models import SessionStatus, TurnOutcome
+from server.sessions.base import QueuedPrompt
 from server.sessions.runtime_types import _Settlement
 from server.sessions.submission import RequestCompletion, SubmissionReceipt
 
@@ -26,6 +27,7 @@ class ModelRequest:
     receipt: SubmissionReceipt
     attempt_id: str
     work_id: str | None
+    request: QueuedPrompt
 
 
 class CompletionModels:
@@ -63,9 +65,11 @@ class CompletionModels:
             tool_input={"request_context": {"request_id": request_id, "work_id": work_id, "source": source,
                                            "knowledge": json.loads(encode(knowledge)) if knowledge is not None else {}}},
         )
-        requests.append(ModelRequest(session, receipt, attempt_id, work_id))
+        requests.append(ModelRequest(session, receipt, attempt_id, work_id,
+                                     QueuedPrompt(prompt, [], request_id=request_id, work_id=work_id, source=source)))
         first = next(item for item in requests if not item.receipt._completion.done())
         session._run.settlement = _Settlement(request_id=first.receipt.request_id, work_id=first.work_id)
+        session._run.request = first.request
         return receipt
 
     def pending(self, manager, session_id):
@@ -82,6 +86,7 @@ class CompletionModels:
                                                      request.receipt.request_id, "controlled-model")
         if matching and event.get("type") == "status":
             request.session.status = SessionStatus(event["status"])
+            event = {**event, "operation": request.receipt.operation if event["status"] == "running" else None}
         if matching and event.get("type") == "assistant_text":
             _, seq, _ = await manager.db.message_sequence_state(event["session_id"])
             await manager.db.append_message(
@@ -128,6 +133,7 @@ class CompletionModels:
         request.session._run.settlement = (
             _Settlement(request_id=following.receipt.request_id, work_id=following.work_id) if following else None
         )
+        request.session._run.request = following.request if following else None
         request.session.status = SessionStatus.running if following else SessionStatus.idle
         try:
             if wait:

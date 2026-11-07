@@ -127,6 +127,10 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       getState().invalidateWikiJob(sessionId, { vault_id: data.vault_id, job_id: data.job_id, state_version: data.state_version });
       if (sessionId === getState().activeSessionId) void refreshWikiJobs(sessionId).catch(() => {});
       break;
+    case "context_state":
+      getState().applyContextState(sessionId, data.generation, data.context_state);
+      break;
+
     case "dispatch_state":
       applyDispatchState(sessionId, data.dispatch_state);
       break;

@@ -11,23 +11,23 @@ test("Stop keeps returns paused through correction and reconnect until explicit 
     backend: "codex", working_dir: "/tmp", created_at: "2026-10-13T00:00:00Z", archived: false,
   };
   const pending = [
-    { request_id: "bg-return", source: "bg", summary: "Background command finished", priority: false },
-    { request_id: "agent-return", source: "delegation", summary: "Child agent returned", priority: false },
+    { request_id: "bg-return", operation: "message" as const, source: "bg", summary: "Background command finished", priority: false },
+    { request_id: "agent-return", operation: "message" as const, source: "delegation", summary: "Child agent returned", priority: false },
   ];
   const snapshots = {
-    initial: { generation: "browser-service", revision: 1, paused: false, active_request_id: "original", items: pending },
-    paused: { generation: "browser-service", revision: 2, paused: true, active_request_id: null, items: pending },
-    correcting: { generation: "browser-service", revision: 3, paused: true, active_request_id: "correction", items: pending },
-    corrected: { generation: "browser-service", revision: 4, paused: true, active_request_id: null, items: pending },
-    resumed: { generation: "browser-service", revision: 6, paused: false, active_request_id: "bg-return", items: pending.slice(1) },
+    initial: { generation: "browser-service", revision: 1, paused: false, active_request_id: "original", active_operation: "message" as const, items: pending },
+    paused: { generation: "browser-service", revision: 2, paused: true, active_request_id: null, active_operation: null, items: pending },
+    correcting: { generation: "browser-service", revision: 3, paused: true, active_request_id: "correction", active_operation: "message" as const, items: pending },
+    corrected: { generation: "browser-service", revision: 4, paused: true, active_request_id: null, active_operation: null, items: pending },
+    resumed: { generation: "browser-service", revision: 6, paused: false, active_request_id: "bg-return", active_operation: "message" as const, items: pending.slice(1) },
   };
   let phase: keyof typeof snapshots = "initial";
   let socket: WebSocketRoute;
   let connections = 0;
   let resumed = 0;
   const requests: Record<string, unknown>[] = [];
-  const interrupted = { kind: "outcome", request_id: "original", status: "interrupted", recovery: {} };
-  const final = { kind: "outcome", request_id: "correction", status: "success", recovery: {} };
+  const interrupted = { kind: "outcome", operation: "message", request_id: "original", status: "interrupted", recovery: {} };
+  const final = { kind: "outcome", operation: "message", request_id: "correction", status: "success", recovery: {} };
   const context = { request_context: { request_id: "correction", source: "human", work_id: null } };
   const messages = [
     { role: "system", type: "result", content: interrupted, is_error: true, seq: 0 },

@@ -66,7 +66,7 @@ async def test_current_stages_and_child_recovery_authority_survive_repeated_open
         assert (await current.get_client_submission("legacy", "child"))["execution_state"] == "withdrawn"
         started = await current.get_client_submission("legacy", "started")
         assert started["execution_state"] == "unknown" and started["execution_generation"] == "original-generation"
-        assert started["payload"]["content"] == "Original content"
+        assert started["payload"]["operation"]["content"] == "Original content"
         assert (await current.get_client_submission("legacy", "source"))["recovered_by"] == "child"
         await current.recover_client_submissions()
         assert await current.get_client_submission("legacy", "started") == started

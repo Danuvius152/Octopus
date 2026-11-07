@@ -277,8 +277,9 @@ async def get_recoverable_inputs(session_manager: SessionMgr, session_id: str,
     for row in rows:
         status = status_from_row(session_id, row, include_input=False)
         items.append({"client_request_id": row["client_id"], "request_id": row["request_id"],
-                      "execution": status["execution"], "preview": row["payload"]["content"][:200],
-                      "attachment_count": len(row["payload"]["attachment_ids"])})
+                      "operation": status["operation"],
+                      "execution": status["execution"], "preview": row["payload"]["operation"]["content"][:200],
+                      "attachment_count": len(row["payload"]["operation"]["attachment_ids"])})
     return {"items": items, "next_cursor": cursor}
 
 
@@ -388,8 +389,12 @@ async def get_session(
             # Keep them available through the storage-id-preserving export.
             messages = []
         oldest = messages[0].seq if messages else None
+        context_state, context_pending = await session_manager.context_snapshot(s)
         return SessionDetail(
             **session_info(s, message_count, transcript_integrity="duplicate_seq" if duplicates else "ok").model_dump(),
+            context_state=context_state,
+            context_generation=session_manager._dispatch_generation,
+            context_pending=context_pending,
             messages=messages,
             active_attempt={"request_id": s._run.request.request_id, "attempt_id": s._run.question_attempt_id}
             if s._run.request and s._run.question_attempt_id else None,

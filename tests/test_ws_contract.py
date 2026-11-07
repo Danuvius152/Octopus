@@ -79,6 +79,8 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         }, user["id"])
         assert samples["command_receipt"]["accepted"] is True
 
+        await manager.update_session_configuration(session.id, {"model": "context-model"}, user["id"])
+
         await _publish(manager, "agent_updated", agent)
         apps = ApplicationManager()
         apps.session_mgr = manager
@@ -96,9 +98,27 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         await manager.unarchive_session(session.id, user["id"])
         session = manager.sessions[session.id]
         assert samples["session_unarchived"]["session"] == session_info(session).model_dump()
-        samples["recovery"] = await manager._recovery_frame(
-            session, code="transient_retry", message="Retrying the original request", phase="retrying",
-        )
+        class DiagnosticRun(FakeRunBase):
+            async def start(self, *args, **kwargs):
+                self.alive = True
+
+            async def stream(self):
+                yield HarnessEvent(type="error", error_code="backend_diagnostic", content="Original provider diagnostic")
+                yield HarnessEvent(type="result")
+
+            def is_alive(self):
+                return self.alive
+
+            async def stop(self):
+                self.alive = False
+
+        # Restoring now establishes the real Owner before exposing live state.
+        # Produce its diagnostic through execution, rather than writing beside it.
+        monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: DiagnosticRun())
+        diagnostic = await manager.start_message(session.id, "Observe provider diagnostic", source="human")
+        await asyncio.wait_for(diagnostic.wait(), 3)
+        await manager.await_session_execution(session.id, timeout=3)
+        assert samples["recovery"]["code"] == "backend_diagnostic"
 
         # A real competing terminal row exercises the Owner's failure producer.
         # Only the model transport is simulated; admission, SQLite conflict,
@@ -137,12 +157,14 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         replacements = {session.id: "session", agent["id"]: "agent", user["id"]: "owner", str(tmp_path): "/work"}
 
         def stable(value, key=""):
+            if key == "duration_ms" and isinstance(value, (int, float)):
+                return 1
             if isinstance(value, dict):
                 return {name: stable(item, name) for name, item in value.items()}
             if isinstance(value, list):
                 return [stable(item, key) for item in value]
             if isinstance(value, str):
-                if value and key in {"created_at", "updated_at", "completed_at", "started_at", "injected_at"}:
+                if value and key in {"created_at", "updated_at", "completed_at", "started_at", "injected_at", "observed_at"}:
                     return "2026-01-01T00:00:00+00:00"
                 if value and key in {"generation", "request_id", "active_request_id", "execution_owner_request_id", "work_id", "attempt_id"}:
                     return {"generation": "service", "work_id": "work", "attempt_id": "attempt"}.get(key, "request")

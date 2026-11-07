@@ -54,6 +54,15 @@ Knowledge history and source/effect evidence are not executable work and must
 not be discarded as a cache. Exclusion from an archive does not delete or
 reconfigure source chats, tasks, logins or files.
 
+Agent context-setting revisions belong to the source comparison authority,
+not the user's model configuration: account import preserves the settings and
+rebuilds each target Agent's `context_settings_revision` as 0. Session
+`context_state` follows the existing exclusion of chats and native continuity.
+A complete consistent backup instead preserves both fields and their original
+binding/revision relationships. Neither restoration path revives an attempt or
+permits replay; there is no additional collection root. See
+[context storage](implemented/current-storage-format.md#complete-record-projections).
+
 Structured Question resolutions live in existing chat-message JSON, with no
 additional collection root. They follow the same chat exclusion in account
 archives. A complete consistent backup retains that JSON and its original form

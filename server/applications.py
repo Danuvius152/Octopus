@@ -1032,7 +1032,7 @@ class ApplicationManager:
         sid = msg.get("session_id")
         if not sid or self.db is None:
             return
-        if msg.get("type") != "status" or msg.get("status") != "running":
+        if msg.get("type") != "status" or msg.get("status") != "running" or msg.get("operation") != "message":
             return
         updates = []
         rows = await self.db.get_applications_for_session(sid)
@@ -1045,7 +1045,8 @@ class ApplicationManager:
                 # Progress can outlive its writer and completion. Read the
                 # current execution projection instead of replaying running.
                 if (session is None or self.session_mgr is None or session.status is not SessionStatus.running
-                        or self.session_mgr.dispatch_snapshot(sid)["paused"]):
+                        or self.session_mgr.dispatch_snapshot(sid)["paused"]
+                        or self.session_mgr.dispatch_snapshot(sid)["active_operation"] != "message"):
                     continue
                 if row["status"] != STATUS_BUILDING:
                     await self.db.update_application(row["id"], status=STATUS_BUILDING, updated_at=_now())
@@ -1058,11 +1059,12 @@ class ApplicationManager:
         if self.session_mgr.get_session(session_id) is None:
             return True
         dispatch = self.session_mgr.dispatch_snapshot(session_id)
-        return not dispatch["items"] and dispatch["active_request_id"] in {None, request_id}
+        return (not any(item["operation"] == "message" for item in dispatch["items"])
+                and (dispatch["active_operation"] != "message" or dispatch["active_request_id"] == request_id))
 
     async def _on_completion(self, session_id: str, completion: RequestCompletion) -> None:
         """Also observe direct chat in the build session when publication fails."""
-        if self.db is None or self.session_mgr is None:
+        if self.db is None or self.session_mgr is None or completion.operation != "message":
             return
         updates = []
         rows = await self.db.get_applications_for_session(session_id)

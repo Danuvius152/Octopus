@@ -8,7 +8,7 @@ import { selectSession } from "../lib/selectSession";
 import { loadSessionSnapshot } from "../lib/hydrateSession";
 
 const dispatch = {
-  generation: "service-current", revision: 3, paused: false, active_request_id: null,
+  generation: "service-current", revision: 3, paused: false, active_request_id: null, active_operation: null,
   items: [],
 };
 beforeEach(() => useSessionStore.setState({
@@ -39,7 +39,7 @@ it("keeps the paused queue after an unsuccessful Resume", async () => {
 
 it("resumes processing only after the server confirms the current queue", async () => {
   const paused = { ...dispatch, paused: true, items: [
-    { request_id: "pending", source: "bg", summary: "Waiting result", priority: false },
+    { request_id: "pending", operation: "message" as const, source: "bg", summary: "Waiting result", priority: false },
   ] };
   useSessionStore.getState().applyDispatchState("session", paused);
   let finish!: (response: Response) => void;
@@ -151,7 +151,7 @@ it("finishes archived viewing without an active snapshot or loading state", asyn
 
 it("keeps the confirmed queue visible and unchanged through an invalid live frame", () => {
   const snapshot = { ...dispatch,
-    items: [{ request_id: "queued", source: "bg", summary: "Retained work", priority: false }] };
+    items: [{ request_id: "queued", operation: "message" as const, source: "bg", summary: "Retained work", priority: false }] };
   handleWsMessage({ type: "queued", session_id: "session", dispatch_state: snapshot });
   render(<DispatchQueue sessionId="session" />);
   act(() => handleWsMessage({ type: "dispatch_state", session_id: "session", dispatch_state: { generation: snapshot.generation } }));

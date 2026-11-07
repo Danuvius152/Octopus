@@ -2,10 +2,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { useSessionStore } from "../stores/sessionStore";
 import { selectSession } from "./selectSession";
+import { readDispatchState } from "./sessionDispatch";
 
 const snapshot = (generation = "service-a", revision = 2, paused = true) => ({
-  generation, revision, paused, active_request_id: null,
-  items: [{ request_id: "bg-1", source: "bg", summary: "completed command", priority: false }],
+  generation, revision, paused, active_request_id: null, active_operation: null,
+  items: [{ request_id: "bg-1", operation: "message" as const, source: "bg", summary: "completed command", priority: false }],
 });
 
 beforeEach(() => useSessionStore.setState({
@@ -14,6 +15,17 @@ beforeEach(() => useSessionStore.setState({
   pendingQuestions: {},
 }));
 afterEach(() => vi.unstubAllGlobals());
+
+it("requires an explicit operation for active and queued inputs", () => {
+  const valid = { ...snapshot(), active_operation: null,
+    items: [{ ...snapshot().items[0], operation: "message" }] };
+  expect(readDispatchState(valid)).not.toBeNull();
+  const { active_operation: _active, ...missingActive } = valid;
+  expect(readDispatchState(missingActive)).toBeNull();
+  const { operation: _operation, ...missingOperation } = valid.items[0];
+  expect(readDispatchState({ ...valid, items: [missingOperation] })).toBeNull();
+  expect(readDispatchState({ ...valid, active_request_id: "running", active_operation: null })).toBeNull();
+});
 
 it("loads dispatch pause on selection and keeps a newer live snapshot", async () => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(

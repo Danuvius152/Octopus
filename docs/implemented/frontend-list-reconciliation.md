@@ -352,6 +352,16 @@ dispose 后旧回执不补读；未知 ID 的归档事件同样阻止迟到创�
 代次合并。详情失败不发布配对辅助数据；辅助失败不把已接纳详情标成队列不可用。
 重连和归档历史使用同一入口。
 
+上下文快照只在会话detail和独立`context_state`事件中提供，不进入侧栏列表。
+store按当前账户/会话/服务generation和独立context revision整份替换，明确接受
+stale及初始null，拒绝旧HTTP或旧连接/账户结果；缺字段或畸形值不冒充清空。
+context_pending与state保存在同一generation/revision记录；同revision只允许由
+非pending降级为pending，更高revision且非pending的可信HTTP或WS都可恢复。
+较旧HTTP不能解除pending。pending同时限制比例、历史标识和可访问说明，不
+改写样本、持久有效性或时间。上下文用量不推进dispatch revision，也不触发恢复列表或辅助任务查询。换代和
+删除清退旧上下文缓存。业务有效性与读数口径见
+[上下文合同](architecture-contract.md#上下文样本与配置绑定)。
+
 ### 执行快照与 Stop
 
 store 在一次更新中接纳详情的 dispatch、服务 generation 与 active attempt。

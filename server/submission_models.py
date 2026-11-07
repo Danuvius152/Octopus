@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .models import AttachmentMetadata, TurnOutcome
+from .session_operations import MessageOperation, OperationKind
 
 
 class SubmissionConflict(ValueError):
@@ -46,11 +47,8 @@ class SavedAttachment(AttachmentMetadata):
     sha256: str
 
 
-class SubmissionInput(BaseModel):
-    content: str
-    attachment_ids: list[str]
+class SubmissionInput(MessageOperation):
     attachments: list[SavedAttachment]
-    wiki_mode: Literal["auto", "read", "maintain"] | None = None
 
 
 class NativeInputEvidence(BaseModel):
@@ -105,6 +103,7 @@ class ClientSubmissionStatus(BaseModel):
     session_id: str
     client_request_id: str
     request_id: str
+    operation: OperationKind
     accepted: bool
     disposition: str | None = None
     execution: SubmissionExecution
@@ -120,6 +119,7 @@ class ClientSubmissionStatus(BaseModel):
 class ClientSubmissionSummary(BaseModel):
     client_request_id: str
     request_id: str
+    operation: OperationKind
     execution: SubmissionExecution
     preview: str
     attachment_count: int

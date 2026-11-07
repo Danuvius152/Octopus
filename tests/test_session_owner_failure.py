@@ -285,7 +285,7 @@ async def test_unconfirmed_owner_retirement_exits_70_and_cold_start_keeps_origin
         original = await database.get_client_submission(proof["session_id"], "owner-failure-input")
         assert original["request_id"] == original["execution_owner"] == proof["request_id"]
         assert original["process_group"] == model["process_group"]
-        assert original["payload"]["content"] == "Retain this exact input after unconfirmed resource retirement."
+        assert original["payload"]["operation"]["content"] == "Retain this exact input after unconfirmed resource retirement."
         restored = SessionManager()
         await restored.initialize(database)
         app = FastAPI()

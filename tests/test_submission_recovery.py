@@ -59,7 +59,8 @@ async def _submit_paused(manager, session_id, content, client_id, *, attachment_
         manager.remove_broadcast(key)
 
 
-async def test_queued_input_is_recoverable_after_shutdown_and_database_reopen(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_queued_input_is_recoverable_after_shutdown_and_database_reopen(tmp_path, monkeypatch, legacy):
     path = str(tmp_path / "recovery.db")
     db = Database(path)
     await db.initialize()
@@ -70,6 +71,23 @@ async def test_queued_input_is_recoverable_after_shutdown_and_database_reopen(tm
     session = await manager.create_session(agent["id"], "recovery", str(tmp_path), backend="codex")
     reply = await _submit_paused(manager, session.id, "Keep my complete input 中文", "queued-input")
     assert reply["accepted"] is True
+    assert reply["operation"] == "message"
+    assert reply["input"]["kind"] == "message"
+    queued = manager.dispatch_snapshot(session.id)
+    assert queued["active_operation"] is None
+    assert queued["items"][0]["operation"] == "message"
+    row = await db.get_client_submission(session.id, "queued-input")
+    # Frozen expected value from the old three-field canonical input digest.
+    assert row["payload_sha256"] == "9109b53677baa9ff6c240a0d2218fac473b9acb619428e511c7394b23bc5be10"
+    assert row["payload"]["operation"]["wiki_mode"] is None
+    if legacy:
+        payload = dict(row["payload"])
+        operation = payload.pop("operation")
+        operation.pop("kind")
+        payload.update(operation)
+        async with db.transaction(write=True) as tx:
+            await tx.execute("UPDATE client_submissions SET payload=? WHERE session_id=? AND client_id='queued-input'",
+                             (json.dumps(payload), session.id))
     await db.close()
 
     reopened = Database(path)
@@ -81,6 +99,8 @@ async def test_queued_input_is_recoverable_after_shutdown_and_database_reopen(tm
         status = await submission_status(restored, session.id, "queued-input")
         assert status["accepted"] is True  # admission is an immutable historical fact
         assert status["request_id"] == reply["request_id"]
+        assert status["operation"] == "message"
+        assert status["input"]["kind"] == "message"
         assert status["execution"]["state"] == "withdrawn"
         assert status["execution"]["recoverable_input"] is True
         assert status["input"]["content"] == "Keep my complete input 中文"
@@ -90,6 +110,32 @@ async def test_queued_input_is_recoverable_after_shutdown_and_database_reopen(tm
         assert await reopened.load_messages(session.id) == []
     finally:
         await reopened.close()
+
+
+@pytest.mark.parametrize("operation", [None, {}, {"kind": "compact"},
+                                       {"kind": "unknown", "content": "No fallback", "attachment_ids": []}])
+async def test_malformed_explicit_operation_cannot_fall_back_to_legacy_message(tmp_path, operation):
+    from pydantic import ValidationError
+
+    db = Database(":memory:")
+    await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
+    agent = await db.get_system_agent()
+    await db.save_session("retained-operation", "Retained input", str(tmp_path), "time", user_id=agent["user_id"])
+    try:
+        # Invalid retained-format fixture includes plausible old fields; their
+        # presence must not rescue an explicit unknown/malformed operation.
+        payload = {"operation": operation, "content": "Never execute this fallback", "attachment_ids": []}
+        async with db.transaction(write=True) as tx:
+            await tx.execute("INSERT INTO client_submissions(session_id,client_id,payload_sha256,request_id,payload) "
+                             "VALUES('retained-operation','bad','saved-digest','bad',?)", (json.dumps(payload),))
+        with pytest.raises(ValidationError):
+            await db.get_client_submission("retained-operation", "bad")
+        async with db.transaction(write=False) as tx:
+            raw = await tx.fetch_one("SELECT payload FROM client_submissions WHERE session_id='retained-operation' AND client_id='bad'")
+        assert json.loads(raw[0]) == payload
+    finally:
+        await db.close()
 
 
 def _lose_submission_process(tmp_path, mode):
@@ -379,7 +425,7 @@ async def test_lost_claim_commit_ack_never_starts_a_model_and_retains_input(tmp_
         original = await db.get_client_submission(evidence["session_id"], "confirm")
         assert original["execution_state"] == ("running" if committed_before_error else "pending")
         assert original["request_id"] == evidence["request_id"]
-        assert original["payload"]["content"] == "Retain responsibility 中文\nKeep the exact input."
+        assert original["payload"]["operation"]["content"] == "Retain responsibility 中文\nKeep the exact input."
         manager = SessionManager()
         await manager.initialize(db)
         status = await submission_status(manager, evidence["session_id"], "confirm")
@@ -574,7 +620,7 @@ async def test_submission_commit_failure_stops_the_process_and_restart_reads_act
         assert row["client_id"] == "confirm"
         assert row["request_id"] == evidence["request_id"]
         assert row["execution_owner"] == evidence["request_id"]
-        assert row["payload"]["content"] == "Retain responsibility 中文\nKeep the exact input."
+        assert row["payload"]["operation"]["content"] == "Retain responsibility 中文\nKeep the exact input."
         completed = operation == "completion" and committed_before_error
         uncertain_delivery = operation == "delivery" and committed_before_error
         assert row["execution_state"] == ("done" if completed else "running")
@@ -587,7 +633,7 @@ async def test_submission_commit_failure_stops_the_process_and_restart_reads_act
         assert status["session_id"] == evidence["session_id"]
         assert status["client_request_id"] == "confirm"
         assert status["request_id"] == evidence["request_id"]
-        assert status["input"] == {"content": "Retain responsibility 中文\nKeep the exact input.",
+        assert status["input"] == {"kind": "message", "content": "Retain responsibility 中文\nKeep the exact input.",
                                    "attachment_ids": [], "attachments": [], "wiki_mode": "auto"}
         assert status["execution"]["state"] == ("done" if completed else "unknown")
         assert status["execution"]["execution_owner_request_id"] == evidence["request_id"]

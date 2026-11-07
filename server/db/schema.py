@@ -9,7 +9,7 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 7
+CURRENT_VERSION = 8
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -91,7 +91,7 @@ CREATE TABLE agents (
     -- agent is still listed, callable and schedulable either way.
     pinned INTEGER NOT NULL DEFAULT 1,
     pin_order INTEGER
-, reasoning_effort TEXT, service_tier TEXT);
+, reasoning_effort TEXT, service_tier TEXT, context_settings_revision INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE applications (
     -- Who owns this row (multi-tenancy.md §5). NULL means the install:
@@ -403,7 +403,7 @@ CREATE TABLE sessions (
     fork_status TEXT                       -- 'initializing'|'reverting'|'ready'
                                            -- crash-recovery marker; NULL on
                                            -- non-fork rows
-, credential_id TEXT, reasoning_effort TEXT, service_tier TEXT);
+, credential_id TEXT, reasoning_effort TEXT, service_tier TEXT, context_state TEXT);
 
 CREATE TABLE users (
     id TEXT PRIMARY KEY,

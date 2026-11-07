@@ -27,7 +27,7 @@ it.each(["before-save", "lost-ack", "broadcast-before-snapshot"])(
 );
 
 it("preserves native outcome and final references through event replay and refresh", () => {
-  const content = { kind: "outcome", request_id: "recording-replay", status: "interrupted",
+  const content = { kind: "outcome", operation: "message", request_id: "recording-replay", status: "interrupted",
     native_status: "completed", final_answer: { thread_id: "root", turn_id: "turn", message_seqs: [] } };
   handleWsMessage({ ...replay.event, content, is_error: true });
   const live = useSessionStore.getState().messages[session][0].outcome;

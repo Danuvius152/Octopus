@@ -190,6 +190,8 @@ class AppAgentManager:
         completion = await receipt.wait()
         if turn.done.is_set():
             pass  # A response error does not retire the original execution.
+        elif completion.operation != "message":
+            self._fail_turn(turn, "The original request did not produce a message reply", code="operation_mismatch")
         elif completion.notification_state != "delivered":
             self._fail_turn(turn, completion.reason or "The original request notification could not be delivered",
                             code="reply_delivery_failed")
@@ -335,6 +337,8 @@ class AppAgentManager:
         session = self._require_conversation(app_id, conversation_id)
         result: dict[str, Any] = {"conversation_id": conversation_id, "request_id": request_id}
         saved = await self._require_db().read_session_result(conversation_id, request_id)
+        if saved.operation != "message":
+            raise AppAgentError("The original request is not a message reply", status_code=409)
         if saved.missing is not None and saved.outcome is not None:
             raise AppAgentError(f"The recorded reply is unavailable: {saved.missing}", status_code=409)
         if saved.outcome is not None:

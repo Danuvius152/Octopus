@@ -16,6 +16,9 @@ const DETAIL_ONLY_FIELDS = [
   "messages",
   "active_attempt",
   "dispatch_state",
+  "context_state",
+  "context_generation",
+  "context_pending",
   "pending_questions",
   "subagents",
   "next_message_seq",
@@ -244,12 +247,18 @@ export function applySessionSnapshot(
   sessionId: string, detail: Record<string, unknown>, start = useSessionStore.getState(),
   advanceOnly = false,
 ): { needsExecutionConfirmation: boolean } | null {
+  if (typeof detail.id === "string" && detail.id !== sessionId) return null;
   const applied = applyDispatchSnapshot(sessionId, detail, start, advanceOnly);
   if (!applied) return null;
   advanceOnly ||= applied.needsExecutionConfirmation;
   applyTranscript(sessionId, detail, start.streamingItems[sessionId] || {});
   const store = useSessionStore.getState();
   const snapshotMessages = (detail.messages as { seq?: number }[]) || [];
+  if (typeof detail.context_generation === "string" && "context_state" in detail) {
+    if (detail.context_pending === undefined || typeof detail.context_pending === "boolean") {
+      store.applyContextState(sessionId, detail.context_generation, detail.context_state, start, detail.context_pending ?? false);
+    }
+  }
   const snapshotHigh = typeof detail.next_message_seq === "number"
     ? detail.next_message_seq - 1 : Math.max(-1, ...snapshotMessages.map((message) => message.seq ?? -1));
   const newerRequests = new Set((store.messages[sessionId] || []).filter((message) =>

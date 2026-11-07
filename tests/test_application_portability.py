@@ -23,12 +23,14 @@ from tests.test_service_runtime import installation_settings
 async def test_export_import_preserves_remaining_application_files_and_explicit_retry(tmp_path, monkeypatch, phase):
     home = tmp_path / "source"
     home.mkdir()
+    working = home / "workspace"
+    working.mkdir()
     config, _ = installation_settings(home)
     for name, value in config.model_dump().items():
         monkeypatch.setattr(settings, name, value)
     database = Database(config.db_path)
     await database.initialize()
-    owner, _ = await create_account(database)
+    owner, _ = await create_account(database, extra_roots=[working])
     code = Path(config.users_root) / owner["id"] / "applications" / "partial"
     data, runtime = Path(data_dir_for(str(code))), Path(runtime_dir_for(str(code)))
     for directory in (code, data, runtime):
@@ -38,6 +40,13 @@ async def test_export_import_preserves_remaining_application_files_and_explicit_
                                     created_at="time", updated_at="time", user_id=owner["id"])
     manager = SessionManager()
     await manager.initialize(database)
+    agent = await database.get_system_agent(owner["id"])
+    await database.update_agent(agent["id"], model="source-model")
+    await database.update_agent(agent["id"], model="source-model-updated")
+    assert (await database.get_agent(agent["id"]))["context_settings_revision"] == 2
+    conversation = await manager.create_session(agent["id"], "Source context", str(working))
+    await manager.update_session_configuration(conversation.id, {"model": "conversation-model"}, owner["id"])
+    assert (await database.load_sessions())[0]["context_state"] is not None
     applications = ApplicationManager()
     applications.bind(manager, database)
     try:
@@ -86,6 +95,9 @@ async def test_export_import_preserves_remaining_application_files_and_explicit_
         row = await copied.get_application("partial")
         assert row["deletion"] == state and row["session_id"] is None
         assert await copied.load_sessions(include_archived=True) == []
+        imported_agent = await copied.get_agent(agent["id"])
+        assert imported_agent["context_settings_revision"] == 0
+        assert imported_agent["model"] == "source-model-updated"
         with pytest.raises(ApplicationError, match="delet"):
             await retry.request_build("partial", "must not restart a writer")
         await retry.delete_application("partial")

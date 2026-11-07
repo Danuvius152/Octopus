@@ -1,0 +1,4853 @@
+{
+  "evidence_kind": "installed_unmodified_cli_with_synthetic_loopback_anthropic_provider",
+  "date": "2026-11-07",
+  "octopus_revision": "e6b350b",
+  "real_model": false,
+  "product_integration": false,
+  "description": "Contiguous native client/server intervals retain original identities and frame contents. Provider responses are synthetic. No real token or external API was used. The original main run remains failed; the short and child scenarios passed.",
+  "captures": [
+    {
+      "scenario": "normal_compact_resume_empty",
+      "original_overall_outcome": "failed",
+      "version": "2.1.319",
+      "binary_sha256": "dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed",
+      "argv_by_generation": [
+        [
+          "/home/jack/.nvm/versions/node/v24.21.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--include-partial-messages",
+          "--input-format",
+          "stream-json",
+          "--dangerously-skip-permissions",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "--strict-mcp-config",
+          "--setting-sources",
+          "user",
+          "--model",
+          "deepseek-flash",
+          "--tools",
+          "",
+          "--append-system-prompt",
+          "Use synthetic protocol responses; no filesystem operations."
+        ],
+        [
+          "/home/jack/.nvm/versions/node/v24.21.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--include-partial-messages",
+          "--input-format",
+          "stream-json",
+          "--dangerously-skip-permissions",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "--strict-mcp-config",
+          "--setting-sources",
+          "user",
+          "--model",
+          "deepseek-flash",
+          "--tools",
+          "",
+          "--append-system-prompt",
+          "Use synthetic protocol responses; no filesystem operations.",
+          "--resume",
+          "04721243-d31d-44c5-9fc2-bd6f1653290c"
+        ],
+        [
+          "/home/jack/.nvm/versions/node/v24.21.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--include-partial-messages",
+          "--input-format",
+          "stream-json",
+          "--dangerously-skip-permissions",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "--strict-mcp-config",
+          "--setting-sources",
+          "user",
+          "--model",
+          "deepseek-flash",
+          "--tools",
+          "",
+          "--append-system-prompt",
+          "Use synthetic protocol responses; no filesystem operations.",
+          "--resume",
+          "04721243-d31d-44c5-9fc2-bd6f1653290c"
+        ],
+        [
+          "/home/jack/.nvm/versions/node/v24.21.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--include-partial-messages",
+          "--input-format",
+          "stream-json",
+          "--dangerously-skip-permissions",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "--strict-mcp-config",
+          "--setting-sources",
+          "user",
+          "--model",
+          "deepseek-flash",
+          "--tools",
+          "",
+          "--append-system-prompt",
+          "Use synthetic protocol responses; no filesystem operations."
+        ]
+      ],
+      "init": {
+        "seq": 3,
+        "generation": 1,
+        "direction": "server",
+        "monotonic_ns": 14808984852304,
+        "frame": {
+          "type": "system",
+          "subtype": "init",
+          "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+          "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+          "tools": [],
+          "mcp_servers": [],
+          "model": "deepseek-flash",
+          "permissionMode": "bypassPermissions",
+          "slash_commands": [
+            "deep-research",
+            "dataviz",
+            "update-config",
+            "verify",
+            "debug",
+            "code-review",
+            "simplify",
+            "batch",
+            "fewer-permission-prompts",
+            "doctor",
+            "loop",
+            "claude-api",
+            "workflow-authoring",
+            "run",
+            "run-skill-generator",
+            "plugin-authoring",
+            "agents",
+            "auto-mode-setup",
+            "autocompact",
+            "clear",
+            "color",
+            "compact",
+            "config",
+            "output-style",
+            "context",
+            "effort",
+            "fast",
+            "focus",
+            "heapdump",
+            "init",
+            "mcp",
+            "model",
+            "__remote-workflow",
+            "workflow-launch-exec",
+            "reload-plugins",
+            "reload-skills",
+            "rename",
+            "security-review",
+            "usage",
+            "insights",
+            "recap",
+            "goal",
+            "list-agents",
+            "team-onboarding"
+          ],
+          "terminal_slash_commands": [
+            "doctor",
+            "color",
+            "focus",
+            "reload-plugins"
+          ],
+          "apiKeySource": "ANTHROPIC_API_KEY",
+          "claude_code_version": "2.1.319",
+          "output_style": "default",
+          "agents": [
+            "claude",
+            "Explore",
+            "general-purpose",
+            "Plan",
+            "statusline-setup"
+          ],
+          "skills": [
+            "deep-research",
+            "dataviz",
+            "update-config",
+            "verify",
+            "debug",
+            "code-review",
+            "simplify",
+            "batch",
+            "fewer-permission-prompts",
+            "doctor",
+            "loop",
+            "claude-api",
+            "workflow-authoring",
+            "run",
+            "run-skill-generator",
+            "plugin-authoring"
+          ],
+          "plugins": [
+            {
+              "name": "cc-plugin-agents-md",
+              "path": "builtin",
+              "source": "cc-plugin-agents-md@builtin"
+            },
+            {
+              "name": "cc-plugin-privacy",
+              "path": "builtin",
+              "source": "cc-plugin-privacy@builtin"
+            },
+            {
+              "name": "cc-plugin-plugin-authoring",
+              "path": "builtin",
+              "source": "cc-plugin-plugin-authoring@builtin"
+            }
+          ],
+          "capabilities": [
+            "interrupt_receipt_v1",
+            "interrupt_cancel_queued_v1",
+            "interrupt_send_now_v1",
+            "interrupt_requeue_taken_v1",
+            "msg_lifecycle_v1",
+            "request_marker_lists_v1",
+            "ask_user_question_unanswered_v1",
+            "lifecycle_wakeup_source_v1",
+            "sdk_mcp_tools_list_changed",
+            "sdk_mcp_manifests",
+            "mcp_read_resource_v1",
+            "mcp_tool_ui_meta_v1",
+            "ui_surface_v1",
+            "mcp_call_result_not_for_model_v1",
+            "mcp_call_check_permissions_v1"
+          ],
+          "analytics_disabled": true,
+          "product_feedback_disabled": true,
+          "uuid": "57194cfa-619d-467e-96c9-1916c9b722e9",
+          "memory_paths": {
+            "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-run-01-cwd/memory/"
+          },
+          "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+          "additional_directories": [],
+          "messaging_socket_path": "/tmp/cc-socks/63622.sock",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "per_turn_effort_active": false,
+          "ultrathink_available": false,
+          "ultrathink_typed_raises": false,
+          "view_mode": "default",
+          "user_message_uuids": [
+            "5a69a783-3db2-425b-8177-968927abd914"
+          ]
+        }
+      },
+      "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+      "model": "deepseek-flash",
+      "latest_root_input_tokens": 666,
+      "reported_context_window": 200000,
+      "context_window_semantics": "CLI-reported window; unrecognized custom model fallback, not a verified provider capacity",
+      "retirements": [
+        {
+          "pid": 63622,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 63649,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 63670,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 63683,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        }
+      ],
+      "provider_request_count": 6,
+      "provider_errors": [],
+      "blocked_connects": [],
+      "intervals": [
+        {
+          "generation": 2,
+          "records": [
+            {
+              "seq": 0,
+              "generation": 2,
+              "direction": "client",
+              "monotonic_ns": 14809068760837,
+              "frame": {
+                "type": "user",
+                "uuid": "e447a85b-7482-4bea-8593-9966a3a1dd32",
+                "parent_tool_use_id": null,
+                "message": {
+                  "role": "user",
+                  "content": "/compact"
+                }
+              }
+            },
+            {
+              "seq": 1,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809229136503,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "e447a85b-7482-4bea-8593-9966a3a1dd32",
+                "state": "queued",
+                "uuid": "3a53d565-fc02-4976-a58a-77f68ef87613",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            },
+            {
+              "seq": 2,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809230186464,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "e447a85b-7482-4bea-8593-9966a3a1dd32",
+                "state": "started",
+                "uuid": "7fdef979-c2ca-4a4c-8d47-6e6c62cdacd8",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            },
+            {
+              "seq": 3,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809243322903,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": "compacting",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "uuid": "556150af-f6e2-451f-b167-ace3d4ada6db"
+              }
+            },
+            {
+              "seq": 4,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809273871156,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": null,
+                "compact_result": "success",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "uuid": "55cfc874-32fd-4ed4-8a16-4b599834b187"
+              }
+            },
+            {
+              "seq": 5,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809279356419,
+              "frame": {
+                "type": "system",
+                "subtype": "init",
+                "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "tools": [],
+                "mcp_servers": [],
+                "model": "deepseek-flash",
+                "permissionMode": "bypassPermissions",
+                "slash_commands": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring",
+                  "agents",
+                  "auto-mode-setup",
+                  "autocompact",
+                  "clear",
+                  "color",
+                  "compact",
+                  "config",
+                  "output-style",
+                  "context",
+                  "effort",
+                  "fast",
+                  "focus",
+                  "heapdump",
+                  "init",
+                  "mcp",
+                  "model",
+                  "__remote-workflow",
+                  "workflow-launch-exec",
+                  "reload-plugins",
+                  "reload-skills",
+                  "rename",
+                  "security-review",
+                  "usage",
+                  "insights",
+                  "recap",
+                  "goal",
+                  "list-agents",
+                  "team-onboarding"
+                ],
+                "terminal_slash_commands": [
+                  "doctor",
+                  "color",
+                  "focus",
+                  "reload-plugins"
+                ],
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "claude_code_version": "2.1.319",
+                "output_style": "default",
+                "agents": [
+                  "claude",
+                  "Explore",
+                  "general-purpose",
+                  "Plan",
+                  "statusline-setup"
+                ],
+                "skills": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring"
+                ],
+                "plugins": [
+                  {
+                    "name": "cc-plugin-agents-md",
+                    "path": "builtin",
+                    "source": "cc-plugin-agents-md@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-privacy",
+                    "path": "builtin",
+                    "source": "cc-plugin-privacy@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-plugin-authoring",
+                    "path": "builtin",
+                    "source": "cc-plugin-plugin-authoring@builtin"
+                  }
+                ],
+                "capabilities": [
+                  "interrupt_receipt_v1",
+                  "interrupt_cancel_queued_v1",
+                  "interrupt_send_now_v1",
+                  "interrupt_requeue_taken_v1",
+                  "msg_lifecycle_v1",
+                  "request_marker_lists_v1",
+                  "ask_user_question_unanswered_v1",
+                  "lifecycle_wakeup_source_v1",
+                  "sdk_mcp_tools_list_changed",
+                  "sdk_mcp_manifests",
+                  "mcp_read_resource_v1",
+                  "mcp_tool_ui_meta_v1",
+                  "ui_surface_v1",
+                  "mcp_call_result_not_for_model_v1",
+                  "mcp_call_check_permissions_v1"
+                ],
+                "analytics_disabled": true,
+                "product_feedback_disabled": true,
+                "uuid": "82b5788b-5753-4baa-9a3f-099eba7b4a26",
+                "memory_paths": {
+                  "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-run-01-cwd/memory/"
+                },
+                "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+                "additional_directories": [],
+                "messaging_socket_path": "/tmp/cc-socks/63649.sock",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "per_turn_effort_active": false,
+                "ultrathink_available": false,
+                "ultrathink_typed_raises": false,
+                "view_mode": "default",
+                "user_message_uuids": [
+                  "e447a85b-7482-4bea-8593-9966a3a1dd32"
+                ]
+              }
+            },
+            {
+              "seq": 6,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809279487495,
+              "frame": {
+                "type": "system",
+                "subtype": "compact_boundary",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "uuid": "1ad4e774-9945-4246-ad85-a008506e3e08",
+                "compact_metadata": {
+                  "trigger": "manual",
+                  "pre_tokens": 693,
+                  "post_tokens": 514,
+                  "cumulative_dropped_tokens": 179,
+                  "duration_ms": 30,
+                  "preserved_segment": {
+                    "head_uuid": "864e7297-5413-4bef-a329-c3c33b258d29",
+                    "anchor_uuid": "b21fb661-248b-42c8-9d01-90fbd97674d9",
+                    "tail_uuid": "864e7297-5413-4bef-a329-c3c33b258d29"
+                  },
+                  "preserved_messages": {
+                    "anchor_uuid": "b21fb661-248b-42c8-9d01-90fbd97674d9",
+                    "uuids": [
+                      "864e7297-5413-4bef-a329-c3c33b258d29"
+                    ],
+                    "all_uuids": [
+                      "864e7297-5413-4bef-a329-c3c33b258d29"
+                    ]
+                  }
+                },
+                "logical_parent_uuid": "864e7297-5413-4bef-a329-c3c33b258d29"
+              }
+            },
+            {
+              "seq": 7,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809279538411,
+              "frame": {
+                "type": "user",
+                "message": {
+                  "role": "user",
+                  "content": "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n<system-reminder>\n<tools-used-before-summary></tools-used-before-summary>\n</system-reminder>\nG0_CLAUDE_COMPACT_SUMMARY\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-run-01-cwd/04721243-d31d-44c5-9fc2-bd6f1653290c.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly \u2014 do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.\n\nThe messages after this summary are the most recent messages from before compaction, kept verbatim. The summary was written without seeing them, so something it says has not happened yet may already have happened in them."
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "b21fb661-248b-42c8-9d01-90fbd97674d9",
+                "timestamp": "2026-11-07T06:36:39.833Z",
+                "isReplay": false,
+                "isSynthetic": true
+              }
+            },
+            {
+              "seq": 8,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809279564840,
+              "frame": {
+                "type": "user",
+                "message": {
+                  "role": "user",
+                  "content": "<local-command-stdout>Compacted </local-command-stdout>"
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "e593566c-4970-4796-bc13-ff1c5305638e",
+                "timestamp": "2026-11-07T06:36:39.936Z",
+                "isReplay": true
+              }
+            },
+            {
+              "seq": 9,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809280363410,
+              "frame": {
+                "is_error": false,
+                "duration_api_ms": 0,
+                "num_turns": 0,
+                "stop_reason": null,
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "total_cost_usd": 0.01392,
+                "usage": {
+                  "output_tokens_details": {
+                    "thinking_tokens": 0
+                  },
+                  "input_tokens": 0,
+                  "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens": 0,
+                  "output_tokens": 0,
+                  "server_tool_use": {
+                    "web_search_requests": 0,
+                    "web_fetch_requests": 0
+                  },
+                  "service_tier": "standard",
+                  "cache_creation": {
+                    "ephemeral_1h_input_tokens": 0,
+                    "ephemeral_5m_input_tokens": 0
+                  },
+                  "inference_geo": "",
+                  "iterations": [],
+                  "speed": "standard",
+                  "fallback_credit": null
+                },
+                "modelUsage": {
+                  "deepseek-flash": {
+                    "inputTokens": 555,
+                    "outputTokens": 135,
+                    "thinkingTokens": 0,
+                    "cacheReadInputTokens": 1665,
+                    "cacheCreationInputTokens": 1110,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.01392,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                },
+                "permission_denials": [],
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "subagent_stats": {
+                  "spawned": 0,
+                  "requested": {
+                    "background": 0,
+                    "foreground": 0,
+                    "unset": 0
+                  },
+                  "started_in_background": 0,
+                  "max_depth": 0,
+                  "spawned_by_subagents": 0,
+                  "completed": 0,
+                  "failed": 0,
+                  "killed": {
+                    "parent": 0,
+                    "user": 0,
+                    "system": 0
+                  },
+                  "refused": {
+                    "depth_limit": 0,
+                    "concurrency_limit": 0,
+                    "budget": 0
+                  },
+                  "by_type": {}
+                },
+                "safety_stops": 0,
+                "subtype": "success",
+                "result": "",
+                "user_message_uuid": "e447a85b-7482-4bea-8593-9966a3a1dd32",
+                "user_message_uuids": [
+                  "e447a85b-7482-4bea-8593-9966a3a1dd32"
+                ],
+                "local_command": "compact",
+                "type": "result",
+                "duration_ms": 48,
+                "uuid": "bfc0577c-31f1-4a78-b3a5-3c568f2e0a00",
+                "queued_turn_count": 0,
+                "result_index": 0,
+                "model_usage_since_last_result": {
+                  "deepseek-flash": {
+                    "inputTokens": 222,
+                    "outputTokens": 54,
+                    "cacheReadInputTokens": 666,
+                    "cacheCreationInputTokens": 444,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.005568,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                }
+              }
+            },
+            {
+              "seq": 10,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 14809280784381,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "e447a85b-7482-4bea-8593-9966a3a1dd32",
+                "state": "completed",
+                "uuid": "ce3ea319-7982-4a19-916c-847e9640a21c",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            }
+          ]
+        },
+        {
+          "generation": 1,
+          "records": [
+            {
+              "seq": 27,
+              "generation": 1,
+              "direction": "client",
+              "monotonic_ns": 14809031168677,
+              "frame": {
+                "type": "user",
+                "uuid": "cddbc561-da17-4ed3-a620-08c9774ea78f",
+                "parent_tool_use_id": null,
+                "message": {
+                  "role": "user",
+                  "content": "G0_CLAUDE_SEED_2: remember synthetic history 2."
+                }
+              }
+            },
+            {
+              "seq": 28,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809031548163,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "7859c6cb-2a84-4c47-a5b7-543ea8e34e4d",
+                "state": "completed",
+                "uuid": "383f9331-7f45-4fe7-b3ee-7741a6589cfa",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            },
+            {
+              "seq": 29,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809032257913,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "cddbc561-da17-4ed3-a620-08c9774ea78f",
+                "state": "queued",
+                "uuid": "73f21bdd-8703-4bf0-9eeb-fd48b05187be",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            },
+            {
+              "seq": 30,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809032562828,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "cddbc561-da17-4ed3-a620-08c9774ea78f",
+                "state": "started",
+                "uuid": "1030dd33-af39-4e9a-9b9a-1650712ce270",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            },
+            {
+              "seq": 31,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809035915042,
+              "frame": {
+                "type": "system",
+                "subtype": "init",
+                "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "tools": [],
+                "mcp_servers": [],
+                "model": "deepseek-flash",
+                "permissionMode": "bypassPermissions",
+                "slash_commands": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring",
+                  "agents",
+                  "auto-mode-setup",
+                  "autocompact",
+                  "clear",
+                  "color",
+                  "compact",
+                  "config",
+                  "output-style",
+                  "context",
+                  "effort",
+                  "fast",
+                  "focus",
+                  "heapdump",
+                  "init",
+                  "mcp",
+                  "model",
+                  "__remote-workflow",
+                  "workflow-launch-exec",
+                  "reload-plugins",
+                  "reload-skills",
+                  "rename",
+                  "security-review",
+                  "usage",
+                  "insights",
+                  "recap",
+                  "goal",
+                  "list-agents",
+                  "team-onboarding"
+                ],
+                "terminal_slash_commands": [
+                  "doctor",
+                  "color",
+                  "focus",
+                  "reload-plugins"
+                ],
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "claude_code_version": "2.1.319",
+                "output_style": "default",
+                "agents": [
+                  "claude",
+                  "Explore",
+                  "general-purpose",
+                  "Plan",
+                  "statusline-setup"
+                ],
+                "skills": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring"
+                ],
+                "plugins": [
+                  {
+                    "name": "cc-plugin-agents-md",
+                    "path": "builtin",
+                    "source": "cc-plugin-agents-md@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-privacy",
+                    "path": "builtin",
+                    "source": "cc-plugin-privacy@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-plugin-authoring",
+                    "path": "builtin",
+                    "source": "cc-plugin-plugin-authoring@builtin"
+                  }
+                ],
+                "capabilities": [
+                  "interrupt_receipt_v1",
+                  "interrupt_cancel_queued_v1",
+                  "interrupt_send_now_v1",
+                  "interrupt_requeue_taken_v1",
+                  "msg_lifecycle_v1",
+                  "request_marker_lists_v1",
+                  "ask_user_question_unanswered_v1",
+                  "lifecycle_wakeup_source_v1",
+                  "sdk_mcp_tools_list_changed",
+                  "sdk_mcp_manifests",
+                  "mcp_read_resource_v1",
+                  "mcp_tool_ui_meta_v1",
+                  "ui_surface_v1",
+                  "mcp_call_result_not_for_model_v1",
+                  "mcp_call_check_permissions_v1"
+                ],
+                "analytics_disabled": true,
+                "product_feedback_disabled": true,
+                "uuid": "1c26a935-ac8f-4957-baa0-f1298dcd437f",
+                "memory_paths": {
+                  "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-run-01-cwd/memory/"
+                },
+                "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+                "additional_directories": [],
+                "messaging_socket_path": "/tmp/cc-socks/63622.sock",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "per_turn_effort_active": false,
+                "ultrathink_available": false,
+                "ultrathink_typed_raises": false,
+                "view_mode": "default",
+                "user_message_uuids": [
+                  "cddbc561-da17-4ed3-a620-08c9774ea78f"
+                ]
+              }
+            },
+            {
+              "seq": 32,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809036487493,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": "requesting",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "uuid": "92af176d-e869-4fea-b097-4bd3090f3559",
+                "user_message_uuids": [
+                  "cddbc561-da17-4ed3-a620-08c9774ea78f"
+                ]
+              }
+            },
+            {
+              "seq": 33,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809041492440,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_start",
+                  "message": {
+                    "id": "msg_g0_claude_2",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "deepseek-flash",
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {
+                      "input_tokens": 111,
+                      "cache_creation_input_tokens": 222,
+                      "cache_read_input_tokens": 333,
+                      "output_tokens": 1
+                    }
+                  }
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "79fca45f-415b-4966-93e6-a596135dbb66",
+                "ttft_ms": 3,
+                "thinking_display": "updates",
+                "api_message_id": "msg_g0_claude_2",
+                "user_message_uuid": "cddbc561-da17-4ed3-a620-08c9774ea78f",
+                "user_message_uuids": [
+                  "cddbc561-da17-4ed3-a620-08c9774ea78f"
+                ]
+              }
+            },
+            {
+              "seq": 34,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809041579011,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_start",
+                  "index": 0,
+                  "content_block": {
+                    "type": "text",
+                    "text": ""
+                  }
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "338ecada-be81-4904-957c-9899e58a45bd",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 35,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809041618478,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_delta",
+                  "index": 0,
+                  "delta": {
+                    "type": "text_delta",
+                    "text": "G0_CLAUDE_SEED_2"
+                  }
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "f19a3af0-1a30-482e-bc9c-957746e2456e",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 36,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809041839222,
+              "frame": {
+                "type": "assistant",
+                "message": {
+                  "id": "msg_g0_claude_2",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "deepseek-flash",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "G0_CLAUDE_SEED_2"
+                    }
+                  ],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 111,
+                    "cache_creation_input_tokens": 222,
+                    "cache_read_input_tokens": 333,
+                    "output_tokens": 1
+                  },
+                  "context_management": null
+                },
+                "parent_tool_use_id": null,
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "uuid": "864e7297-5413-4bef-a329-c3c33b258d29",
+                "timestamp": "2026-11-07T06:36:39.604Z",
+                "user_message_uuid": "cddbc561-da17-4ed3-a620-08c9774ea78f",
+                "user_message_uuids": [
+                  "cddbc561-da17-4ed3-a620-08c9774ea78f"
+                ]
+              }
+            },
+            {
+              "seq": 37,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809041907859,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_stop",
+                  "index": 0
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "ea7b6f42-c65e-4d73-9aff-3cd440139629",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 38,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809042436023,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_delta",
+                  "delta": {
+                    "stop_reason": "end_turn",
+                    "stop_sequence": null
+                  },
+                  "usage": {
+                    "output_tokens": 27
+                  }
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "c665e0a9-6027-474d-9120-4a2ddadee522",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 39,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809042635811,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_stop"
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "7766e2ee-9f20-4860-ab04-121995884bc3",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 40,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809044092429,
+              "frame": {
+                "duration_api_ms": 20,
+                "stop_reason": "end_turn",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "total_cost_usd": 0.008352,
+                "usage": {
+                  "input_tokens": 111,
+                  "cache_creation_input_tokens": 222,
+                  "cache_read_input_tokens": 333,
+                  "output_tokens": 27,
+                  "output_tokens_details": {
+                    "thinking_tokens": 0
+                  },
+                  "server_tool_use": {
+                    "web_search_requests": 0,
+                    "web_fetch_requests": 0
+                  },
+                  "service_tier": "standard",
+                  "cache_creation": {
+                    "ephemeral_1h_input_tokens": 0,
+                    "ephemeral_5m_input_tokens": 0
+                  },
+                  "inference_geo": "",
+                  "iterations": [],
+                  "speed": "standard",
+                  "fallback_credit": null
+                },
+                "modelUsage": {
+                  "deepseek-flash": {
+                    "inputTokens": 333,
+                    "outputTokens": 81,
+                    "cacheReadInputTokens": 999,
+                    "cacheCreationInputTokens": 666,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.008352,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                },
+                "permission_denials": [],
+                "terminal_reason": "completed",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "subagent_stats": {
+                  "spawned": 0,
+                  "requested": {
+                    "background": 0,
+                    "foreground": 0,
+                    "unset": 0
+                  },
+                  "started_in_background": 0,
+                  "max_depth": 0,
+                  "spawned_by_subagents": 0,
+                  "completed": 0,
+                  "failed": 0,
+                  "killed": {
+                    "parent": 0,
+                    "user": 0,
+                    "system": 0
+                  },
+                  "refused": {
+                    "depth_limit": 0,
+                    "concurrency_limit": 0,
+                    "budget": 0
+                  },
+                  "by_type": {}
+                },
+                "safety_stops": 0,
+                "is_error": false,
+                "num_turns": 1,
+                "subtype": "success",
+                "api_error_status": null,
+                "result": "G0_CLAUDE_SEED_2",
+                "ttft_ms": 9,
+                "type": "result",
+                "duration_ms": 11,
+                "uuid": "2bd22923-f5a3-48a5-bd1e-20636fa040b4",
+                "ttft_stream_ms": 9,
+                "time_to_request_ms": 6,
+                "first_content_frame_ms": 9,
+                "user_message_uuid": "cddbc561-da17-4ed3-a620-08c9774ea78f",
+                "user_message_uuids": [
+                  "cddbc561-da17-4ed3-a620-08c9774ea78f"
+                ],
+                "request_sent_wall_ms": 1794033399602,
+                "first_request_input_tokens": 666,
+                "queued_turn_count": 0,
+                "result_index": 2,
+                "model_usage_since_last_result": {
+                  "deepseek-flash": {
+                    "inputTokens": 111,
+                    "outputTokens": 27,
+                    "cacheReadInputTokens": 333,
+                    "cacheCreationInputTokens": 222,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.002784,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                }
+              }
+            },
+            {
+              "seq": 41,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 14809044567195,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "cddbc561-da17-4ed3-a620-08c9774ea78f",
+                "state": "completed",
+                "uuid": "e306484a-7766-464f-9075-74ec32701037",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            }
+          ]
+        },
+        {
+          "generation": 3,
+          "records": [
+            {
+              "seq": 0,
+              "generation": 3,
+              "direction": "client",
+              "monotonic_ns": 14809312767919,
+              "frame": {
+                "type": "user",
+                "uuid": "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724",
+                "parent_tool_use_id": null,
+                "message": {
+                  "role": "user",
+                  "content": "G0_CLAUDE_CONTINUE_AFTER_COMPACT"
+                }
+              }
+            },
+            {
+              "seq": 1,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809471874159,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724",
+                "state": "queued",
+                "uuid": "7ae8e621-ed58-4d23-93b3-3f18a6b0f255",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            },
+            {
+              "seq": 2,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809473055405,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724",
+                "state": "started",
+                "uuid": "15804aa3-35ee-4730-ab36-9bea9539cee6",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            },
+            {
+              "seq": 3,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809494392754,
+              "frame": {
+                "type": "system",
+                "subtype": "init",
+                "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "tools": [],
+                "mcp_servers": [],
+                "model": "deepseek-flash",
+                "permissionMode": "bypassPermissions",
+                "slash_commands": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring",
+                  "agents",
+                  "auto-mode-setup",
+                  "autocompact",
+                  "clear",
+                  "color",
+                  "compact",
+                  "config",
+                  "output-style",
+                  "context",
+                  "effort",
+                  "fast",
+                  "focus",
+                  "heapdump",
+                  "init",
+                  "mcp",
+                  "model",
+                  "__remote-workflow",
+                  "workflow-launch-exec",
+                  "reload-plugins",
+                  "reload-skills",
+                  "rename",
+                  "security-review",
+                  "usage",
+                  "insights",
+                  "recap",
+                  "goal",
+                  "list-agents",
+                  "team-onboarding"
+                ],
+                "terminal_slash_commands": [
+                  "doctor",
+                  "color",
+                  "focus",
+                  "reload-plugins"
+                ],
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "claude_code_version": "2.1.319",
+                "output_style": "default",
+                "agents": [
+                  "claude",
+                  "Explore",
+                  "general-purpose",
+                  "Plan",
+                  "statusline-setup"
+                ],
+                "skills": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring"
+                ],
+                "plugins": [
+                  {
+                    "name": "cc-plugin-agents-md",
+                    "path": "builtin",
+                    "source": "cc-plugin-agents-md@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-privacy",
+                    "path": "builtin",
+                    "source": "cc-plugin-privacy@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-plugin-authoring",
+                    "path": "builtin",
+                    "source": "cc-plugin-plugin-authoring@builtin"
+                  }
+                ],
+                "capabilities": [
+                  "interrupt_receipt_v1",
+                  "interrupt_cancel_queued_v1",
+                  "interrupt_send_now_v1",
+                  "interrupt_requeue_taken_v1",
+                  "msg_lifecycle_v1",
+                  "request_marker_lists_v1",
+                  "ask_user_question_unanswered_v1",
+                  "lifecycle_wakeup_source_v1",
+                  "sdk_mcp_tools_list_changed",
+                  "sdk_mcp_manifests",
+                  "mcp_read_resource_v1",
+                  "mcp_tool_ui_meta_v1",
+                  "ui_surface_v1",
+                  "mcp_call_result_not_for_model_v1",
+                  "mcp_call_check_permissions_v1"
+                ],
+                "analytics_disabled": true,
+                "product_feedback_disabled": true,
+                "uuid": "ad4e53af-f1aa-43af-b4d0-987af66f293e",
+                "memory_paths": {
+                  "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-run-01-cwd/memory/"
+                },
+                "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+                "additional_directories": [],
+                "messaging_socket_path": "/tmp/cc-socks/63670.sock",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "per_turn_effort_active": false,
+                "ultrathink_available": false,
+                "ultrathink_typed_raises": false,
+                "view_mode": "default",
+                "user_message_uuids": [
+                  "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724"
+                ]
+              }
+            },
+            {
+              "seq": 4,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809496859163,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": "requesting",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "uuid": "67828bf2-4c29-4def-8cd9-db6c1b198855",
+                "user_message_uuids": [
+                  "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724"
+                ]
+              }
+            },
+            {
+              "seq": 5,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809511359093,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_start",
+                  "message": {
+                    "id": "msg_g0_claude_5",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "deepseek-flash",
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {
+                      "input_tokens": 111,
+                      "cache_creation_input_tokens": 222,
+                      "cache_read_input_tokens": 333,
+                      "output_tokens": 1
+                    }
+                  }
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "629a572f-54a5-43f5-9e8a-6983c75be685",
+                "ttft_ms": 5,
+                "thinking_display": "updates",
+                "api_message_id": "msg_g0_claude_5",
+                "user_message_uuid": "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724",
+                "user_message_uuids": [
+                  "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724"
+                ]
+              }
+            },
+            {
+              "seq": 6,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809511449028,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_start",
+                  "index": 0,
+                  "content_block": {
+                    "type": "text",
+                    "text": ""
+                  }
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "b9131694-0a61-4b71-ab96-22fb95e8a388",
+                "api_message_id": "msg_g0_claude_5"
+              }
+            },
+            {
+              "seq": 7,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809511536307,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_delta",
+                  "index": 0,
+                  "delta": {
+                    "type": "text_delta",
+                    "text": "G0_CLAUDE_FOLLOWUP_5"
+                  }
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "3b85c310-83a2-45a0-bec4-510ba2ffba12",
+                "api_message_id": "msg_g0_claude_5"
+              }
+            },
+            {
+              "seq": 8,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809512690885,
+              "frame": {
+                "type": "assistant",
+                "message": {
+                  "id": "msg_g0_claude_5",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "deepseek-flash",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "G0_CLAUDE_FOLLOWUP_5"
+                    }
+                  ],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 111,
+                    "cache_creation_input_tokens": 222,
+                    "cache_read_input_tokens": 333,
+                    "output_tokens": 1
+                  },
+                  "context_management": null
+                },
+                "parent_tool_use_id": null,
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "uuid": "0349d857-f70d-4fc0-85f6-80e9fdb7d44a",
+                "timestamp": "2026-11-07T06:36:40.074Z",
+                "user_message_uuid": "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724",
+                "user_message_uuids": [
+                  "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724"
+                ]
+              }
+            },
+            {
+              "seq": 9,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809512784786,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_stop",
+                  "index": 0
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "cff91cfd-4af9-4157-8ab9-abc55da5ba01",
+                "api_message_id": "msg_g0_claude_5"
+              }
+            },
+            {
+              "seq": 10,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809513521325,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_delta",
+                  "delta": {
+                    "stop_reason": "end_turn",
+                    "stop_sequence": null
+                  },
+                  "usage": {
+                    "output_tokens": 27
+                  }
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "c43281d0-5ced-45de-af6d-0476fc3e9a3c",
+                "api_message_id": "msg_g0_claude_5"
+              }
+            },
+            {
+              "seq": 11,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809513694398,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_stop"
+                },
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "parent_tool_use_id": null,
+                "uuid": "daeafb2b-d637-4315-9910-c85de26af3b9",
+                "api_message_id": "msg_g0_claude_5"
+              }
+            },
+            {
+              "seq": 12,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809517718058,
+              "frame": {
+                "duration_api_ms": 39,
+                "stop_reason": "end_turn",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c",
+                "total_cost_usd": 0.016704,
+                "usage": {
+                  "input_tokens": 111,
+                  "cache_creation_input_tokens": 222,
+                  "cache_read_input_tokens": 333,
+                  "output_tokens": 27,
+                  "output_tokens_details": {
+                    "thinking_tokens": 0
+                  },
+                  "server_tool_use": {
+                    "web_search_requests": 0,
+                    "web_fetch_requests": 0
+                  },
+                  "service_tier": "standard",
+                  "cache_creation": {
+                    "ephemeral_1h_input_tokens": 0,
+                    "ephemeral_5m_input_tokens": 0
+                  },
+                  "inference_geo": "",
+                  "iterations": [],
+                  "speed": "standard",
+                  "fallback_credit": null
+                },
+                "modelUsage": {
+                  "deepseek-flash": {
+                    "inputTokens": 666,
+                    "outputTokens": 162,
+                    "thinkingTokens": 0,
+                    "cacheReadInputTokens": 1998,
+                    "cacheCreationInputTokens": 1332,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.016704,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                },
+                "permission_denials": [],
+                "terminal_reason": "completed",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "subagent_stats": {
+                  "spawned": 0,
+                  "requested": {
+                    "background": 0,
+                    "foreground": 0,
+                    "unset": 0
+                  },
+                  "started_in_background": 0,
+                  "max_depth": 0,
+                  "spawned_by_subagents": 0,
+                  "completed": 0,
+                  "failed": 0,
+                  "killed": {
+                    "parent": 0,
+                    "user": 0,
+                    "system": 0
+                  },
+                  "refused": {
+                    "depth_limit": 0,
+                    "concurrency_limit": 0,
+                    "budget": 0
+                  },
+                  "by_type": {}
+                },
+                "safety_stops": 0,
+                "is_error": false,
+                "num_turns": 1,
+                "subtype": "success",
+                "api_error_status": null,
+                "result": "G0_CLAUDE_FOLLOWUP_5",
+                "ttft_ms": 38,
+                "type": "result",
+                "duration_ms": 43,
+                "uuid": "b078b37f-6175-418b-b51c-6e738664a404",
+                "ttft_stream_ms": 37,
+                "time_to_request_ms": 33,
+                "first_content_frame_ms": 37,
+                "user_message_uuid": "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724",
+                "user_message_uuids": [
+                  "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724"
+                ],
+                "request_sent_wall_ms": 1794033400070,
+                "first_request_input_tokens": 666,
+                "queued_turn_count": 0,
+                "result_index": 0,
+                "model_usage_since_last_result": {
+                  "deepseek-flash": {
+                    "inputTokens": 111,
+                    "outputTokens": 27,
+                    "cacheReadInputTokens": 333,
+                    "cacheCreationInputTokens": 222,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.002784,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                }
+              }
+            },
+            {
+              "seq": 13,
+              "generation": 3,
+              "direction": "server",
+              "monotonic_ns": 14809518653190,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "c42f6e1a-ad20-44e9-bbef-c0e5d80a6724",
+                "state": "completed",
+                "uuid": "fefbe6b3-e178-4bd8-afbf-124d9639f0d6",
+                "session_id": "04721243-d31d-44c5-9fc2-bd6f1653290c"
+              }
+            }
+          ]
+        },
+        {
+          "generation": 4,
+          "records": [
+            {
+              "seq": 0,
+              "generation": 4,
+              "direction": "client",
+              "monotonic_ns": 14809544732972,
+              "frame": {
+                "type": "user",
+                "uuid": "7f6fd704-03a7-4a1e-9ba6-4afc12eb1ab1",
+                "parent_tool_use_id": null,
+                "message": {
+                  "role": "user",
+                  "content": "/compact"
+                }
+              }
+            },
+            {
+              "seq": 1,
+              "generation": 4,
+              "direction": "server",
+              "monotonic_ns": 14809704540590,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "7f6fd704-03a7-4a1e-9ba6-4afc12eb1ab1",
+                "state": "queued",
+                "uuid": "a499c722-d570-4f2a-b6ed-a1a682f49401",
+                "session_id": "c03b8e5b-aba3-4461-9306-5ce0b92cb971"
+              }
+            },
+            {
+              "seq": 2,
+              "generation": 4,
+              "direction": "server",
+              "monotonic_ns": 14809705640027,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "7f6fd704-03a7-4a1e-9ba6-4afc12eb1ab1",
+                "state": "started",
+                "uuid": "c1231a0a-5e7d-431f-8714-9b31429d5d49",
+                "session_id": "c03b8e5b-aba3-4461-9306-5ce0b92cb971"
+              }
+            },
+            {
+              "seq": 3,
+              "generation": 4,
+              "direction": "server",
+              "monotonic_ns": 14809719962558,
+              "frame": {
+                "type": "system",
+                "subtype": "init",
+                "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+                "session_id": "c03b8e5b-aba3-4461-9306-5ce0b92cb971",
+                "tools": [],
+                "mcp_servers": [],
+                "model": "deepseek-flash",
+                "permissionMode": "bypassPermissions",
+                "slash_commands": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring",
+                  "agents",
+                  "auto-mode-setup",
+                  "autocompact",
+                  "clear",
+                  "color",
+                  "compact",
+                  "config",
+                  "output-style",
+                  "context",
+                  "effort",
+                  "fast",
+                  "focus",
+                  "heapdump",
+                  "init",
+                  "mcp",
+                  "model",
+                  "__remote-workflow",
+                  "workflow-launch-exec",
+                  "reload-plugins",
+                  "reload-skills",
+                  "rename",
+                  "security-review",
+                  "usage",
+                  "insights",
+                  "recap",
+                  "goal",
+                  "list-agents",
+                  "team-onboarding"
+                ],
+                "terminal_slash_commands": [
+                  "doctor",
+                  "color",
+                  "focus",
+                  "reload-plugins"
+                ],
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "claude_code_version": "2.1.319",
+                "output_style": "default",
+                "agents": [
+                  "claude",
+                  "Explore",
+                  "general-purpose",
+                  "Plan",
+                  "statusline-setup"
+                ],
+                "skills": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring"
+                ],
+                "plugins": [
+                  {
+                    "name": "cc-plugin-agents-md",
+                    "path": "builtin",
+                    "source": "cc-plugin-agents-md@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-privacy",
+                    "path": "builtin",
+                    "source": "cc-plugin-privacy@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-plugin-authoring",
+                    "path": "builtin",
+                    "source": "cc-plugin-plugin-authoring@builtin"
+                  }
+                ],
+                "capabilities": [
+                  "interrupt_receipt_v1",
+                  "interrupt_cancel_queued_v1",
+                  "interrupt_send_now_v1",
+                  "interrupt_requeue_taken_v1",
+                  "msg_lifecycle_v1",
+                  "request_marker_lists_v1",
+                  "ask_user_question_unanswered_v1",
+                  "lifecycle_wakeup_source_v1",
+                  "sdk_mcp_tools_list_changed",
+                  "sdk_mcp_manifests",
+                  "mcp_read_resource_v1",
+                  "mcp_tool_ui_meta_v1",
+                  "ui_surface_v1",
+                  "mcp_call_result_not_for_model_v1",
+                  "mcp_call_check_permissions_v1"
+                ],
+                "analytics_disabled": true,
+                "product_feedback_disabled": true,
+                "uuid": "38801c54-d2f7-4b2c-bcac-6160ccc762af",
+                "memory_paths": {
+                  "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-run-01-cwd/memory/"
+                },
+                "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/cwd",
+                "additional_directories": [],
+                "messaging_socket_path": "/tmp/cc-socks/63683.sock",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "per_turn_effort_active": false,
+                "ultrathink_available": false,
+                "ultrathink_typed_raises": false,
+                "view_mode": "default",
+                "user_message_uuids": [
+                  "7f6fd704-03a7-4a1e-9ba6-4afc12eb1ab1"
+                ]
+              }
+            },
+            {
+              "seq": 4,
+              "generation": 4,
+              "direction": "server",
+              "monotonic_ns": 14809720144592,
+              "frame": {
+                "type": "assistant",
+                "message": {
+                  "diagnostics": null,
+                  "id": "ec13b554-25a3-4bd5-962e-2921f23ba1ff",
+                  "container": null,
+                  "model": "<synthetic>",
+                  "role": "assistant",
+                  "stop_details": null,
+                  "stop_reason": "end_turn",
+                  "stop_sequence": null,
+                  "type": "message",
+                  "usage": {
+                    "output_tokens_details": null,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "server_tool_use": {
+                      "web_search_requests": 0,
+                      "web_fetch_requests": 0
+                    },
+                    "service_tier": null,
+                    "cache_creation": {
+                      "ephemeral_1h_input_tokens": 0,
+                      "ephemeral_5m_input_tokens": 0
+                    },
+                    "inference_geo": null,
+                    "iterations": null,
+                    "speed": null,
+                    "fallback_credit": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Error: No messages to compact"
+                    }
+                  ],
+                  "context_management": null
+                },
+                "parent_tool_use_id": null,
+                "local_command_source": "<local-command-stderr>Error: No messages to compact</local-command-stderr>",
+                "session_id": "c03b8e5b-aba3-4461-9306-5ce0b92cb971",
+                "uuid": "a824d1b0-b7cd-4a97-9bba-d2baf07a7bae",
+                "timestamp": "2026-11-07T06:36:40.277Z",
+                "local_command_run": {
+                  "command": "compact",
+                  "args": ""
+                },
+                "local_command_outcome": {
+                  "kind": "failed"
+                }
+              }
+            },
+            {
+              "seq": 5,
+              "generation": 4,
+              "direction": "server",
+              "monotonic_ns": 14809721159285,
+              "frame": {
+                "is_error": false,
+                "duration_api_ms": 0,
+                "num_turns": 0,
+                "stop_reason": null,
+                "session_id": "c03b8e5b-aba3-4461-9306-5ce0b92cb971",
+                "total_cost_usd": 0,
+                "usage": {
+                  "output_tokens_details": {
+                    "thinking_tokens": 0
+                  },
+                  "input_tokens": 0,
+                  "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens": 0,
+                  "output_tokens": 0,
+                  "server_tool_use": {
+                    "web_search_requests": 0,
+                    "web_fetch_requests": 0
+                  },
+                  "service_tier": "standard",
+                  "cache_creation": {
+                    "ephemeral_1h_input_tokens": 0,
+                    "ephemeral_5m_input_tokens": 0
+                  },
+                  "inference_geo": "",
+                  "iterations": [],
+                  "speed": "standard",
+                  "fallback_credit": null
+                },
+                "modelUsage": {},
+                "permission_denials": [],
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "subagent_stats": {
+                  "spawned": 0,
+                  "requested": {
+                    "background": 0,
+                    "foreground": 0,
+                    "unset": 0
+                  },
+                  "started_in_background": 0,
+                  "max_depth": 0,
+                  "spawned_by_subagents": 0,
+                  "completed": 0,
+                  "failed": 0,
+                  "killed": {
+                    "parent": 0,
+                    "user": 0,
+                    "system": 0
+                  },
+                  "refused": {
+                    "depth_limit": 0,
+                    "concurrency_limit": 0,
+                    "budget": 0
+                  },
+                  "by_type": {}
+                },
+                "safety_stops": 0,
+                "subtype": "success",
+                "result": "",
+                "user_message_uuid": "7f6fd704-03a7-4a1e-9ba6-4afc12eb1ab1",
+                "user_message_uuids": [
+                  "7f6fd704-03a7-4a1e-9ba6-4afc12eb1ab1"
+                ],
+                "local_command": "compact",
+                "type": "result",
+                "duration_ms": 13,
+                "uuid": "a76052c3-00ae-4ba9-b387-6a0a76782b0c",
+                "queued_turn_count": 0,
+                "result_index": 0,
+                "model_usage_since_last_result": {}
+              }
+            },
+            {
+              "seq": 6,
+              "generation": 4,
+              "direction": "server",
+              "monotonic_ns": 14809721606832,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "7f6fd704-03a7-4a1e-9ba6-4afc12eb1ab1",
+                "state": "completed",
+                "uuid": "0a8d003e-c8fa-4e30-a775-094c951fe5f5",
+                "session_id": "c03b8e5b-aba3-4461-9306-5ce0b92cb971"
+              }
+            }
+          ]
+        }
+      ],
+      "followup_compacted_history_projection": [
+        {
+          "role": "user",
+          "content": "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n<system-reminder>\n<tools-used-before-summary></tools-used-before-summary>\n</system-reminder>\nG0_CLAUDE_COMPACT_SUMMARY\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-run-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-run-01-cwd/04721243-d31d-44c5-9fc2-bd6f1653290c.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly \u2014 do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.\n\nThe messages after this summary are the most recent messages from before compaction, kept verbatim. The summary was written without seeing them, so something it says has not happened yet may already have happened in them."
+        }
+      ],
+      "followup_request_sha256": "c5881665478b0eb8a46049667ad73d2eeb7bbefb65ba3cf39c7e2712b3d5ddaa",
+      "original_failure": "Probe assumed documented Not enough messages no-op text; actual empty-history native command reported structured failed despite an outer success result. Original failed result retained.",
+      "artifact_sha256": {
+        "host-1.jsonl": "7aea8762ef0ebe3e50e388da29ae450b1831f9ff97ceb9e464647633b5025d9e",
+        "host-1.stderr": "237f355dd4c52386530c0359232c9173d42e303fab8bd6cdbe7a305e2c4803a2",
+        "host-2.jsonl": "ff960ff548667494cc5ac4aca14cf71adaf8ac8794c48a34329068d6726338e7",
+        "host-2.stderr": "998fdffc8123c3a7a4a1e07d4ae4a39c2839221b7a1124d449863931aa727ca5",
+        "host-3.jsonl": "2cfbae313a8ae9b874c531e77559043e00801249e938f50df6847779eefae868",
+        "host-3.stderr": "237f355dd4c52386530c0359232c9173d42e303fab8bd6cdbe7a305e2c4803a2",
+        "host-4.jsonl": "d30c709bcb3fae248c8a6a001bb1c4e226467116d7b08532a8bf23837fbf021b",
+        "host-4.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "request-0.json": "352307baf7eb4e63ea74e6ba0a6e788e8bb4ff69e27736b8cd396be95540dd20",
+        "request-1.json": "9183b7a5feada750ba483492238b18af29077e99392430facc4a05411c2d66b6",
+        "request-2.json": "dee9b6f5e9b12a7723d20748172c0bd458f0ac1c158170649955dc268b9e3851",
+        "request-3.json": "68c04fc6ca807930299b1cf5ebf317ca89351ac24a9364515c11bfb88d6e5480",
+        "request-4.json": "c468d9b9f8f016749a09758e9d050fcfc8ab3df20ffdd24ceab6c4d446050f30",
+        "request-5.json": "c5881665478b0eb8a46049667ad73d2eeb7bbefb65ba3cf39c7e2712b3d5ddaa",
+        "response-0.sse": "cd14beca21b35fafe5e170d37e454e2ca1ed6b5844251f489d4bda0297810536",
+        "response-1.sse": "6e7dc7bae03a76110881b696064510f93a1007a65bb26e8d8a786ba43829188d",
+        "response-2.sse": "6be7c2897f8dab834ede4de967b4b65715f91084bb96d7859e963ebda70bc709",
+        "response-3.sse": "3e483958d6475f3c8e73f18f991692d2a2e7b32d42a824e7d25488ef998595c6",
+        "response-4.sse": "21133905cb09ff3a584aa8dbb3edd013a2b5479e1cae79655716548a6f3f8e56",
+        "response-5.sse": "b5356e9a7063722ec7d5eed0ded946d8476d30a24015f80eb1447c9bd7e8a8d2",
+        "result.json": "dba2de5762a63ed187ba3c3d04c8e7d9cf97a14668aef4d370c835bbb6c5c5a8"
+      }
+    },
+    {
+      "scenario": "one_exchange_compacts",
+      "original_overall_outcome": "passed",
+      "version": "2.1.319",
+      "binary_sha256": "dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed",
+      "argv_by_generation": [
+        [
+          "/home/jack/.nvm/versions/node/v24.21.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--include-partial-messages",
+          "--input-format",
+          "stream-json",
+          "--dangerously-skip-permissions",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "--strict-mcp-config",
+          "--setting-sources",
+          "user",
+          "--model",
+          "deepseek-flash",
+          "--tools",
+          "",
+          "--append-system-prompt",
+          "Use synthetic protocol responses; no filesystem operations."
+        ],
+        [
+          "/home/jack/.nvm/versions/node/v24.21.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--include-partial-messages",
+          "--input-format",
+          "stream-json",
+          "--dangerously-skip-permissions",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "--strict-mcp-config",
+          "--setting-sources",
+          "user",
+          "--model",
+          "deepseek-flash",
+          "--tools",
+          "",
+          "--append-system-prompt",
+          "Use synthetic protocol responses; no filesystem operations.",
+          "--resume",
+          "16f37ba8-ab4e-441e-8d06-dc50d380cab0"
+        ]
+      ],
+      "init": {
+        "seq": 3,
+        "generation": 1,
+        "direction": "server",
+        "monotonic_ns": 15026699973040,
+        "frame": {
+          "type": "system",
+          "subtype": "init",
+          "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/cwd",
+          "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+          "tools": [],
+          "mcp_servers": [],
+          "model": "deepseek-flash",
+          "permissionMode": "bypassPermissions",
+          "slash_commands": [
+            "deep-research",
+            "dataviz",
+            "update-config",
+            "verify",
+            "debug",
+            "code-review",
+            "simplify",
+            "batch",
+            "fewer-permission-prompts",
+            "doctor",
+            "loop",
+            "claude-api",
+            "workflow-authoring",
+            "run",
+            "run-skill-generator",
+            "plugin-authoring",
+            "agents",
+            "auto-mode-setup",
+            "autocompact",
+            "clear",
+            "color",
+            "compact",
+            "config",
+            "output-style",
+            "context",
+            "effort",
+            "fast",
+            "focus",
+            "heapdump",
+            "init",
+            "mcp",
+            "model",
+            "__remote-workflow",
+            "workflow-launch-exec",
+            "reload-plugins",
+            "reload-skills",
+            "rename",
+            "security-review",
+            "usage",
+            "insights",
+            "recap",
+            "goal",
+            "list-agents",
+            "team-onboarding"
+          ],
+          "terminal_slash_commands": [
+            "doctor",
+            "color",
+            "focus",
+            "reload-plugins"
+          ],
+          "apiKeySource": "ANTHROPIC_API_KEY",
+          "claude_code_version": "2.1.319",
+          "output_style": "default",
+          "agents": [
+            "claude",
+            "Explore",
+            "general-purpose",
+            "Plan",
+            "statusline-setup"
+          ],
+          "skills": [
+            "deep-research",
+            "dataviz",
+            "update-config",
+            "verify",
+            "debug",
+            "code-review",
+            "simplify",
+            "batch",
+            "fewer-permission-prompts",
+            "doctor",
+            "loop",
+            "claude-api",
+            "workflow-authoring",
+            "run",
+            "run-skill-generator",
+            "plugin-authoring"
+          ],
+          "plugins": [
+            {
+              "name": "cc-plugin-agents-md",
+              "path": "builtin",
+              "source": "cc-plugin-agents-md@builtin"
+            },
+            {
+              "name": "cc-plugin-privacy",
+              "path": "builtin",
+              "source": "cc-plugin-privacy@builtin"
+            },
+            {
+              "name": "cc-plugin-plugin-authoring",
+              "path": "builtin",
+              "source": "cc-plugin-plugin-authoring@builtin"
+            }
+          ],
+          "capabilities": [
+            "interrupt_receipt_v1",
+            "interrupt_cancel_queued_v1",
+            "interrupt_send_now_v1",
+            "interrupt_requeue_taken_v1",
+            "msg_lifecycle_v1",
+            "request_marker_lists_v1",
+            "ask_user_question_unanswered_v1",
+            "lifecycle_wakeup_source_v1",
+            "sdk_mcp_tools_list_changed",
+            "sdk_mcp_manifests",
+            "mcp_read_resource_v1",
+            "mcp_tool_ui_meta_v1",
+            "ui_surface_v1",
+            "mcp_call_result_not_for_model_v1",
+            "mcp_call_check_permissions_v1"
+          ],
+          "analytics_disabled": true,
+          "product_feedback_disabled": true,
+          "uuid": "25e97edc-db51-4ac4-b096-bd3ef738c99b",
+          "memory_paths": {
+            "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-short-01-cwd/memory/"
+          },
+          "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/cwd",
+          "additional_directories": [],
+          "messaging_socket_path": "/tmp/cc-socks/64614.sock",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "per_turn_effort_active": false,
+          "ultrathink_available": false,
+          "ultrathink_typed_raises": false,
+          "view_mode": "default",
+          "user_message_uuids": [
+            "b7109484-e3da-4eb6-b213-dfab303a5a78"
+          ]
+        }
+      },
+      "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+      "model": "deepseek-flash",
+      "latest_root_input_tokens": 666,
+      "reported_context_window": 200000,
+      "context_window_semantics": "CLI-reported window; unrecognized custom model fallback, not a verified provider capacity",
+      "retirements": [
+        {
+          "pid": 64614,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        },
+        {
+          "pid": 64638,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        }
+      ],
+      "provider_request_count": 3,
+      "provider_errors": [],
+      "blocked_connects": [],
+      "intervals": [
+        {
+          "generation": 1,
+          "records": [
+            {
+              "seq": 0,
+              "generation": 1,
+              "direction": "client",
+              "monotonic_ns": 15026484377020,
+              "frame": {
+                "type": "user",
+                "uuid": "b7109484-e3da-4eb6-b213-dfab303a5a78",
+                "parent_tool_use_id": null,
+                "message": {
+                  "role": "user",
+                  "content": "G0_CLAUDE_SEED_0: remember synthetic history 0."
+                }
+              }
+            },
+            {
+              "seq": 1,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026681457892,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "b7109484-e3da-4eb6-b213-dfab303a5a78",
+                "state": "queued",
+                "uuid": "ab6eca1a-8022-422e-b45c-ffe40bb19e46",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0"
+              }
+            },
+            {
+              "seq": 2,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026682644336,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "b7109484-e3da-4eb6-b213-dfab303a5a78",
+                "state": "started",
+                "uuid": "4f3560d0-fb37-4be1-ac08-7f75e76ad9aa",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0"
+              }
+            },
+            {
+              "seq": 3,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026699973040,
+              "frame": {
+                "type": "system",
+                "subtype": "init",
+                "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/cwd",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "tools": [],
+                "mcp_servers": [],
+                "model": "deepseek-flash",
+                "permissionMode": "bypassPermissions",
+                "slash_commands": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring",
+                  "agents",
+                  "auto-mode-setup",
+                  "autocompact",
+                  "clear",
+                  "color",
+                  "compact",
+                  "config",
+                  "output-style",
+                  "context",
+                  "effort",
+                  "fast",
+                  "focus",
+                  "heapdump",
+                  "init",
+                  "mcp",
+                  "model",
+                  "__remote-workflow",
+                  "workflow-launch-exec",
+                  "reload-plugins",
+                  "reload-skills",
+                  "rename",
+                  "security-review",
+                  "usage",
+                  "insights",
+                  "recap",
+                  "goal",
+                  "list-agents",
+                  "team-onboarding"
+                ],
+                "terminal_slash_commands": [
+                  "doctor",
+                  "color",
+                  "focus",
+                  "reload-plugins"
+                ],
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "claude_code_version": "2.1.319",
+                "output_style": "default",
+                "agents": [
+                  "claude",
+                  "Explore",
+                  "general-purpose",
+                  "Plan",
+                  "statusline-setup"
+                ],
+                "skills": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring"
+                ],
+                "plugins": [
+                  {
+                    "name": "cc-plugin-agents-md",
+                    "path": "builtin",
+                    "source": "cc-plugin-agents-md@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-privacy",
+                    "path": "builtin",
+                    "source": "cc-plugin-privacy@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-plugin-authoring",
+                    "path": "builtin",
+                    "source": "cc-plugin-plugin-authoring@builtin"
+                  }
+                ],
+                "capabilities": [
+                  "interrupt_receipt_v1",
+                  "interrupt_cancel_queued_v1",
+                  "interrupt_send_now_v1",
+                  "interrupt_requeue_taken_v1",
+                  "msg_lifecycle_v1",
+                  "request_marker_lists_v1",
+                  "ask_user_question_unanswered_v1",
+                  "lifecycle_wakeup_source_v1",
+                  "sdk_mcp_tools_list_changed",
+                  "sdk_mcp_manifests",
+                  "mcp_read_resource_v1",
+                  "mcp_tool_ui_meta_v1",
+                  "ui_surface_v1",
+                  "mcp_call_result_not_for_model_v1",
+                  "mcp_call_check_permissions_v1"
+                ],
+                "analytics_disabled": true,
+                "product_feedback_disabled": true,
+                "uuid": "25e97edc-db51-4ac4-b096-bd3ef738c99b",
+                "memory_paths": {
+                  "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-short-01-cwd/memory/"
+                },
+                "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/cwd",
+                "additional_directories": [],
+                "messaging_socket_path": "/tmp/cc-socks/64614.sock",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "per_turn_effort_active": false,
+                "ultrathink_available": false,
+                "ultrathink_typed_raises": false,
+                "view_mode": "default",
+                "user_message_uuids": [
+                  "b7109484-e3da-4eb6-b213-dfab303a5a78"
+                ]
+              }
+            },
+            {
+              "seq": 4,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026704277980,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": "requesting",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "uuid": "df44a5de-5e48-445d-b119-8d3fd4e51d92",
+                "user_message_uuids": [
+                  "b7109484-e3da-4eb6-b213-dfab303a5a78"
+                ]
+              }
+            },
+            {
+              "seq": 5,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026719519718,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_start",
+                  "message": {
+                    "id": "msg_g0_claude_0",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "deepseek-flash",
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {
+                      "input_tokens": 111,
+                      "cache_creation_input_tokens": 222,
+                      "cache_read_input_tokens": 333,
+                      "output_tokens": 1
+                    }
+                  }
+                },
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "parent_tool_use_id": null,
+                "uuid": "43d2477a-1110-44c0-afa9-63e2a39f5db6",
+                "ttft_ms": 5,
+                "thinking_display": "updates",
+                "api_message_id": "msg_g0_claude_0",
+                "user_message_uuid": "b7109484-e3da-4eb6-b213-dfab303a5a78",
+                "user_message_uuids": [
+                  "b7109484-e3da-4eb6-b213-dfab303a5a78"
+                ]
+              }
+            },
+            {
+              "seq": 6,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026719610951,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_start",
+                  "index": 0,
+                  "content_block": {
+                    "type": "text",
+                    "text": ""
+                  }
+                },
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "parent_tool_use_id": null,
+                "uuid": "9ecc3b4d-471c-4857-9e5e-f1a3d8e1b265",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 7,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026719699097,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_delta",
+                  "index": 0,
+                  "delta": {
+                    "type": "text_delta",
+                    "text": "G0_CLAUDE_SEED_0"
+                  }
+                },
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "parent_tool_use_id": null,
+                "uuid": "5c9517b9-d3c3-40b5-a29d-8ce4ca0a0844",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 8,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026720622107,
+              "frame": {
+                "type": "assistant",
+                "message": {
+                  "id": "msg_g0_claude_0",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "deepseek-flash",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "G0_CLAUDE_SEED_0"
+                    }
+                  ],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 111,
+                    "cache_creation_input_tokens": 222,
+                    "cache_read_input_tokens": 333,
+                    "output_tokens": 1
+                  },
+                  "context_management": null
+                },
+                "parent_tool_use_id": null,
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "uuid": "55d5d5cf-02d8-4742-8b00-b9d5f643bee7",
+                "timestamp": "2026-11-07T06:40:17.282Z",
+                "user_message_uuid": "b7109484-e3da-4eb6-b213-dfab303a5a78",
+                "user_message_uuids": [
+                  "b7109484-e3da-4eb6-b213-dfab303a5a78"
+                ]
+              }
+            },
+            {
+              "seq": 9,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026720675649,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_stop",
+                  "index": 0
+                },
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "parent_tool_use_id": null,
+                "uuid": "1c3e7aff-d159-4ae5-be00-adc5b83c3b03",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 10,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026721816107,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_delta",
+                  "delta": {
+                    "stop_reason": "end_turn",
+                    "stop_sequence": null
+                  },
+                  "usage": {
+                    "output_tokens": 27
+                  }
+                },
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "parent_tool_use_id": null,
+                "uuid": "99c60269-9a20-4a65-b601-9bb2890e4d69",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 11,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026722013277,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_stop"
+                },
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "parent_tool_use_id": null,
+                "uuid": "bab6bf7d-847d-4438-bce8-fdd8fae3b45f",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 12,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026726153461,
+              "frame": {
+                "duration_api_ms": 10,
+                "stop_reason": "end_turn",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "total_cost_usd": 0.002784,
+                "usage": {
+                  "input_tokens": 111,
+                  "cache_creation_input_tokens": 222,
+                  "cache_read_input_tokens": 333,
+                  "output_tokens": 27,
+                  "output_tokens_details": {
+                    "thinking_tokens": 0
+                  },
+                  "server_tool_use": {
+                    "web_search_requests": 0,
+                    "web_fetch_requests": 0
+                  },
+                  "service_tier": "standard",
+                  "cache_creation": {
+                    "ephemeral_1h_input_tokens": 0,
+                    "ephemeral_5m_input_tokens": 0
+                  },
+                  "inference_geo": "",
+                  "iterations": [],
+                  "speed": "standard",
+                  "fallback_credit": null
+                },
+                "modelUsage": {
+                  "deepseek-flash": {
+                    "inputTokens": 111,
+                    "outputTokens": 27,
+                    "cacheReadInputTokens": 333,
+                    "cacheCreationInputTokens": 222,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.002784,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                },
+                "permission_denials": [],
+                "terminal_reason": "completed",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "subagent_stats": {
+                  "spawned": 0,
+                  "requested": {
+                    "background": 0,
+                    "foreground": 0,
+                    "unset": 0
+                  },
+                  "started_in_background": 0,
+                  "max_depth": 0,
+                  "spawned_by_subagents": 0,
+                  "completed": 0,
+                  "failed": 0,
+                  "killed": {
+                    "parent": 0,
+                    "user": 0,
+                    "system": 0
+                  },
+                  "refused": {
+                    "depth_limit": 0,
+                    "concurrency_limit": 0,
+                    "budget": 0
+                  },
+                  "by_type": {}
+                },
+                "safety_stops": 0,
+                "is_error": false,
+                "num_turns": 1,
+                "subtype": "success",
+                "api_error_status": null,
+                "result": "G0_CLAUDE_SEED_0",
+                "ttft_ms": 36,
+                "type": "result",
+                "duration_ms": 41,
+                "uuid": "8a00b04f-294a-4e2c-a5ff-9651f2ecff6c",
+                "ttft_stream_ms": 35,
+                "time_to_request_ms": 31,
+                "first_content_frame_ms": 36,
+                "user_message_uuid": "b7109484-e3da-4eb6-b213-dfab303a5a78",
+                "user_message_uuids": [
+                  "b7109484-e3da-4eb6-b213-dfab303a5a78"
+                ],
+                "request_sent_wall_ms": 1794033617277,
+                "first_request_input_tokens": 666,
+                "queued_turn_count": 0,
+                "result_index": 0,
+                "model_usage_since_last_result": {
+                  "deepseek-flash": {
+                    "inputTokens": 111,
+                    "outputTokens": 27,
+                    "cacheReadInputTokens": 333,
+                    "cacheCreationInputTokens": 222,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.002784,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                }
+              }
+            },
+            {
+              "seq": 13,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15026727022340,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "b7109484-e3da-4eb6-b213-dfab303a5a78",
+                "state": "completed",
+                "uuid": "3168ee5b-624d-4f52-8c80-aa2fda2bde63",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0"
+              }
+            }
+          ]
+        },
+        {
+          "generation": 2,
+          "records": [
+            {
+              "seq": 0,
+              "generation": 2,
+              "direction": "client",
+              "monotonic_ns": 15026760839384,
+              "frame": {
+                "type": "user",
+                "uuid": "b518b454-ce4b-4a48-82db-ccdc79798cda",
+                "parent_tool_use_id": null,
+                "message": {
+                  "role": "user",
+                  "content": "/compact"
+                }
+              }
+            },
+            {
+              "seq": 1,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026918873841,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "b518b454-ce4b-4a48-82db-ccdc79798cda",
+                "state": "queued",
+                "uuid": "718aed50-1306-424c-ac66-e331b6939174",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0"
+              }
+            },
+            {
+              "seq": 2,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026919801536,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "b518b454-ce4b-4a48-82db-ccdc79798cda",
+                "state": "started",
+                "uuid": "22ac849f-cc8b-4ab8-9a1a-0bb574f9bacc",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0"
+              }
+            },
+            {
+              "seq": 3,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026933816722,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": "compacting",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "uuid": "595d950e-dc26-454e-80bc-55df40f211a4"
+              }
+            },
+            {
+              "seq": 4,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026964158972,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": null,
+                "compact_result": "success",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "uuid": "ef10f64f-4569-4a6a-8ce8-719befa5fbd7"
+              }
+            },
+            {
+              "seq": 5,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026970231884,
+              "frame": {
+                "type": "system",
+                "subtype": "init",
+                "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/cwd",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "tools": [],
+                "mcp_servers": [],
+                "model": "deepseek-flash",
+                "permissionMode": "bypassPermissions",
+                "slash_commands": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring",
+                  "agents",
+                  "auto-mode-setup",
+                  "autocompact",
+                  "clear",
+                  "color",
+                  "compact",
+                  "config",
+                  "output-style",
+                  "context",
+                  "effort",
+                  "fast",
+                  "focus",
+                  "heapdump",
+                  "init",
+                  "mcp",
+                  "model",
+                  "__remote-workflow",
+                  "workflow-launch-exec",
+                  "reload-plugins",
+                  "reload-skills",
+                  "rename",
+                  "security-review",
+                  "usage",
+                  "insights",
+                  "recap",
+                  "goal",
+                  "list-agents",
+                  "team-onboarding"
+                ],
+                "terminal_slash_commands": [
+                  "doctor",
+                  "color",
+                  "focus",
+                  "reload-plugins"
+                ],
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "claude_code_version": "2.1.319",
+                "output_style": "default",
+                "agents": [
+                  "claude",
+                  "Explore",
+                  "general-purpose",
+                  "Plan",
+                  "statusline-setup"
+                ],
+                "skills": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring"
+                ],
+                "plugins": [
+                  {
+                    "name": "cc-plugin-agents-md",
+                    "path": "builtin",
+                    "source": "cc-plugin-agents-md@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-privacy",
+                    "path": "builtin",
+                    "source": "cc-plugin-privacy@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-plugin-authoring",
+                    "path": "builtin",
+                    "source": "cc-plugin-plugin-authoring@builtin"
+                  }
+                ],
+                "capabilities": [
+                  "interrupt_receipt_v1",
+                  "interrupt_cancel_queued_v1",
+                  "interrupt_send_now_v1",
+                  "interrupt_requeue_taken_v1",
+                  "msg_lifecycle_v1",
+                  "request_marker_lists_v1",
+                  "ask_user_question_unanswered_v1",
+                  "lifecycle_wakeup_source_v1",
+                  "sdk_mcp_tools_list_changed",
+                  "sdk_mcp_manifests",
+                  "mcp_read_resource_v1",
+                  "mcp_tool_ui_meta_v1",
+                  "ui_surface_v1",
+                  "mcp_call_result_not_for_model_v1",
+                  "mcp_call_check_permissions_v1"
+                ],
+                "analytics_disabled": true,
+                "product_feedback_disabled": true,
+                "uuid": "bf2ad6bc-f50b-4561-a4f9-a18021e7a589",
+                "memory_paths": {
+                  "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-short-01-cwd/memory/"
+                },
+                "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/cwd",
+                "additional_directories": [],
+                "messaging_socket_path": "/tmp/cc-socks/64638.sock",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "per_turn_effort_active": false,
+                "ultrathink_available": false,
+                "ultrathink_typed_raises": false,
+                "view_mode": "default",
+                "user_message_uuids": [
+                  "b518b454-ce4b-4a48-82db-ccdc79798cda"
+                ]
+              }
+            },
+            {
+              "seq": 6,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026970364794,
+              "frame": {
+                "type": "system",
+                "subtype": "compact_boundary",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "uuid": "3e99d4c3-7cce-4c69-b167-18cb765055f7",
+                "compact_metadata": {
+                  "trigger": "manual",
+                  "pre_tokens": 693,
+                  "post_tokens": 455,
+                  "cumulative_dropped_tokens": 238,
+                  "duration_ms": 30
+                },
+                "logical_parent_uuid": "0aedcd05-15b6-42ca-9a6b-c097a436382c"
+              }
+            },
+            {
+              "seq": 7,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026970406318,
+              "frame": {
+                "type": "user",
+                "message": {
+                  "role": "user",
+                  "content": "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n<system-reminder>\n<tools-used-before-summary></tools-used-before-summary>\n</system-reminder>\nG0_CLAUDE_COMPACT_SUMMARY\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-short-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-short-01-cwd/16f37ba8-ab4e-441e-8d06-dc50d380cab0.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly \u2014 do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+                },
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "parent_tool_use_id": null,
+                "uuid": "1b80c702-2bbe-426c-9b3a-7327f749ecc7",
+                "timestamp": "2026-11-07T06:40:17.523Z",
+                "isReplay": false,
+                "isSynthetic": true
+              }
+            },
+            {
+              "seq": 8,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026970434020,
+              "frame": {
+                "type": "user",
+                "message": {
+                  "role": "user",
+                  "content": "<local-command-stdout>Compacted </local-command-stdout>"
+                },
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "parent_tool_use_id": null,
+                "uuid": "3dabd50d-4aac-46fc-8595-c124e1ba493f",
+                "timestamp": "2026-11-07T06:40:17.627Z",
+                "isReplay": true
+              }
+            },
+            {
+              "seq": 9,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026971181265,
+              "frame": {
+                "is_error": false,
+                "duration_api_ms": 0,
+                "num_turns": 0,
+                "stop_reason": null,
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0",
+                "total_cost_usd": 0.008352,
+                "usage": {
+                  "output_tokens_details": {
+                    "thinking_tokens": 0
+                  },
+                  "input_tokens": 0,
+                  "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens": 0,
+                  "output_tokens": 0,
+                  "server_tool_use": {
+                    "web_search_requests": 0,
+                    "web_fetch_requests": 0
+                  },
+                  "service_tier": "standard",
+                  "cache_creation": {
+                    "ephemeral_1h_input_tokens": 0,
+                    "ephemeral_5m_input_tokens": 0
+                  },
+                  "inference_geo": "",
+                  "iterations": [],
+                  "speed": "standard",
+                  "fallback_credit": null
+                },
+                "modelUsage": {
+                  "deepseek-flash": {
+                    "inputTokens": 333,
+                    "outputTokens": 81,
+                    "thinkingTokens": 0,
+                    "cacheReadInputTokens": 999,
+                    "cacheCreationInputTokens": 666,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.008352,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                },
+                "permission_denials": [],
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "subagent_stats": {
+                  "spawned": 0,
+                  "requested": {
+                    "background": 0,
+                    "foreground": 0,
+                    "unset": 0
+                  },
+                  "started_in_background": 0,
+                  "max_depth": 0,
+                  "spawned_by_subagents": 0,
+                  "completed": 0,
+                  "failed": 0,
+                  "killed": {
+                    "parent": 0,
+                    "user": 0,
+                    "system": 0
+                  },
+                  "refused": {
+                    "depth_limit": 0,
+                    "concurrency_limit": 0,
+                    "budget": 0
+                  },
+                  "by_type": {}
+                },
+                "safety_stops": 0,
+                "subtype": "success",
+                "result": "",
+                "user_message_uuid": "b518b454-ce4b-4a48-82db-ccdc79798cda",
+                "user_message_uuids": [
+                  "b518b454-ce4b-4a48-82db-ccdc79798cda"
+                ],
+                "local_command": "compact",
+                "type": "result",
+                "duration_ms": 49,
+                "uuid": "bbd079b4-5577-4f6e-a13a-ab0f1fbcfa8a",
+                "queued_turn_count": 0,
+                "result_index": 0,
+                "model_usage_since_last_result": {
+                  "deepseek-flash": {
+                    "inputTokens": 222,
+                    "outputTokens": 54,
+                    "cacheReadInputTokens": 666,
+                    "cacheCreationInputTokens": 444,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.005568,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                }
+              }
+            },
+            {
+              "seq": 10,
+              "generation": 2,
+              "direction": "server",
+              "monotonic_ns": 15026971575819,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "b518b454-ce4b-4a48-82db-ccdc79798cda",
+                "state": "completed",
+                "uuid": "3d2f79aa-ba9d-4f77-a253-e476962d7fd1",
+                "session_id": "16f37ba8-ab4e-441e-8d06-dc50d380cab0"
+              }
+            }
+          ]
+        }
+      ],
+      "artifact_sha256": {
+        "host-1.jsonl": "9920fc8b4a0ae680c5f992749931c5b69c41c1f640f63ee6af8c8d7a1a9f983a",
+        "host-1.stderr": "237f355dd4c52386530c0359232c9173d42e303fab8bd6cdbe7a305e2c4803a2",
+        "host-2.jsonl": "937ac434c606517c731abf19fa1fb908bbbb104ef888bd5209302e788ba06068",
+        "host-2.stderr": "998fdffc8123c3a7a4a1e07d4ae4a39c2839221b7a1124d449863931aa727ca5",
+        "request-0.json": "9be1039c6ff87a991acc06ba969555836add301cc113f661f88dedfa4247e93a",
+        "request-1.json": "7b7b7e930eda19adfd667e512753bb4c61efd99dfd29c95148a8ac7b49923081",
+        "request-2.json": "8f2f7343f0f55626af80d9678a17c96866a81a0c6722ce1625cc1a4eb9ba7cef",
+        "response-0.sse": "cd14beca21b35fafe5e170d37e454e2ca1ed6b5844251f489d4bda0297810536",
+        "response-1.sse": "22500f7793d44fb044e015ff6f4e4a95e9fef482c76a4c3b498c97b779ff532e",
+        "response-2.sse": "a4a3db5364fc307d9e2b6d146020a79063f45ec60a040d61efd7c16fec9211a7",
+        "result.json": "b5b2c999825ef3983ade6c0ac027bdaa9cae5113302fcac8fa1edf239993bdec"
+      }
+    },
+    {
+      "scenario": "forwarded_child_usage",
+      "original_overall_outcome": "passed",
+      "version": "2.1.319",
+      "binary_sha256": "dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed",
+      "argv_by_generation": [
+        [
+          "/home/jack/.nvm/versions/node/v24.21.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--include-partial-messages",
+          "--input-format",
+          "stream-json",
+          "--dangerously-skip-permissions",
+          "--mcp-config",
+          "{\"mcpServers\":{}}",
+          "--strict-mcp-config",
+          "--setting-sources",
+          "user",
+          "--model",
+          "deepseek-flash",
+          "--tools",
+          "Agent",
+          "--append-system-prompt",
+          "Use synthetic protocol responses; no filesystem operations.",
+          "--forward-subagent-text",
+          "--agents",
+          "{\"g0_child\": {\"description\": \"Synthetic protocol child\", \"prompt\": \"Return G0_CHILD_TASK synthetic marker.\", \"tools\": [], \"model\": \"inherit\"}}"
+        ]
+      ],
+      "init": {
+        "seq": 3,
+        "generation": 1,
+        "direction": "server",
+        "monotonic_ns": 15028036355945,
+        "frame": {
+          "type": "system",
+          "subtype": "init",
+          "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-children-01/cwd",
+          "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+          "tools": [
+            "Task"
+          ],
+          "mcp_servers": [],
+          "model": "deepseek-flash",
+          "permissionMode": "bypassPermissions",
+          "slash_commands": [
+            "deep-research",
+            "dataviz",
+            "update-config",
+            "verify",
+            "debug",
+            "code-review",
+            "simplify",
+            "batch",
+            "fewer-permission-prompts",
+            "doctor",
+            "loop",
+            "claude-api",
+            "workflow-authoring",
+            "run",
+            "run-skill-generator",
+            "plugin-authoring",
+            "agents",
+            "auto-mode-setup",
+            "autocompact",
+            "clear",
+            "color",
+            "compact",
+            "config",
+            "output-style",
+            "context",
+            "effort",
+            "fast",
+            "focus",
+            "heapdump",
+            "init",
+            "mcp",
+            "model",
+            "__remote-workflow",
+            "workflow-launch-exec",
+            "reload-plugins",
+            "reload-skills",
+            "rename",
+            "security-review",
+            "usage",
+            "insights",
+            "recap",
+            "goal",
+            "list-agents",
+            "team-onboarding"
+          ],
+          "terminal_slash_commands": [
+            "doctor",
+            "color",
+            "focus",
+            "reload-plugins"
+          ],
+          "apiKeySource": "ANTHROPIC_API_KEY",
+          "claude_code_version": "2.1.319",
+          "output_style": "default",
+          "agents": [
+            "claude",
+            "Explore",
+            "g0_child",
+            "general-purpose",
+            "Plan",
+            "statusline-setup"
+          ],
+          "skills": [
+            "deep-research",
+            "dataviz",
+            "update-config",
+            "verify",
+            "debug",
+            "code-review",
+            "simplify",
+            "batch",
+            "fewer-permission-prompts",
+            "doctor",
+            "loop",
+            "claude-api",
+            "workflow-authoring",
+            "run",
+            "run-skill-generator",
+            "plugin-authoring"
+          ],
+          "plugins": [
+            {
+              "name": "cc-plugin-agents-md",
+              "path": "builtin",
+              "source": "cc-plugin-agents-md@builtin"
+            },
+            {
+              "name": "cc-plugin-privacy",
+              "path": "builtin",
+              "source": "cc-plugin-privacy@builtin"
+            },
+            {
+              "name": "cc-plugin-plugin-authoring",
+              "path": "builtin",
+              "source": "cc-plugin-plugin-authoring@builtin"
+            }
+          ],
+          "capabilities": [
+            "interrupt_receipt_v1",
+            "interrupt_cancel_queued_v1",
+            "interrupt_send_now_v1",
+            "interrupt_requeue_taken_v1",
+            "msg_lifecycle_v1",
+            "request_marker_lists_v1",
+            "ask_user_question_unanswered_v1",
+            "lifecycle_wakeup_source_v1",
+            "sdk_mcp_tools_list_changed",
+            "sdk_mcp_manifests",
+            "mcp_read_resource_v1",
+            "mcp_tool_ui_meta_v1",
+            "ui_surface_v1",
+            "mcp_call_result_not_for_model_v1",
+            "mcp_call_check_permissions_v1"
+          ],
+          "analytics_disabled": true,
+          "product_feedback_disabled": true,
+          "uuid": "1ccb0a6a-6254-405a-9ec7-db0d44f5b3d1",
+          "memory_paths": {
+            "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-children-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-children-01-cwd/memory/"
+          },
+          "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-children-01/cwd",
+          "additional_directories": [],
+          "messaging_socket_path": "/tmp/cc-socks/64657.sock",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "per_turn_effort_active": false,
+          "ultrathink_available": false,
+          "ultrathink_typed_raises": false,
+          "view_mode": "default",
+          "user_message_uuids": [
+            "493ff49c-517d-4ce1-a4f2-eb2069d13721"
+          ]
+        }
+      },
+      "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+      "model": "deepseek-flash",
+      "latest_root_input_tokens": 666,
+      "reported_context_window": 200000,
+      "context_window_semantics": "CLI-reported window; unrecognized custom model fallback, not a verified provider capacity",
+      "retirements": [
+        {
+          "pid": 64657,
+          "exit_code": 0,
+          "signals": [],
+          "readers_joined": true,
+          "process_group_gone": true,
+          "reader_errors": []
+        }
+      ],
+      "provider_request_count": 4,
+      "provider_errors": [],
+      "blocked_connects": [],
+      "intervals": [
+        {
+          "generation": 1,
+          "records": [
+            {
+              "seq": 0,
+              "generation": 1,
+              "direction": "client",
+              "monotonic_ns": 15027814334483,
+              "frame": {
+                "type": "user",
+                "uuid": "493ff49c-517d-4ce1-a4f2-eb2069d13721",
+                "parent_tool_use_id": null,
+                "message": {
+                  "role": "user",
+                  "content": "G0_CLAUDE_SEED_0: remember synthetic history 0."
+                }
+              }
+            },
+            {
+              "seq": 1,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028016955439,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "493ff49c-517d-4ce1-a4f2-eb2069d13721",
+                "state": "queued",
+                "uuid": "cb70dea3-d743-4dd7-8faf-6c4364b472d2",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c"
+              }
+            },
+            {
+              "seq": 2,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028018170857,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "493ff49c-517d-4ce1-a4f2-eb2069d13721",
+                "state": "started",
+                "uuid": "8ed74306-1183-45a4-9f38-2302a7cb3f2d",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c"
+              }
+            },
+            {
+              "seq": 3,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028036355945,
+              "frame": {
+                "type": "system",
+                "subtype": "init",
+                "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-children-01/cwd",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "tools": [
+                  "Task"
+                ],
+                "mcp_servers": [],
+                "model": "deepseek-flash",
+                "permissionMode": "bypassPermissions",
+                "slash_commands": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring",
+                  "agents",
+                  "auto-mode-setup",
+                  "autocompact",
+                  "clear",
+                  "color",
+                  "compact",
+                  "config",
+                  "output-style",
+                  "context",
+                  "effort",
+                  "fast",
+                  "focus",
+                  "heapdump",
+                  "init",
+                  "mcp",
+                  "model",
+                  "__remote-workflow",
+                  "workflow-launch-exec",
+                  "reload-plugins",
+                  "reload-skills",
+                  "rename",
+                  "security-review",
+                  "usage",
+                  "insights",
+                  "recap",
+                  "goal",
+                  "list-agents",
+                  "team-onboarding"
+                ],
+                "terminal_slash_commands": [
+                  "doctor",
+                  "color",
+                  "focus",
+                  "reload-plugins"
+                ],
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "claude_code_version": "2.1.319",
+                "output_style": "default",
+                "agents": [
+                  "claude",
+                  "Explore",
+                  "g0_child",
+                  "general-purpose",
+                  "Plan",
+                  "statusline-setup"
+                ],
+                "skills": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring"
+                ],
+                "plugins": [
+                  {
+                    "name": "cc-plugin-agents-md",
+                    "path": "builtin",
+                    "source": "cc-plugin-agents-md@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-privacy",
+                    "path": "builtin",
+                    "source": "cc-plugin-privacy@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-plugin-authoring",
+                    "path": "builtin",
+                    "source": "cc-plugin-plugin-authoring@builtin"
+                  }
+                ],
+                "capabilities": [
+                  "interrupt_receipt_v1",
+                  "interrupt_cancel_queued_v1",
+                  "interrupt_send_now_v1",
+                  "interrupt_requeue_taken_v1",
+                  "msg_lifecycle_v1",
+                  "request_marker_lists_v1",
+                  "ask_user_question_unanswered_v1",
+                  "lifecycle_wakeup_source_v1",
+                  "sdk_mcp_tools_list_changed",
+                  "sdk_mcp_manifests",
+                  "mcp_read_resource_v1",
+                  "mcp_tool_ui_meta_v1",
+                  "ui_surface_v1",
+                  "mcp_call_result_not_for_model_v1",
+                  "mcp_call_check_permissions_v1"
+                ],
+                "analytics_disabled": true,
+                "product_feedback_disabled": true,
+                "uuid": "1ccb0a6a-6254-405a-9ec7-db0d44f5b3d1",
+                "memory_paths": {
+                  "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-children-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-children-01-cwd/memory/"
+                },
+                "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-children-01/cwd",
+                "additional_directories": [],
+                "messaging_socket_path": "/tmp/cc-socks/64657.sock",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "per_turn_effort_active": false,
+                "ultrathink_available": false,
+                "ultrathink_typed_raises": false,
+                "view_mode": "default",
+                "user_message_uuids": [
+                  "493ff49c-517d-4ce1-a4f2-eb2069d13721"
+                ]
+              }
+            },
+            {
+              "seq": 4,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028041617990,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": "requesting",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "uuid": "a0a3b1d5-2cae-44ab-be4b-dddfd3cd54a8",
+                "user_message_uuids": [
+                  "493ff49c-517d-4ce1-a4f2-eb2069d13721"
+                ]
+              }
+            },
+            {
+              "seq": 5,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028058624669,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_start",
+                  "message": {
+                    "id": "msg_g0_claude_0",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "deepseek-flash",
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {
+                      "input_tokens": 111,
+                      "cache_creation_input_tokens": 222,
+                      "cache_read_input_tokens": 333,
+                      "output_tokens": 1
+                    }
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "7b356fc5-73c3-4edc-97ae-b8bed8dd8de1",
+                "ttft_ms": 6,
+                "thinking_display": "updates",
+                "api_message_id": "msg_g0_claude_0",
+                "user_message_uuid": "493ff49c-517d-4ce1-a4f2-eb2069d13721",
+                "user_message_uuids": [
+                  "493ff49c-517d-4ce1-a4f2-eb2069d13721"
+                ]
+              }
+            },
+            {
+              "seq": 6,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028058728801,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_start",
+                  "index": 0,
+                  "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_g0_child",
+                    "name": "Agent",
+                    "input": {}
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "fbc533e6-e6aa-4996-a9da-0f118c0b2eee",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 7,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028058808545,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_delta",
+                  "index": 0,
+                  "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": "{\"description\": \"G0 child protocol\", \"prompt\": \"G0_CHILD_TASK return the synthetic marker\", \"subagent_type\": \"g0_child\"}"
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "c308152b-b98e-4e63-b9f8-c0d7541be906",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 8,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028060222893,
+              "frame": {
+                "type": "assistant",
+                "message": {
+                  "id": "msg_g0_claude_0",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "deepseek-flash",
+                  "content": [
+                    {
+                      "type": "tool_use",
+                      "id": "toolu_g0_child",
+                      "name": "Agent",
+                      "input": {
+                        "description": "G0 child protocol",
+                        "prompt": "G0_CHILD_TASK return the synthetic marker",
+                        "subagent_type": "g0_child"
+                      }
+                    }
+                  ],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 111,
+                    "cache_creation_input_tokens": 222,
+                    "cache_read_input_tokens": 333,
+                    "output_tokens": 1
+                  },
+                  "context_management": null
+                },
+                "parent_tool_use_id": null,
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "uuid": "6690815b-a27f-4390-9892-6b06343f9f68",
+                "timestamp": "2026-11-07T06:40:18.621Z",
+                "user_message_uuid": "493ff49c-517d-4ce1-a4f2-eb2069d13721",
+                "user_message_uuids": [
+                  "493ff49c-517d-4ce1-a4f2-eb2069d13721"
+                ]
+              }
+            },
+            {
+              "seq": 9,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028064065205,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_stop",
+                  "index": 0
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "343d8665-fb9f-4c13-acfb-d6d5c0338a9f",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 10,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028068523464,
+              "frame": {
+                "type": "system",
+                "subtype": "background_tasks_changed",
+                "tasks": [
+                  {
+                    "task_id": "aeca38a26ed4ef502",
+                    "run_id": "0mw61ank6-5c451b27",
+                    "task_type": "local_agent",
+                    "subagent_type": "g0_child",
+                    "description": "G0 child protocol"
+                  }
+                ],
+                "uuid": "a256819a-9ebd-4dc0-916b-1d02c2752a51",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c"
+              }
+            },
+            {
+              "seq": 11,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028069721185,
+              "frame": {
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "aeca38a26ed4ef502",
+                "run_id": "0mw61ank6-5c451b27",
+                "tool_use_id": "toolu_g0_child",
+                "description": "G0 child protocol",
+                "subagent_type": "g0_child",
+                "is_backgrounded": true,
+                "spawn_depth": 1,
+                "task_type": "local_agent",
+                "prompt": "G0_CHILD_TASK return the synthetic marker",
+                "uuid": "3ae12fb6-c256-47db-86e0-87b03c6f9a94",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c"
+              }
+            },
+            {
+              "seq": 12,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028071624965,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_delta",
+                  "delta": {
+                    "stop_reason": "tool_use",
+                    "stop_sequence": null
+                  },
+                  "usage": {
+                    "output_tokens": 27
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "f3164847-3796-4302-89e5-1fc1d0d359bd",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 13,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028074438992,
+              "frame": {
+                "type": "user",
+                "message": {
+                  "role": "user",
+                  "content": [
+                    {
+                      "tool_use_id": "toolu_g0_child",
+                      "type": "tool_result",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Async agent launched successfully. (This tool result is internal metadata \u2014 never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: aeca38a26ed4ef502 (internal ID - do not mention to user.)\nThe agent is working in the background. You will be notified automatically when it completes. You know nothing about its results until that notification arrives \u2014 do not report, assume, or predict them; continue other work or respond to the user in the meantime.\nIn your own words, briefly tell the user what you launched \u2014 do not echo this tool result. Agent results will arrive in a subsequent message. If the user asks for progress, say the agent is still running."
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "parent_tool_use_id": null,
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "uuid": "fd798f36-4919-4bfa-a17d-71096a803e22",
+                "timestamp": "2026-11-07T06:40:18.632Z",
+                "tool_use_result": {
+                  "isAsync": true,
+                  "status": "async_launched",
+                  "agentId": "aeca38a26ed4ef502",
+                  "description": "G0 child protocol",
+                  "resolvedModel": "deepseek-flash",
+                  "prompt": "G0_CHILD_TASK return the synthetic marker",
+                  "outputFile": "/tmp/claude-1000/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-children-01-cwd/318fa345-8fed-47ea-8077-bea804f3a82c/tasks/aeca38a26ed4ef502.output",
+                  "canReadOutputFile": false,
+                  "canContinueAgent": false
+                },
+                "tool_result_meta": [
+                  {
+                    "id": "toolu_g0_child",
+                    "permission_decision": {
+                      "decision": "accept",
+                      "source": "config",
+                      "reason_type": "mode"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "seq": 14,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028074539410,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_stop"
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "fd7ebcd2-6786-46a6-b762-2e2bc41428ce",
+                "api_message_id": "msg_g0_claude_0"
+              }
+            },
+            {
+              "seq": 15,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028084135122,
+              "frame": {
+                "type": "assistant",
+                "message": {
+                  "id": "msg_g0_claude_1",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "deepseek-flash",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "G0_CHILD_RETURN"
+                    }
+                  ],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 444,
+                    "cache_creation_input_tokens": 222,
+                    "cache_read_input_tokens": 333,
+                    "output_tokens": 1
+                  },
+                  "context_management": null
+                },
+                "parent_tool_use_id": "toolu_g0_child",
+                "agent_id": "aeca38a26ed4ef502",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "uuid": "b1a8bfdc-81f5-4729-9306-1e08ceeae0ba",
+                "timestamp": "2026-11-07T06:40:18.646Z",
+                "subagent_type": "g0_child",
+                "task_description": "G0 child protocol"
+              }
+            },
+            {
+              "seq": 16,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028105505916,
+              "frame": {
+                "type": "system",
+                "subtype": "task_updated",
+                "task_id": "aeca38a26ed4ef502",
+                "run_id": "0mw61ank6-5c451b27",
+                "patch": {
+                  "status": "completed",
+                  "end_time": 1794033618667
+                },
+                "uuid": "c987d52e-1fa6-4415-a3cb-32f930153bf3",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c"
+              }
+            },
+            {
+              "seq": 17,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028105625977,
+              "frame": {
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "aeca38a26ed4ef502",
+                "run_id": "0mw61ank6-5c451b27",
+                "tool_use_id": "toolu_g0_child",
+                "status": "completed",
+                "output_file": "/tmp/claude-1000/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-children-01-cwd/318fa345-8fed-47ea-8077-bea804f3a82c/tasks/aeca38a26ed4ef502.output",
+                "summary": "G0_CHILD_RETURN",
+                "usage": {
+                  "total_tokens": 1026,
+                  "tool_uses": 0,
+                  "duration_ms": 41
+                },
+                "uuid": "c35ccac0-0780-4a22-af0f-7f84605b4e98",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c"
+              }
+            },
+            {
+              "seq": 18,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028106555580,
+              "frame": {
+                "type": "system",
+                "subtype": "background_tasks_changed",
+                "tasks": [],
+                "uuid": "a6039407-6926-4df5-8b61-798b2fa9144d",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c"
+              }
+            },
+            {
+              "seq": 19,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028110444086,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": "requesting",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "uuid": "e49e691b-869c-4985-bbc8-13cc2823adf9",
+                "user_message_uuids": [
+                  "493ff49c-517d-4ce1-a4f2-eb2069d13721"
+                ]
+              }
+            },
+            {
+              "seq": 20,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028117013488,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_start",
+                  "message": {
+                    "id": "msg_g0_claude_2",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "deepseek-flash",
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {
+                      "input_tokens": 111,
+                      "cache_creation_input_tokens": 222,
+                      "cache_read_input_tokens": 333,
+                      "output_tokens": 1
+                    }
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "13eed936-d2ef-43ce-919e-fce9f11cbdd7",
+                "ttft_ms": 3,
+                "thinking_display": "updates",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 21,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028117106387,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_start",
+                  "index": 0,
+                  "content_block": {
+                    "type": "text",
+                    "text": ""
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "787d783b-7baf-4784-a870-59d65b9ec191",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 22,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028117151666,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_delta",
+                  "index": 0,
+                  "delta": {
+                    "type": "text_delta",
+                    "text": "G0_CLAUDE_SEED_2"
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "6b746c15-41fb-40c4-91fb-028a4dc2935e",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 23,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028117790762,
+              "frame": {
+                "type": "assistant",
+                "message": {
+                  "id": "msg_g0_claude_2",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "deepseek-flash",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "G0_CLAUDE_SEED_2"
+                    }
+                  ],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 111,
+                    "cache_creation_input_tokens": 222,
+                    "cache_read_input_tokens": 333,
+                    "output_tokens": 1
+                  },
+                  "context_management": null
+                },
+                "parent_tool_use_id": null,
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "uuid": "31519cb7-55e7-4713-8751-870df7be3074",
+                "timestamp": "2026-11-07T06:40:18.679Z"
+              }
+            },
+            {
+              "seq": 24,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028117867877,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_stop",
+                  "index": 0
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "b5abc141-8d0b-43ed-b3c0-c9d346289afb",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 25,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028118450314,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_delta",
+                  "delta": {
+                    "stop_reason": "end_turn",
+                    "stop_sequence": null
+                  },
+                  "usage": {
+                    "output_tokens": 27
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "92a4a05b-82f1-40d7-88e7-a656584afa91",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 26,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028118664347,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_stop"
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "d3b928a5-74c5-4098-b9a5-ae8c248a3b49",
+                "api_message_id": "msg_g0_claude_2"
+              }
+            },
+            {
+              "seq": 27,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028121460303,
+              "frame": {
+                "duration_api_ms": 35,
+                "stop_reason": "end_turn",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "total_cost_usd": 0.010017,
+                "usage": {
+                  "input_tokens": 222,
+                  "cache_creation_input_tokens": 444,
+                  "cache_read_input_tokens": 666,
+                  "output_tokens": 54,
+                  "output_tokens_details": {
+                    "thinking_tokens": 0
+                  },
+                  "server_tool_use": {
+                    "web_search_requests": 0,
+                    "web_fetch_requests": 0
+                  },
+                  "service_tier": "standard",
+                  "cache_creation": {
+                    "ephemeral_1h_input_tokens": 0,
+                    "ephemeral_5m_input_tokens": 0
+                  },
+                  "inference_geo": "",
+                  "iterations": [],
+                  "speed": "standard",
+                  "fallback_credit": null
+                },
+                "modelUsage": {
+                  "deepseek-flash": {
+                    "inputTokens": 666,
+                    "outputTokens": 81,
+                    "cacheReadInputTokens": 999,
+                    "cacheCreationInputTokens": 666,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.010017,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                },
+                "permission_denials": [],
+                "terminal_reason": "completed",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "subagent_stats": {
+                  "spawned": 1,
+                  "requested": {
+                    "background": 0,
+                    "foreground": 0,
+                    "unset": 1
+                  },
+                  "started_in_background": 1,
+                  "max_depth": 1,
+                  "spawned_by_subagents": 0,
+                  "completed": 1,
+                  "failed": 0,
+                  "killed": {
+                    "parent": 0,
+                    "user": 0,
+                    "system": 0
+                  },
+                  "refused": {
+                    "depth_limit": 0,
+                    "concurrency_limit": 0,
+                    "budget": 0
+                  },
+                  "by_type": {
+                    "g0_child": 1
+                  }
+                },
+                "safety_stops": 0,
+                "is_error": false,
+                "num_turns": 2,
+                "subtype": "success",
+                "api_error_status": null,
+                "result": "G0_CLAUDE_SEED_2",
+                "ttft_ms": 40,
+                "type": "result",
+                "duration_ms": 100,
+                "uuid": "b701f016-beb3-4444-aaa0-1c3e9e2dd77b",
+                "ttft_stream_ms": 39,
+                "time_to_request_ms": 34,
+                "first_content_frame_ms": 39,
+                "user_message_uuid": "493ff49c-517d-4ce1-a4f2-eb2069d13721",
+                "user_message_uuids": [
+                  "493ff49c-517d-4ce1-a4f2-eb2069d13721"
+                ],
+                "request_sent_wall_ms": 1794033618616,
+                "first_request_input_tokens": 666,
+                "queued_turn_count": 0,
+                "result_index": 0,
+                "model_usage_since_last_result": {
+                  "deepseek-flash": {
+                    "inputTokens": 666,
+                    "outputTokens": 81,
+                    "cacheReadInputTokens": 999,
+                    "cacheCreationInputTokens": 666,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.010017,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                }
+              }
+            },
+            {
+              "seq": 28,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028122663924,
+              "frame": {
+                "type": "command_lifecycle",
+                "command_uuid": "493ff49c-517d-4ce1-a4f2-eb2069d13721",
+                "state": "completed",
+                "uuid": "1346a8a3-7a8a-4e2e-afc0-9f3586887b20",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c"
+              }
+            },
+            {
+              "seq": 29,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028127161278,
+              "frame": {
+                "type": "system",
+                "subtype": "init",
+                "cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-children-01/cwd",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "tools": [
+                  "Task"
+                ],
+                "mcp_servers": [],
+                "model": "deepseek-flash",
+                "permissionMode": "bypassPermissions",
+                "slash_commands": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring",
+                  "agents",
+                  "auto-mode-setup",
+                  "autocompact",
+                  "clear",
+                  "color",
+                  "compact",
+                  "config",
+                  "output-style",
+                  "context",
+                  "effort",
+                  "fast",
+                  "focus",
+                  "heapdump",
+                  "init",
+                  "mcp",
+                  "model",
+                  "__remote-workflow",
+                  "workflow-launch-exec",
+                  "reload-plugins",
+                  "reload-skills",
+                  "rename",
+                  "security-review",
+                  "usage",
+                  "insights",
+                  "recap",
+                  "goal",
+                  "list-agents",
+                  "team-onboarding"
+                ],
+                "terminal_slash_commands": [
+                  "doctor",
+                  "color",
+                  "focus",
+                  "reload-plugins"
+                ],
+                "apiKeySource": "ANTHROPIC_API_KEY",
+                "claude_code_version": "2.1.319",
+                "output_style": "default",
+                "agents": [
+                  "claude",
+                  "Explore",
+                  "g0_child",
+                  "general-purpose",
+                  "Plan",
+                  "statusline-setup"
+                ],
+                "skills": [
+                  "deep-research",
+                  "dataviz",
+                  "update-config",
+                  "verify",
+                  "debug",
+                  "code-review",
+                  "simplify",
+                  "batch",
+                  "fewer-permission-prompts",
+                  "doctor",
+                  "loop",
+                  "claude-api",
+                  "workflow-authoring",
+                  "run",
+                  "run-skill-generator",
+                  "plugin-authoring"
+                ],
+                "plugins": [
+                  {
+                    "name": "cc-plugin-agents-md",
+                    "path": "builtin",
+                    "source": "cc-plugin-agents-md@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-privacy",
+                    "path": "builtin",
+                    "source": "cc-plugin-privacy@builtin"
+                  },
+                  {
+                    "name": "cc-plugin-plugin-authoring",
+                    "path": "builtin",
+                    "source": "cc-plugin-plugin-authoring@builtin"
+                  }
+                ],
+                "capabilities": [
+                  "interrupt_receipt_v1",
+                  "interrupt_cancel_queued_v1",
+                  "interrupt_send_now_v1",
+                  "interrupt_requeue_taken_v1",
+                  "msg_lifecycle_v1",
+                  "request_marker_lists_v1",
+                  "ask_user_question_unanswered_v1",
+                  "lifecycle_wakeup_source_v1",
+                  "sdk_mcp_tools_list_changed",
+                  "sdk_mcp_manifests",
+                  "mcp_read_resource_v1",
+                  "mcp_tool_ui_meta_v1",
+                  "ui_surface_v1",
+                  "mcp_call_result_not_for_model_v1",
+                  "mcp_call_check_permissions_v1"
+                ],
+                "analytics_disabled": true,
+                "product_feedback_disabled": true,
+                "uuid": "c39ed626-593c-44b1-a743-bab45c6ecd10",
+                "memory_paths": {
+                  "auto": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-children-01/config/projects/-home-jack--cache-octopus-tests-context-meter-compact-g0-claude-2-1-319-children-01-cwd/memory/"
+                },
+                "original_cwd": "/home/jack/.cache/octopus-tests/context-meter-compact-g0/claude-2.1.319-children-01/cwd",
+                "additional_directories": [],
+                "messaging_socket_path": "/tmp/cc-socks/64657.sock",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "per_turn_effort_active": false,
+                "ultrathink_available": false,
+                "ultrathink_typed_raises": false,
+                "view_mode": "default"
+              }
+            },
+            {
+              "seq": 30,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028127796775,
+              "frame": {
+                "type": "system",
+                "subtype": "status",
+                "status": "requesting",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "uuid": "dbb504bf-25c7-4c5d-bdcf-5617a9cdf62d"
+              }
+            },
+            {
+              "seq": 31,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028133954576,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_start",
+                  "message": {
+                    "id": "msg_g0_claude_3",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "deepseek-flash",
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {
+                      "input_tokens": 111,
+                      "cache_creation_input_tokens": 222,
+                      "cache_read_input_tokens": 333,
+                      "output_tokens": 1
+                    }
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "b5e03822-0128-4f23-b58a-497dba0b9378",
+                "ttft_ms": 3,
+                "thinking_display": "updates",
+                "api_message_id": "msg_g0_claude_3"
+              }
+            },
+            {
+              "seq": 32,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028134051366,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_start",
+                  "index": 0,
+                  "content_block": {
+                    "type": "text",
+                    "text": ""
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "d85aa2b8-67aa-463a-ba5e-a4d7f9d993e4",
+                "api_message_id": "msg_g0_claude_3"
+              }
+            },
+            {
+              "seq": 33,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028134093507,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_delta",
+                  "index": 0,
+                  "delta": {
+                    "type": "text_delta",
+                    "text": "G0_CLAUDE_SEED_3"
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "cf26afe1-940c-4e52-a3c6-519267a2c935",
+                "api_message_id": "msg_g0_claude_3"
+              }
+            },
+            {
+              "seq": 34,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028134399693,
+              "frame": {
+                "type": "assistant",
+                "message": {
+                  "id": "msg_g0_claude_3",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "deepseek-flash",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "G0_CLAUDE_SEED_3"
+                    }
+                  ],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 111,
+                    "cache_creation_input_tokens": 222,
+                    "cache_read_input_tokens": 333,
+                    "output_tokens": 1
+                  },
+                  "context_management": null
+                },
+                "parent_tool_use_id": null,
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "uuid": "21d99ea5-8103-45d8-b3bc-5ccc43e05d51",
+                "timestamp": "2026-11-07T06:40:18.696Z"
+              }
+            },
+            {
+              "seq": 35,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028134470315,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "content_block_stop",
+                  "index": 0
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "82e8db19-4d62-4174-9f59-cdafdbe4b7f8",
+                "api_message_id": "msg_g0_claude_3"
+              }
+            },
+            {
+              "seq": 36,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028135043351,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_delta",
+                  "delta": {
+                    "stop_reason": "end_turn",
+                    "stop_sequence": null
+                  },
+                  "usage": {
+                    "output_tokens": 27
+                  }
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "20757d9c-6520-4695-863e-684bd0cdace7",
+                "api_message_id": "msg_g0_claude_3"
+              }
+            },
+            {
+              "seq": 37,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028135261850,
+              "frame": {
+                "type": "stream_event",
+                "event": {
+                  "type": "message_stop"
+                },
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "parent_tool_use_id": null,
+                "uuid": "6b65d2da-cc1c-4fb0-b09b-9f4ec3c6932e",
+                "api_message_id": "msg_g0_claude_3"
+              }
+            },
+            {
+              "seq": 38,
+              "generation": 1,
+              "direction": "server",
+              "monotonic_ns": 15028136506185,
+              "frame": {
+                "duration_api_ms": 41,
+                "stop_reason": "end_turn",
+                "session_id": "318fa345-8fed-47ea-8077-bea804f3a82c",
+                "total_cost_usd": 0.012801,
+                "usage": {
+                  "input_tokens": 111,
+                  "cache_creation_input_tokens": 222,
+                  "cache_read_input_tokens": 333,
+                  "output_tokens": 27,
+                  "output_tokens_details": {
+                    "thinking_tokens": 0
+                  },
+                  "server_tool_use": {
+                    "web_search_requests": 0,
+                    "web_fetch_requests": 0
+                  },
+                  "service_tier": "standard",
+                  "cache_creation": {
+                    "ephemeral_1h_input_tokens": 0,
+                    "ephemeral_5m_input_tokens": 0
+                  },
+                  "inference_geo": "",
+                  "iterations": [],
+                  "speed": "standard",
+                  "fallback_credit": null
+                },
+                "modelUsage": {
+                  "deepseek-flash": {
+                    "inputTokens": 777,
+                    "outputTokens": 108,
+                    "cacheReadInputTokens": 1332,
+                    "cacheCreationInputTokens": 888,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.012801,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                },
+                "permission_denials": [],
+                "terminal_reason": "completed",
+                "fast_mode_state": "off",
+                "fast_mode_disabled_reason": "sdk_opt_in_required",
+                "origin": {
+                  "kind": "task-notification",
+                  "producer": "session-task",
+                  "runId": "0mw61ank6-5c451b27"
+                },
+                "subagent_stats": {
+                  "spawned": 1,
+                  "requested": {
+                    "background": 0,
+                    "foreground": 0,
+                    "unset": 1
+                  },
+                  "started_in_background": 1,
+                  "max_depth": 1,
+                  "spawned_by_subagents": 0,
+                  "completed": 1,
+                  "failed": 0,
+                  "killed": {
+                    "parent": 0,
+                    "user": 0,
+                    "system": 0
+                  },
+                  "refused": {
+                    "depth_limit": 0,
+                    "concurrency_limit": 0,
+                    "budget": 0
+                  },
+                  "by_type": {
+                    "g0_child": 1
+                  }
+                },
+                "safety_stops": 0,
+                "is_error": false,
+                "num_turns": 1,
+                "subtype": "success",
+                "api_error_status": null,
+                "result": "G0_CLAUDE_SEED_3",
+                "ttft_ms": 11,
+                "type": "result",
+                "duration_ms": 13,
+                "uuid": "dfae7101-eb24-4a3e-bac6-fbe7ccd91480",
+                "ttft_stream_ms": 11,
+                "time_to_request_ms": 8,
+                "first_content_frame_ms": 11,
+                "queued_turn_count": 0,
+                "result_index": 1,
+                "model_usage_since_last_result": {
+                  "deepseek-flash": {
+                    "inputTokens": 111,
+                    "outputTokens": 27,
+                    "cacheReadInputTokens": 333,
+                    "cacheCreationInputTokens": 222,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.002784,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 32000,
+                    "thinkingTokens": 0,
+                    "cacheCreationEphemeral5mInputTokens": 0,
+                    "cacheCreationEphemeral1hInputTokens": 0,
+                    "canonicalModel": "deepseek-flash",
+                    "provider": "firstParty",
+                    "costBasis": "unknown"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "limitation": "Child forwarding explicitly enabled for this capture; ordinary product argv does not enable it. Reader drain also recorded a later native root response without user_message_uuid; it does not establish another user request.",
+      "artifact_sha256": {
+        "host-1.jsonl": "c3e6e58d58b7388ca78cbf222a63ddefb6de52acb582f3d2ac04e55ba470d60c",
+        "host-1.stderr": "237f355dd4c52386530c0359232c9173d42e303fab8bd6cdbe7a305e2c4803a2",
+        "request-0.json": "2723ff5d555ff83c886f1d737fbe4ab7ac77b60a8168ad92bbd0ae3b2e8714f1",
+        "request-1.json": "4a4d9ca38229a5adb381f0d96620c8bdd271202965b5389bf077084afd05808e",
+        "request-2.json": "37db581bde3d964e0e9112de1daff64144b3d0c649833503b5d765fb171f3954",
+        "request-3.json": "a31eeb70e730f555d483f35775c4e0aa0a77f25c42040c8d33307f28aaf30471",
+        "response-0.sse": "e6e90fa5414752cd288241d6320413bf264236a036115fd02c4cc9c40258f7df",
+        "response-1.sse": "77360de18d4ae467402022e63e450c04fb7dc2fa021f9b38f39192affa74fa85",
+        "response-2.sse": "6be7c2897f8dab834ede4de967b4b65715f91084bb96d7859e963ebda70bc709",
+        "response-3.sse": "ae1a568105ef0ae8c93be856f090389dbf32db363b5bd27283e8b0f829552471",
+        "result.json": "af699d35048915cba46201be68daa7f771ed540a54e644aa9d7f1c7908341040"
+      }
+    }
+  ]
+}

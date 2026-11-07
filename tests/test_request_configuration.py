@@ -102,8 +102,8 @@ async def test_request_captures_session_and_agent_after_coordinated_updates(conf
         waiting.put_nowait(None)
         return await acquire()
 
-    # Hold the existing configuration boundary to order real HTTP updates
-    # before request assembly; assertions concern the process's actual input.
+    # Order real HTTP updates before capture, then release the lock before
+    # awaiting the Owner. Configuration writes now use that same Owner.
     async with manager.configuration_lock:
         monkeypatch.setattr(manager.configuration_lock, "acquire", observe_acquire)
         session_update = asyncio.create_task(client.patch(f"/api/sessions/{session.id}", json={"model": "session-new"}))
@@ -112,10 +112,11 @@ async def test_request_captures_session_and_agent_after_coordinated_updates(conf
             "reasoning_effort": "high", "service_tier": "fast", "credential_id": credential_ids[1],
         }))
         await asyncio.wait_for(waiting.get(), 1)
-        receipt = await manager.start_message(session.id, "Use a consistent configuration")
-        await asyncio.wait_for(input_recorded.wait(), 3)
+        submission = asyncio.create_task(manager.start_message(session.id, "Use a consistent configuration"))
     try:
-        replies = await asyncio.gather(session_update, agent_update)
+        receipt = await asyncio.wait_for(submission, 3)
+        await asyncio.wait_for(input_recorded.wait(), 3)
+        replies = await asyncio.wait_for(asyncio.gather(session_update, agent_update), 3)
         assert all(reply.status_code == 200 for reply in replies), [reply.text for reply in replies]
         assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
         assert [json.loads(line) for line in effects.read_text().splitlines()] == [{

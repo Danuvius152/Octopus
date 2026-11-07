@@ -79,6 +79,7 @@ class SessionOwner:
         self.manager = cast("SessionManager", manager)
         self.session = session
         self._wake = asyncio.Event()
+        self._context_refresh = asyncio.Event()
         self._commands: deque[_NoticeCommand | _QuestionCommand | _RuntimeCommand] = deque()
         self._command_bytes = 0
         self._controls: deque[_QuestionCommand | _RuntimeCommand] = deque()
@@ -166,6 +167,12 @@ class SessionOwner:
     def wake(self) -> None:
         self._wake.set()
 
+    def refresh_context(self) -> None:
+        """A lossy wake hint; durable configuration versions decide validity."""
+        if not self._closing and not self.task.done():
+            self._context_refresh.set()
+            self._wake.set()
+
     def control_conflicts(self, data: dict[str, Any]) -> bool:
         """The first original envelope owns its ID before a receipt can commit."""
         for entry in (self._current, *self._controls):
@@ -225,6 +232,7 @@ class SessionOwner:
     @property
     def idle(self) -> bool:
         return (self._current is None and not self._commands and not self._controls
+                and not self._context_refresh.is_set()
                 and not self.questions.has_waiting_notifications and self.publisher.idle
                 and self.runtime.idle)
 
@@ -322,6 +330,9 @@ class SessionOwner:
                 # retirement; otherwise an early EOF/refusal can steal outcome
                 # selection while the Owner was recording an answer.
                 if native_stop is None:
+                    if self._context_refresh.is_set():
+                        self._context_refresh.clear()
+                        await self.manager._read_context_owned(self.session)
                     await self.questions.deadlines()
                     self.questions.flush_notifications()
                     await self.runtime.advance()

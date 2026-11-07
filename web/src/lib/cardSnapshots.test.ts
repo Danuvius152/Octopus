@@ -27,7 +27,7 @@ it("retains a newer subagent result across an older detail response", () => {
   store.upsertSubagent("s", running);
   const before = useSessionStore.getState();
   store.upsertSubagent("s", { ...running, status: "completed", summary: "new answer" });
-  const dispatch = { generation: "cards", revision: 0, paused: false, active_request_id: null, items: [] };
+  const dispatch = { generation: "cards", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] };
   applySessionSnapshot("s", { messages: [], subagents: [running], dispatch_state: dispatch, active_attempt: null }, before);
   expect(useSessionStore.getState().subagents.s.call.summary).toBe("new answer");
   const nextStart = useSessionStore.getState();

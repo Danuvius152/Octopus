@@ -46,6 +46,8 @@ async def _publish(session_manager, kind: str, agent: dict) -> None:
     comes down whole, and the store mirrors it — `agent_created` /
     `agent_updated` upsert, `agent_archived` / `agent_deleted` remove.
     """
+    if kind == "agent_updated":
+        session_manager.wake_contexts(agent["id"], agent.get("user_id"))
     await session_manager._broadcast(
         {"type": kind, "agent_id": agent["id"], "agent": AgentRead(**agent).model_dump()},
         # An agent event carries a row, not a session, so the owner is told

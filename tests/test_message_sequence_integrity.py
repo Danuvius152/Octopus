@@ -71,7 +71,8 @@ async def test_append_failure_hole_survives_reload_and_unarchive(history, monkey
     assert restored._message_count == 1 and restored._next_message_seq == 2
     await manager.archive_session(session.id, replace=False)
     restored = await manager.unarchive_session(session.id)
-    assert await manager._persist_message(restored, MessageContent(role="user", type="text", content="after restore")) == 2
+    assert await manager.retain_result_notice(restored.id, "after-restore", "after restore")
+    assert (await db.load_messages(restored.id))[-1]["seq"] == 2
     detail = await get_session(manager, session.id, user_id=None)
     assert detail.message_count == 2
     assert detail.next_message_seq == 3

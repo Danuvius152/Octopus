@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from .. import fork_helpers
 from ..attachments import AttachmentUnavailable, validate_message_attachments
 from ..config import settings
+from ..context_models import ContextBinding, context_binding, context_target
 from ..credential_bindings import CredentialBindingError
 from ..diagnostics import diagnostic_text, exception_diagnostic, safe_diagnostic
 from ..harness import HarnessCredential, HarnessEvent, HarnessRun, get_harness
@@ -119,6 +120,22 @@ class Reset:
 
 
 @dataclass(frozen=True)
+class ReadContext:
+    pass
+
+
+@dataclass(frozen=True)
+class CaptureConfiguration:
+    context: Session
+
+
+@dataclass(frozen=True)
+class UpdateConfiguration:
+    fields: dict[str, Any]
+    user_id: str | None
+
+
+@dataclass(frozen=True)
 class RecoveryDismissed:
     """The durable recovery row was already dismissed by its database owner."""
 
@@ -213,7 +230,7 @@ class IdlePublication:
     reply: asyncio.Future[bool] | None = None
 
 
-RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | CloseWork | RetireProcess | RetireHeldProcess
+RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | ReadContext | CaptureConfiguration | UpdateConfiguration | CloseWork | RetireProcess | RetireHeldProcess
                   | CloseExecution | ReleaseApplication | ReserveFork | OwnForkProcess | ReleaseArchive | AutoArchive | FinishAutoArchive
                   | IdleEvent | CorrelatedControl | RecoveryDismissed)
 
@@ -234,6 +251,7 @@ class _PreparedRun:
     connectors: list[tuple[Any, Any]]
     backend: HarnessRun
     prompt: str
+    context_binding: ContextBinding
 
 
 @dataclass
@@ -396,6 +414,7 @@ class OwnerRuntime:
         self.steer: _Steer | None = None
         self.dispatch_notice: dict[str, Any] | None = None
         self.status_notice: dict[str, Any] | None = None
+        self.context_notice: dict[str, Any] | None = None
         self._idle_action: asyncio.Task[Any] | None = None
         self._auto_archive_operation: asyncio.Task[bool] | None = None
         self._idle_publication: IdlePublication | None = None
@@ -407,7 +426,7 @@ class OwnerRuntime:
     @property
     def idle(self) -> bool:
         return (not self.busy and self.steer is None and self.dispatch_notice is None
-                and self.status_notice is None and self._idle_action is None
+                and self.status_notice is None and self.context_notice is None and self._idle_action is None
                 and self._auto_archive_operation is None and self._idle_publication is None)
 
     def task(self, operation: Any, name: str) -> asyncio.Task[Any]:
@@ -445,10 +464,18 @@ class OwnerRuntime:
         self.dispatch_notice = self.owner.manager._dispatch_event(self.owner.session)
         self.owner.wake()
 
+    def context_changed(self) -> None:
+        session = self.owner.session
+        self.context_notice = {"type": "context_state", "session_id": session.id,
+                               "generation": self.owner.manager._dispatch_generation,
+                               "context_state": session.context_state.model_dump() if session.context_state else None}
+        self.owner.wake()
+
     def notify_status(self, value: SessionStatus) -> None:
         session = self.owner.session
         session.status = value
-        self.status_notice = {"type": "status", "session_id": session.id, "status": value.value}
+        self.status_notice = {"type": "status", "session_id": session.id, "status": value.value,
+                              "operation": self.current.request.operation if self.current is not None else None}
 
     def can_handle(self, command: RuntimeCommand) -> bool:
         if isinstance(command, IdleEvent):
@@ -457,6 +484,13 @@ class OwnerRuntime:
 
     async def handle(self, command: RuntimeCommand) -> Any:
         session, manager = self.owner.session, self.owner.manager
+        if isinstance(command, ReadContext):
+            return await manager._read_context_owned(session)
+        if isinstance(command, CaptureConfiguration):
+            return await manager._capture_request_configuration(command.context)
+        if isinstance(command, UpdateConfiguration):
+            async with manager.configuration_lock:
+                return await manager._save_session_configuration(session.id, command.fields, command.user_id)
         if isinstance(command, Submit):
             return await self._submit(command)
         if isinstance(command, RecoveryDismissed):
@@ -561,6 +595,8 @@ class OwnerRuntime:
                 session._dispatch_paused = isinstance(command, CloseExecution)
             await self._interrupt("shutdown" if reason == "shutdown" else "user")
             await self.owner.questions.handle(CloseSessionQuestions(reason, tuple(session._questions.values())))
+            if isinstance(command, Reset):
+                await manager._reset_context_owned(session)
             self.changed()
             return True
         if isinstance(command, RetireProcess):
@@ -664,15 +700,20 @@ class OwnerRuntime:
     async def _submit(self, command: Submit) -> SubmissionReceipt:
         from ..knowledge import for_entry
         from ..mcp_identity import work_is_open
+        from ..session_operations import MessageOperation
         from .client_submissions import input_digest
 
         session, manager, request = self.owner.session, self.owner.manager, command.request
         database = manager.input_database()
-        payload: dict[str, Any] = {"content": request.prompt, "attachment_ids": request.attachment_ids,
-                   "attachments": list(command.attachments), "wiki_mode": request.wiki_mode}
+        submitted: dict[str, Any] = {"content": request.prompt, "attachment_ids": request.attachment_ids,
+                                    "wiki_mode": request.wiki_mode}
+        operation = MessageOperation.model_validate({"kind": request.operation, **submitted})
+        if command.recovery_of:
+            submitted["recovery_of_client_id"] = command.recovery_of
+        digest = input_digest(submitted)
+        payload: dict[str, Any] = {"operation": operation.model_dump(), "attachments": list(command.attachments)}
         if command.recovery_of:
             payload["recovery_of_client_id"] = command.recovery_of
-        digest = input_digest(payload)
         client_id = command.client_id or (
             f"{request.source}:{request.delivery_id}" if request.delivery_id else request.request_id
         )
@@ -744,7 +785,7 @@ class OwnerRuntime:
         snapshot["revision"] += 1
         if not steering:
             snapshot["items"].append({
-                "request_id": request.request_id, "source": request.source,
+                "request_id": request.request_id, "source": request.source, "operation": request.operation,
                 "summary": request.prompt[:1000], "priority": request.priority,
             })
         queued = not steering and (self.current is not None or session._dispatch_paused)
@@ -793,7 +834,7 @@ class OwnerRuntime:
     @staticmethod
     def _pending_input(request: QueuedPrompt) -> PendingInput:
         return PendingInput(request.request_id, request.source, request.summary, request.work_id,
-                            request.priority, request.order, request.queued_event)
+                            request.priority, request.order, request.queued_event, operation=request.operation)
 
     async def _steer_configuration_matches(self, session: Session, agent: dict[str, Any] | None) -> bool:
         execution = self.current
@@ -835,7 +876,7 @@ class OwnerRuntime:
         if self.current is not execution:
             raise SessionOwnerUnavailable("The original execution is no longer owned")
         outcome = TurnOutcome(
-            request_id=settlement.request_id, status=status,
+            request_id=settlement.request_id, status=status, operation=execution.request.operation,
             message=safe_diagnostic(message), code=code,
             provider_code=getattr(result, "error_code", None) or provider_code,
             recovery=dict(settlement.recovery),
@@ -1077,7 +1118,7 @@ class OwnerRuntime:
         return RequestCompletion(
             input_request_id=request.request_id, request_id=actual_request_id or request.request_id,
             state=state, outcome=outcome, recording_state=recording, reason=reason,
-            notification_state=notification_state,
+            notification_state=notification_state, operation=request.operation,
         )
 
     def notification_state(self, execution: Execution) -> Literal["delivered", "failed", "unavailable"]:
@@ -1207,7 +1248,7 @@ class OwnerRuntime:
                 if self.owner.publisher.offer(request.queued_event, self.owner.session.user_id) is None:
                     return False
                 request.queued_event = None
-        for attribute in ("status_notice", "dispatch_notice"):
+        for attribute in ("context_notice", "status_notice", "dispatch_notice"):
             event = getattr(self, attribute)
             if event is not None:
                 if self.owner.publisher.offer(event, self.owner.session.user_id) is None:
@@ -1502,7 +1543,8 @@ class OwnerRuntime:
         if configured.agent_id:
             from ..agent_memory import ensure_agent_dirs
             await asyncio.to_thread(ensure_agent_dirs, configured.agent_id, configured.user_id)
-        return _PreparedRun(configured, agent, credential, connectors, backend, prompt)
+        return _PreparedRun(configured, agent, credential, connectors, backend, prompt,
+                            context_binding(context_target(configured, agent), configured.context_state))
 
     async def _prepare_retry(self, captured: Session, prepared: _PreparedRun, prompt: str) -> _PreparedRun:
         if captured.user_id is None:
@@ -1552,6 +1594,7 @@ class OwnerRuntime:
         attempt_id = execution.settlement.attempt_id if execution.attempt is None else None
         attempt = execution.attempt = _Attempt(backend, prepared.prompt, reused, attempt_id=attempt_id or uuid.uuid4().hex)
         attempt.credential = getattr(backend, "credential", None) if reused else prepared.credential
+        attempt.context_binding = prepared.context_binding
         if isinstance(backend, HarnessRun):
             from ..harness import Harness
             assert execution.turn is not None
@@ -2016,7 +2059,8 @@ class OwnerRuntime:
             captured = capture_configuration(session)
             async def became_idle() -> None:
                 await manager._enforce_held_cap(keep_session_id=captured.id)
-                await manager._fire_session_idle_notification(captured)
+                if execution.request.operation == "message":
+                    await manager._fire_session_idle_notification(captured)
                 if captured.origin in manager._AUTO_ARCHIVE_ORIGINS:
                     await manager.auto_archive_scheduled_session(captured.id)
             self._idle_action = self.task(became_idle(), f"session-idle-{session.id}")

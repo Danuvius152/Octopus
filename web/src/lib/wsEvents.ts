@@ -2,6 +2,7 @@ import type { components } from "../api/contracts";
 import type { Agent, Application, AttachmentMetadata, Delegation, QuestionItem, ResearchJob, SessionInfo } from "../stores/sessionStore";
 import { readDispatchState, type DispatchState } from "./sessionDispatch";
 import { readRuntimeMetadata } from "./toolIdentity";
+import { readContextState, type ContextState } from "./sessionContext";
 
 type Guard<T> = (value: unknown) => value is T;
 type Value<G> = G extends Guard<infer T> ? T : never;
@@ -89,8 +90,8 @@ const researchReceipt: Guard<NonNullable<ResearchJob["delivery_receipt"]>> = fie
   error: maybeText, browser_confirmed_version: optional(integer), browser_confirmed_at: optional(text),
 });
 const finalAnswer: Guard<Dto["FinalAnswerRef"]> = fields({ thread_id: id, turn_id: id, message_seqs: optional(array(integer)) });
-const outcome: Guard<Pick<Dto["TurnOutcome"], "kind" | "request_id" | "status" | "message" | "code" | "provider_code" | "recovery" | "final_answer" | "native_status">> = fields({
-  kind: oneOf("outcome"), request_id: id, status: oneOf("success", "failed", "interrupted"),
+const outcome: Guard<Pick<Dto["TurnOutcome"], "kind" | "operation" | "request_id" | "status" | "message" | "code" | "provider_code" | "recovery" | "final_answer" | "native_status">> = fields({
+  kind: oneOf("outcome"), operation: oneOf("message"), request_id: id, status: oneOf("success", "failed", "interrupted"),
   message: maybeText, code: maybeText, provider_code: maybeText,
   recovery: optional(countMap), final_answer: optional(nullable(finalAnswer)),
   native_status: optional(nullable(oneOf("completed", "failed", "interrupted"))),
@@ -110,6 +111,8 @@ function event<const K extends string, const S extends Rules>(type: K, rules: S)
   return { type, matches: fields({ ...envelope, type: oneOf(type), ...rules }) };
 }
 const definitions = [
+  event("context_state", { ...inSession, generation: id,
+    context_state: ((value: unknown): value is ContextState | null => readContextState(value) !== undefined) }),
   event("submission", { ...inSession, client_request_id: id, accepted: boolean, message: maybeText, code: maybeText,
     state: optional(nullable(oneOf("unknown"))), execution: optional(execution) }),
   event("command_receipt", { ...inSession, client_command_id: id, operation: oneOf("interrupt", "answer_question", "snooze_question"),

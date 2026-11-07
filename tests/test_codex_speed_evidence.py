@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from server.context_models import ContextObservation, ContextReading, ContextSource
 from server.harness import HarnessEvent
 from tests.codex_speed_evidence import (
     RolloutSnapshot,
     capture_rollout,
+    record_phase,
     successful_thread,
     verify_resume,
 )
@@ -17,6 +19,17 @@ from tests.codex_speed_evidence import (
 THREAD = "speed-thread"
 CWD = Path("/tmp/speed-test")
 SOURCE = Path("/synthetic/rollout.jsonl")
+
+
+def test_phase_evidence_preserves_typed_context_observations_as_json(tmp_path):
+    observation = ContextObservation(backend="codex", native_session_id=THREAD, actual_model="model",
+        source=ContextSource(request_id="request", attempt_id="attempt", connection_generation="connection",
+            native_turn_id="turn", observation_seq=1), kind="sample",
+        reading=ContextReading(used_tokens=250, capacity_tokens=1000, basis="codex_last_total"))
+    record_phase(tmp_path, "sample", snapshot(initial()), [HarnessEvent(type="context_observation", context=observation)])
+    evidence = json.loads((tmp_path / "sample.json").read_text())
+    assert evidence["events"][0]["context"]["source"]["request_id"] == "request"
+    assert evidence["events"][0]["context"]["reading"]["used_tokens"] == 250
 
 
 def event(kind, **payload):

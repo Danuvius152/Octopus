@@ -32,6 +32,7 @@ from .base import (
     resolve_working_dir,
 )
 from .configuration import ConfigurationMixin
+from .context import ContextMixin
 from .credentials import CredentialsMixin
 from .events import EventsMixin
 from .forking import ForkingMixin
@@ -44,6 +45,7 @@ from .turns import TurnsMixin
 
 
 class SessionManager(
+    ContextMixin,
     ConfigurationMixin,
     OwnershipMixin,
     TurnsMixin,

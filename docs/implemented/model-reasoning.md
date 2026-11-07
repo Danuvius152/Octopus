@@ -31,7 +31,7 @@ Archived detail, restore, archive replacement, rewind and full-copy forks
 preserve the settings along with their existing ownership and resume state.
 
 One logical request captures its session overrides and Agent defaults together
-when preparation acquires the configuration lock. Queued input and preparation
+through its original Owner when preparation acquires the configuration lock. Queued input and preparation
 still waiting for that lock have not captured settings: changes saved before
 capture apply to that request. Later changes apply to a subsequent request;
 retries keep the original capture. A held process's spawn signature includes
@@ -62,8 +62,9 @@ cannot move an error or close the new session's dialog.
 | Logical request capture | Capture the effective configuration under the configuration lock; retries keep that capture. |
 | Process launch | Recheck supported controls and current credential authorization before invoking the captured backend. |
 
-`AgentManager` owns candidate validation and default saves. The existing session
-module owns override saves, committed credential-deletion propagation and
+`AgentManager` owns candidate validation and default saves. The original SessionOwner
+owns override commits and configuration capture; the existing session module
+coordinates committed credential-deletion propagation and
 request capture in [configuration.py](../../server/sessions/configuration.py).
 These operations share the database instance's short configuration lock;
 routes translate requests and errors without composing locks or live-field
@@ -71,6 +72,17 @@ refreshes. Effective field precedence stays in `effective_settings`.
 Credential refresh, connector loading and other slow preparation happen after
 capture releases the lock. Revoking a credential can still prevent spawn or
 any later frame write; capture grants no continuing authorization.
+
+Research rechecks the original live Session identity and admission after capture
+returns, before registering a job. A session deleted or archived while that
+result was pending cannot admit research from its retained configuration copy.
+
+Context-affecting override changes commit their invalidation with the original
+configuration transaction. Agent default/credential changes advance their
+comparison revision in the original transaction; committed notifications only
+wake an Owner. Context snapshots and samples independently compare those facts,
+including A→B→A changes. The complete binding and observation rules are owned by
+[the context contract](architecture-contract.md#上下文样本与配置绑定).
 
 `resolve_credential_by_id` in [credentials.py](../../server/sessions/credentials.py)
 already serves ordinary sessions, Research, files and Agent operations. It owns

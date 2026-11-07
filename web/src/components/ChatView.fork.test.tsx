@@ -22,7 +22,7 @@ vi.mock("./ForkDialog", () => ({ ForkDialog: ({ onForked }: { onForked: (value: 
   }}>Confirm test rewind</button> }));
 
 const parent = { ...child, id: "parent", name: "Parent", forked_from_session_id: null } as SessionInfo;
-const dispatch = (generation: string) => ({ generation, revision: 0, paused: false, active_request_id: null, items: [] });
+const dispatch = (generation: string) => ({ generation, revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] });
 const detail = () => ({ ...child,
   messages: Array.from({ length: 200 }, (_, index) => ({ role: "assistant", type: "text", seq: 200 + index, content: `old ${index}` })),
   oldest_loaded_seq: 200, has_more_messages: true, next_message_seq: 400,

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
+
+from pydantic import TypeAdapter
 
 from server.harness import HarnessEvent
 
@@ -133,7 +135,7 @@ def record_phase(directory: Path, label: str, snapshot: RolloutSnapshot, events:
     evidence = {
         "source_path": str(snapshot.path), "bytes": len(snapshot.raw),
         "sha256": hashlib.sha256(snapshot.raw).hexdigest(),
-        "events": [asdict(event) for event in events],
+        "events": TypeAdapter(list[HarnessEvent]).dump_python(events, mode="json"),
     }
     (directory / f"{label}.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
     (directory / f"{label}.json").chmod(0o600)

@@ -85,7 +85,7 @@ async def execution_context(database: Database, session_id: str, original_row: d
             if (edit is None or edit.origin.user_id != owner or not isinstance(request, dict)
                     or request.get("request_id") != inline["request_id"] or request.get("source") != "human"
                     or request.get("work_id") != payload.get("work_id")
-                    or inline["content"] != payload.get("content") or not isinstance(inline["seq"], int)):
+                    or inline["content"] != payload["operation"]["content"] or not isinstance(inline["seq"], int)):
                 return None
             merged = decode_context(json.dumps(request.get("knowledge")))
             expected = revise(context, AdmittedRequest(
@@ -122,12 +122,13 @@ async def load_pending_input(manager: SessionManager, session_id: str, pending: 
     if row is None or not (row["execution_state"] == "pending" or retained_claim) or row["payload"] is None:
         raise ValueError("The queued input is no longer pending")
     payload = row["payload"]
+    operation = payload["operation"]
     context = saved_context(session_id, row)
     session = manager.get_session(session_id)
     if context is None or session is None or context.origin.user_id != session.user_id:
         raise ValueError("The saved input has no valid request context")
     return QueuedPrompt(
-        payload["content"], payload["attachment_ids"], wiki_mode=context.mode,
+        operation["content"], operation["attachment_ids"], wiki_mode=context.mode,
         trusted_request=payload["trusted_request"], knowledge_context=context,
         source=payload["source"], priority=pending.priority, request_id=row["request_id"],
         delivery_id=payload["delivery_id"], work_id=payload["work_id"], order=payload["order"],
@@ -146,6 +147,7 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
         state = "done"
     receipt = row["receipt"]
     result = {"session_id": session_id, "client_request_id": row["client_id"], "request_id": row["request_id"],
+              "operation": row["payload"]["operation"]["kind"] if row["payload"] else "message",
               **(receipt or {"accepted": state in {"pending", "running", "done"}})}
     result["execution"] = {"state": state, "reason_code": row["reason_code"],
                            "state_version": row["state_version"], "updated_at": row["updated_at"],
@@ -178,8 +180,8 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
         result["message"] = "The native runtime accepted this input. Model processing is unconfirmed; the root result does not prove this instruction was consumed."
     if include_input and row["payload"] is not None:
         payload = row["payload"]
-        result["input"] = {"content": payload["content"], "attachment_ids": payload["attachment_ids"],
-                           "attachments": payload.get("attachments", []), "wiki_mode": context.mode if context else None}
+        result["input"] = {**payload["operation"], "attachments": payload.get("attachments", []),
+                           "wiki_mode": context.mode if context else None}
     return result
 
 
@@ -234,7 +236,7 @@ async def claim_input(manager: SessionManager, session_id: str, request_id: str,
             session = manager.get_session(session_id)
             if session is None or session.user_id is None:
                 raise AttachmentUnavailable()
-            observed = await asyncio.to_thread(_files, session_id, payload["attachment_ids"], user_id=session.user_id)
+            observed = await asyncio.to_thread(_files, session_id, payload["operation"]["attachment_ids"], user_id=session.user_id)
             if observed != payload.get("attachments", []):
                 raise AttachmentUnavailable("Required attachments changed after this input was accepted. Restore the input and re-upload the complete files.")
     return True

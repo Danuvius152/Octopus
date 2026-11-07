@@ -122,7 +122,7 @@ async def test_all_jobs_return_once_to_original_after_the_group_settles(jobs, re
     inputs = await cursor.fetchall()
     assert len(inputs) == 1, "All completed job cards must cause one automatic return to the original session"
     payload = json.loads(inputs[0][1])
-    assert first["id"] in payload["content"] and second["id"] in payload["content"]
+    assert first["id"] in payload["operation"]["content"] and second["id"] in payload["operation"]["content"]
     context = json.loads(payload["knowledge"])["value"]
     assert context["trusted_request"] == "Review these selected notes"
     assert context["origin"]["request_id"] == returning.receipt.request_id
@@ -194,7 +194,7 @@ async def test_attention_and_unconfirmed_cancel_return_once_without_claiming_com
     )
     inputs = await cursor.fetchall()
     assert len(inputs) == 1
-    body = json.loads(inputs[0][0])["content"]
+    body = json.loads(inputs[0][0])["operation"]["content"]
     report = json.loads(body.split("\n")[-1])
     assert report["statuses"] == {"completed_with_attention": 1, "cancelled": 1}
     assert any(job["settlement_phase"] == "pending" for job in report["jobs"])
@@ -229,7 +229,7 @@ async def test_real_worker_attention_terminal_returns_in_a_single_or_mixed_group
     )
     inputs = await cursor.fetchall()
     assert len(inputs) == 1
-    report = json.loads(json.loads(inputs[0][0])["content"].split("\n")[-1])
+    report = json.loads(json.loads(inputs[0][0])["operation"]["content"].split("\n")[-1])
     assert report["statuses"] == ({"completed_with_attention": 1, "completed": 1} if success else {"completed_with_attention": 1})
 
 
@@ -295,7 +295,7 @@ async def test_omitted_job_still_contributes_unconfirmed_recording_and_settlemen
     )
     inputs = await cursor.fetchall()
     assert len(inputs) == 1
-    report = json.loads(json.loads(inputs[0][0])["content"].split("\n")[-1])
+    report = json.loads(json.loads(inputs[0][0])["operation"]["content"].split("\n")[-1])
     assert report["jobs_omitted"] == 1
     assert omitted["id"] not in {job["job_id"] for job in report["jobs"]}
     assert report["recording_pending"] == 1

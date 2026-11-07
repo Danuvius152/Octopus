@@ -111,20 +111,20 @@ async def test_completed_undelivered_report_remains_downloadable_by_its_account(
 @pytest.mark.parametrize("retirement", ["delete", "archive"])
 async def test_research_waiting_for_configuration_rejects_a_retired_session(client, db, monkeypatch, retirement):
     session = await _session(client)
-    entered = asyncio.Event()
-    lock = db.configuration_lock
-    acquire = lock.acquire
+    entered, release = asyncio.Event(), asyncio.Event()
+    capture = session_manager.capture_request_configuration
 
-    async def acquiring():
+    async def captured(context):
+        configured = await capture(context)
         entered.set()
-        return await acquire()
+        await release.wait()
+        return configured
 
     async def forbidden_pipeline(*args, **kwargs):
         pytest.fail("A retired session cannot admit research")
 
     monkeypatch.setattr(rm_mod, "run_research", forbidden_pipeline)
-    await lock.acquire()
-    monkeypatch.setattr(lock, "acquire", acquiring)
+    monkeypatch.setattr(session_manager, "capture_request_configuration", captured)
     pending = asyncio.create_task(client.post(f"/api/sessions/{session['id']}/research",
         json={"question": "waiting for original configuration"}))
     try:
@@ -134,7 +134,7 @@ async def test_research_waiting_for_configuration_rejects_a_retired_session(clie
         else:
             await session_manager.archive_session(session["id"], replace=False)
     finally:
-        lock.release()
+        release.set()
     response = await asyncio.wait_for(pending, 2)
     assert response.status_code == 404, response.text
     assert not research_manager._tasks

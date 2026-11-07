@@ -70,6 +70,10 @@ Phone / Browser
 - **Background & scheduled work** — Agents fire off shell commands that run in
   the background **across turns** (the result arrives as a follow-up turn), and
   recurring scheduled prompts run per agent into fresh, auto-archiving sessions.
+- **Codex context meter** — The ring beside Attach file shows remaining context
+  from the latest native root sample. Open its read-only details for tokens,
+  model and sampling information. Unknown or stale data stays explicit;
+  automatic compaction and model/credential changes update its validity.
 - **Agent-to-agent collaboration** — One agent can delegate to another by
   name: "ask Vera to review this file" spawns Vera in her own session
   under her own agent config (credentials, memory, tools, even a different

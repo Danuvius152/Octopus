@@ -20,7 +20,7 @@ test("saved input survives a page reload and only executes after an explicit new
     else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
     else if (path === "/api/sessions") data = [session];
     else if (path === `/api/sessions/${session.id}`) data = { ...session, messages: [], pending_questions: [], subagents: [],
-      next_message_seq: 0, has_more_messages: false, dispatch_state: { generation: "restarted-service", revision: 0, paused: false, active_request_id: null, items: [] } };
+      next_message_seq: 0, has_more_messages: false, dispatch_state: { generation: "restarted-service", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] } };
     else if (path === `/api/sessions/${session.id}/submissions`) data = { items: frames.length ? [] : [summary], next_cursor: null };
     else if (path === `/api/sessions/${session.id}/submissions/old-client`) data = { session_id: session.id, ...summary, accepted: true,
       input: { content: "Saved input after restart 中文", attachment_ids: [], attachments: [], wiki_mode: null } };

@@ -274,7 +274,7 @@ class ScheduleRunner:
         """Use the same original completion and retirement evidence for each mode."""
         completion = await receipt.wait()
         await self._session_mgr.await_session_execution(session_id)
-        recorded = completion.state == "completed" and completion.recording_state == "committed"
+        recorded = completion.operation == "message" and completion.state == "completed" and completion.recording_state == "committed"
         if not recorded:
             logger.error("Schedule %s completion is %s, recording is %s (session=%s request=%s)",
                          schedule_id, completion.state, completion.recording_state, session_id, completion.request_id)

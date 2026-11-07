@@ -17,7 +17,7 @@ it("resumes exact-round polling after a real reconnect invalidates its in-flight
     receipt: { kind: "delegation", delegation_id: "child", work_id: "round" } } } as Message;
   const row = { id: "parent", archived: false } as SessionInfo;
   const round = { delegation_id: "child", work_id: "round", parent_session_id: "parent", state: "running" } as Delegation;
-  const dispatch = { generation: "service", revision: 0, paused: false, active_request_id: null, items: [] };
+  const dispatch = { generation: "service", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] };
   useSessionStore.setState({ ...useSessionStore.getInitialState(), token: "existing-account", dispatchGeneration: "service",
     activeSessionId: "parent", sessions: [row], messages: { parent: [tool, result] }, delegations: { parent: [round] } }, true);
   const waiting: ((response: Response) => void)[] = [];

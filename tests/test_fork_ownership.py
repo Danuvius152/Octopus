@@ -68,7 +68,7 @@ async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_
         await db.initialize()
         assert {r["id"]: r for r in await db.load_sessions(include_archived=True)} == after
         async with db.transaction(write=False) as view:
-            assert await view.fetch_one("PRAGMA user_version") == (7,)
+            assert await view.fetch_one("PRAGMA user_version") == (8,)
         manager = SessionManager()
         await manager.initialize(db)
         assert manager.get_session("child", owner_a) is not None

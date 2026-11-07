@@ -207,7 +207,7 @@ async def test_unconfirmed_inline_input_stops_the_process_before_a_frame(tmp_pat
         saved = await reader.get_submission_for_request(evidence["session_id"], "original-inline-input")
         assert (saved is not None) is (stage == "recording" or committed_before_error)
         if saved:
-            assert saved["payload"]["content"] == "Use the added evidence before answering."
+            assert saved["payload"]["operation"]["content"] == "Use the added evidence before answering."
             assert saved["receipt"]["accepted"]
         assert len(corrections) == int(stage == "recording" and committed_before_error)
         if corrections:

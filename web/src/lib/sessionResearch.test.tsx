@@ -14,7 +14,7 @@ import { VirtuosoMockContext } from "react-virtuoso";
 import { ArchivedSessionsDialog } from "../components/ArchivedSessionsDialog";
 import { useSessionStore, type SessionInfo, type ResearchJob } from "../stores/sessionStore";
 
-const dispatch = (generation = "service") => ({ generation, revision: 1, paused: false, items: [], active_request_id: null });
+const dispatch = (generation = "service") => ({ generation, revision: 1, paused: false, items: [], active_request_id: null, active_operation: null });
 const job: ResearchJob = { id: "r1", session_id: "s1", question: "Existing research", status: "running", phase: "search" };
 const session = { id: "s1", name: "Saved conversation", archived: false, agent_id: "ag1" } as SessionInfo;
 beforeEach(() => {

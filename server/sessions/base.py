@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..config import settings
+from ..context_models import ContextState
 from ..credential_use import CredentialUse
 from ..database import Database
 from ..diagnostics import exception_diagnostic
@@ -27,6 +28,7 @@ from ..models import (
     MessageContent,
     SessionStatus,
 )
+from ..session_operations import OperationKind
 from .observation import RequestObservation
 from .submission import (
     RequestCompletion,
@@ -44,7 +46,7 @@ if TYPE_CHECKING:
     from .owner import SessionOwner
     from .owner_questions import QuestionNotification
     from .owner_runtime import ReleaseArchive, ReserveFork
-    from .runtime_types import _Settlement
+    from .runtime_types import _Attempt, _Settlement
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,7 @@ def _session_from_row(row: dict[str, Any]) -> Session:
         reasoning_effort=row.get("reasoning_effort") or None,
         service_tier=row.get("service_tier") or None,
         user_id=row.get("user_id") or None,
+        context_state=ContextState.model_validate_json(row["context_state"]) if row.get("context_state") else None,
         parent_session_id=row.get("parent_session_id"),
         delegation_request=row.get("delegation_request"),
         app_id=row.get("app_id"),
@@ -207,6 +210,7 @@ class QueuedPrompt:
 
     prompt: str
     attachment_ids: list[str]
+    operation: Literal["message"] = field(default="message", init=False)
     wiki_mode: str | None = None
     trusted_request: str | None = None
     knowledge_context: KnowledgeContext | None = None
@@ -237,6 +241,7 @@ class PendingInput:
     priority: bool
     order: int
     queued_event: dict[str, Any] | None = field(default=None, repr=False)
+    operation: OperationKind = "message"
 
     @property
     def started(self) -> bool:
@@ -360,6 +365,7 @@ class Session:
     model: str | None = None
     reasoning_effort: str | None = None
     service_tier: str | None = None
+    context_state: ContextState | None = None
     # Who owns this conversation (multi-tenancy.md §5). Denormalised from the
     # agent on purpose: `agent_id` is nullable, and the WebSocket fan-out has
     # to route by owner on every frame.
@@ -562,6 +568,18 @@ class SessionManagerBase:
         raise NotImplementedError  # provided by a mixin
 
     async def capture_request_configuration(self, context: Session) -> tuple[Session, dict[str, Any] | None]:
+        raise NotImplementedError  # provided by a mixin
+
+    async def _align_context_locked(self, session: Session, agent: dict[str, Any] | None) -> None:
+        raise NotImplementedError  # provided by a mixin
+
+    async def _accept_context(self, session: Session, attempt: _Attempt, event: HarnessEvent) -> None:
+        raise NotImplementedError  # provided by a mixin
+
+    async def _reset_context_owned(self, session: Session) -> None:
+        raise NotImplementedError  # provided by a mixin
+
+    def wake_contexts(self, agent_id: str | None, user_id: str | None) -> None:
         raise NotImplementedError  # provided by a mixin
 
     def _make_run(
@@ -804,6 +822,15 @@ class SessionManagerBase:
         rows = await db.load_sessions()
         for row in rows:
             session = _session_from_row(row)
+            if session.context_state is not None:
+                from ..context_models import align_context, context_target
+
+                async with db.configuration_lock:
+                    agent = await db.get_agent(session.agent_id) if session.agent_id else None
+                    state = align_context(session.context_state, context_target(session, agent))
+                    if state != session.context_state:
+                        await db.update_session_field(session.id, context_state=state.model_dump_json() if state else None)
+                        session.context_state = state
             from ..db.applications import ApplicationDeleting
 
             try:

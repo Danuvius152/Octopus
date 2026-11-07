@@ -120,8 +120,9 @@ class TurnsMixin(SessionManagerBase):
             "active_request_id": (
                 session._run.request.request_id if session._run.request else None
             ),
+            "active_operation": session._run.request.operation if session._run.request else None,
             "items": [{
-                "request_id": item.request_id, "source": item.source,
+                "request_id": item.request_id, "source": item.source, "operation": item.operation,
                 "summary": item.summary, "priority": item.priority,
             } for item in session._pending_queue],
         }
@@ -257,7 +258,7 @@ class TurnsMixin(SessionManagerBase):
         session._request_completions[queued.request_id] = future
         observation = RequestObservation(queued.request_id, queued.work_id, asyncio.get_running_loop().create_future())
         session._request_observations[queued.request_id] = observation
-        return SubmissionReceipt(disposition, queued.request_id, future, observation)  # type: ignore[arg-type]
+        return SubmissionReceipt(disposition, queued.request_id, future, observation, operation=queued.operation)  # type: ignore[arg-type]
 
     def _finish_receipt(self, session: Session, completion: RequestCompletion) -> None:
         future = session._request_completions.pop(completion.input_request_id, None)
@@ -741,15 +742,24 @@ class TurnsMixin(SessionManagerBase):
         attempt.delta_last_flush = now
         return self._flush_text_deltas(session.id, attempt.delta_buf, attempt.delta_metadata)
 
-    async def _remember_resume_id(self, session: Session, resume_id: str) -> None:
+    async def _remember_resume_id(self, session: Session, resume_id: str | None) -> None:
         """Persist the engine-side conversation id this session resumes from."""
         if session.claude_session_id == resume_id:
             return
-        session.claude_session_id = resume_id
         if self.db:
-            await self.db.update_session_field(
-                session.id, claude_session_id=resume_id
-            )
+            from dataclasses import replace
+
+            from ..context_models import align_context, context_target
+
+            async with self.db.configuration_lock:
+                agent = await self._load_agent(session)
+                state = align_context(session.context_state, context_target(replace(session, claude_session_id=resume_id), agent))
+                await self.db.update_session_field(session.id, claude_session_id=resume_id,
+                    context_state=state.model_dump_json() if state else None)
+                if state != session.context_state:
+                    session.context_state = state
+                    self._session_owner(session).runtime.context_changed()
+        session.claude_session_id = resume_id
 
     async def _note_question_request(
         self, session: Session, question_id: str, tool_input: dict[str, Any] | None, *, attempt_id: str,
@@ -859,6 +869,9 @@ class TurnsMixin(SessionManagerBase):
                 message=event.content or "Native records could not be collected", source=event,
             )]
         if event.type == "subagent" and session._run.backend is not attempt.backend and not (event.runtime_metadata or {}).get("native"):
+            return []
+        if event.type == "context_observation":
+            await self._accept_context(session, attempt, event)
             return []
         from ..harness.tool_identity import ToolIdentityTracker
         tracker = getattr(attempt.backend, "_tool_identity_tracker", None)
@@ -1103,9 +1116,7 @@ class TurnsMixin(SessionManagerBase):
             "clearing it and starting a fresh conversation",
             session.id,
         )
-        session.claude_session_id = None
-        if self.db:
-            await self.db.update_session_field(session.id, claude_session_id=None)
+        await self._remember_resume_id(session, None)
         # Don't restart cold: Octopus still has the whole conversation (the
         # engine's transcript is a cache of ours, not the record), so replay
         # its tail into this turn through the same channel a fork uses when its

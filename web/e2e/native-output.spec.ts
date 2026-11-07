@@ -58,7 +58,8 @@ test("native root and helper items stay separate through completion, reconnect a
         active_attempt: done ? null : { request_id: "request", attempt_id: "attempt" },
         messages, next_message_seq: messages.at(-1)!.seq! + 1, oldest_loaded_seq: 1, has_more_messages: false,
         pending_questions: [], subagents: [{ ...helper, name: reconnected ? "/root/reviewer restored" : helper.name }],
-        dispatch_state: { generation: "native-service", revision, paused: false, active_request_id: done ? null : "request", items: [] } };
+        dispatch_state: { generation: "native-service", revision, paused: false, active_request_id: done ? null : "request",
+          active_operation: done ? null : "message", items: [] } };
     }
     await route.fulfill({ json: data });
   });
@@ -118,7 +119,7 @@ test("native root and helper items stay separate through completion, reconnect a
   await expect(questionCard.getByRole("button")).toHaveCount(0);
   revision += 1;
   done = true;
-  send({ type: "dispatch_state", dispatch_state: { generation: "native-service", revision, paused: false, active_request_id: null, items: [] } });
+  send({ type: "dispatch_state", dispatch_state: { generation: "native-service", revision, paused: false, active_request_id: null, active_operation: null, items: [] } });
   send({ type: "status", status: "idle" });
   await expect(page.locator('[data-testid="streaming-text"]')).toHaveCount(0);
   await expect(card).toHaveClass(/subagent-completed/);

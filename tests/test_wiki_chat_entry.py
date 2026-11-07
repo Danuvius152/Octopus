@@ -187,7 +187,7 @@ async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_pat
         if outcome == "rejected":
             assert saved is None and builds == []
         else:
-            assert saved["payload"]["content"] == question
+            assert saved["payload"]["operation"]["content"] == question
             assert saved["request_id"] == probe.last_request_id == submitted[0]["receipt"].request_id
             assert saved["terminal"]["status"] == outcome
             assert len(builds) == 1 and question in builds[0].prompt

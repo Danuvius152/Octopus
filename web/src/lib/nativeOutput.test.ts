@@ -100,6 +100,6 @@ test("a snapshot card remains visible when a 200-row tool window excludes its an
 test("a new service generation clears partial items from the previous native connection", () => {
   useSessionStore.setState({ dispatchGeneration: "old-service", retiredDispatchGenerations: [], dispatchStates: {} });
   handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Old partial", runtime_metadata: identity("child") });
-  useSessionStore.getState().applyDispatchState("s", { generation: "new-service", revision: 1, paused: false, active_request_id: null, items: [] });
+  useSessionStore.getState().applyDispatchState("s", { generation: "new-service", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [] });
   expect(useSessionStore.getState().streamingItems).toEqual({});
 });

@@ -24,13 +24,13 @@ async def installation(tmp_path, monkeypatch):
     await database.save_session('original', 'Saved session', str(tmp_path), 'time', user_id=owner['id'])
     await database.append_message('original', 2, 'user', 'text', 'Original input 原文')
     await database.admit_client_submission('original', 'input', 'digest', 'original-request',
-                                            payload={'wiki_mode': 'read'}, receipt={'accepted': True})
+                                            payload={'content': 'Retained input', 'attachment_ids': [], 'wiki_mode': 'read'}, receipt={'accepted': True})
     await database.close()
     return config
 
 
 @pytest.mark.parametrize('damage', ['missing-index', 'extra-column', 'unknown-trigger',
-                                   'quoted-primary', 'quoted-default', 'missing-unique', 'retired-input'])
+                                   'quoted-primary', 'quoted-default', 'missing-unique', 'retired-input', 'nested-retired-input'])
 async def test_publication_rejects_incompatible_current_structure_or_facts_without_repair(installation, damage):
     path = Path(installation.db_path)
     with sqlite3.connect(path) as db:
@@ -42,6 +42,8 @@ async def test_publication_rejects_incompatible_current_structure_or_facts_witho
             db.execute('CREATE TRIGGER unknown_effect AFTER INSERT ON agents BEGIN DELETE FROM messages; END')
         elif damage == 'retired-input':
             db.execute("UPDATE client_submissions SET payload='{\"wiki_mode\":\"off\"}'")
+        elif damage == 'nested-retired-input':
+            db.execute("UPDATE client_submissions SET payload='{\"operation\":{\"kind\":\"message\",\"wiki_mode\":\"off\"}}'")
         else:
             table = {'quoted-primary': 'agents', 'quoted-default': 'backend_credentials', 'missing-unique': 'users'}[damage]
             original = db.execute('SELECT sql FROM sqlite_schema WHERE name=?', (table,)).fetchone()[0]
@@ -70,14 +72,15 @@ async def test_publication_rejects_incompatible_current_structure_or_facts_witho
 async def test_publication_verification_leaves_current_messages_and_input_facts_unchanged(installation):
     path = Path(installation.db_path)
     before = path.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 7
+    assert verify_storage(installation)['main_format_version'] == 8
     assert path.read_bytes() == before
     database = Database(str(path))
     await database.initialize()
     try:
         assert (await database.load_messages('original'))[0]['content'] == 'Original input 原文'
         submission = await database.get_client_submission('original', 'input')
-        assert submission['payload'] == {'wiki_mode': 'read'}
+        assert submission['payload'] == {'operation': {'kind': 'message', 'content': 'Retained input',
+                                                     'attachment_ids': [], 'wiki_mode': 'read'}}
         assert submission['request_id'] == 'original-request'
     finally:
         await database.close()
@@ -89,7 +92,7 @@ async def test_publication_uses_the_same_main_database_alias_as_current_startup(
     alias.symlink_to(original)
     installation.db_path = str(alias)
     before = original.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 7
+    assert verify_storage(installation)['main_format_version'] == 8
     assert original.read_bytes() == before
 
 

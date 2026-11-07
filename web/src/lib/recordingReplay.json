@@ -22,6 +22,7 @@
             "premature_exit": 0
           },
           "kind": "outcome",
+          "operation": "message",
           "recording_integrity": "complete",
           "recording_issues": {},
           "recording_locations": [],
@@ -52,6 +53,7 @@
         "premature_exit": 0
       },
       "kind": "outcome",
+      "operation": "message",
       "recording_integrity": "complete",
       "recording_issues": {},
       "recording_locations": [],

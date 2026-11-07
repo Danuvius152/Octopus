@@ -18,6 +18,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from ..context_models import (
+    ContextInvalidationReason,
+    ContextObservation,
+    ContextObservationKind,
+    ContextReading,
+    ContextSource,
+)
 from ..submission_models import NativeInputEvidence
 from . import codex_rpc
 from .codex import (
@@ -84,7 +91,7 @@ def profile(base: RuntimeProfile) -> RuntimeProfile:
                    activity_observer=None, prepare_resume=None, can_steer=True,
                    native_input_evidence=True, tools_prompt=_OCTOPUS_SYSTEM_PROMPT_CODEX,
                    injects_memory_prompt=True, can_fork=True, fork_prepare=_fork_prepare_replay,
-                   reusable=False, can_continue=True, stale_session_patterns=(),
+                   reusable=False, can_continue=True, can_observe_context=True, stale_session_patterns=(),
                    auth_error_patterns=(), transient_error_patterns=_CODEX_TRANSIENT_ERROR_PATTERNS,
                    transient_error_codes=("server_overloaded", "native_provider_transient"), inline_large_inputs=True,
                    fork_copy=fork_copy, fork_cleanup=fork_cleanup)
@@ -245,6 +252,12 @@ class AppServerDriver(RunDriver):
         self._pending_measurement_bytes = 0
         self._preparation_mode = "not_started"
         self._controls: tuple[str, str | None, str] | None = None
+        self._context_seq = 0
+        # Candidates belong to one observed compaction interval. They become
+        # visible only with that item's verified installation boundary.
+        self._context_items: dict[str, ContextObservation | None] = {}
+        self._context_signature: str | None = None
+        self._context_model_ambiguous = False
 
     def continue_configuration(self, previous: RunDriver) -> None:
         if not isinstance(previous, AppServerDriver):
@@ -718,6 +731,10 @@ class AppServerDriver(RunDriver):
                 elif frame["method"] == "serverRequest/resolved":
                     self._resolve_question(frame.get("params") or {})
                     parsed = ParseOutput()
+                elif frame["method"] == "thread/tokenUsage/updated":
+                    parsed = self._context_usage(frame.get("params") or {})
+                elif frame["method"] == "model/rerouted":
+                    parsed = self._context_rerouted(frame.get("params") or {})
                 else:
                     parsed = self._event(frame)
             except Exception as error:
@@ -842,9 +859,18 @@ class AppServerDriver(RunDriver):
                 "code": -32601, "message": "This native request is not supported by the selected transport"}}) + "\n").encode())
             raise NativeProtocolError(f"Unsupported native request: {obj['method']}")
         params = obj.get("params") or {}
+        if obj["method"] == "model/rerouted":
+            if self._input.rpc_id is not None and not self._input.turn_id and params.get("threadId") == self._input.thread_id:
+                self._buffer_frame(obj)
+                return ParseOutput(activity=False)
+            return self._context_rerouted(params)
         if obj["method"] == "thread/tokenUsage/updated":
             self._usage_snapshot(params)
-            return ParseOutput(activity=False)
+            if (self._input.rpc_id is not None and not self._input.turn_id
+                    and params.get("threadId") == self._input.thread_id):
+                self._buffer_frame(obj)
+                return ParseOutput(activity=False)
+            return self._context_usage(params)
         if obj["method"] == "serverRequest/resolved":
             if not self._input.turn_id:
                 self._buffer_frame(obj)
@@ -898,6 +924,76 @@ class AppServerDriver(RunDriver):
             detail[target] = value if type(value) is int and value >= 0 else None
         self._io.record_measurement(HarnessEvent(type="model_measurement", raw=detail),
             request_id=self._input.input_id, attempt_id=self._input.attempt_id)
+
+    def _context_usage(self, params: dict[str, Any]) -> ParseOutput:
+        assert self._input is not None
+        if (self._input.rpc_id is None or not self._input.turn_id
+                or params.get("threadId") != self._input.thread_id or params.get("turnId") != self._input.turn_id):
+            return ParseOutput(activity=False)
+        usage = params.get("tokenUsage")
+        if not isinstance(usage, dict) or self._context_model_ambiguous:
+            return ParseOutput(activity=False)
+        last = usage.get("last")
+        if not isinstance(last, dict):
+            return ParseOutput(activity=False)
+        used, capacity = last.get("totalTokens"), usage.get("modelContextWindow")
+        if type(used) is not int or used < 0 or used > 9007199254740991:
+            return ParseOutput(activity=False)
+        if capacity is not None and (type(capacity) is not int or capacity <= 0 or capacity > 9007199254740991):
+            return ParseOutput(activity=False)
+        assert self._input.thread_id is not None
+        # Native full-window handling resets the cumulative aggregate. Source
+        # identity and stream order establish freshness, never that aggregate.
+        signature = json.dumps(usage, sort_keys=True)
+        if signature == self._context_signature:
+            return ParseOutput(activity=False)
+        self._context_signature = signature
+        details = ("inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens", "reasoningOutputTokens")
+        cumulative = usage.get("total")
+        if (capacity is not None and used <= capacity and isinstance(cumulative, dict)
+                and type(cumulative.get("totalTokens")) is int and cumulative["totalTokens"] == capacity
+                and all(type(record.get(key)) is int and record[key] == 0
+                    for record in (cumulative, last) for key in details)):
+            # fill_to_context_window reports a synthetic delta, possibly zero.
+            # The wire cannot distinguish a later estimate with this shape;
+            # neither can prove a new sample, including within compaction.
+            for identifier in self._context_items:
+                self._context_items[identifier] = None
+            return ParseOutput(activity=False)
+        recomputed = used > 0 and all(type(last.get(key)) is int and last.get(key) == 0
+            for key in details)
+        reading = ContextReading(used_tokens=used, capacity_tokens=capacity,
+            basis="codex_recomputed_estimate" if recomputed else "codex_last_total",
+            capacity_basis="runtime_model_window" if capacity else None)
+        event = self._context_event("sample", reading)
+        if self._context_items:
+            for identifier in self._context_items:
+                self._context_items[identifier] = event.context if recomputed and len(self._context_items) == 1 else None
+            return ParseOutput(activity=False)
+        return ParseOutput(events=[event], activity=False)
+
+    def _context_rerouted(self, params: dict[str, Any]) -> ParseOutput:
+        assert self._input is not None
+        if (params.get("threadId") != self._input.thread_id or not self._input.turn_id
+                or params.get("turnId") != self._input.turn_id or self._context_model_ambiguous):
+            return ParseOutput(activity=False)
+        self._context_model_ambiguous = True
+        for identifier in self._context_items:
+            self._context_items[identifier] = None
+        return ParseOutput(events=[self._context_event("invalidated", reason="native_context_changed")], activity=False)
+
+    def _context_event(self, kind: ContextObservationKind, reading: ContextReading | None = None, *,
+                       reading_source: ContextSource | None = None,
+                       reason: ContextInvalidationReason = "operation_unconfirmed") -> HarnessEvent:
+        assert self._input is not None and self._input.thread_id is not None
+        self._context_seq += 1
+        return HarnessEvent(type="context_observation", context=ContextObservation(
+            backend="codex", native_session_id=self._input.thread_id,
+            actual_model=self._controls[0] if self._controls else None,
+            source=ContextSource(request_id=self._input.input_id, attempt_id=self._input.attempt_id,
+                connection_generation=self._rpc.generation, native_turn_id=self._input.turn_id,
+                observation_seq=self._context_seq), reading=reading, kind=kind,
+            reading_source=reading_source, compacting=bool(self._context_items), invalidation_reason=reason))
 
     def _buffer_frame(self, obj: dict[str, Any]) -> None:
         self._buffer_bytes += len(json.dumps(obj, ensure_ascii=False).encode())
@@ -980,6 +1076,19 @@ class AppServerDriver(RunDriver):
         if len(self._items) > 16384:
             raise NativeProtocolError("Native item identity capacity exceeded")
         output = self._raw_event(obj)
+        if params["threadId"] == self._input.thread_id:
+            if item.get("type") == "contextCompaction":
+                if method == "item/started":
+                    self._context_items[item["id"]] = None
+                    output.events.append(self._context_event("compaction_started"))
+                elif method == "item/completed":
+                    candidate = self._context_items.pop(item["id"], None)
+                    output.events.append(self._context_event("compacted",
+                        candidate.reading if candidate else None,
+                        reading_source=candidate.source if candidate else None))
+            elif method == "turn/completed" and self._context_items:
+                self._context_items.clear()
+                output.events.insert(0, self._context_event("invalidated"))
         source = self._output.source(params["threadId"], turn_id, item.get("id") or params.get("itemId"),
                                      item.get("phase"))
         for event in output.events:
@@ -1003,6 +1112,9 @@ class AppServerDriver(RunDriver):
         if self._output is None:
             return []
         events = self._output.retire(reason, reconcile=reconcile)
+        if self._context_items:
+            self._context_items.clear()
+            events.append(self._context_event("invalidated"))
         # Freeze positive constraints before release_output clears the wire
         # cache. The original ordered consumer checks committed rows and refs.
         events.append(HarnessEvent(type="native_completion", raw=dict(self._summary_finals),
@@ -1015,6 +1127,7 @@ class AppServerDriver(RunDriver):
         self._started_turns.clear()
         self._buffer.clear()
         self._buffer_bytes = 0
+        self._context_items.clear()
         self._output = None
         self.parser = self.profile.new_event_parser()
 

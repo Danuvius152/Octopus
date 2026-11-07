@@ -83,7 +83,7 @@ def _now() -> str:
 
 
 def _delivery_result(completion: RequestCompletion) -> tuple[str, str | None]:
-    successful = (completion.state == "completed" and completion.recording_state == "committed"
+    successful = (completion.operation == "message" and completion.state == "completed" and completion.recording_state == "committed"
                   and completion.outcome is not None and completion.outcome.status == "success")
     stage = ("processed" if successful else "unknown" if completion.state == "unavailable" else
              "recording_unconfirmed" if completion.recording_state in {"failed", "unconfirmed"} else "failed")
@@ -243,6 +243,10 @@ class ResearchManager:
         # synchronous, so shutdown cannot miss a job admitted after its snapshot.
         if self._closing:
             raise ResearchError("ResearchManager is shutting down", status_code=503)
+        if self.session_mgr.get_session(session_id) is not session:
+            raise ResearchError(f"session {session_id} not found", status_code=404)
+        if session._admission_closed:
+            raise ResearchError("Session admission is closed", status_code=409)
         if not has_backend(configured.backend):
             raise ResearchError(f"unknown backend {configured.backend!r}", status_code=400)
         harness = get_harness(configured.backend)

@@ -478,7 +478,7 @@ class DelegationManager:
             if withdrawn is not None:
                 changes["_child_work_ids"] = rec._child_work_ids - {withdrawn}
             candidate = rec._candidate_request_id if withdrawn is not None else None
-            if completion is not None:
+            if completion is not None and completion.operation == "message":
                 outcome = completion.outcome if completion.recording_state == "committed" else None
                 if outcome is not None and outcome.status == "success":
                     candidate = completion.request_id
@@ -1633,7 +1633,9 @@ class DelegationManager:
                 if rec.state == "completed":
                     assert self.db is not None and request_id is not None
                     result = await self.db.read_session_result(rec.delegation_id, request_id)
-                    if result.outcome is None or result.missing is not None:
+                    if result.operation != "message":
+                        delivery_failure = ("reply_unavailable", "The child terminal is not a message reply.")
+                    elif result.outcome is None or result.missing is not None:
                         if result.missing not in {"session_missing", "answer_reference_invalid"}:
                             raise RuntimeError("The committed delegation terminal is missing from its retained conversation")
                         delivery_failure = (

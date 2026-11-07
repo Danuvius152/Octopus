@@ -27,6 +27,7 @@ import { WikiJobCards } from "./WikiJobCards";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
 import { MessageBubble } from "./MessageBubble";
 import { DispatchQueue } from "./DispatchQueue";
+import { ContextMeter } from "./ContextMeter";
 import { CommandNotices } from "./CommandNotices";
 import { SessionAuxiliaryNotice } from "./SessionAuxiliaryNotice";
 import { MessageTime } from "./MessageTime";
@@ -161,6 +162,8 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const contextSnapshot = useSessionStore((s) => activeSessionId ? s.contextStates[activeSessionId] : null);
+  const contextState = contextSnapshot?.state;
   const researchCreations = useRef(new Set<AbortController>());
   useEffect(() => {
     const operations = researchCreations.current;
@@ -1490,6 +1493,7 @@ export function ChatView({
             — viewing read-only history. Unarchive from the sidebar to
             continue the conversation.
           </span>}
+                  <ContextMeter key={activeSessionId} state={contextState} historical={isArchived} pending={contextSnapshot?.pending} />
         </div>
       ) : (
         <div className="chat-input-bar shrink-0 bg-background px-6 pb-5 pt-2">
@@ -1620,6 +1624,7 @@ export function ChatView({
                 >
                   <IconPaperclip size={16} stroke={1.5} />
                 </button>
+                <ContextMeter key={activeSessionId} state={contextState} pending={contextSnapshot?.pending} />
               </div>
               <div className="flex items-center gap-1">
                 {isRunning ? (

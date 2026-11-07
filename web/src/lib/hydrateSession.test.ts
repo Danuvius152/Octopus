@@ -9,7 +9,7 @@ import { selectSession } from "./selectSession";
 const json = (value: unknown) => new Response(JSON.stringify(
   value && typeof value === "object" && "dispatch_state" in value ? { active_attempt: null, ...value } : value
 ));
-const dispatch = (generation: string) => ({ generation, revision: 0, paused: false, active_request_id: null, items: [] });
+const dispatch = (generation: string) => ({ generation, revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] });
 
 beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);
@@ -145,7 +145,7 @@ it("captures the background baseline before fetch", async () => {
 });
 
 it.each(["new-attempt", "attempt-cleared", "new-dispatch"])("rejects an old execution snapshot after %s was observed", async (observation) => {
-  const initial = { ...dispatch("service"), active_request_id: "r", revision: 1 };
+  const initial = { ...dispatch("service"), active_request_id: "r", active_operation: "message" as const, revision: 1 };
   useSessionStore.getState().applyDispatchState("s", initial);
   if (observation !== "attempt-cleared") useSessionStore.getState().setActiveAttempt("s", { request_id: "r", attempt_id: "a1" });
   const response = deferred<Response>();
@@ -166,7 +166,7 @@ it.each(["new-attempt", "attempt-cleared", "new-dispatch"])("rejects an old exec
 });
 
 it.each([undefined, {}, { request_id: "other", attempt_id: "a2" }])("refuses incomplete or inconsistent attempt data %j without changing dispatch", async (active) => {
-  const initial = { ...dispatch("service"), active_request_id: "r", revision: 1 };
+  const initial = { ...dispatch("service"), active_request_id: "r", active_operation: "message" as const, revision: 1 };
   useSessionStore.getState().applyDispatchState("s", initial);
   useSessionStore.getState().setActiveAttempt("s", { request_id: "r", attempt_id: "a1" });
   const before = useSessionStore.getState();
@@ -187,7 +187,7 @@ it("clears every old attempt when another session observes a new service generat
 });
 
 it.each([false, true])("fills reconnect history and task results with one confirmation; another live change=%s", async (changedAgain) => {
-  const initial = { ...dispatch("service"), revision: 1, active_request_id: "r" };
+  const initial = { ...dispatch("service"), revision: 1, active_request_id: "r", active_operation: "message" as const };
   useSessionStore.getState().applyDispatchState("s", initial);
   useSessionStore.getState().setActiveAttempt("s", { request_id: "r", attempt_id: "cached-a1" });
   const first = deferred<Response>(), confirmation = deferred<Response>();
@@ -223,7 +223,7 @@ it.each([false, true])("fills reconnect history and task results with one confir
 });
 
 it("ending the original observation also retires its pending execution confirmation", async () => {
-  const initial = { ...dispatch("service"), active_request_id: "r" };
+  const initial = { ...dispatch("service"), active_request_id: "r", active_operation: "message" as const };
   useSessionStore.getState().applyDispatchState("s", initial);
   const first = deferred<Response>(), confirmation = deferred<Response>();
   const fetcher = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(confirmation.promise);

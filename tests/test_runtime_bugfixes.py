@@ -552,7 +552,7 @@ async def test_recording_reference_survives_a_cancellation_between_control_read_
 
     monkeypatch.setattr(job_execution, "transition", racing_transition)
     completion = SimpleNamespace(input_request_id="original-request", request_id="original-request",
-                                 outcome=None, recording_state="unconfirmed")
+                                 operation="message", outcome=None, recording_state="unconfirmed")
     await WikiWorker()._mark_recording_failure(jobs, job["id"], reference, completion)
     result = current.get(job["id"])
     assert raced

@@ -45,7 +45,7 @@ it.each(["live", "history"])("shows one canonical primary cause and keeps saved-
   const { handleWsMessage } = await import("../hooks/useWebSocket");
   const { normalizeMessage } = await import("../lib/turnOutcome");
   const cause = "The model turn completed, but required tool results were not confirmed.";
-  const content = { kind: "outcome", request_id: "primary", status: "failed", message: cause,
+  const content = { kind: "outcome", operation: "message", request_id: "primary", status: "failed", message: cause,
     native_status: "completed", recovery: {}, recording_integrity: "incomplete",
     recording_issues: { native_collection_incomplete: 1 }, recording_locations: [{ kind: "native_collection_incomplete", line: 7 }],
     final_answer: { thread_id: "root", turn_id: "turn", message_seqs: [1] } };
@@ -72,7 +72,7 @@ it.each(["live", "history"])("shows one canonical primary cause and keeps saved-
 it.each(["live", "history"])("keeps native status and missing-final evidence in %s results", async (path) => {
   const { handleWsMessage } = await import("../hooks/useWebSocket");
   const { normalizeMessage } = await import("../lib/turnOutcome");
-  const content = { kind: "outcome", request_id: "r", status: "failed", recovery: {}, native_status: "completed",
+  const content = { kind: "outcome", operation: "message", request_id: "r", status: "failed", recovery: {}, native_status: "completed",
     recording_integrity: "incomplete", recording_issues: { native_final_missing: 1 },
     final_answer: { thread_id: "root", turn_id: "turn", message_seqs: [1] } };
   useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
@@ -209,7 +209,7 @@ it.each([
   useSessionStore.getState().setMessages("result-display", [{
     role: "system", type: "result",
     content: status === "unknown" ? null : {
-      kind: "outcome", status, request_id: "r1", recovery: { transient: 1 },
+      kind: "outcome", operation: "message", status, request_id: "r1", recovery: { transient: 1 },
       message: status === "interrupted" ? "(interrupted by user)" : null,
     },
   }]);

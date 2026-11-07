@@ -19,7 +19,7 @@ async def native_input(tmp_path):
     session = await manager.create_session(agent["id"], "Native input", str(tmp_path), backend="codex")
     await db.admit_client_submission(
         session.id, "browser-input", "digest", "request-1",
-        payload={"content": "Keep this exact input", "order": 1}, receipt={"accepted": True},
+        payload={"content": "Keep this exact input", "attachment_ids": [], "order": 1}, receipt={"accepted": True},
     )
     assert await db.claim_client_submission(session.id, "request-1", "request-1", "generation-1")
     try:
@@ -43,7 +43,7 @@ async def test_successful_terminal_cannot_erase_unknown_first_input(native_input
     row = await db.get_client_submission(session_id, "browser-input")
     assert row["execution_state"] == "unknown"
     assert row["delivery_state"] == "unknown"
-    assert row["payload"]["content"] == "Keep this exact input"
+    assert row["payload"]["operation"]["content"] == "Keep this exact input"
     assert row["native_inputs"] == [evidence.model_dump()]
     result = await db.read_session_result(session_id, "request-1")
     assert result.outcome is None and result.missing == "input_unconfirmed"
@@ -63,7 +63,7 @@ async def test_restart_uses_native_input_evidence_without_replaying(native_input
     row = await db.get_client_submission(session_id, "browser-input")
     assert row["execution_state"] == expected
     assert row["native_inputs"] == [evidence.model_dump()]
-    assert row["payload"]["content"] == "Keep this exact input"
+    assert row["payload"]["operation"]["content"] == "Keep this exact input"
     assert (await db.load_sessions())[0]["claude_session_id"] == "native-thread"
 
 

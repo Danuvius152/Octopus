@@ -35,7 +35,7 @@ test(`history prepend keeps the visible row and offset across ${childOnly ? "chi
       return;
     } else if (path === `/api/sessions/${session.id}`) data = { ...session,
       messages, next_message_seq: 261, oldest_loaded_seq: 200, has_more_messages: true, pending_questions: [], subagents: [helper],
-      dispatch_state: { generation: "history-service", revision: 1, paused: false, active_request_id: null, items: [] },
+      dispatch_state: { generation: "history-service", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [] },
     };
     await route.fulfill({ json: data });
   });

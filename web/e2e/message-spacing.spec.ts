@@ -23,7 +23,7 @@ test("hidden reasoning leaves no virtual-list spacing after history reload", asy
       ],
       next_message_seq: hiddenCount + 3, oldest_loaded_seq: 1, has_more_messages: false,
       pending_questions: [], subagents: [], active_attempt: null,
-      dispatch_state: { generation: "spacing-service", revision: 1, paused: false, active_request_id: null, items: [] },
+      dispatch_state: { generation: "spacing-service", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [] },
     };
     await route.fulfill({ json: data });
   });

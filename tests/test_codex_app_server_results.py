@@ -180,7 +180,7 @@ async def test_named_delegation_delivers_only_the_bound_roots_selected_final(nat
             while (saved := await database.get_source_submission("delegation", f"agent-terminal:{work.work_id}",
                                                                  session_id=parent.id)) is None:
                 await asyncio.sleep(0)
-        assert saved["payload"]["content"].endswith(
+        assert saved["payload"]["operation"]["content"].endswith(
             f"[agent-reply:Native worker delegation={work.delegation_id}]\nFirst final\n\nSecond final")
         assert len(starts) == (2 if recovery else 1) and work.state == "completed"
     finally:

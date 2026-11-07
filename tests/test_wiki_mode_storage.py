@@ -68,7 +68,7 @@ async def test_empty_storage_and_current_reopen_share_current_format_without_rep
     await database.initialize()
     await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (7,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (8,)
     before = _facts(path)
     statements = []
     connect = aiosqlite.Connection._connect

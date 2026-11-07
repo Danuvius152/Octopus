@@ -760,6 +760,8 @@ class LifecycleMixin(SessionManagerBase):
         oldest = messages[0].seq if messages else None
         return SessionDetail(
             **session_info(match, total, archived=True, transcript_integrity="duplicate_seq" if duplicates else "ok").model_dump(),
+            context_state=_session_from_row(match).context_state,
+            context_generation=self._dispatch_generation,
             messages=messages,
             pending_questions=[],
             oldest_loaded_seq=oldest,
@@ -834,6 +836,9 @@ class LifecycleMixin(SessionManagerBase):
         session.restore_message_state(*message_state)
         self.sessions[session.id] = session
         self.reopen_application_session_work(session.id)
+        from .owner_runtime import ReadContext
+
+        await self._session_owner(session).call_runtime(ReadContext())
         return session
 
     def _require_task_return(self, owned: OwnedTaskContext, session_id: str, user_id: str | None) -> None:

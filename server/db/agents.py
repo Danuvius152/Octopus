@@ -264,6 +264,8 @@ class AgentsMixin(DatabaseBase):
     async def update_agent(self, agent_id: str, **fields: Any) -> None:
         fields = self.normalize_agent_update(fields)
         async with self.transaction(write=True) as tx:
+            context_fields = ("backend", "model", "credential_id")
+            previous = await tx.fetch_one("SELECT backend,model,credential_id FROM agents WHERE id=?", (agent_id,))
             updates: dict[str, Any] = {}
             for k, v in fields.items():
                 if k in ("mcp_servers", "subagents"):
@@ -274,6 +276,9 @@ class AgentsMixin(DatabaseBase):
                     updates[k] = v
             if not updates:
                 return
+            if previous is not None and any(key in updates and (updates[key] or None) != (previous[index] or None)
+                                            for index, key in enumerate(context_fields)):
+                await tx.execute("UPDATE agents SET context_settings_revision=context_settings_revision+1 WHERE id=?", (agent_id,))
             updates["updated_at"] = datetime.now(UTC).isoformat()
             set_clause = ", ".join(f"{k} = ?" for k in updates)
             values = list(updates.values()) + [agent_id]

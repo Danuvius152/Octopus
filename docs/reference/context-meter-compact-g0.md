@@ -99,12 +99,82 @@ async 与 token-budget 在这次实验中明确关闭，只读取了源码；没
 feature，源码默认关闭；这不是对所有项目覆盖、requirements 或生产生效配置的
 完整读取。实际启用配置的核验和相应分支验收仍需由后续实施/发布取得。
 
-## Claude 来源与未关闭的能力门
+## Claude 2.1.319：本地生产者证据
 
 仓库历史 [CLI notes](claude-cli-protocol.md) 记录 v2.1.143 的 VM0 形状，未留
 本次需要的 usage/modelUsage/compact 原始帧。当前代码已经使用 stream-json
 stdin，不能把历史 argv prompt 的观察算作当前 transport 的新通过项。当前
 fake_claude_cli 是人工 fixture，也没有这些新字段。
+
+用户确认本地已有 Claude、通过 DeepSeek 驱动，并要求不调用真实 API，随后
+告知已更新 CLI。本次重新核对本地 npm 包及隔离环境的 `--version`，均为
+**2.1.319**；Linux ELF 入口 SHA-256 为
+`dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed`。
+此前只读取包声明的 2.1.314 未运行本次协议实验，不能混作这个版本的证据。
+
+实验以现有 CLI 连接 loopback 人工 Anthropic Messages SSE，子进程独立
+HOME/CLAUDE_CONFIG_DIR/cwd，清空继承认证与服务环境，使用明确的假 API key，
+仅加载本次合成 settings。三个模型 alias 均指向 `deepseek-flash`；关闭遥测、
+自动更新及非必要流量，代理拒绝外部 CONNECT。配置核对只输出非秘密白名单
+字段；CLI 子进程未加载真实配置或凭据，未输出、复制或使用真实 DeepSeek
+token，没有安装或登录，也没有访问真实 DeepSeek/Anthropic API。
+三个实验均无 proxy CONNECT 或 provider 错误；这里只报告本地代理观察，
+不声称做了系统级网络流量审计。
+
+[CLI 原始流摘录](claude-context-compact-2.1.319.json) 保存实际 init、user UUID、
+command 生命周期、assistant usage、result、compacting/boundary 和各进程
+退出结果；模型响应由人工服务生成，CLI 输出没有用 fixture 仿造。
+
+| 场景 | 实际观察 | 证明范围 |
+| --- | --- | --- |
+| 正常根输入 | 根 assistant 的实际 model 为 deepseek-flash；input/cache creation/cache read 为 111/222/333；assistant output=1，普通 result output=27 | 最近根请求输入为 666，不能加入 output 占位或整段累计量 |
+| 窗口配对 | 同 session 的 result.modelUsage 有精确同名 key，contextWindow=200000 | CLI 报告的窗口可与该根样本配对；不证明 DeepSeek 服务真实上限 |
+| 精确恢复后手动压缩 | init 列表含 compact；原 session 的 compacting → status=null → init → manual boundary → result；result.user_message_uuid 等于发送的 UUID | 命令已识别、边界及终结能归到该次输入，不能把 status=null 当完成 |
+| 压缩后第三宿主续聊 | 新进程 `--resume` 原 ID；后继本地 provider 请求的 messages 实含原生安装的合成摘要 | 不是仅看到相同 session ID 或退出码 |
+| 只有一次问答的短历史 | 仍产生 manual boundary，pre_tokens=693、post_tokens=455 | 本版本不会仅因历史短就必然 no-op |
+| 完全空会话 | 不调用本地 provider、无 boundary；原生本地命令消息含 failed，外层 result 却 success/is_error=false | 空历史是已识别的命令失败，不能套用文档中某些版本的成功 no-op 示例 |
+| 子任务交错 | 根输入分项为 111/222/333，子 assistant 为 444/222/333 且 parent_tool_use_id=toolu_g0_child，随后又有根消息 | 分开观察而不累加；该专门实验显式启用 forward-subagent-text，普通产品 argv 未启用此选项 |
+
+`deepseek-flash` 在 CLI stderr 被标为 unrecognized_model。本次读取该固定 binary
+中的模型用量生成与窗口解析代码，`modelUsage.contextWindow` 来自 CLI 的 Xh
+解析；此自定义模型落到其默认窗口。本机 settings 的该模型仅设置 effort，
+没有窗口覆盖。200000 因而描述 **CLI 报告的窗口**，不是从 DeepSeek API 验证
+的容量，也不是框架可以硬编码的默认值。未来其他模型/配置仍需各自的同源配对。
+
+主实验的原始整体结果保留 failed：探针把文档中的 no-op 英文原因当成了空历史
+的预期，实际 CLI 返回 `Error: No messages to compact` 和
+`local_command_outcome.kind=failed`。其正常取样、压缩与续聊断言已在失败前
+执行到末尾，独立回读原帧和请求体确认；没有重跑这些未失效的场景。只补跑
+短历史、根/子隔离两组，均通过。共七个宿主退出 0，无信号，reader join，
+原进程组均不存在。不得将主实验改称一次全绿的 suite。
+
+### 对适配器假设的修正
+
+该版本的 `command_lifecycle.command_uuid`、普通/命令 result 的
+`user_message_uuid` 保留原输入 UUID。命令判断还必须保留
+`local_command_run`、`local_command_outcome` 及原生说明：只看外层 success、
+is_error=false 和流完整仍可能把已证实的失败误判成 no-op。成功 no-op 保留为
+**条件分支**，只有目标版本给出肯定的无需压缩语义才可采用；本次没有采得
+2.1.319 的成功 no-op，不据此声称所有版本都不可能 no-op。
+
+当前 headless 的 init 是输入后才出现的；手动压缩中甚至晚于 compacting 和
+status=null。首次发送前的能力不能唯一依赖等待该次 init.slash_commands，
+否则循环等待；可依据已核验版本合同确认能力，收到 init 后再核对环境。
+
+本地命令的 assistant 使用 `<synthetic>` 模型和零 usage，不能作为新的根模型
+请求覆盖正常快照。子任务实验在收尾 drain 时还记录到没有 user_message_uuid
+的后继根响应；这没有建立另一条用户请求，后票必须按原操作来源判断，不按
+“同 session 最近到达”归属。该实验不建立普通 argv 默认转发子文本的保证。
+
+manual boundary 除 pre_tokens 外，实际还含可选 post_tokens、duration 和
+保留片段字段；三轮历史场景为 693 → 514，短历史为 693 → 455。旧文档
+“只有 pre_tokens”的绝对表述不适用于本版本。但 post_tokens 属于原生压缩
+元数据，不是最近根请求 input/cache 样本，本次不把它改名为
+`claude_last_request_input`。确认 boundary 后，既定圆环输入口径仍等待下一
+合格根样本；预先的旧 assistant usage、命令零 usage 和累计 modelUsage 都
+不能用于填充压缩后的分子。此次只运行手动压缩，自动 trigger 仍需后票验证。
+
+### 官方客户端来源及其边界
 
 官方 Python SDK v0.2.144 的
 [parser](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.144/src/claude_agent_sdk/_internal/message_parser.py#L199)
@@ -119,13 +189,15 @@ terminal_reason 可缺失。故不能仅看 success 判 compact/no-op，也不�
 本地命令都必须带 terminal_reason=completed。官方
 [命令文档](https://code.claude.com/docs/en/agent-sdk/slash-commands#compact-history-with-compact)
 说明历史不足可成功但没有 boundary；现行文档的示例不能证明本机版本按当前
-argv 发出所需字段。compact_boundary 的 pre_tokens 只描述压缩前用量。
+argv 发出所需字段。现在以以上 2.1.319 原始流核对实际结果；pre_tokens 仍只
+描述压缩前用量，不能从其名字推导额外字段不存在。
 
-仍缺有版本/digest/配置来源的当前 headless 有序流，尤其是根 input/cache 与
-同 session、精确实际模型的 contextWindow 配对，以及 compact/no-op 后沿原
-session 续聊。尚不能宣布双后端协议前置任务 resolved，也不能将 Claude 长期
-显示未知当成功交付。此次未执行、探测、安装或登录 Claude；常规安装政策由
-[验证规则](../testing.md#markers-providers-and-isolation)维护。
+因此 01 所需的 Claude 生产者来源缺口已经补齐，并修正了会误导后票的结果
+假设。G0-A1 的**产品 parser/driver 消费回归**仍属后票，不是本次已经通过的
+产品测试。仍未验证真实 DeepSeek 模型、自动压缩、各种模型 alias 或生产生效
+配置；这些边界没有被本地模拟扩大。常规安装政策继续由
+[验证规则](../testing.md#markers-providers-and-isolation)维护，本次用户指定的
+离线专项不扩大日常实机范围。
 
 ## 后续验证责任
 
@@ -135,7 +207,7 @@ session 续聊。尚不能宣布双后端协议前置任务 resolved，也不能
 | G0-C2 | 源码不保证 ACK 先到；真实轨迹均 ACK 先到 | framed peer 验证逆序、丢 ACK、准备失败、无 item 的失败终态 |
 | G0-C4 | handler 替换活动任务的源码依据 | Owner 验证自然收束后发送、队列优先级、Stop 与取消 |
 | G0-C5 | 已读自动/async/token-budget 源码；本次关闭后二者且未触发自动压缩 | 实际启用分支与多 item、未安装候选由后续后端切片验证 |
-| G0-A1 | SDK 固定源码和官方文档；缺目标 headless 原始流 | 保持前置阻断，取得有来源的既有 capture 或经明确授权的专项验证 |
+| G0-A1 | CLI 2.1.319 的根用量/精确模型窗口/父身份原始流及本地命令结果；产品适配未实现 | 后票验证同 ID 去重、晚到/子样本排除、别名歧义、自动 boundary 与持久化 |
 | G0-A2 / S1 | 尚无产品实现 | 后续 Claude Harness 和 Owner/DB/HTTP/WS 回归 |
 
 协议可达性、产品模拟验证、真实模型和生产发布分别报告；历史 G0、源码及本次

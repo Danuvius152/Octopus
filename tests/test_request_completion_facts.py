@@ -38,6 +38,7 @@ async def test_failed_notification_preserves_the_exact_committed_completion(noti
             await asyncio.sleep(.005)
     runtime.release.set()
     completion = await asyncio.wait_for(receipt.wait(), 2)
+    assert receipt.operation == completion.operation == completion.outcome.operation == "message"
     assert completion.input_request_id == completion.request_id == receipt.request_id
     assert completion.state == "completed" and completion.recording_state == "committed"
     assert completion.outcome.status == "success"

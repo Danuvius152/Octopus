@@ -259,7 +259,7 @@ describe("ApplicationView", () => {
               origin: "application",
               agent_id: "ag1",
               messages: [{ role: "user", type: "text", content: "brief" }],
-              dispatch_state: { generation: "application-test", revision: 0, paused: false, active_request_id: null, items: [] },
+              dispatch_state: { generation: "application-test", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] },
               pending_questions: [],
               next_message_seq: 1,
             }),
