@@ -1,18 +1,27 @@
 # Local tasks, specs and tickets
 
-New temporary tasks use `<account-workspace>/<task>/`. Resolve the current
-account's workspace from the session/account context; the local layout is in
-[local-wsl.md](../local-wsl.md#临时任务目录). It is outside the project checkout.
-This project has no external issue tracker. When a skill asks for tracker setup
-or uses `.scratch/<feature>/` as its generic local example, use this task directory.
+This project uses local Markdown files as its issue tracker. Skills such as
+`to-spec`, `to-tickets`, `triage` and `wayfinder` read and write these files.
+There is no external issue tracker; a GitHub Git remote does not change that.
+
+## Task directory
+
+Grill discussion drafts and intermediate artifacts use `.scratch/<task>/` in
+this repository. A spec, tickets or map derived from that discussion stay in
+the same task directory. Existing grill tasks keep their current paths.
+
+Other new temporary tasks default to `<account-workspace>/<task>/`. Resolve
+the account workspace from the session/account context; the local layout is in
+[local-wsl.md](../local-wsl.md#临时任务目录). A user-specified task directory
+takes precedence. Use one directory per task, not copies in both roots.
 
 ## Placement
 
 Keep temporary analysis, specs, tickets, investigation scripts, experiments,
-handoffs and task artifacts together in that task directory. An isolated Git
-worktree, when needed, can live under its `worktree/` subdirectory. Ordinary
-implementation edits stay in the selected repository checkout or worktree;
-reusable product code and regression tests belong in that repository.
+handoffs and task artifacts together in the selected task directory. New
+isolated source worktrees default to the account workspace; edit deliverable
+code in the selected repository checkout or worktree. Reusable product code
+and regression tests belong in that repository.
 
 Test databases, synthetic accounts, provider output and other mutable runtime
 state use the separate roots required by [testing.md](../testing.md). A source
@@ -21,37 +30,57 @@ isolated test-state root. Test launchers must still select independent state and
 provider homes. `~/.cache/octopus-tests/` is a local testing location, not the
 default for source worktrees or general task materials.
 
-Existing `.scratch/` or cache-based tasks may finish at their current paths while
-processes, review links or recovery still depend on them. New tasks use workspace;
-moving an active task requires updating those consumers, not just moving files.
-`docs/review/` remains available for requested temporary review reports; managed
-application/research output and private publication resources keep their owners.
+Preserve existing tasks while processes, review links or recovery depend on
+their paths. Moving an active task requires updating those consumers, not just
+moving files. `docs/review/` remains available for requested temporary review
+reports; managed application/research output and private publication resources
+keep their owners.
 
-## Files and lifecycle
+## Files and operations
 
-- One feature or investigation per `<account-workspace>/<task>/` directory.
-- A spec, when needed: `spec.md`.
+- A spec, when needed: `<task-directory>/spec.md`.
 - Separate implementation tickets, when needed: `issues/01-<slug>.md`, numbered
-  in dependency order. Record `Status`, `Blocked by`, intended behavior and
-  acceptance criteria near the top. Reference the relevant source revision.
-- “Publish to the tracker” means save these local files. “Fetch a ticket” means
-  read its file. Record clarification and evidence in the same ticket.
-- A map is optional for a large decision graph. Use `map.md`, link its child
-  tickets, and keep each resolved answer with the decision that required it.
+  from `01` in dependency order, one file per ticket.
+- Record `Status:`, `Blocked by:`, intended behavior and acceptance criteria
+  near the top. Reference the relevant source revision. `Blocked by:` names
+  exact ticket paths, relative to the task directory or absolute when needed.
+- “Publish to the issue tracker” means save these local files. “Fetch a ticket”
+  means read its file. A bare number resolves only within an identified task;
+  ask when the task or file reference is ambiguous.
+- Record clarification and evidence in the same ticket. Append conversations
+  under `## Comments` instead of creating a second copy of the ticket.
+- Use the triage states in [triage-labels.md](triage-labels.md). For triage,
+  record one category (`bug` or `enhancement`) and one triage state.
 - Small, well-defined work can proceed directly from the conversation. Creating
   a spec, tickets or a map is not an acceptance requirement for every task.
 
-The local status vocabulary is `needs-triage`, `needs-info`, `ready-for-agent`,
-`ready-for-human`, `claimed`, `resolved` and `wontfix`. Use only the states the
-selected workflow needs. `Blocked by` names the exact local ticket files;
-resolved dependencies permit work, while `needs-info` records the missing input.
-Status changes do not grant implementation, publication or production authority.
+## Wayfinding and execution
+
+- A map, when needed, is `<task-directory>/map.md`, linking its child tickets
+  under `issues/`. Use `Type: research`, `prototype`, `grilling` or `task`.
+- A ticket is unblocked when all tickets named by `Blocked by:` are `resolved`.
+  Read blocker status before starting; missing references are unresolved.
+- The frontier contains open, unblocked and unclaimed tickets. Select the first
+  eligible ticket by number unless the user chooses one.
+- Claim by saving `Status: claimed` before work. Resolve by recording the
+  answer and evidence under `## Answer`, setting `Status: resolved`, and adding
+  a context pointer to the map when one exists.
+- `claimed` and `resolved` are execution states, in addition to the five triage
+  labels. `needs-info` records a missing prerequisite; `wontfix` closes a task
+  without implementation. Status changes do not grant implementation,
+  publication or production authority.
+
+## Lifecycle
 
 `.scratch/`, `docs/review/` and the account workspace are temporary. Before
 cleanup, put lasting decisions, their reasons and applicability, and concise
-regression evidence in the owning project document. Current contracts belong in
-`docs/implemented/`; unfinished changes belong in `docs/plans/`; verification
-policy belongs in `docs/testing.md`. Final durable links point to those owners.
-Do not remove material still needed by running work, an active review or recovery.
-Machine-specific publication tools and unfinished release evidence stay in their
-managed operations location, as described in [local-wsl.md](../local-wsl.md).
+regression evidence in the owning project document. Current contracts belong
+in `docs/implemented/`; unfinished formal plans belong in `docs/plans/`;
+verification policy belongs in `docs/testing.md`. A confirmed grill decision
+does not establish implemented behavior. Follow [domain.md](domain.md) for
+document consumption and placement.
+
+Final durable links point to those owners. Do not remove material still needed
+by running work, an active review or recovery. Machine-specific publication
+tools and unfinished release evidence stay in their managed operations location,
+as described in [local-wsl.md](../local-wsl.md).

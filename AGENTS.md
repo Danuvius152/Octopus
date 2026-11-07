@@ -75,7 +75,7 @@ web/e2e/                Playwright; test.ts is the shared offline entry
 tests/                  Backend correctness and explicitly selected integration tiers
 scripts/                Checks, generated contracts and documentation index
 docs/                   Current guides, contracts, unfinished plans and version references
-.scratch/               Existing temporary tasks; new tasks use account workspace
+.scratch/               Grill drafts, specs and tickets; see local task conventions
 ```
 
 Read the relevant part of [architecture.md](docs/architecture.md) for component
@@ -164,22 +164,38 @@ the service does not publish the development tree.
   For documentation, persona or memory changes, read those documentation rules
   and use the existing [documentation index](docs/README.md) to find the owner.
 
-## Agent skills and local tasks
+## Agent skills
 
-Use the account workspace for new temporary task materials, experiments and
-isolated source worktrees. Edit deliverable code in the selected repository
-checkout or worktree. Test runtime state follows its separate isolation rules;
-the test cache is not a general development directory.
+### Issue tracker
 
-There is no external issue tracker. [Local task conventions](docs/agents/issue-tracker.md)
-define workspace paths, statuses and what “publish” means for skills, including
-skills whose generic examples use `.scratch/`. Routine work does not require
-tickets. Durable decisions and final evidence belong in existing `docs/` owners
-before temporary task material is removed. Preserve active tasks at their current
+This project uses local Markdown files as its issue tracker. Grill tasks keep
+intermediate artifacts and derived specs/tickets in `.scratch/<task>/`; other
+new temporary tasks default to the account workspace. Read
+[local task conventions](docs/agents/issue-tracker.md) before publishing or
+fetching specs, tickets or maps. Routine work does not require tickets.
+
+### Triage labels
+
+Use the five default triage labels in
+[triage-labels.md](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Use the root `GLOSSARY.md`, current contracts in `docs/implemented/` and
+unfinished formal plans in `docs/plans/`. Read
+[domain.md](docs/agents/domain.md) for consumption and decision placement.
+
+### Local tasks
+
+Use the account workspace by default for new temporary tasks, experiments and
+isolated source worktrees; grill task material follows the directory convention
+above. Edit deliverable code in the selected repository checkout or worktree.
+Test runtime state follows its separate isolation rules; the test cache is not
+a general development directory.
+
+Durable decisions and final evidence belong in existing `docs/` owners before
+temporary task material is removed. Preserve active tasks at their current
 paths until their processes and references can be retired or updated safely.
-
-Use the repository's terminology and `docs/implemented/` contracts and rationale.
-Unfinished changes belong in `docs/plans/`. Create a glossary only when needed.
 Skills support the task's scope and existing authorization.
 
 ## Repository and Upstream Maintenance

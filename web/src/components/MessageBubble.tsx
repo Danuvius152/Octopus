@@ -7,6 +7,7 @@ import {
   IconArrowBarToRight,
   IconGitFork,
   IconRobot,
+  IconHelpCircle,
 } from "@tabler/icons-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -36,6 +37,13 @@ import { requestSource } from "../lib/injectedTurns";
 const BG_TASK_RESULT_PREFIX = "[bg-task-result]";
 
 import { normalizeMessage, presentOutcome } from "../lib/turnOutcome";
+
+function hasAsyncQuestions(value: unknown): boolean {
+  if (!value || typeof value !== "object" || !("type" in value) || value.type !== "agentMessage" ||
+      !("questions" in value) || !Array.isArray(value.questions) || !value.questions.length) return false;
+  return value.questions.every((question: unknown) => question !== null && typeof question === "object" &&
+    "title" in question && typeof question.title === "string" && question.title.trim().length > 0);
+}
 
 interface MessageBubbleProps {
   message: Message;
@@ -173,6 +181,7 @@ export function MessageBubble({
   // Mirror the header's avatar treatment: show the agent's emoji, falling
   // back to the default octopus when an agent exists but set no avatar.
   const assistantAvatar = agentName ? agentAvatar || "🐙" : null;
+  const asyncQuestion = !plain && message.role === "assistant" && hasAsyncQuestions(message.tool_input?.native_item);
   switch (message.type) {
     case "native_subagent":
       return typeof message.tool_input?.card_id === "string"
@@ -259,8 +268,8 @@ export function MessageBubble({
         );
       }
       return (
-        /* The agent speaks as the page: an identity tile in the left gutter
-           and plain prose beside it — no card, no name row. */
+        /* Ordinary replies use plain prose; async questions need a visible
+           reply cue while keeping the original text and options together. */
         <div className="msg msg-assistant flex gap-3">
           <span
             className="tile tile-lg tile-plain mt-0.5"
@@ -271,7 +280,22 @@ export function MessageBubble({
           </span>
           {/* `pr-12`: the hover timestamp sits in the row's top-right corner, so
               the first line of prose stops before it instead of running under it. */}
-          <div className="msg-content markdown min-w-0 flex-1 pr-12 text-[14px] leading-[1.65] text-gray-900">
+          <div
+            role={asyncQuestion ? "region" : undefined}
+            aria-label={asyncQuestion ? "Question for you" : undefined}
+            className={`msg-content markdown min-w-0 flex-1 pr-12 text-[14px] leading-[1.65] text-gray-900 ${
+              asyncQuestion ? "msg-async-question rounded-lg border-2 border-primary/50 bg-primary-50 p-4" : ""
+            }`}
+          >
+            {asyncQuestion && <>
+              <div className="flex items-center gap-2 font-semibold text-primary">
+                <IconHelpCircle size={20} aria-hidden />
+                Question for you
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Reply in the message box. The agent may continue working while you reply.
+              </p>
+            </>}
             {plain ? (
               <div className="msg-streaming-text whitespace-pre-wrap break-words">
                 {message.content || ""}

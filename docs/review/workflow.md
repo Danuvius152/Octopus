@@ -17,7 +17,7 @@
 | [Research Asset Map][ram] · v1.0.4 | 来源、摘录、主张、决定与产出分开；记录准确版本、实际采纳范围和纠正影响；归档后从自然问题检索验收 | **优先借鉴。** 适合非数学研究、数字人方案、文章和演示材料；在现有 Wiki 与项目入口上实现这些语义，先不复制它的整套库。 |
 | [Math Research Solve][mrs] · v3.4.0 | 需要时复用旧资产；重读依据后判断适用性；保留有信息量的失败和重开条件；研究与正式归档分开 | **优先借鉴。** 用于持续研究与跨会话续接。保留当前研究问题及其变更理由，不照搬数学目标不可变、证明状态或交换包审查体系。 |
 | [Manage Personal Knowledge][mpk] · v1.11.6 | 一个入口负责路由，专业流程各有 owner；检索覆盖可见；写回有明确交接包 | **优先借鉴。** 主会话协调 Wiki、论文、实验和写作；索引与正文各有责任，避免每个 skill 复制全部流程。题库优先的默认检索顺序不适用于通用 AI 研究。 |
-| [Obsidian Vault Notes][ovn] · v1.14.0 | 当前文件优先；编辑按实际复杂度分流；保护含义与结构；内容审查、语言审查和机械检查分开 | **迁移写作方法。** 局部改句走短路径，整篇重写覆盖全文；不照搬 Vault 权限包、个人作者画像或具体发布控制器。 |
+| [Obsidian Vault Notes][ovn] · v1.14.0 | 当前文件优先；按指定范围自动优化写作与去 AI 味；保护含义、校准作者表达；内容审查、两遍改写和机械检查分开 | **优先迁移写作方法。** 局部改句走短路径，整篇重写覆盖全文；借鉴文风校准方法，不照搬原作者画像、Vault 权限包或发布控制器。 |
 | [PDF Problem Search][pdf] · v1.12.4 | 先缩小范围，保持查询硬条件，命中后核读原页，区分正文角色、提取失败与未命中 | **迁移到论文取证。** 核对本文实验、相关工作、附录和图表；数学公式指纹与定理检索算法无需迁移。 |
 | [Math & Science Computation][msc] · v1.12.3 | 按交付选择计算与核验成本；估算可行性；选中路径再实测能力；作业、尝试、产物和核验分别绑定 | **迁移到 AI 实验。** 区分快速探索、可复现交付和额外独立核验；采用任务适合的执行器，不继承其 Wolfram 优先级或 Windows 专属政策。 |
 | [Compute Fleet Manager][fleet] · v1.0.10 | 有效吞吐优先；权威队列唯一；数据就地处理；原身份恢复；程序负责持续监测 | **有真实多机需求再采用。** 先把单机实验闭环做通，已有调度器继续拥有任务事实。 |
@@ -120,6 +120,43 @@ when saving is authorized.
 | “验证这个想法／复现这个结果” | 区分假设、方案和实际运行；按请求与资源选择实验及核验成本。 |
 | “接着这个项目／新结果改变了什么” | 读当前决定与依据，核对变化、旧失败和待复查项，补当前缺口。 |
 | “写成综述／重写这篇文档” | 按读者问题重组，保护含义和归属，完成全文内容审查与连续冷读。 |
+| “去 AI 味／润色／优化表达” | 在指定范围直接改写，核对含义与文风，第二遍检查改写造成的新问题；“只检查”则返回发现。 |
+
+### 3.4 写作优化与去 AI 味的候选 prompt
+
+这部分适合放进写作 skill，或专门写作角色的 system prompt。通用角色保留对应的加载入口即可。它同时服务于从材料成文和既有文章修订，重点是内容、表达与读者能否理解，不能用一个词表代替判断。
+
+```text
+Write for the intended reader, genre and purpose of each paragraph. Make the
+actual claim, action, relation or condition clear. Let every paragraph earn its
+place through a fact, reason, example, distinction, transition or useful limit.
+
+When asked to polish, naturalize or remove AI-style prose, rewrite the requested
+scope directly. Whole-article requests cover the whole article; local requests
+stay local with necessary transition repairs. Inspection-only requests return
+findings. Complete ordinary style choices without sentence-by-sentence approval.
+
+Preserve facts, information coverage, numbers, attribution, quotations, technical
+terms, negation, causality, chronology, uncertainty, author position and document
+structure required by the task. Use reliable author-written passages supplied
+for this task to calibrate voice. Match genre before surface habits. Invent no
+experiences, examples, emotions, sources or details to make the prose feel human.
+
+Rewrite empty announcements, inflated significance, vague attribution, decorative
+contrasts, abstract packaging, formulaic endings and chat residue when they obscure
+the paragraph's purpose. Keep useful lists, technical repetition, real contrasts
+and developed analogies. Decide from context; apply no blanket word bans or
+mechanical synonym replacement. A shorter summary does not replace a full rewrite.
+
+Review content first, then reread the revised scope continuously. Repair newly
+uniform rhythm, repeated stock phrasing, lost transitions, weakened detail and
+changed claim strength. Check the final text against the original meaning and
+relevant document checks. Lint findings guide inspection; they do not certify prose.
+If a safe edit requires an unresolved factual or source decision, retain that
+claim and report the exact issue while completing independent style improvements.
+```
+
+这段迁移自[去 AI 味改写][ovn-ai]与[文章修订][ovn-style]的行为要求。原包的[作者画像][ovn-voice]来自其用户的笔记分析，不能直接视作你的文风。可迁移的是先区分可靠作者原文、引用、脚本体裁和助手残留，再校准表达的方法。若以后要建立你的画像，另用你提供或授权的样本，不直接继承原包的词频、标点偏好，也不为了校准自动扫描其他笔记。
 
 ## 4. 四条可直接使用的工作流
 
@@ -190,11 +227,25 @@ when saving is authorized.
 
 可直接提出：
 
-> 围绕目标读者的问题重新组织这些材料。保留来源的条件、归属和不确定性，明确哪些是我的判断；每段承担具体作用。完成后通读全文，核对证据、图表与链接，再检查表达是否自然、是否有重复或空话。
+> 围绕目标读者的问题重新组织这些材料，直接完成指定范围的写作与去 AI 味改写。保留信息、来源条件、归属和不确定性，每段承担具体作用。先检查内容，再连续冷读修订稿，修掉空话、模板表达和改写引入的新问题，最后核对含义、图表与链接。
 
-写作先确定文章要回答的问题，再选材料。逐段检查指代是什么、作了什么判断、增加了什么、依据在哪里，以及删掉它读者会失去什么。定义、过渡和例子按真实功能审视，不要求每段都添加数据。含义稳定后，再做语言冷读；lint 只提供机械风险信号。[段落审查][ovn-content]
+写作与修订按以下顺序进行。新文章先确定要回答的问题和材料，既有文章先读当前正文、段落前后文及章节作用，再进入同一套内容与语言检查。
 
-修订要保护数字、单位、否定、因果、时间顺序、引用归属和确定性。例如，不能把“作者在该数据集报告提升”润色成“方法已经普遍有效”。局部改句只处理所选范围和必要衔接；整篇重写则重建全文论证，删除失效正文，不靠文末补记纠正前文。个人文风校准只使用真实可靠的样本，不从旧 AI 扩写或模板噪声推断你的偏好。
+1. **确定范围和保留项。** 明确全文、章节或局部请求，核对读者、体裁、信息覆盖和必须保留的结构。润色请求直接进入改写，不停在建议清单；只检查的请求保持只读。局部修改只处理所选内容与必要衔接。
+2. **先检查内容。** 逐段检查指代是什么、作了什么判断、增加了什么、依据在哪里，以及删除后读者会失去什么。定义、过渡和例子按真实功能审视，不要求每段都添加数据。缺依据的实质判断单独标出，不靠润色补成事实。[段落审查][ovn-content]
+3. **按上下文改写。** 用可靠作者原文校准表达，说明谁做了什么、对象和条件是什么。处理下表中的具体问题，同时保留有效术语、细节与论证。整篇重写可调整结构，但不靠大幅删掉论据伪造干净效果。
+4. **连续冷读第二遍。** 暂时放下初始问题清单，检查新稿是否出现整齐句长、连续金句、同义词轮换、套路结尾、衔接断裂或文风被磨平。空洞结尾换个近义说法仍要处理。
+5. **核对最终稿。** 对照改前含义、信息与结构，检查图表、引用及相关格式。简要报告修改范围、主要改写和具体未决项。lint 若使用，前后结果仅用于辅助检查，不代替语义审查和冷读。[去 AI 味改写][ovn-ai]、[文章修订][ovn-style]
+
+| 需要检查的表达 | 处理方式与保留边界 |
+| --- | --- |
+| 预告正文、重复标题、助手寒暄和工具标记 | 从实际问题或关系开始；真实的阅读路线说明和研究工具示例按用途保留。 |
+| 空泛意义、宣传语、无来源权威和套话结尾 | 回到已有事实、结果、限制或下一步。实质主张缺来源时标出待核，不随意删除或伪配引用。 |
+| 抽象名词包装、强行译词、造出来的术语 | 写清动作、对象、条件或代价；已有领域术语和准确来源标签保留。 |
+| 模板反转、排比问句、短句金句和装饰性比喻 | 直接陈述判断，保留能排除实际误解的对比、有后续回答的问题和解释了对应关系的比喻。 |
+| 机械加粗、碎标题和强行整齐的列表 | 按阅读任务组织；真实的分类、步骤与比较继续使用列表或表格。 |
+
+修订尤其要保护数字、单位、否定、因果、时间顺序、引用归属和确定性。例如，不能把“作者在该数据集报告提升”润色成“方法已经普遍有效”。个人经历、真实犹豫、明确立场和有效重复也应保留，不能为了模仿人类添加口语、情绪或故事。事实判断暂时无法核实时，保留对应主张并说明缺口，其他可独立完成的改写继续。
 
 数字人项目的证据与产出也包括视频、字幕、音频、幻灯片、动画场景及可编辑工程。值得迁移 RAM 的多媒体设计：先看元数据，再选择具体片段；记录文件版本与时间段、页、场景或帧范围，附可搜索的用途说明和必要构建依赖。重新剪辑、转码或改页后，旧定位须核对映射。[多媒体资料][ram-media]
 
@@ -244,7 +295,7 @@ when saving is authorized.
 
 | 顺序 | 具体采用内容 | 完成条件与归属 |
 | --- | --- | --- |
-| 先做行为试用 | 用第 4 节的单次请求完成真实论文比较与项目续接；在候选 prompt 中保留能改变行为的规则 | 观察到条件化结论、冲突保留和可继续入口，再决定是否固化；当前文档不修改配置。 |
+| 先做行为试用 | 用第 4 节的单次请求完成论文比较、项目续接或写作优化；在候选 prompt 中保留能改变行为的规则 | 分别检查证据条件、可继续入口及保持含义的直接改写，再决定是否固化；当前文档不修改配置。 |
 | 第一批工程：材料与证据 | PDF 取证／转换、问点覆盖、准确定位、反证理由和比较条件 | 一个真实问题能从原始材料走到有依据的结论；沿现有研究计划的 P、A 范围实施。 |
 | 接通项目复用 | 有界本地上下文、采纳范围、更新影响与自然检索验收 | 完成“旧知识＋新证据＋判断变化”，获授权保存后还能从正常入口找回；归现有 B 范围及 Wiki 计划。 |
 | 接通实际实验 | 设置与尝试分开、实际产物、核验、失败解释和原身份恢复 | 一个真实单机实验能运行、解释并续接；归现有实验范围。 |
@@ -273,6 +324,7 @@ when saving is authorized.
 | 进程成功但漏样本、缺产物或指标版本不符 | 实验不能标为无条件通过，原始输出和缺口仍能重开。 |
 | 丢回执、等待超时、取消或旧尝试迟到 | 查询原身份，不重复启动，不让旧输出覆盖新结果；停止与资源释放分别确认。 |
 | 保存后的冷启动续接 | 从正常项目入口用自然问题找回材料，并识别当前、历史、候选与纠正状态；已知路径只能事后核对。 |
+| 全文去 AI 味、局部润色与只读审校 | 按指定范围完成对应动作，保留内容和立场；必要术语、对比与列表不被机械删除，第二遍能发现改写产生的新模板。 |
 | 长文重写、复杂 PDF 图表或视频工程 | 含义、归属与不确定性保留，正文和附件可打开，定位与实际版本一致；未覆盖视觉内容和依赖如实说明。 |
 
 每项同时记录回答质量与成本：问点覆盖、准确定位、条件保真、错误结论、检索成功，以及墙钟时间、调用／token、重复读取、失败重试和必要人工修正。冷启动与复用分别测；并行耗时不能相加冒充墙钟时间，也不能用减少证据义务制造提速。质量要求相同后，才判断新 prompt 或工作流是否更划算。
@@ -302,3 +354,6 @@ when saving is authorized.
 [mpk-pdf]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/manage-personal-knowledge/references/pdf-library.md
 [mpk-writeback]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/manage-personal-knowledge/references/writeback-handoff.md
 [ovn-content]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/obsidian-vault-notes/references/paragraph-content-review.md
+[ovn-ai]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/obsidian-vault-notes/references/ai-style-rewrite.md
+[ovn-style]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/obsidian-vault-notes/references/article-revision-style.md
+[ovn-voice]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/obsidian-vault-notes/references/author-voice-profile.md

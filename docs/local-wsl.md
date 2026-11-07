@@ -144,7 +144,7 @@ Windows 风格的 `127.*`
 
 ### 本地 Codex skills
 
-本机通过 Codex 原生的用户级发现目录共享已安装技能：
+本机通过 Codex 原生的用户级发现目录共享自有的独立技能：
 `~/.agents/skills` 软链接到 `~/.codex/skills`。
 首次重建时，目标路径不存在才创建，不覆盖已有技能目录：
 
@@ -153,26 +153,58 @@ mkdir -p "$HOME/.agents"
 ln -s "$HOME/.codex/skills" "$HOME/.agents/skills"
 ```
 
-Octopus 服务以当前用户及其 `HOME` 运行，因此本地 CLI、已有和新建
-Codex agent、普通新会话都使用同一份用户技能。凭据仍使用
-`~/.octopus/codex/<credential_id>/` 作为独立 `CODEX_HOME`，不需要复制
-认证、配置或会话文件。下一轮启动 Codex 即可发现，无需重启 Octopus 或新建
-会话；已经运行的回合不必打断。框架和 agent prompt 无需添加技能清单。
+Octopus 服务以当前用户及其 `HOME` 运行，因此本地 CLI 和 Codex agent
+都能发现这些独立技能。凭据仍使用 `~/.octopus/codex/<credential_id>/`
+作为独立 `CODEX_HOME`。插件的 marketplace、启用配置和缓存归各自
+`CODEX_HOME`，终端 CLI 在 `~/.codex` 安装插件不会自动给 Octopus 凭据安装。
+不需要复制认证或会话文件，框架和 agent prompt 无需添加技能清单。
 
-技能由 Codex 按名称、描述及自身调用策略按需加载；`grilling` 可按任务匹配，
-`grill-me` 的 `allow_implicit_invocation: false` 保留，需显式 `$grill-me`。
-自动发现不意味着所有技能都应自动触发。目录、软链接与调用策略见
+Matt Pocock skills 通过原生插件安装。对实际使用的每个凭据执行以下命令，
+先将 `<credential_id>` 换成目标凭据；终端 CLI 则选 `~/.codex`：
+
+```bash
+octopus_skills_home="$HOME/.octopus/codex/<credential_id>"
+CODEX_HOME="$octopus_skills_home" codex plugin marketplace add mattpocock/skills
+CODEX_HOME="$octopus_skills_home" codex plugin add mattpocock-skills@mattpocock
+CODEX_HOME="$octopus_skills_home" codex plugin list --marketplace mattpocock --json
+```
+
+插件更新由 Codex 原生机制管理，也可用
+`CODEX_HOME="$octopus_skills_home" codex plugin marketplace upgrade mattpocock`
+刷新 marketplace。安装或更新后核对插件实际版本与技能发现结果；不把用户技能
+入口固定链接到 `plugins/cache` 下的版本目录，也不再复制同一套 Matt skills
+到独立技能目录。[作者安装说明](https://github.com/mattpocock/skills#installation-30-second-setup)
+区分了自动更新的插件与手动维护的技能副本。
+
+安装或目录调整后，新启动的原生 Codex 运行按当前目录与配置发现技能，
+无需重启 Octopus；已经运行的回合不必打断。技能按名称、描述及自身调用策略
+按需加载。插件技能使用 `mattpocock-skills:` 命名空间；显式调用例如
+`$mattpocock-skills:grill-me`。自动发现不意味着所有技能都应自动触发。见
 [官方 skills 说明](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills)。
+
+本机仅保留一项 Matt 文本修正：`ask-matt/SKILL.md` 与
+`ask-matt/PHASE-BOUNDARIES.md` 的 smart zone 说明结合当前模型容量、宿主
+剩余上下文信号和实际工作质量判断，不设固定 token 阈值。修正在两个实际使用
+的插件安装中直接应用，不新增全局 `AGENTS.md`，不改变 Codex 的自动压缩配置。
+插件更新或重装可能覆盖这两处本地修改，更新时需重新核对。其余旧技能定制规则
+已退出，仅保留独立的 `find-code-simplifications` 与官方 `.system` 内容。
+
+2026-11-07 本机验收：终端 CLI 与 Octopus 当前凭据的原生 App Server
+`skills/list` 各发现 27 个启用的 Matt 插件技能，旧副本发现数均为 0；两个安装
+的技能文件相对上游仅有上述两处文本修正。
 
 ## 临时任务目录
 
 新的一般临时任务使用当前账户的 `~/.octopus/users/<user_id>/workspace/<task>/`。
 分析材料、规格票据、调试脚本、临时实验、交接和任务产物放在同一任务目录；需要
-隔离开发时，Git worktree 可放其 `worktree/` 子目录。正式代码仍在选定仓库或
-工作树内修改。具体生命周期与票据格式见[本地任务约定](agents/issue-tracker.md)。
+隔离开发时，Git worktree 可放其 `worktree/` 子目录。Octopus 的 grill 中间
+产物与其后续规格、票据沿用仓库 `.scratch/<task>/`；其他临时任务和新建隔离
+工作树仍默认放账户 workspace。正式代码仍在选定仓库或工作树内修改。
+具体目录选择、生命周期与票据格式见[本地任务约定](agents/issue-tracker.md)。
 
-`.scratch/` 和 `.cache/octopus-worktrees/` 不再作为新任务的默认目录；已有活动
-任务先保留路径与引用，完成后再清理。`docs/review/` 仍可放当次审阅报告。
+除上述 grill 任务外，`.scratch/` 和 `.cache/octopus-worktrees/` 不作为新任务的
+默认目录；已有活动任务先保留路径与引用，完成后再清理。`docs/review/` 仍可放
+当次审阅报告。
 这里的目录选择不改变框架的账户路径、应用输出或受管发布目录。
 
 下面的测试目录约束针对运行数据，而非源码存放位置：即使源码工作树位于

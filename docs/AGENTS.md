@@ -25,9 +25,10 @@ verification and repository actions.
   their version, method, observed result and limits; link current contracts.
   Historical evidence does not determine today's implementation or deployment.
 - `review/`, repository `.scratch/` and the account workspace are temporary.
-  New task materials and isolated worktrees use the account workspace under
-  [local task conventions](agents/issue-tracker.md); existing `.scratch/` work
-  retains its active references until completion. Test state has separate roots.
+  Grill intermediate artifacts and their derived specs/tickets use `.scratch/`;
+  other new tasks and isolated worktrees default to the account workspace under
+  [local task conventions](agents/issue-tracker.md). Preserve active paths until
+  their consumers can be updated safely. Test state has separate roots.
   Transfer useful decisions, reasons, applicability and regression evidence to
   their durable owner before cleanup. Preserve active tasks and recovery state.
   Use `post-mortems/` selectively for incidents whose causal evidence helps

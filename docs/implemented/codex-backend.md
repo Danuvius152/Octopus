@@ -304,6 +304,12 @@ that its native response was sent. MCP ask keeps its existing entry and owner,
 and also closes with its originating native run. Full timing and provenance
 belong to [the question contract](architecture-contract.md#native-question-control).
 
+`agentMessage.questions` supplies a separate asynchronous reply cue. Live and
+loaded messages show a prominent question card while preserving the original
+body and options. Users answer through the ordinary message composer; the card
+explains that the agent may continue working. This presentation does not create
+a pending native request or change execution waiting and question settlement.
+
 Headless permission policy remains unchanged. Unexpected command/file approvals
 are declined, permission requests receive no permissions, and legacy approval
 methods use their own negative response shape. An unregistered dynamic tool

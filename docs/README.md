@@ -14,7 +14,7 @@
 | [`reference/`](reference/) | 带版本和适用范围的协议观察、实验及反证。 |
 | [`post-mortems/`](post-mortems/) | 对未来诊断有用的事故与工程复盘。 |
 | 账户 workspace | 新临时任务、实验和隔离源码工作副本；见[任务约定](agents/issue-tracker.md)。 |
-| `review/` 与既有 `.scratch/` | 临时审查及活动任务材料；长期结论归位后清理。 |
+| `review/` 与 `.scratch/` | 临时审阅材料与 grill 任务草稿、规格和票据；长期结论归位后清理。 |
 
 `implemented` 描述当前代码，不代表生产已经部署；实现、验证与部署分别取证。
 完成计划要提炼当前合同及理由，退出旧执行正文。混合材料先拆分，未完成范围
@@ -43,6 +43,7 @@
 - [Agent 提示词](agent-prompts.md)：可复制的角色配置快照；编辑文件不会更新已保存配置。
 - [本机测试](local-wsl.md#本机测试)：离线覆盖 Claude Code 与 Codex，日常实机范围为 Codex；门禁由 [testing.md](testing.md)维护。
 - [领域词汇](../GLOSSARY.md)：术语解释；术语存在不代表该能力已承诺或已实现。
+- [Skills 项目配置](agents/issue-tracker.md)：本地任务与 grill 目录；[状态标签](agents/triage-labels.md)与[领域文档规则](agents/domain.md)。
 
 ## 当前合同
 

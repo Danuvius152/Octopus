@@ -102,6 +102,20 @@ test("native root and helper items stay separate through completion, reconnect a
   const root: Message = { role: "assistant", type: "text", seq: 4, content: "Root final answer", runtime_metadata: identity("root", "same") };
   messages.push(root);
   send({ ...root, type: "assistant_text" });
+  const questionText = "是否保留默认 triage 标签？\n- 保留默认标签（推荐）\n- 我要自定义标签";
+  const question: Message = { role: "assistant", type: "text", seq: 5, content: questionText,
+    runtime_metadata: identity("root", "async-question"), tool_input: { native_item: {
+      type: "agentMessage", id: "async-question", questions: [{ title: "是否保留默认 triage 标签？",
+        options: ["保留默认标签（推荐）", "我要自定义标签"] }],
+    } } };
+  messages.push(question);
+  send({ ...question, type: "assistant_text" });
+  const questionCard = page.getByRole("region", { name: "Question for you" });
+  await expect(questionCard).toBeVisible();
+  await expect(questionCard).toContainText("Reply in the message box. The agent may continue working while you reply.");
+  await expect(questionCard).toContainText("保留默认标签（推荐）");
+  await expect(questionCard).toContainText("我要自定义标签");
+  await expect(questionCard.getByRole("button")).toHaveCount(0);
   revision += 1;
   done = true;
   send({ type: "dispatch_state", dispatch_state: { generation: "native-service", revision, paused: false, active_request_id: null, items: [] } });
@@ -128,7 +142,9 @@ test("native root and helper items stay separate through completion, reconnect a
   await expect(card).toHaveCount(1);
   await expect(card).toHaveClass(/subagent-completed/);
   await expect(card.locator(".subagent-summary")).toHaveText("Helper saved answer");
-  await expect(page.locator(".msg-assistant .msg-content")).toHaveText(["Root progress", "Root final answer"]);
+  await expect(page.locator(".msg-assistant .msg-content:not(.msg-async-question)")).toHaveText(["Root progress", "Root final answer"]);
+  await expect(questionCard).toBeVisible();
+  await expect(questionCard).toContainText("是否保留默认 triage 标签？");
   await card.locator(".subagent-summary-row").click();
   await expect(card.getByRole("region", { name: "Saved helper details" }).getByText("Helper saved answer", { exact: true })).toBeVisible();
   expect(detailReads.length).toBeGreaterThanOrEqual(2);
