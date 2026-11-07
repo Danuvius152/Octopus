@@ -137,6 +137,12 @@ for line in frames():
         continue  # A response to a server request is not a client RPC.
     if method == "initialized":
         continue
+    if mode == f"unsupported:{method}":
+        send({"id": frame["id"], "error": {"code": -32601, "message": f"Method not found: {method}"}})
+        continue
+    if method == "initialize":
+        version_path = root / "native-version"
+        result = {"userAgent": f"codex-cli/{version_path.read_text() if version_path.exists() else '0.167.0'}"}
     if method == "model/list":
         catalog_model = defaults["model"] or "catalog-default"
         metadata = {"id": catalog_model, "model": catalog_model, "isDefault": True,

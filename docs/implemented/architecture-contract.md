@@ -76,7 +76,7 @@ App Server 的根 terminal 是 provider 候选。一个 attempt 只接纳一个�
 terminal 后，Run 同步冻结 target、问题回答和工具准入，启动原有界退休；同一
 reader 仍以原 connection/request/attempt/work 和 native 身份采集完整晚事件，
 不转入 Claude held/idle，也不恢复 grant。EOF、原采集截止和真实退出分别取证；
-raw drain 不证明完整 item 已保存。按锁版 producer 核定的实际效果结果缺口不能
+raw drain 不证明完整 item 已保存。按原生来源与 item 类型核定的实际效果结果缺口不能
 成功；准确取消并清理的纯输入只适用下文原调用窄例外。可放弃的 sampling/维护
 观察与 delta 不自动形成完成债务。来源与类型的
 具体规则归 [Codex 完成合同](codex-backend.md#root-completion-and-selected-answer)，

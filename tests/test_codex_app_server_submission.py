@@ -296,10 +296,18 @@ async def test_stop_retains_late_native_proof_without_changing_interrupted_outco
     assert len((tmp_path / "native-business.jsonl").read_text().splitlines()) == 1
 
 
-async def test_missing_bare_binary_keeps_an_unsent_recoverable_original(native_runtime, tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["missing-bare", "missing-absolute", "nonexecutable"])
+async def test_unavailable_binary_keeps_an_unsent_recoverable_original(native_runtime, tmp_path, monkeypatch, failure):
     manager, database, session, mode, starts, events = native_runtime
     build = codex_app_server.build_argv
-    monkeypatch.setattr(codex_app_server, "build_argv", lambda context: (["octopus-no-such-native-binary"], {"cwd": context.working_dir}))
+    binary = "octopus-no-such-native-binary"
+    if failure != "missing-bare":
+        path = tmp_path / "unavailable-native-binary"
+        if failure == "nonexecutable":
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o644)
+        binary = str(path)
+    monkeypatch.setattr(codex_app_server, "build_argv", lambda context: ([binary], {"cwd": context.working_dir}))
     await submit_client_message(manager, session.id, "Keep original startup failure", [], "missing", wiki_mode=None)
     await wait_dispatch_idle(manager, session.id)
     status = await submission_status(manager, session.id, "missing")

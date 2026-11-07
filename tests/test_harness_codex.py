@@ -69,14 +69,9 @@ async def test_discovery_and_ordinary_prepare_select_the_same_configured_executa
     prepared, kwargs = prepare_spawn(argv, kwargs)
     expected = str(generic) if selection == "default" else str(configured)
     assert prepared[0] == expected
-    if selection == "missing":
-        with pytest.raises(FileNotFoundError) as failure:
-            await invocation._driver.prepare(invocation, context, prepared, kwargs)
-        assert str(configured) in str(failure.value)
-    else:
-        # Presence does not relax the actual binary's pin or launch a probe.
-        with pytest.raises(ValueError, match="verified 0.166.0 binary"):
-            await invocation._driver.prepare(invocation, context, prepared, kwargs)
+    # Preparation neither reads a binary digest nor launches a version probe.
+    # The OS launch and native handshake own executability and compatibility.
+    await invocation._driver.prepare(invocation, context, prepared, kwargs)
     assert codex_app_server.build_argv(context)[0][0] == "another-codex"
 
 

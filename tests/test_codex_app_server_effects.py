@@ -175,7 +175,6 @@ async def test_schedule_records_original_result_and_archives_only_after_retireme
 async def native_wiki(jobs, client, tmp_path, monkeypatch):
     manager = wiki_api.session_manager
     await manager.db.update_agent(jobs.registration["curator_agent_id"], backend="codex")
-    monkeypatch.setattr(codex_app_server, "verify_binary", lambda path: None)
     runtime = SimpleNamespace(manager=manager, jobs=jobs, client=client, starts=[], completions=[])
 
     def argv(context):

@@ -120,7 +120,6 @@ class McpQuestionCall:
                 or (pending.request_id, pending.attempt_id) != (self.request_id, attempt.attempt_id)
                 or (metadata.get("threadId"), turn.get("thread_id"), turn.get("turn_id"))
                     != (self.root[0], self.root[0], self.root[1])
-                or turn.get("codex_version") != "0.166.0"
                 or (self.identity.get("server"), self.identity.get("tool")) != ("ask", "user")):
             return None
         if self.creation.exception() is not None or self.creation.result() is not pending:

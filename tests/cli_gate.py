@@ -139,19 +139,16 @@ def codex_cli_works() -> bool:
 
 
 def codex_app_server_works() -> bool:
-    """Verify the product's selected native binary and the selected login.
+    """Probe the selected login using the product's configured executable.
 
-    An invalid pin fails validation instead of becoming an unavailable-login
-    skip. The authentication probe uses that same executable in an isolated
-    home; an unrelated PATH codex cannot decide whether native tests run.
+    Native tests exercise protocol compatibility through the product handshake.
+    An unrelated PATH codex cannot decide whether those tests run.
     """
     from server.config import settings
-    from server.harness.codex_app_server import verify_binary
 
     exe = _resolve_cli(settings.codex_app_server_binary)
     if exe is None:
         return False
-    verify_binary(exe)
     return codex_home_works(os.environ.get("CODEX_HOME") or Path.home() / ".codex", executable=exe)
 
 

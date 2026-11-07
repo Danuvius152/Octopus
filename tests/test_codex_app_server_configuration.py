@@ -5,8 +5,6 @@ import json
 import pytest
 
 from server.agent_manager import AgentError, AgentManager
-from server.harness import codex_app_server
-from server.harness.codex_app_server import verify_binary
 from server.sessions.client_submissions import submission_status, submit_client_message
 from tests.native_app_server import native_runtime as native_runtime
 from tests.session_runtime import wait_dispatch_idle
@@ -217,22 +215,41 @@ async def test_oversized_jsonl_controller_is_rejected_before_saving(native_runti
     assert (await database.get_agent(session.agent_id))["system_prompt"] == before["system_prompt"]
 
 
-async def test_unverified_binary_fails_preparation_without_business_send(native_runtime, tmp_path, monkeypatch):
-    manager, database, session, _, starts, _ = native_runtime
-    # Restore the real verifier: the fixture's Python peer is intentionally
-    # not the pinned Codex binary and must be rejected before it is spawned.
-    monkeypatch.setattr(codex_app_server, "verify_binary", verify_binary)
-    await submit_client_message(manager, session.id, "Keep this unsent input", [], "wrong-binary", wiki_mode=None)
+@pytest.mark.parametrize("version", ["0.166.0", "0.167.0", "0.168.0-alpha.1", "1.0.0", "custom-build"])
+async def test_compatible_binary_can_start_and_resume_without_a_version_pin(native_runtime, tmp_path, version):
+    manager, _, session, _, starts, _ = native_runtime
+    for key in ("first", "second"):
+        (tmp_path / "native-version").write_text("0.166.0" if key == "first" else version)
+        await submit_client_message(manager, session.id, "Use the compatible server", [], key, wiki_mode=None)
+        await wait_dispatch_idle(manager, session.id)
+        assert (await submission_status(manager, session.id, key))["outcome"]["status"] == "success"
+    frames = [json.loads(line) for line in (tmp_path / "native-frames.jsonl").read_text().splitlines()]
+    assert len(starts) == 2
+    assert len([frame for frame in frames if frame.get("method") == "thread/start"]) == 1
+    assert len([frame for frame in frames if frame.get("method") == "thread/resume"]) == 1
+    assert len((tmp_path / "native-business.jsonl").read_text().splitlines()) == 2
+
+
+@pytest.mark.parametrize("method", ["initialize", "config/read", "thread/start", "thread/resume"])
+async def test_incompatible_protocol_fails_preparation_without_business_send(native_runtime, tmp_path, method):
+    manager, _, session, mode, starts, _ = native_runtime
+    if method == "thread/resume":
+        await submit_client_message(manager, session.id, "Establish history", [], "first", wiki_mode=None)
+        await wait_dispatch_idle(manager, session.id)
+    mode[0] = f"unsupported:{method}"
+    await submit_client_message(manager, session.id, "Keep this unsent input", [], "unsupported", wiki_mode=None)
     await wait_dispatch_idle(manager, session.id)
-    status = await submission_status(manager, session.id, "wrong-binary")
+    status = await submission_status(manager, session.id, "unsupported")
     assert status["outcome"]["status"] == "failed"
     assert status["execution"]["state"] == "withdrawn"
+    assert f"Method not found: {method}" in status["outcome"]["message"]
     assert status["input"]["content"] == "Keep this unsent input"
     assert status["execution"]["recoverable_input"]
     assert status["execution"]["native_inputs"][0]["state"] == "not_sent"
-    assert len(starts) == 1
-    assert not (tmp_path / "native-frames.jsonl").exists()
-    assert not (tmp_path / "native-business.jsonl").exists()
+    resumed = method == "thread/resume"
+    assert len(starts) == (2 if resumed else 1)
+    business = tmp_path / "native-business.jsonl"
+    assert (len(business.read_text().splitlines()) if business.exists() else 0) == (1 if resumed else 0)
 
 
 @pytest.mark.parametrize("characters,accepted", [(30000, True), (50000, False)])

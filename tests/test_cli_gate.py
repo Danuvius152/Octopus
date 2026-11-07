@@ -174,34 +174,30 @@ def test_native_gate_uses_configured_binary_when_path_codex_is_absent(codex_prob
     _, calls, _ = codex_probe
     configured = "/selected/native-codex"
     monkeypatch.setattr(settings, "codex_app_server_binary", configured)
-    resolved, verified = [], []
+    resolved = []
 
     def resolve(binary):
         resolved.append(binary)
         return configured if binary == configured else None
 
     monkeypatch.setattr(cli_gate, "_resolve_cli", resolve)
-    monkeypatch.setattr("server.harness.codex_app_server.verify_binary", verified.append)
     item = SimpleNamespace(get_closest_marker=lambda marker: object() if marker in {
         "real", "real_codex", "native_codex",
     } else None)
     conftest.pytest_runtest_setup(item)
-    assert resolved == verified == [configured]
+    assert resolved == [configured]
     assert len(calls) == 1 and calls[0]["argv"][0] == configured
     assert calls[0]["argv"][1] == "exec"
 
 
-def test_native_gate_rejects_wrong_binary_without_probing_login(codex_probe, tmp_path, monkeypatch):
+def test_native_gate_missing_configured_binary_does_not_probe_another_login(codex_probe, monkeypatch):
     from server.config import settings
     from tests import cli_gate
 
     _, calls, _ = codex_probe
-    wrong = tmp_path / "wrong-codex"
-    wrong.write_bytes(b"A different executable, never launched")
-    monkeypatch.setattr(settings, "codex_app_server_binary", str(wrong))
-    monkeypatch.setattr(cli_gate, "_resolve_cli", lambda _: str(wrong))
-    with pytest.raises(ValueError, match="G0-Base verified"):
-        cli_gate.codex_app_server_works()
+    monkeypatch.setattr(settings, "codex_app_server_binary", "/missing/configured-codex")
+    monkeypatch.setattr(cli_gate, "_resolve_cli", lambda _: None)
+    assert not cli_gate.codex_app_server_works()
     assert calls == []
 
 

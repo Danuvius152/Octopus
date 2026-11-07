@@ -275,7 +275,8 @@ async def test_failed_native_schedule_consumes_only_its_original_fire(native_run
         await asyncio.gather(firing, return_exceptions=True)
 
 
-@pytest.mark.parametrize("variant", ["exact", "unknown-meta", "wrong-call", "wrong-thread", "wrong-turn", "wrong-version",
+@pytest.mark.parametrize("variant", ["exact", "new-version", "prerelease-version", "unknown-version", "missing-version",
+                                    "unknown-meta", "wrong-call", "wrong-thread", "wrong-turn",
                                     "connector", "dynamic", "root-write", "child-write", "reader-cutoff", "wrong-scope",
                                     "answered", "normal-answer", "malformed-meta"])
 async def test_cancelled_original_input_gap_keeps_raw_records_without_failing_saved_answer(
@@ -328,8 +329,14 @@ async def test_cancelled_original_input_gap_keeps_raw_records_without_failing_sa
                         metadata["threadId"] = "another-thread"
                     elif variant == "wrong-turn":
                         metadata["x-codex-turn-metadata"]["turn_id"] = "another-turn"
-                    elif variant == "wrong-version":
+                    elif variant == "new-version":
+                        metadata["x-codex-turn-metadata"]["codex_version"] = "0.167.0"
+                    elif variant == "prerelease-version":
+                        metadata["x-codex-turn-metadata"]["codex_version"] = "0.168.0-alpha.1"
+                    elif variant == "unknown-version":
                         metadata["x-codex-turn-metadata"]["codex_version"] = "unknown"
+                    elif variant == "missing-version":
+                        metadata["x-codex-turn-metadata"].pop("codex_version")
                     elif variant == "malformed-meta":
                         metadata["x-codex-turn-metadata"] = "unknown shape"
                     calling = asyncio.create_task(mcp.call_tool("user", {"questions": [{"question": "Original input?"}]},
@@ -372,7 +379,8 @@ async def test_cancelled_original_input_gap_keeps_raw_records_without_failing_sa
                         inject(tmp_path, item(ROOT, "turn-1", "answer", "The saved answer."), terminal())
                         await wait_dispatch_idle(manager, session.id)
                         saved = await database.read_session_result(session.id, receipt["request_id"])
-                        assert saved.outcome.status == ("success" if variant in {"exact", "answered"} else "failed")
+                        qualified = variant in {"exact", "answered", "new-version", "prerelease-version", "unknown-version", "missing-version"}
+                        assert saved.outcome.status == ("success" if qualified else "failed")
                         assert saved.fragments == ("The saved answer.",)
                         assert saved.outcome.native_status == "completed"
                         assert saved.outcome.recording_integrity == "incomplete"
@@ -382,7 +390,7 @@ async def test_cancelled_original_input_gap_keeps_raw_records_without_failing_sa
                             assert "origin" not in gap and "local_input_cleanup" not in gap
                         else:
                             assert gap["missing_items"][0]["item_id"] == "exact-input-call"
-                        if variant in {"exact", "answered"}:
+                        if qualified:
                             proof, = gap["local_input_cleanup"]
                             assert proof["question_id"] == pending.question_id
                             assert proof["disposition"] == ("answered" if variant == "answered" else "closed")

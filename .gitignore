@@ -4,6 +4,8 @@
 .venv
 __pycache__/
 *.pyc
+# Windows download metadata copied into WSL.
+*:Zone.Identifier
 node_modules/
 web/dist/
 web/test-results/

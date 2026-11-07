@@ -629,7 +629,7 @@ The native result path also separates provider completion, business outcome,
 recording, notification and resource retirement. A completed model turn may
 still have unknown tool effects; a locally saved answer does not prove that
 the provider consumed it. These distinctions and the corresponding consumer
-regressions are covered in the [SessionOwner follow-up](session-owner-scope-creep.md#后续核对原问题与真实消费者)
+regressions are covered in the [SessionOwner analysis](session-owner-scope-creep.md#3-原问题调用与真实消费者)
 and [current execution contract](../implemented/architecture-contract.md#输入完成与资源退休).
 Current check selections, including the now-enforced mypy codes and separate
 offline/live tiers, belong to [testing](../testing.md), not the counts above.

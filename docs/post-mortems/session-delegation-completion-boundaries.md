@@ -14,8 +14,8 @@
 running 项、父模型后来成功过一次、聊天最后出现了回复，都不能替代这条关联。
 
 这篇承接 [SessionOwner 范围失控复盘](session-owner-scope-creep.md)：10 月 21 日
-收口原 receipt 和单一写者，解决了完成事实的归属；后续消费者继续证明，**完成
-接口还需要回答“完成的是哪次工作、哪条返回、由哪个执行处理”。** 相邻缺口逐次
+收口原 receipt 和单一写者，解决了完成事实的归属；后续消费者继续证明，
+**完成接口还需要回答“完成的是哪次工作、哪条返回、由哪个执行处理”。** 相邻缺口逐次
 暴露与正常能力演进都有证据，不能把整条修改链统称为同一个 bug 被反复改坏。
 
 ## 调查范围与证据
@@ -178,8 +178,8 @@ unknown 在原控制对象记住；原有结算重入可以核对同一 receipt�
 | 删除关系就能退休全部暂存责任 | 在 CAS 后、接纳前／后以及丢 ACK 时删除 parent／child；只撤回精确未接纳 work，accepted／unknown 仍阻塞排空，关系替换不能冒充删除。 | [test_delegation_restart_deletion.py](../../tests/test_delegation_restart_deletion.py) |
 | transcript 最后一条成功就是工作轮成功 | 只写看似相关的历史消息不能证明消费；发起轮成功但嵌套返回未处理时，重启分类为 interrupted，不重放旧回复。 | [test_delegation_state.py](../../tests/test_delegation_state.py)：`test_transcript_order_cannot_prove_return_consumption`；[test_delegation_restart_nested.py](../../tests/test_delegation_restart_nested.py)：`test_nested_first_turn_success_is_interrupted_when_its_relay_never_finished` |
 
-测试应先选择最能推翻旧设计的情景：**让所有 child 比父发起轮更早结束，再只放行
-一个父返回执行。** 若此时已经向上游发出最终结果，单次子任务、顺序返回和大量
+测试应先选择最能推翻旧设计的情景：
+**让所有 child 比父发起轮更早结束，再只放行一个父返回执行。** 若此时已经向上游发出最终结果，单次子任务、顺序返回和大量
 绿色测试都不能挽救这个完成定义。取证必须落到原输入和提交事实；测试里的有限
 超时只负责暴露未完成，不能把等待超时解释成业务未发生。
 

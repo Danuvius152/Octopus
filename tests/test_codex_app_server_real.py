@@ -1,4 +1,4 @@
-"""Live product gates for the G0-pinned ordinary Codex transport."""
+"""Live product gates for the installed ordinary Codex App Server."""
 
 import asyncio
 import json

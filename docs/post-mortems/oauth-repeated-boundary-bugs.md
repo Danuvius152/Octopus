@@ -1,28 +1,26 @@
-# OAuth 连续修复中的责任边界遗漏（2026-11-03）
+# OAuth 连续修复中的责任边界遗漏
 
-状态：历史复盘。下列缺陷已有对应修复，仍存边界单独列出；不代表所有 OAuth 问题已关闭或当前部署已验收。
-
-阅读提示：正文保留 `6ab383a` 时的历史判断；Connector refresh 的旧剩余项已由
-[11 月 4 日补记](#后续补记2026-11-04基线-0f15708)关闭，不能直接作为今天的修复待办。
+状态：历史复盘。整合至 2026-11-05 的已知修复、剩余边界与验证经验；不代表所有
+OAuth 问题已关闭或当前部署已验收。
 
 ## 摘要
 
-近一个月，OAuth 相关修复从调用账户、重授权目标，延伸到刷新、首次绑定、取消、数据库
-提交、进程退役和前端迟到回报。所查样本主要是同一责任链上不同缺口被逐次发现，不能
-一概解释为“同一个 bug 修了又被改回来”。共同原因是：**修复围绕一个函数、一个状态或
-一种并发，正确性却要求整条操作在身份、权限、提交和退役之间连续成立。**
+近一个月，OAuth 相关修复从调用账户、重授权目标，延伸到刷新、首次绑定、取消、
+数据库提交、进程退役和前端迟到回报。所查样本主要是同一责任链上不同缺口被逐次
+发现，不能一概解释为“同一个 bug 修了又被改回来”。共同原因是：
+**修复围绕一个函数、状态或一种并发，正确性却要求原操作在身份、权限、提交和退役之间连续成立。**
 
-最直接的例子是 Claude 登录：10 月 31 日已经把 `finalizing` 列为 drain blocker，
-11 月 3 日仍需把实际数据库提交收回原登录任务。此前“token 已拿到”的成功、HTTP
-请求的寿命和“凭据已完整落库”的完成并不是同一个事实。测试分别证明了各层，交接处
-却没有被一起验证。
+Claude 登录的 `finalizing` blocker 没有自动覆盖 router 的落库；Connector 的
+installation 锁没有自动覆盖首次身份创建、waiter 退出后的轮转保存或定义替换；
+Codex 的成功退出也没有自动证明正式凭据已发布、staging 已清理。把操作交还原 owner
+后，还必须分别核对权限、失败分类、持久化效果、历史结果和当前对象，才能形成
+消费者可使用的保证。
 
-## 概述
+## 调查范围与证据
 
-调查窗口为 **2026-10-03 至 2026-11-03（Asia/Shanghai）**，沿本地 `main` 历史检查
-相关路径及其消费者，不只按提交标题搜索 `OAuth`。最终代码基线为
-`6ab383ac2b1f5adc784ef1e7e72c3a756b67e332`；分析期间从 `7a830e0` 新增的该提交
-未修改本文涉及的 OAuth、Connector、登录 UI 及其回归测试路径。
+调查窗口为 **2026-10-03 至 2026-11-05（Asia/Shanghai）**，整理代码基线为
+`0a56386315548b6e9df6251166220749fc0ce4aa`。核对相关路径的 Git 历史、前后差异、
+所属合同与回归源码，不只搜索提交标题中的 OAuth。
 
 这里有三类需要分别验证的链路：
 
@@ -30,245 +28,206 @@
   主动刷新、CLI 实际采用的认证来源。
 - **Connector OAuth**：第三方 callback、远端身份查询、账户所属 installation 绑定、
   secret 写入、后续 MCP 调用与刷新。
-- **Codex 设备登录**：CLI 输出设备 URL/code、用户授权、进程退出、`auth.json` 发布与
-  credential 行保存。它与前两者共享部分责任问题，但有独立进程和文件生命周期。
+- **Codex 设备登录**：设备 URL/code、用户授权、CLI 进程退出、`auth.json` 发布及
+  credential 行保存；它与前两者共享部分责任问题，但有独立进程和文件生命周期。
 
-证据来自提交前后代码、现行合同和回归测试源码。本文没有生产事故日志或外部供应商
-复现回执，不能据此声称出现过实际账户接管、凭据泄露、生产数据损坏，或归因于供应商
-近期变更。原调查只核对代码与历史，没有重跑产品套件或发起真实 OAuth 登录；
-文中测试名说明相应版本的覆盖范围，不构成当前版本执行通过的声明。
+本文没有生产事故日志或外部供应商复现回执，不能据此声称发生账户接管、凭据泄露、
+生产数据损坏，或归因于供应商近期变更。本次是文档整理，没有重新登录、运行产品
+套件或发布；下列测试说明覆盖方式，既有实机记录也不构成本轮新增通过声明。
 
-## 时间线
-
-以下为能解释反复修补的关键节点，并非所有碰到相关文件的提交。
+## 关键修改链
 
 | 日期 / 提交 | 修正的行为 | 前一保证仍漏掉的事实 |
 | --- | --- | --- |
-| 10-05 `3f8bd4a`、`88d2284` | 账户化设计提出“一次调用、一个 owner、一个 installation”。这是设计记录，日期按上海时区换算。 | 文档提出 owner，并不证明运行时代码已在每个使用点、提交点保持同一归属。 |
-| 10-14 `7449f12` | Codex login 在等待 spawn 前登记原任务，关闭接纳后确认进程退出，未确认则保留记录并报错。 | 已给设备登录进程建立 owner，并不代表 Claude exchange 到 DB commit 的另一链路也有完整 owner；发 kill 或清 map 不能代表退役。 |
-| 10-19 `94eaa29` | Connector 去掉共享 MCP context 的 token 缓存；模型凭据 reauth 校验目标账户，并在存储写入时再核归属。 | 缓存撤掉后，调用的 installation 和 API 目的地仍需取自当前 scope；请求开始时的 owner 检查也不能代表网络返回后的权限。 |
-| 10-25 `fe2200f` | Connector 按当前请求 scope 解析 installation，custom 的 token 与 `api_base` 同次读取；Codex reauth 改用 staging home，并串行化 status 持久化。 | token 正确不等于目标地址正确；重新登录失败的清理不能删除旧授权、配置和原生会话。 |
-| 10-26 `737a583` | Connector refresh、更新、删除、重授权使用同 installation 锁；DB 在同事务中确认 installation 存在，避免删除后留下孤立 secret。模型凭据显式绑定失效时报错，停止回退宿主登录。 | “两个 refresh 只执行一次”没有涵盖其他 writer；首次绑定还没有既有 installation ID。“没有选择凭据”与“选择的凭据失效”也不能共用默认身份语义。 |
-| 10-27 `18fe07f` | 模型凭据 refresh 由 SessionManager 保有，等待者取消不撤销刷新；按捕获的凭据版本条件写回，分类临时失败与明确失效，限定完整响应总时限。 | 旧 provider 回报不能覆盖新 reauth、删除或撤权；网络错误不能直接变成持久化的“必须重连”。这次修的是 refresh，不自动覆盖 login completion。 |
-| 10-27 `b19f6f9` | Connector callback 一次 claim，TTL 限制接纳；取消与本地绑定协调，提交后返回权威结果；UI 关闭等待取消竞争的结果。 | 一个 login 只处理一次，不保证两个独立 login 首次绑定同一远端身份时得到同一 installation。 |
-| 10-28 `bbadc28` | 首次绑定先按 `(user_id, kind, external_id)` 协调，再用 installation 锁；元数据、身份选择与 secret 在同事务提交；refresh 写回核当前账户可用性。 | 旧 installation 锁未覆盖首次创建；即使分别给新 ID 加锁，也不足以协调同远端身份。事务原子性与身份串行化承担不同责任。 |
-| 10-30 `9e50e46` | 显式 Claude 凭据同时覆盖进程环境和私有 settings，清除竞争认证来源，文件由实际进程生命周期管理。 | 设置一个环境变量，不证明 CLI 在重读宿主配置后仍使用所选凭据；token 存取正确也不证明使用端正确。 |
-| 10-31 `1d026c2` | Claude OAuth 增加 `finalizing` drain blocker。 | blocker 只跟踪一个状态；token 返回后由 router 继续落库，shutdown 仍只清登录记录，完整操作没有唯一保有者。 |
-| 11-03 `9599150` | Claude 原登录任务覆盖 validate、exchange、mint 和完整凭据提交；固定原请求，重复等待同一结果；明确取消提交边界，UI 按账户/视图处理迟到回报。 | HTTP 等待结束不代表操作结束，关闭弹窗不代表取消；历史成功结果也不能重新插回已删除的凭据列表。 |
-| 11-03 `983ff39` | Codex readiness 必须同时具备 URL 和 code；错误/取消后迟到的成功退出不能改写终态。 | 唤醒事件、URL 已出现、进程 `rc=0` 都各自不足以证明当前登录阶段成功。 |
+| 10-05 `3f8bd4a`、`88d2284` | 账户化设计提出“一次调用、一个 owner、一个 installation”；这是设计记录，日期按上海时区换算。 | 文档提出 owner，不证明每个使用点和提交点保持同一归属。 |
+| 10-14 `7449f12` | Codex login 在等待 spawn 前登记原任务，关闭接纳后确认进程退出，未确认则保留记录并报错。 | 设备登录的进程 owner 不自动拥有另一登录链路的 DB commit；发 kill 或清 map 也不代表退休。 |
+| 10-19 `94eaa29` | Connector 去掉共享 MCP context 的 token 缓存；模型凭据 reauth 校验目标账户，写入时再核归属。 | 当前 installation、API 目的地及网络返回后的权限仍需在实际使用处确认。 |
+| 10-25 `fe2200f` | Connector 按当前 scope 解析 installation，custom token 与 API base 同次读取；Codex reauth 使用 staging home，并串行化 status 持久化。 | token 正确不等于目的地正确；重授权失败清理不能删除旧授权、配置和原生资料；status 串行化仍不等于原登录拥有发布。 |
+| 10-26 `737a583` | Connector refresh、更新、删除和 reauth 使用同 installation 锁；DB 同事务确认对象存在。显式模型凭据失效停止回退宿主登录。 | 同 ID 的 writer 协调不覆盖首次创建；没有选择凭据和选择的凭据失效也不是同一身份语义。 |
+| 10-27 `18fe07f` | 模型凭据 refresh 由 SessionManager 保有，按捕获版本条件写回，分类临时失败与明确失效，并限定完整响应总时限。 | refresh 的完整 owner 不自动覆盖 login completion，也不自动迁入 Connector 的另一条实现。 |
+| 10-27 `b19f6f9`、10-28 `bbadc28` | callback 一次 claim、TTL 限制接纳、取消与绑定协调；首次绑定按远端身份键再按 installation 锁协调，元数据与 secret 同事务提交。 | 同 login 去重、首次身份归并和本地原子提交解决不同问题，不能互相替代。 |
+| 10-30 `9e50e46` | 显式 Claude 凭据覆盖进程环境及私有 settings，清除竞争认证来源，文件寿命随实际进程管理。 | token 存取正确不证明 CLI 重读宿主配置后仍采用所选凭据。 |
+| 10-31 `1d026c2`、11-03 `9599150` | 先为 Claude `finalizing` 加 blocker，再让原任务覆盖 validate、exchange、mint 和完整凭据提交；固定请求，重复等待同一结果。 | 状态 blocker 漏掉 router 后续落库；HTTP 等待结束和窗口关闭不证明原操作取消。 |
+| 11-03 `983ff39` | Codex readiness 同时要求 URL 和 code；错误／取消后迟到成功退出不能改写终态。 | 唤醒、单个字段或 `rc=0` 不足以证明当前阶段成功。 |
+| 11-03 `a660fcc` | Connector 保留 HTTP/status/error 分类；临时失败不自动要求重连，资源拒绝按原 grant stamp 条件写回。 | 旧拒绝不能污染新授权；正确分类仍不保有 waiter 退出后的轮转结果。 |
+| 11-04 `324a913` | Connector manager 保有 refresh 到结果保存及退休，shield waiter、shutdown join；custom 定义替换不向旧操作提供新配置。 | 一次外部请求、原配置与完整保存必须同时成立，单次调用计数不足以证明。 |
+| 11-04 `07b83bf` | Codex 原登录保有 CLI、正式 auth 文件／凭据事务发布及清理；status 只读，同目标占用保留到实际退休。 | 已提交成功不等于清理结束，重试清理不能重新发布或复活已删除凭据。 |
 
-## 影响
+这些修改的工程代价是同一领域多轮增加协调和回归，反复重审相邻消费者。“上次
+修过 OAuth”无法回答这次究竟保证了哪一段行为。代码支持身份混用、迟到覆盖、
+安装归并失败、错误重连、取消与效果不一致等后果判断，不证明它们全部在线上发生。
 
-Git 和回归用例能支持的影响，是这些旧路径存在以下错误结果的可能及对应修复：
+## 具体反例与根因
 
-- 共享上下文或旧请求身份绕过当前调用范围；正确 token 与错误 API 目的地组合。
-- refresh 的迟到成功/失败覆盖新授权，或临时 provider 故障把可重试凭据标成需要重连。
-- 首次并发绑定无法可靠归并为同一 installation，元数据与 secret 的写入边界不完整。
-- 取消、断连、shutdown 与 exchange、落库或进程退出交错时，返回状态与实际效果不一致。
-- Codex 重授权失败清理伤及旧 home；旧 UI 回报更新新视图，或历史成功掩盖当前对象已删除。
+### 1. 登录成功停在组件出口，实际提交还没有 owner
 
-这些是代码缺陷的后果范围，不能当作全部已经在生产发生。确定的工程代价是：同一领域
-多轮增加协调和回归用例，反复重审相邻消费者；“上次修过 OAuth”无法回答这次究竟
-保证了哪一段行为。
+`9599150^` 的 `OAuthLoginManager.submit_code` 在 exchange/mint 后置 success，
+router 再加密、保存凭据并补 token bundle 的到期字段。manager 的成功早于完整
+存储，cancel 只改状态，`1d026c2` 的 blocker 也只罩住 finalizing。因此“已有状态机”
+和“已经加 drain”仍不能回答断连或 shutdown 后由谁完成剩余写入。
 
-## 根因
+修复让原任务保有不可变的账户、login、code、label 和 reauth target，覆盖 validate、
+exchange、mint 或 bundle 及完整凭据事务；router 不再补写。匹配的重复调用等待
+同一结果，参数冲突拒绝。进入 committing 前取消撤销后续阶段并等待实际退出，
+进入后保全唯一 committer。取消未确认仍保留 owner/blocker，不把发出取消解释为
+没有效果。外部授权、本地提交、HTTP 回报和资源退休分别有证据。
 
-### 根因 #1：完成点停在组件出口，没有覆盖完整业务效果
+### 2. 一次入口检查和一把对象锁，没有覆盖身份的变化与首次创建
 
-`9599150^` 的 `OAuthLoginManager.submit_code` 在 exchange/mint 后置 `success`，
-router 接着加密、保存凭据，再补 token bundle 的到期字段。manager 的成功先于存储
-完成；cancel 只改登录状态，不能完整支配正在执行的 provider 工作和 router 后续写入。
-`1d026c2` 新加的 drain blocker 因而也只罩住 `finalizing`，没有罩住后续提交。
+OAuth 至少涉及登录操作、内部账户、远端账户和本地 credential/installation。
+它们在首次绑定、reauth 和迟到 refresh 时并不总是一一对应。共享 MCP context 的
+token cache 撤掉后，仍需从本次 scope 同时确定 installation、token 与 API 目的地；
+显式失效的凭据也不能悄悄回退到宿主登录。
 
-这解释了为什么“已有登录状态机”“已经加 drain”仍会出新问题：被管理的对象只是登录
-的一段。`9599150` 的关键变化是原任务一直负责到完整提交，router 不再补写；进入
-`committing` 前取消可以撤销后续阶段，进入后则保全唯一 committer 并等待真实结果。
-外部授权已发生、本地写入成功、HTTP 回报到达和资源退役分别保留自己的证据。
+Connector 已有同 installation 的 refresh 锁，`737a583` 还要把 delete/reauth 纳入；
+`bbadc28` 又补首次绑定，因为两个 login 可同时查无记录，各选新 ID 插入。唯一约束
+可以拒绝竞争者，却不能让两者都得到同一已提交安装。远端身份键决定归并对象，
+installation 锁协调该对象的 writer，事务保证身份、元数据和 secret 一起提交。
+首次归并使用 `(user_id, kind, external_id)`；空远端身份不随意合并，同一远端身份
+跨内部账户仍须隔离。
 
-### 根因 #2：身份与权限被当成入口检查，没有贯穿等待后的使用和提交
+权限还会在 provider 等待期间改变。模型凭据按捕获的账户、backend、认证类型、
+密文和有效状态条件写回；旧请求即使正常结束，也未必有权覆盖新 reauth 或撤权。
+只在入口核对，或只检查“这行还在”，都不足以证明迟到回报仍可写。
 
-多账户之后，一个 ID、一个进程级 MCP 实例或一次成功校验，都不足以代表后续的当前
-权限。这里至少有四个身份：登录操作、内部账户、远端账户、本地 credential/installation。
-它们在首次绑定、重新授权和迟到 refresh 时并不总是一一对应。
+### 3. 刷新必须保留失败类别、原授权、原配置和操作寿命
 
-`94eaa29` 去 token cache 后，`fe2200f` 仍要修当前 scope 与 custom API 地址；
-`18fe07f` 则将 refresh 的写回条件扩到所捕获的账户、backend、认证类型、密文及有效
-状态。旧 refresh 可以正常结束，却已无权覆盖现在的 secret。修复落在实际消费或写入
-边界，才能挡住“检查过、随后变化”的路径。
+模型凭据刷新在 `18fe07f` 已区分临时与永久失败，但 Connector 的旧实现仍广泛
+捕获异常并标记 needs_reconnect。共同名称没有让一个链路的保证自动迁入另一个。
+`a660fcc` 保留 provider HTTP 状态和机器错误码：transport、429、5xx 属临时失败，
+即使 5xx 正文含 invalid_grant 也不改变分类；只有 400/401 的明确 invalid_grant
+构成相应永久 grant 拒绝。临时不可用不能升级为持久授权失效。
 
-### 根因 #3：锁的对象和事务范围没有对应到真实竞争
+资源请求的迟到 401 另有原授权快照。token、expiry、API base 与 grant_stamp 同次
+捕获，拒绝写回事务比较当前账户、installation 和材料：applied 才标记当前授权，
+obsolete 保留替代授权，gone 表示对象不再可用。未知标记结果也有独立说明，不能
+用一次旧拒绝诱导当前授权重连。证据见[错误分类](../../server/connectors/errors.py)、
+[授权快照](../../server/connectors/grants.py)与[分类回归](../../tests/test_connector_grant_failures.py)。
 
-Connector 原先已能让同 installation 的两个 refresh 串行。`737a583` 把其他修改者
-纳入同锁，处理 refresh 对 delete/reauth 的竞争；`bbadc28` 又补首次绑定，因为旧路径
-查无记录后直接生成新 ID 并插入，没有获取 installation 锁。两个 login 可同时查无记录，
-各选新 ID 直接插入；唯一约束可以拒绝竞争者，却不能让两者都取得同一已提交安装。
+即使分类正确，waiter 在 provider 返回轮转 token 后、保存前取消，仍可能丢失已收到
+的结果。`324a913` 由 manager 保有原 refresh 到保存和退休，等待者被 shield，
+shutdown join 原任务。保存失败由完成回调记录异常并移除已结束任务；已加入等待的
+shutdown 传播非预期失败。退休超时则保留未完成任务并使关闭失败。custom 定义删除
+或同名重建也不能让旧操作改用新的 endpoint/client 配置，原配置在实际操作前捕获。
 
-这两次修复并不互相替代。远端身份键决定应该归并到哪个 installation，installation
-锁协调这个对象的修改；数据库事务保证身份、元数据和 secret 一起提交。只写“加锁”
-或“事务化”，没有列出所有 writer 和首次创建路径，就会在另一种竞争上继续补洞。
+[轮转回归](../../tests/test_connector_manager.py)在响应前、save lock 和 COMMIT 等
+阶段取消 waiter，重开 SQLite 检查原 grant；[定义替换回归](../../tests/test_connector_custom_lifecycle.py)
+在远端等待期间换定义，检查旧操作仍使用原配置。一次外部调用、正确的原授权与
+完整的后续提交必须一起成立；单看 refresh 只调用一次不能证明这些保证。
 
-### 根因 #4：观察者寿命、操作寿命与当前可用性混在同一个结果里
+### 4. 设备登录退出、凭据发布和真实清理是不同完成点
 
-HTTP 断开、弹窗关闭、显式取消和登录完成，是不同动作。refresh 已在 `18fe07f` 保证
-等待者退出后操作仍有 owner；Claude login 直到 `9599150` 才获得对应的完整保证。
-Codex 还有单独的进程输出、设备码准备、授权窗口、文件发布和 status 持久化。
+Codex readiness 必须有完整 URL/code，唤醒事件只结束等待，不自动给出成功。
+发生错误或取消后，迟到 `rc=0` 不能改写原终态。reauth 使用 staging，失败保全旧
+home、配置、绑定和原生历史。
 
-同样，原操作成功是历史事实，不保证对应 credential 现在仍存在。新 Claude UI 保存
-原请求用于 **Wait again**，消费明确的取消结果，成功后重新读取当前列表，并用账户和
-视图代际阻止旧回报更新新界面。Codex readiness 修复则说明：一个邻近事件可以唤醒
-观察者，但不能替代阶段的完成条件。
+`07b83bf` 将 CLI、正式 auth 文件／凭据事务发布及清理统一交给原登录任务。
+登录前保有原账户、目标和目录，实际进程组退出及材料校验后，由唯一 committer
+重验当前账户与目标，替换 auth 文件、保存匹配元数据并等待原 COMMIT。无人轮询
+status 也能发布；status 只观察历史结果和当前可用对象，不再承担持久化。
 
-### 根因 #5：修复验收没有系统覆盖相邻操作，经验未自动跨链路成立
+同一目标在原任务和 staging 清理确认前继续占用。已提交后的清理失败保留历史成功
+和 blocker，重试只补原清理；取消观察者不取消 committer，删除则与原发布排序。
+未知 COMMIT 沿存储 fail-stop，不补查猜测提交、不再发布，也不擅自回滚旧文件。
+这不是跨文件／DB、跨进程崩溃的原子性承诺。
 
-从变更顺序看，修复多次围绕已经暴露的一种交错展开：同 ID refresh、单 callback claim、
-等待 token、等待 URL。下一轮才补另一位 writer、首次身份、实际落库或完整设备码。
-据此可以推断，验收模型对责任交接的覆盖不足；仅凭 Git 不能进一步断言每次开发和
-审查时实际采用了什么思考流程。
+[原登录回归](../../tests/test_codex_login.py)分别验证无人观察仍发布、提交等待中
+取消观察者、与删除排序、清理失败仍保留占用和旧 auth 保全。这些保证不能倒推为
+早期已有，也不能从一次成功退出外推到全部资源都已退休。
 
-同名领域也容易掩盖差异：模型凭据 refresh 已分类临时/永久错误，Connector refresh
-当前仍广泛捕获异常并标 `needs_reconnect`。一个链路的保证没有自动扩散到另一个。
-经验应转成共享的验证问题，各链路依实际责任回答；不能因为名字都叫 OAuth，就强行
-把设备登录、callback 和 token refresh 塞进一个通用状态机。
+### 5. 历史结果与当前对象、观察视图混在一起
 
-## 为什么测试没有捕获（真正的失败）
+HTTP 断开、弹窗关闭、显式取消和登录完成是不同动作。原操作成功也不保证对应
+credential 现在还存在。UI 保存原请求供 Wait again，消费明确取消结果，成功后
+重读当前列表，并按账户／视图代际拒绝迟到回报。已删除对象不能因历史成功重新
+插回列表；关闭观察也不能被理解成取消授权操作。
 
-问题并非此前完全没有真实 DB、并发或前端测试，而是测试之间留下了责任缝。
+这些问题的共同根因是验收停在一段责任：一次 claim 不涵盖两个 login 的首次绑定，
+两次 refresh 串行不涵盖 delete/reauth，token 返回不涵盖提交，URL 出现不涵盖设备码，
+历史 success 不涵盖当前列表。应把经验变成各链路共同回答的验证问题，不能强行把
+设备登录、callback 和 refresh 塞入同一个通用状态机。
 
-1. **分层都测，交接被 mock 掉。** `9599150^` 的
-   `test_oauth_login.py::test_submit_code_happy_path` 断言 manager 返回 token 与
-   `success`；`test_credentials_api.py::test_oauth_complete_persists_credential`
-   用真实 DB，却把 `submit_code` stub 成成功。它们分别验证交换和存储，无法证明
-   exchange→mint→commit 在断连、取消、shutdown 中始终由原任务负责。旧
-   `test_cancel_is_idempotent` 只取消尚未提交 code 的登录。
-2. **测了一种并发，外推到另一种。** 旧 `test_concurrent_token_refreshes_once`
-   不覆盖删除或 reauth；顺序的 `test_complete_install_upserts_same_account`
-   不覆盖两个首次 callback；一个 login 的重复 claim 也不覆盖两个 login 解析出同一
-   外部身份。`737a583`、`b19f6f9`、`bbadc28` 分别增加这些不同的交错。
-3. **观察点早于目标事实。** manager 状态、provider 返回、唤醒事件、窗口关闭，都可能
-   先于完整提交、明确取消结果或进程退役。`9599150` 的新操作测试在真实 HTTP→SQLite
-   链路中阻塞 exchange、mint 和 save，分别断言操作次数、数据库效果、返回结果与
-   drain blocker；`983ff39` 对设备输出不完整及迟到退出建立了反例。
-4. **UI 与后端证据被混用。** `ConnectorsPage.oauth.test.tsx` 和
-   `connector-cancellation.spec.ts` 能证明 UI 消费 `success/cancelled` 回执；其 HTTP
-   被模拟，后端竞争要由 `test_router_connectors.py` 的阶段屏障另行验证。反过来，
-   后端正确也不证明旧响应不会污染新账户或新弹窗。
+## 为什么原测试没有识别这些交错
 
-这些证据说明旧测试不足以识别对应故障。它们不能单独证明每个旧版本的全套测试当时
-实际跑绿；本文不把新增测试数量或某次历史通过数当作 OAuth 完整正确性的证据。
+问题并非完全没有真实 DB、并发或前端测试，而是它们之间留下了责任缝。
 
-## 防护措施
+- `9599150^` 的 manager 测试断言 token 与 success；router 测试使用真实 DB，
+  却把 submit_code stub 成成功。它们分别测交换和存储，未验证 exchange→mint→commit
+  在断连、取消和 shutdown 中始终由原任务保有；旧取消用例只取消尚未提交 code 的登录。
+- 同 ID 的并发 refresh 不覆盖删除或 reauth；顺序 upsert 不覆盖两个首次 callback；
+  单 login 重复 claim 不覆盖两个 login 解析到同一远端身份。
+- manager 状态、provider 返回、唤醒和窗口关闭，都可能早于完整提交、权威取消结果
+  或进程退休。断言这些邻近事件，不能证明目标效果。
+- 模拟 HTTP 的 UI 用例能证明界面消费回执，后端竞争仍需真实路由、阶段屏障和临时
+  SQLite 验证；反过来，后端正确也不证明旧响应不会更新新账户或新弹窗。
 
-后续 OAuth 修复的验收应回答以下问题，并按实际变更选择能推翻设计的用例。
-
-1. **先画完整责任链。** 写清操作身份、账户、远端身份、本地对象、唯一 writer、实际
-   commit 点、使用端及退役条件。登录成功必须说明成功到了哪一层；新发现另一位
-   writer 或另一个提交点时，先修正责任模型，再补机制。
-2. **逐个检查等待后的权力。** provider 请求前查当前授权，写回时用事务或条件更新
-   核对当前身份与版本；列出删除、reauth、撤权、账户失效对迟到成功和失败的处理。
-   只在入口查一次，或只核“这行还在”，不足以证明旧回报仍可写。
-3. **区别首次身份与既有对象。** 新对象还没有 ID 时，明确用什么业务身份协调；再说明
-   谁负责对象级串行化、谁负责元数据与 secret 原子提交。保留空远端身份不能被随意
-   合并、同远端身份跨内部账户仍隔离的用例。
-4. **取消以效果边界为准。** 区分断连、关闭观察、显式取消和超时。进入 commit 前停止
-   后续阶段并确认实际退役；进入后保全 committer。取消未确认就保留 owner/blocker，
-   回报实际未知或失败，不能把“发了 cancel”写成“已经没有效果”。
-5. **验证真实使用端和恢复端。** 除 token 存取，还核 CLI 认证优先级、MCP 当前 scope、
-   custom API 目的地；reauth 失败保全旧授权、配置、绑定和原生资料。UI 使用历史结果
-   后读取当前对象，拒绝旧账户/视图回报。
-6. **测试最可能推翻当前模型的交错。** 下表给出已有回归入口；每次新增用例写明注入点、
-   观察事实和旧代码为什么应失败。用事件屏障控制顺序，在公开入口与真实临时存储上
-   验证结果、完整效果、远端操作次数及退役，避免只断言中间状态。
-
-| 要推翻的假设 | 故障或交错 | 关键观察 / 已有回归入口 |
+| 要推翻的假设 | 交错与目标事实 | 代表性回归入口 |
 | --- | --- | --- |
-| 等待者退出等于操作结束 | refresh 或 complete 期间取消 HTTP waiter，再次等待或关闭 DB | 同一次操作、完整 secret/expiry、实际 blocker；`test_credential_refresh.py`、`test_oauth_operation.py`。 |
-| 旧请求仍有写权限 | provider 等待期间 reauth/delete/revoke/disable/改变 owner | 迟到成功和失败都不能覆盖当前授权；`test_late_refresh_cannot_overwrite_current_authority`、`test_credential_reauth_ownership.py`。 |
-| 单 callback 正确即可保证唯一安装 | 两个独立 login 同时完成同远端身份解析；secret 写入失败 | 同一已提交 installation、metadata/secret 一致、失败回滚；`test_two_first_oauth_callbacks_commit_one_installation_and_both_succeed`、`test_authorization_secret_failure_rolls_back_metadata_and_identity`。 |
-| Cancel 或成功响应代表当前对象 | exchange/mint/commit 各阶段取消，成功后删除对象再重等，切换账户/弹窗 | 权威取消结果、原任务退役、不会复活对象或修改新视图；`test_oauth_operation.py`、`HarnessPage.test.tsx`、`ConnectorsPage.oauth.test.tsx`。 |
-| 收到邻近事件即阶段完成 | Codex 仅 URL、仅 code、deadline 前后到达、超时后 `rc=0` | 两字段齐备、终态不复活、原进程退出；`test_codex_login.py`。 |
-| 设置凭据就会采用该凭据 | 宿主同时配置 key/token/helper/header；reauth fail/cancel | 实际调用配置选中原凭据，旧 home/绑定仍可用；`test_harness_claude.py`、`test_private_cli_settings.py`、`test_codex_login.py`。 |
+| waiter 退出就是操作结束 | 在 exchange、mint、保存及 COMMIT 等阶段取消观察者，检查同一次操作、完整 secret/expiry 和实际 blocker。 | [test_oauth_operation.py](../../tests/test_oauth_operation.py)、[test_credential_refresh.py](../../tests/test_credential_refresh.py)、[test_connector_manager.py](../../tests/test_connector_manager.py) |
+| 旧请求仍有写权限 | provider 等待时 reauth/delete/revoke/disable/改变 owner，迟到成功和失败都不能覆盖当前授权。 | [test_credential_reauth_ownership.py](../../tests/test_credential_reauth_ownership.py)、[test_connector_grant_failures.py](../../tests/test_connector_grant_failures.py) |
+| 单 callback 正确就保证唯一安装 | 两个独立 login 同时解析同一远端身份，并注入 secret 写入失败，检查同一安装与整体回滚。 | [test_router_connectors.py](../../tests/test_router_connectors.py)、[test_connectors_db.py](../../tests/test_connectors_db.py) |
+| 失败就应重连，定义替换与旧请求无关 | 注入 429/5xx/transport、400/401 invalid_grant、迟到资源拒绝及定义替换，核原类别、原 stamp 和原 endpoint/client。 | [test_connector_grant_failures.py](../../tests/test_connector_grant_failures.py)、[test_connector_custom_lifecycle.py](../../tests/test_connector_custom_lifecycle.py) |
+| status、进程退出或 success 代表全部结束 | 无 status 观察完成发布，取消提交观察者、与删除排序、staging 清理失败，核唯一发布、历史成功和原占用。 | [test_codex_login.py](../../tests/test_codex_login.py) |
+| 邻近事件或环境配置足以证明当前认证 | 仅 URL／仅 code、超时后 rc=0、宿主竞争 key/token/helper/header、reauth fail/cancel，核完整阶段及实际认证来源。 | [test_codex_login.py](../../tests/test_codex_login.py)、[test_harness_claude.py](../../tests/test_harness_claude.py)、[test_private_cli_settings.py](../../tests/test_private_cli_settings.py) |
+| 历史回报可以更新当前界面 | 成功后删对象再等，切换账户／弹窗，检查不复活对象、不修改新视图。 | [HarnessPage.test.tsx](../../web/src/components/HarnessPage.test.tsx)、[ConnectorsPage.oauth.test.tsx](../../web/src/components/ConnectorsPage.oauth.test.tsx) |
 
-这些是修复与评审的问题集，不要求每次重跑所有 OAuth 链路、增加重试层或引入分布式
-协调。验证范围和证据复用仍遵循[测试政策](../testing.md)。
+这些证据不证明每个旧版本的全套测试都曾跑绿，也不要求每次修复重跑所有 OAuth
+链路。按本次改变的责任选择反例，复用仍有效证据，具体遵循[测试政策](../testing.md)。
 
-## 经验教训
+### 实机验收也必须观察原凭据
 
-- “已经有 owner”要追问它是否一直拥有到真实提交和退役；状态名不能替代责任范围。
-- 一个局部修复成立，不会自动证明相邻 writer、首次创建、另一登录链路和实际消费者。
-- 锁、事务、条件写回解决不同问题；明确竞争身份和提交事实后才能判断是否完整。
-- 失败分类会改变持久化授权状态。暂时不可用与明确失效必须有不同的证据门槛。
-- 绿测试的价值取决于它是否能制造目标交错，并在真正的效果边界观察结果。
-- 历史成功、当前可用、通知送达和资源退出各有自己的真相；重试观察不能重做外部效果，
-  也不能复活已经删除的本地对象。
+11 月 5 日的既有验收记录中，后台任务继承服务默认 CODEX_HOME，与正在正常对话
+的凭据绑定不同。默认旧登录返回 token_expired，不能据此要求当前账户重新授权。
+核对原进程和 agent 绑定、显式传入当前既有目录后，该次记录中的最小模型调用、
+21 项 Codex 实机和两项浏览器验收通过，成功轮次没有认证域请求。
+
+这次纠正的是测试启动输入；只读接口 200 只能作为诊断线索，真实模型及网络审计
+才补齐相应验证。本文复用既有记录，没有在本轮重复实机，也不从一次通过推出
+OAuth 或远端撤销问题已消失。当前目录选择与网络核验规则归[本机测试](../local-wsl.md#本机测试)。
+
+## 可迁移的开发经验
+
+1. **先写完整责任链。** 列出操作、账户、远端身份、本地对象、唯一 writer、实际
+   commit、使用端及退休条件；新发现 writer 或提交点时先修正模型，状态名不能
+   替代责任范围。
+2. **在真正使用与写回处核权。** provider 请求前确认授权，返回后用事务或条件更新
+   处理 reauth、删除、撤权和账户失效；首次创建还要先找到正确的业务身份。
+3. **分开锁、事务和操作保有。** 锁协调竞争者，事务保证本地提交，原 owner 保有
+   waiter 退出后的效果。三者各有用途，不能互相代替。
+4. **保留效果与失败的真实边界。** 临时失败、明确失效和未知效果分别判断；取消
+   不撤销已发出的外部效果，未知 COMMIT 不靠重试猜测，历史成功不复活已删除对象。
+5. **验证真实消费者和最难交错。** 核 CLI 认证优先级、MCP 当前 scope、custom API
+   目的地、UI 当前视图和恢复端；检查原操作次数、完整持久效果及实际退休，不能
+   只断言函数返回、中间状态或一份通过数。
 
 ## 仍存边界与关联
 
-截至上述基线，以下内容不能被本复盘当成已经关闭的历史缺陷；后续修复见文末补记：
+Connector 的临时／永久失败分类、原 refresh 保有及定义替换已有上述修复，不再
+作为当前未完成项。仍需保留以下适用边界：
 
-- **Connector refresh 分类仍未对齐模型凭据刷新。**
-  `ConnectorManager.get_access_token` 仍把 provider/transport 异常广泛标为
-  `needs_reconnect`，临时 timeout/429/5xx 也可能设置该标记；这是现代码和现合同都
-  承认的剩余行为，改进范围归[账户计划](../plans/multi-tenancy-gaps.md)。
-- **浏览器绑定、远端撤销和进程间恢复有独立选择。** Connector callback 的 state、TTL、
-  一次 claim 不提供发起浏览器 cookie 绑定；disconnect 删除本地安装，不保证 provider
-  grant 已撤销。pending login 为进程内状态，不承诺重启恢复或多进程共享。没有相应
-  事故证据和部署需求时，不能把这些边界写成已发生攻击或本轮修复任务。
-- **版本证据与运行验收分开。** 本文没有新增真实供应商登录或发布验收；Codex 设备登录、
-  Claude OAuth 与 Connector API 的实机结果也不能互相代替。
+- callback 的 state、TTL 和一次 claim 不提供发起浏览器 cookie 绑定；disconnect
+  删除本地安装不保证 provider grant 已撤销。
+- pending login 和上述操作责任属于进程内状态，不承诺重启恢复、多进程共享或
+  SIGKILL／存储 fail-stop 后跨文件与 DB 的原子恢复。当前进程未收到的 provider
+  轮转响应仍可能有未知远端效果，不自动重试轮转。
+- Codex 设备登录、Claude OAuth 与 Connector API 的实机结果不能相互替代。
+  没有事故证据或部署需求时，不能把这些边界写成已发生攻击或本轮修复任务。
 
-当前行为和后续范围由原文档维护，本文保留因果与验证经验：
+当前行为和产品选择继续由所属文档维护，本文保留因果与回归观察点：
 
-- [Connector 合同](../implemented/connectors.md)、[配置指南](../connectors-setup.md)。
-- [凭据刷新与重新授权合同](../implemented/harness-credential-reauth.md)、
+- [Connector 合同](../implemented/connectors.md)、[配置指南](../connectors-setup.md)、
+  [账户计划](../plans/multi-tenancy-gaps.md)。
+- [凭据刷新与发布](../implemented/harness-credential-reauth.md)、
   [Harness 登录边界](../implemented/harness-layer.md)。
 - [登录操作](../../server/oauth_login.py)、[凭据 writer](../../server/oauth_credentials.py)、
-  [refresh owner](../../server/sessions/credentials.py)、[条件写回](../../server/db/credentials.py)。
+  [模型 refresh owner](../../server/sessions/credentials.py)、[条件写回](../../server/db/credentials.py)。
 - [Connector manager](../../server/connector_manager.py)、
   [callback 与取消](../../server/routers/connectors.py)、[绑定事务](../../server/db/connectors.py)、
   [设备登录](../../server/codex_login.py)。
-- [SessionOwner 范围失控复盘](session-owner-scope-creep.md)：同样需要检查
-  责任连续性；本次额外暴露首次身份、认证来源与跨链路保证不能外推的问题。
+- [SessionOwner 责任范围复盘](session-owner-scope-creep.md)：相同的责任连续性问题，
+  OAuth 还需额外检查首次身份、认证来源及跨链路保证不能外推。
 
-复查历史可运行 `git show <上表提交> -- <相关路径>`；其中
+复查历史可运行 `git show <上表提交> -- <相关路径>`。例如
 `git show 9599150^:server/oauth_login.py`、
-`git show 9599150^:server/routers/credentials.py` 及对应旧测试，能直接重建
+`git show 9599150^:server/routers/credentials.py` 及对应旧测试，能重建
 “manager 已成功、router 仍在提交”的责任断点。
-
-## 后续补记（2026-11-04，基线 0f15708）
-
-本节固定在 `0f1570877be4e2ed5903377fe93955c454f43906`，不改写原文的事故时间线。
-原“Connector refresh 分类仍未对齐”描述的是 `6ab383a`，以下后续保证已经进入该基线：
-
-| 提交 | 已补齐的责任 | 证据与回归入口 |
-| --- | --- | --- |
-| [a660fcc](https://github.com/Danuvius152/Octopus/commit/a660fccf3a1298b5da89079195301454363bb374) | 保留 HTTP/status/error 分类；429、5xx 及 transport 失败不自动标记重连；400／401 且明确 invalid_grant 才走相应永久拒绝。资源拒绝按原 grant stamp 条件写回，迟到拒绝不污染新授权 | [错误分类](../../server/connectors/errors.py)、[授权快照](../../server/connectors/grants.py)、[分类回归](../../tests/test_connector_grant_failures.py) |
-| [324a913](https://github.com/Danuvius152/Octopus/commit/324a913aa959a4664fc016c6e339ee42b1f3b32c) | manager 保有原 refresh 到 provider 结果保存及退休，shield waiter 并在 shutdown join；custom definition 删除／同名重建不能向旧操作提供新配置 | [refresh owner](../../server/connector_manager.py)、[取消与轮转回归](../../tests/test_connector_manager.py)、[定义替换回归](../../tests/test_connector_custom_lifecycle.py) |
-| [07b83bf](https://github.com/Danuvius152/Octopus/commit/07b83bf2fed2e1d88ca1e782eafe384e86988355) | 原登录任务保有 CLI、正式 auth 文件／凭据事务发布和清理；status 只读原结果，同目标占用直到原进程组及 staging 清理确认；不能倒推旧版本早已有这些责任 | [凭据发布合同](../implemented/harness-credential-reauth.md)、[登录合同](../implemented/harness-layer.md) |
-
-例如 `test_refresh_waiter_cancellation_keeps_the_original_rotated_result` 在原操作不同
-阶段取消 waiter，检查同一轮转结果仍能保存；
-`test_refresh_captures_original_endpoint_and_client_before_definition_replacement`
-在远端等待期间替换定义，检查旧操作仍使用原配置。这比“refresh 只调用一次”更接近
-真实保证：一次外部操作、正确的原授权与完整的后续提交必须同时成立。
-
-Codex 的相邻反例也已进入[原登录回归](../../tests/test_codex_login.py)：
-`test_original_login_publishes_without_any_status_observer` 验证无人轮询仍完成发布；
-`test_original_commit_survives_observer_cancellation_and_orders_later_deletion`
-在真实提交等待中取消观察者，仍只由原 committer 完成并与后续删除排序；
-`test_committed_login_retains_target_and_success_until_failed_staging_cleanup_is_confirmed`
-保留历史成功及真实清理占用，重试只补原清理，不再发布。发布前撤权、未知 COMMIT
-和旧 auth 文件保全仍按所属合同分别处理，不能从一次 `rc=0` 或 success 文字外推。
-
-因此，原分类缺口及上述 owner／定义替换缺口不再作为当前未完成项。当前行为由
-[Connector 合同](../implemented/connectors.md)和上述 Harness 合同维护，
-[账户计划](../plans/multi-tenancy-gaps.md)也已将旧分类项列为已处理。浏览器绑定、
-远端撤销与跨进程 pending 恢复仍按原适用边界分别判断；源码与回归入口的补记
-不能代替真实供应商登录或当前安装的部署验收。
-
-2026-11-05 的实机验收又暴露了观察对象选错的例子：后台任务继承服务的默认
-`CODEX_HOME`，与正在正常对话的凭据绑定不同。默认旧登录返回 token_expired，
-不能据此要求当前账户重新授权。核对原进程及 agent 绑定、显式传入当前既有
-目录后，最小模型调用、21 项 Codex 实机和两项浏览器验收通过，成功轮次没有
-认证域请求。只读接口 200 只能作为诊断线索；真实模型与网络审计才补齐该次
-验证。此处修正的是测试启动输入，不是宣称 OAuth 或远端撤销问题已消失；
-本机验证的目录选择规则归[本机测试](../local-wsl.md#本机测试)。

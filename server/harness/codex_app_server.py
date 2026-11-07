@@ -1,4 +1,4 @@
-"""Ordinary single-root Codex 0.166.0 stdio protocol.
+"""Ordinary single-root Codex App Server stdio protocol.
 
 The driver reports native facts. HarnessRun owns the host and retirement;
 the original submission recorder commits input evidence before business I/O.
@@ -50,20 +50,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-BINARY_SHA256 = "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8"
 _METRICS_CLOSE_GRACE = 1.0
 _METRICS_PENDING_COUNT = 256
 _METRICS_PENDING_BYTES = 1024 * 1024
 _REQUIRED_FEATURES = {"features.fast_mode": True, "features.wake_on_agent_messages": False, "features.goals": False,
                 "features.sleep_tool": False, "features.unbounded_connection_retries": False, "features.multi_agent": True,
                 "features.multi_agent_v2.enabled": True, "features.multi_agent_v2.wait_agent_enabled": True}
-
-
-def verify_binary(path: str) -> None:
-    with open(path, "rb") as stream:
-        digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if digest != BINARY_SHA256:
-        raise ValueError("Codex App Server requires the G0-Base verified 0.166.0 binary")
 
 
 def ordinary_binary() -> str:
@@ -552,7 +544,6 @@ class AppServerDriver(RunDriver):
         await self._record()
 
     async def prepare(self, io: HarnessRun, context: TurnContext, argv: list[str], kwargs: dict[str, Any]) -> None:
-        await asyncio.to_thread(verify_binary, argv[0])
         self._metrics_env = {"CODEX_HOME": (kwargs.get("env") or os.environ).get("CODEX_HOME") or ""}
 
     async def _model_metadata(self, model: str | None) -> dict[str, Any]:

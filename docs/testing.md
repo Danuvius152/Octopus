@@ -5,10 +5,9 @@ keeps the everyday summary; this file owns the complete requirements and command
 
 ## Verification
 
-Use fast checks for repeated development iterations and full checks before a
-code commit. **Both exclude `knowledge_eval` and `wiki_perf` by default.** These
-optional tiers require a separate evaluation or measurement task and explicit
-opt-in; they are outside commit and release gates.
+Use affected checks during development and the full gate before a code commit.
+`knowledge_eval` and `wiki_perf` are independent opt-in tiers outside commit
+and release gates; commands and selection rules are below.
 
 **Offline correctness covers both Claude Code and Codex.** Include each backend's
 affected argument/configuration, protocol, session lifecycle and simulated-process
@@ -18,11 +17,11 @@ use controlled fixtures, fake CLI subprocesses or local HTTP mocks, without a
 real provider CLI, model request or login. Claude's exclusion from live testing
 must not become a filename filter or skip in the offline gate.
 
-**Routine live validation remains Codex only**, for both pytest and browser E2E.
-Report offline coverage and live-provider coverage separately. Offline success
-does not establish Claude's actual authentication, model output or provider-side
-effort behavior; a separately authorized live investigation does not change this
-default test selection.
+**Routine live validation remains Codex only**, for pytest and browser E2E,
+regardless of Claude's installation or earlier investigations. Do not probe,
+install or authenticate Claude for routine checks. Report offline and each
+provider's live coverage separately; unexecuted checks are not passes, and
+Claude live checks are not a pending gate for this installation.
 
 ### Existing tests when adding a transport
 
@@ -38,20 +37,13 @@ and choose its fixture from what it tests:
 | Stored/wire shape | Update expected additive fields or the declared format only with the corresponding validity and old-record coverage. Keep byte/association/integrity checks. The shared [recording replay](../web/src/lib/recordingReplay.json) is checked against backend snapshots and frontend replay. |
 | Reply consumers and UI | Preserve legacy rendering and formatting, then add root/child interleaving, commentary versus final, empty/bad references and reload checks. [Native result consumers](../tests/test_codex_app_server_results.py) exercise actual App and named-delegation entry points. |
 
-For a timing-contract change, move a deterministic barrier to the newly owning
-boundary and retain the original failure/recovery proposition. For example,
-losing internal `session_started` delivery must not prevent precise resume from
-committed input identity; the test must still allow the finite native output
-reader to finish. Do not globally change old tests to App Server, remove their
-assertions or turn incompatibilities into skips. A selected live test that skips
-does not certify App Server acceptance. Default cutover has its own integration
-scope; the explicit exec leaf and text-worker uses retain their tests.
-
-`tests/harness_profiles.py::process_profile` declares a synthetic process peer's
-actual driver and capabilities. Replacing an argv builder alone cannot turn the
-native App Server profile into an argv peer. Shared tests retain their original
-business assertions, while native input evidence and RPC behavior require the
-native controlled-stdio fixtures. Cold subprocess fixtures follow the same rule.
+Move timing barriers with their owning boundary, retaining the failure/recovery
+assertions and allowing finite output readers to finish. Do not globally convert
+old tests to App Server or replace incompatibilities with skips. The explicit
+exec leaf and text worker retain coverage. Synthetic peers, including cold
+subprocesses, declare their actual driver/capabilities through
+`tests/harness_profiles.py::process_profile`; replacing argv alone cannot change
+a native profile into an argv peer.
 
 ### Fast checks during development
 
@@ -110,10 +102,6 @@ remain offline, while Chat, schedule and native-provider cases keep their live
 selection. All E2E files are checked by `tsconfig.e2e.json` through the ordinary
 `bun run typecheck` and build commands.
 
-Keep this feedback loop focused while editing. The hermetic selection over all
-of `tests/` is the full backend suite. Fast checks establish local correctness;
-complete the full checks at the commit boundary.
-
 ### Full checks before code commits
 
 At the code commit boundary, complete the check set in `./scripts/check.sh`:
@@ -121,9 +109,7 @@ the Python dependency-pins check, full hermetic backend suite,
 backend/frontend lint and types, frontend unit
 tests, generated contracts and the docs index check. Use the script for a
 combined run, or use the pre-commit hook for its gates and run the remaining
-checks separately. Give each check one executor. The backend
-selection includes Wiki correctness and excludes live integration and both
-optional tiers; see Test Coverage for individual commands.
+checks separately. See [Test Coverage](#test-coverage) for individual commands.
 
 The pins gate checks the declared runtime + `test` + `dev` dependency closure
 against `constraints-python.txt`, including the recorded Python/platform.
@@ -133,29 +119,18 @@ Run the verifier from the verification environment and pass the actual service
 interpreter with `--python`. Rebuild and constraint-update commands belong to
 [the local environment guide](local-wsl.md#环境重建).
 
-Mypy enables `arg-type`, `union-attr` and `misc`: argument compatibility,
-attribute access across union members, and the remaining miscellaneous checks.
-There is no global suppression of those codes. The two local exceptions explain
-the HTMLParser subclass's Final override and ZipExtFile's incomplete IO stub.
-Optional database bindings retain their lifecycle-specific skip, domain error
-or initialization invariant; cold recovery and shutdown are not all input-ready
-operations. This gate retains the configured unchecked untyped bodies and
-missing-import policy; success does not claim whole-repository strict typing.
+Mypy checks `arg-type`, `union-attr` and `misc` without global suppression;
+local exceptions explain the HTMLParser Final override and ZipExtFile IO stub.
+Preserve lifecycle-specific handling of optional database bindings. Configured
+untyped-body and missing-import exclusions mean passing is not whole-repository
+strict typing.
 
 The full backend gate uses four pytest-xdist workers grouped by file, with worker
 restart disabled. Focused development checks and live-provider checks stay serial;
 parallelism is selected by the full-gate commands, not global pytest `addopts`.
 
-Bare `pytest` selects offline correctness. Tests marked `real` are deselected
-before setup unless `--run-real` is present; a marker expression alone cannot
-enable provider probes or supervisor integration. The optional `knowledge_eval`
-and `wiki_perf` switches remain independent. A test carrying several opt-in
-markers requires every corresponding switch.
-
-**All required correctness checks must pass before committing.** Investigate
-and fix failures. Reuse passing evidence for unchanged code, environment and
-checks; rerun checks invalidated by subsequent changes. Release adds the
-installation-specific checks below.
+**All required correctness checks must pass before committing**, applying the
+evidence-reuse rules above. Release adds the installation-specific checks below.
 
 ### Release and documentation checks
 
@@ -164,19 +139,21 @@ installation-specific checks below.
 | Before release on this Codex installation | All commit gates, **offline E2E**, **live Codex pytest** and **Codex browser E2E** from Test Coverage below; then follow [自动发布](local-wsl.md#自动发布). Include supervisor checks when managed-service behavior changed. |
 | Documentation only | Affected links, index and diff checks; follow [repository action policy](../AGENTS.md#repository-and-upstream-maintenance). |
 
+For documentation, check local targets and anchors (including inbound links
+when headings move), then run `.venv/bin/python scripts/gen-docs-index.py --check`
+for both generated indexes and `git diff --check`. Do not run product suites,
+builds, model calls or deployment for documentation-only changes.
+
 Complete the release checks during validation and reuse valid results. When the
 user says to release, proceed directly with [自动发布](local-wsl.md#自动发布);
 routine release preparation does not open another review or approval round.
 
 ### Conditional automation work
 
-The upstream polish plan's remaining offline-E2E automation goal is retained:
-choose its execution frequency, isolated environment and acceptable elapsed cost
-before adding it to an automatic gate. `scripts/check.sh` currently runs browser
-E2E only with `--e2e`; this candidate does not change that default or the release
-requirements above. Adopt automation when a repeatable offline environment and
-measured cost justify it, then verify that failures are visible and no live
-model or production state is used. Source: the
+`scripts/check.sh` runs browser E2E only with `--e2e`. Before making it automatic,
+choose frequency, isolation and acceptable measured cost; ensure visible failures
+without live models or production state. This does not change release gates.
+The remaining automation goal comes from the
 [fixed upstream polish plan](https://github.com/archeryue/Octopus/blob/fd18c3407a7c61fb19074f475b357871edf1dabb/docs/plans/polish-2026-09.md).
 
 ## Test Coverage
@@ -193,7 +170,7 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 | Supervisor integration | `.venv/bin/pytest tests/ --run-real -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
 | Frontend unit | `cd web && bun run test` | Stores, HTTP/WS events, components, input lifecycle, account/service generation boundaries and Wiki job cards. Vitest tests are colocated with source. |
 | Offline browser E2E | `cd web && bun run test:e2e:fast` | Real browser plus isolated backend: login/accounts, sessions, input recovery, sidebar/pins, attachments, Wiki cards and page readiness. Uses a test-only harness and verifies an offline execution audit; actual provider behavior needs the live tier. |
-| Codex browser E2E | `cd web && bun run test:e2e:llm codex.spec.ts codex-app-server.spec.ts` | Real default Codex creation, complete streamed response, Monitor, original-receipt deduplication and precise native resume after reload/reopen. Needs the pinned, signed-in Codex CLI. |
+| Codex browser E2E | `cd web && bun run test:e2e:llm codex.spec.ts codex-app-server.spec.ts` | Real default Codex creation, complete streamed response, Monitor, original-receipt deduplication and precise native resume after reload/reopen. Needs a compatible, signed-in Codex App Server CLI. |
 
 ### Topic regression entry points
 
@@ -230,21 +207,14 @@ evidence under the reuse policy above.
   SQLite database and cleanup together. `tests/session_runtime.py` owns shared
   dispatcher observations. Import support modules directly, not case modules.
 - `tests/_fixtures/jsonl_frames.py` splits snapshots on byte newlines before UTF-8
-  decoding or JSON parsing. Both the fake peer's injection reader and the wire
-  observer retain an active writer's suffix for later snapshots. Only explicit
-  writer completion rejects an unfinished suffix; complete bad encoding/JSON
-  still fails immediately. The peer's final EOF snapshot delivers newly completed
-  frames and advances the same offset, rather than only validating them.
-  `tests/test_native_protocol_framing.py` controls real append writes and peer
-  subprocess/RPC/pipe barriers, including split UTF-8, multiple frames, exactly-once
-  delivery and EOF, without sleeps or broader timeouts.
-  The chunked-input assertions failed on baseline `07240d1b8fd1` and pass with
-  the shared reader. Evidence was obtained on 2026-11-04 with Python 3.14.4,
-  pytest 9.1.1 on this Linux/WSL installation, using the repository's pinned 0.166
-  schema/peer fixtures and `constraints-python.txt` dependency closure. It uses
-  the hermetic selection without transport overrides or model calls. Reuse
-  requires the same source, dependencies and fixture settings.
-  This proves fixture framing, not native work identity or a product protocol fix.
+  decoding/JSON parsing. Readers retain active-writer suffixes; explicit writer
+  completion rejects an unfinished suffix, while complete malformed frames fail
+  immediately. Final EOF delivers new complete frames exactly once and advances
+  the offset. `test_native_protocol_framing.py` uses real append/pipe/RPC barriers
+  without sleeps. Its chunked-input regression failed on `07240d1b8fd1` and passed
+  with the shared reader on 2026-11-04 (Linux/WSL, Python 3.14.4, pytest 9.1.1,
+  pinned 0.166 fixtures and Python constraints, hermetic selection without
+  transport overrides). This proves fixture framing, not product work identity.
 - `tests/session_fork_support.py` owns the function-scoped fork source, SQLite
   and HTTP fixture; `tests/session_held_process.py` owns the original live
   process, readers and their teardown for rewind and failed-Owner tests.
@@ -259,20 +229,15 @@ evidence under the reuse policy above.
   intended deadline. Retirement tests retain real process-group cleanup even
   when injecting loss of exit proof.
 - `tests/wiki_api.py` owns HTTP account/Manager/database fixtures;
-  `tests/wiki_job_runtime.py` adds authenticated job helpers.
-  Its `active_worker` returns the exact headers, task and scope; consumers use
-  those identities rather than the newest entry in a shared task table. Each
-  job registers retirement immediately. Session creation retains its original
-  task and registers cleanup before waiting, so cancellation still observes
-  and deletes a late-created session. Cleanup closes the task and assignment,
-  retires the session, then awaits the job's cancellation and effect settlement;
-  the complete exit stack and callback host stop finish before cancellation
-  propagates. The fixture's original `JobOwner` proves that this helper never
-  submits model input. That proof is limited to these controlled API fixtures
-  and must not stand in for a real model worker's retirement evidence.
-  `tests/wiki_jobs.py` is a separate store-only fixture and cannot substitute
-  for the HTTP account. Teardown through `db.close()` drains turns, joins Owners
-  and only then closes storage. Frontend WS lifecycle tests reuse
+  `tests/wiki_job_runtime.py::active_worker` returns exact headers/task/scope,
+  never the newest shared-table entry. Register retirement before waiting on
+  creation, retaining the original task so late-created sessions are deleted.
+  Close task/assignment, retire the session, then await cancellation and effects;
+  finish the exit stack and callback host stop before propagating cancellation.
+  The original `JobOwner` proves no model submission only for this controlled
+  fixture, not real-worker retirement. Store-only `tests/wiki_jobs.py` cannot
+  replace HTTP accounts. `db.close()` drains turns and joins Owners before
+  closing storage. Frontend WS lifecycle tests reuse
   [`Socket`](../web/src/test-support/socket.ts) with explicit callback ordering.
 - Connector diagnostic fixtures use long credential values that do not collide
   with ordinary prose. Assertions inspect the Connector's own logger, preserve
@@ -294,7 +259,8 @@ evidence under the reuse policy above.
   boundary when checking source-version consistency, replacement, byte cost or
   history locks; observing only `Path.read_bytes` misses bounded readers.
 - Ordinary App Server has no transport opt-in. `OCTOPUS_CODEX_APP_SERVER_BINARY`
-  must resolve to the [pinned binary](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume).
+  selects the [native executable](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume);
+  no binary digest or exact release is required. Live tests exercise the required protocol.
   Live exec-origin history is seeded only by an external test CLI, then resumed
   through the product path; there is no ordinary product exec fallback.
 - The native question smoke enables `features.default_mode_request_user_input`
@@ -317,125 +283,73 @@ evidence under the reuse policy above.
 
 ### Test fixture remediation evidence
 
-T-01–T-04 were verified on 2026-11-04 against baseline
-`4f1418da3906fedd7221d9b239774681e785945c` plus the regression-code patch
-SHA256 `bd8053033019f38043d005c7b921b08f8149e149d7c1d09701a7944ecfe5b9b5`.
-Strengthened assertions exposed the short-token diagnostic collision and the
-broken generic `Popen` replacement. Failure injection also exposed assignment
-and persisted-job leaks, late session creation, interrupted settlement/host
-stop, and the pagination rendering window. These failures remain distinct
-from the passing repair checks; none were converted to skips or weaker gates.
-
-`./scripts/check.sh` passed all nine commit gates: 6,733 backend hermetic cases
-and 1,059 frontend cases, including the complete affected modules and shared
-helper consumers. The environment was Linux/WSL, Python 3.14.4, pytest 9.1.1,
-MCP 1.30.0 and AnyIO 4.15.1 under `constraints-python.txt`, with Node 24.21.0,
-Bun 1.4.2 and Vitest 4.1.12 under the existing JS lockfile. Separately,
-`python -m pytest tests/test_joint_recovery_reentry.py -q` passed both cases
-on Python 3.12.16 in an isolated environment installed with the same Python
-constraints. Test state stayed under an independent test-cache root. These
-are offline test-fixture results; they do not establish live-provider or
-browser E2E acceptance, deployment, or closure of the other remediation tickets.
-Reuse requires unchanged relevant source, configuration, dependencies and environment.
+On 2026-11-04, T-01–T-04 used baseline `4f1418da3906fedd7221d9b239774681e785945c`
+and regression patch SHA256 `bd8053033019f38043d005c7b921b08f8149e149d7c1d09701a7944ecfe5b9b5`.
+Strengthened assertions exposed diagnostic-token collisions, the generic `Popen`
+replacement, assignment/job leaks, late creation, interrupted teardown and DOM
+readiness. Repairs passed all nine `check.sh` gates and affected helper consumers;
+initial failures were not skipped or weakened. Environment: Linux/WSL, Python
+3.14.4, pytest 9.1.1, MCP 1.30.0, AnyIO 4.15.1, Node 24.21.0, Bun 1.4.2 and
+Vitest 4.1.12 under the recorded constraints/lockfile. The joint-recovery module
+also passed on isolated Python 3.12.16 with the same Python constraints. These
+offline, isolated results do not establish live/browser acceptance or deployment.
 
 ### Session delivery and interaction retirement verification
 
-Tickets 10–14 were verified on 2026-11-04 from baseline
-`07b83bf2fed2e1d88ca1e782eafe384e86988355`. Vera's final reviewed candidate patch
-SHA256 was `d14251663ca7c3736b468f2313094215ac574b7d9ac6efa83266322c6962114c`.
-Her Standards and Spec axes each had zero remaining findings. The last fixes
-retain already-started MCP cleanup through a later cancellation and end an
-unattended child's original parent-solver opportunity when the parent stops.
-Real mounted SDK cancellation plus close-persistence/waiter barriers and actual
-parent admission/Stop at queued, claim and preparation phases cover those races.
-
-The initial complete `check.sh` run passed six gates and exposed one mypy error,
-six backend failures and two frontend failures. After correction, the affected
-backend selection passed 1,126 cases, and all 90 frontend modules passed 1,073
-cases. The final Owner/MCP review fixes then passed 692 affected cases, lint and
-mypy over 259 source files. Unchanged passing full-suite evidence was reused;
-all initially failing modules are covered by the successful follow-ups. Frontend
-lint/types, generated contracts, documentation indexes and added local links
-also passed. Initial failures remain distinct from that composed acceptance.
-
-The complete offline browser suite passed 114 cases, including actual REST
-deletion through two sockets/pages and the current credential-list fixture.
-All 20 selected live Codex cases have passing evidence: the first run passed 19,
-and the corrected native optional-question check passed separately. The initial
-failure assumed blocking despite a real `isBlocking:false` frame; no product
-frame was changed or failure skipped. Both Codex browser checks passed. After
-the final MCP fix, the real 65-second HTTP question wait passed again. Network
-audits retained the same existing login and observed no authentication-domain
-attempts; no new login or refresh was performed. Human blocking/idle suspension
-remains controlled true-frame/clock evidence, with the live Default-mode scope
-described above. These results validate this change, without establishing a
-deployment or claiming closure of tickets 15–20.
+Tickets 10–14 used baseline `07b83bf2fed2e1d88ca1e782eafe384e86988355` on
+2026-11-04; Vera cleared Standards and Spec for patch SHA256
+`d14251663ca7c3736b468f2313094215ac574b7d9ac6efa83266322c6962114c`.
+Mounted SDK/waiter barriers and original parent admission/Stop cover cleanup
+surviving later cancellation and closure of the parent-solver opportunity.
+Initial mypy/backend/frontend failures were repaired and their complete modules
+rerun; final Owner/MCP checks, lint/types and indexes composed with unchanged
+passing full-gate evidence. Offline E2E, selected live Codex cases and both Codex
+browser cases passed, including a repeated real 65-second HTTP question wait.
+The native question's first failure wrongly assumed blocking despite
+`isBlocking:false`; the corrected assertion did not alter product frames.
+Blocking/idle suspension remains controlled-frame evidence. Network audits used
+the same login with no authentication-domain attempts, login or refresh.
+This does not establish deployment or close tickets 15–20.
 
 ### Question draft, input cleanup and App recovery verification
 
-The remaining question changes were independently reviewed from baseline
-`0f1570877be4e2ed5903377fe93955c454f43906`; Vera accepted the final code/document
-patch `af4c3666811a7de835a8cb08cc16338e5214bdaa9beb2113923d65f07f02435c`
-with no remaining Standards or Spec defects. Mounted MCP cancellation tests
-retain original Owner consumption and waiter barriers, exact native association,
-associated child-effect and reader-cutoff counterexamples, and actual App/build,
-delegation, schedule, Research and Wiki consumers. Page tests retain original
-answer/continuation identities across unmount and edits; real browser gestures
-distinguish Tab/Shift+Tab and pointer entry from programmatic focus.
-
-The complete commit-gate run passed eight gates and 6,906 backend tests; its only
-backend failure was the missing structural audit entry for the authenticated
-client module. The complete route audit and App recovery follow-up passed all
-22 cases. The final SDK source passed 14 JS cases, lint and types. These affected
-results compose with the unchanged passing full-suite evidence. The offline
-browser run passed 114 cases and failed one paused-dispatch reconnect assertion;
-the unchanged two-test module subsequently passed, including five repetitions
-of both tests. The initial failure remains unexplained; no sleeps, skips or
-relaxed assertions were introduced or claimed as its fix.
-
-All 21 selected live Codex cases then passed, including an App built from the
-actual runtime client brief, and both Codex browser cases passed. The successful
-network audit fixed the current conversation's existing login and observed no
-authentication-domain attempts. An earlier background run inherited the
-service's different default login, skipped all live cases and failed browser
-authentication; those are retained failed setup evidence, not product passes.
-The selected login was reused without reauthentication or refresh. These are
-verification results; deployment requires its separate publication receipts.
+Vera cleared Standards and Spec from baseline `0f1570877be4e2ed5903377fe93955c454f43906`
+for code/document patch SHA256 `af4c3666811a7de835a8cb08cc16338e5214bdaa9beb2113923d65f07f02435c`.
+Mounted MCP/consumer tests, page identity checks and real browser focus gestures
+cover the boundaries listed above. A missing client-module structural audit
+entry failed the full gate; repaired route/App modules and final SDK tests,
+lint and types passed alongside unchanged full-gate evidence. Offline E2E's
+paused-dispatch reconnect failure remains unexplained: its unchanged module
+subsequently passed, including five repetitions, without sleeps, skips or relaxed
+assertions. Selected live Codex cases (including an actual App build) and both
+Codex browser cases passed using the conversation's existing login, with no
+authentication-domain attempts or refresh. An earlier background run used the
+service's different login, skipped live cases and failed browser authentication;
+that is failed setup evidence, not a product pass. Deployment still requires
+separate publication receipts.
 
 ### App, login and delegation ownership regressions
 
-The CR-01–CR-03 regressions use original public entry points and controlled
-external peers: proxy HTTP to local process groups, device-login routes to a
-controlled CLI plus real SQLite/files, and actual delegation/session deletion.
-`test_app_request_lifetime.py` and `test_wiki_app_request_lifetime.py` observe
-original-target loss, occupied capacity, actual effects and complete resource
-retirement, including 202 handoff and failed cleanup. Existing
-`test_app_proxy_wiki_target.py` lock/body barriers allow active stop to interrupt
-and join the original request before admitting a replacement.
-Poll-close fault injection retains a failed first close after a later `done`,
-and weak response references verify that successful polls are not accumulated.
+CR-01–CR-03 use public entry points, controlled peers and real SQLite/files:
 
-`test_codex_login.py` separates publication COMMIT from earlier key/read commits
-when placing a barrier. It covers cancelled observers, overlapping targets,
-disable/delete ordering, label preservation, whole-group exit, compensation
-ownership, committed deletion cleanup reentry and retained drain blockers.
-Directory-denial regressions inject actual `os.stat` failures and use `os.lstat`
-to prove the original directories remain, covering `Path.exists()` suppression.
-Process-group signal probes retain real group-exit observation; publishing barriers
-also show that an expired scrape watchdog cannot overwrite the publishing phase.
-`_fixtures/codex_publication_probe.py` isolates real fail-stop exits; known rollback
-and unknown acknowledgment are different outcomes. Rendered `HarnessPage` tests
-check historical success against current lists and retired view/account guards.
-`test_delegation_restart_deletion.py` retains accepted/unknown input responsibility
-while permitting only a confirmed resource-free, unadmitted setup to retire after
-relationship deletion. Existing command/return tests continue to prove rollback
-after typed refusal and preservation of the previous question writer.
+- App/Wiki request-lifetime tests cover target loss, capacity, effects, 202 handoff
+  and failed cleanup. Proxy lock/body barriers require original-request retirement
+  before replacement; poll-close failures survive later `done`, and weak references
+  detect accumulated successful responses.
+- `test_codex_login.py` places barriers at publication COMMIT, separately from
+  key/read commits. It covers observer cancellation, target overlap, disable/delete,
+  labels, whole-group exit, compensation/reentry and drain blockers. Actual
+  `os.stat` failure plus `os.lstat` checks cover suppressed directory errors;
+  group-exit/watchdog barriers preserve publishing. The isolated publication
+  probe distinguishes known rollback from unknown acknowledgment. `HarnessPage`
+  checks historical success against current lists and retired view/account guards.
+- `test_delegation_restart_deletion.py` retains accepted/unknown input responsibility;
+  only confirmed resource-free, unadmitted setup retires after relationship deletion.
+  Command/return tests retain typed-refusal rollback and the previous question writer.
 
-These are offline correctness checks for process-local ownership. They do not
-prove provider authentication, crash recovery, production deployment or closure
-of the remaining remediation tickets. Full-gate and release selections remain
-the ones above; do not substitute a 202, terminal UI label or cancelled waiter
-for an observed effect/retirement receipt.
+These prove process-local offline ownership, not provider authentication, crash
+recovery or deployment. A 202, terminal UI label or cancelled waiter cannot replace
+an effect/retirement receipt.
 
 ### Optional resource experiments
 
@@ -523,19 +437,14 @@ or a claim about live-provider coverage.
   the binary. Availability probes run at setup in `tests/conftest.py`, so
   collection and hermetic checks do not invoke model CLIs.
 - **`native_codex` checks the configured App Server executable.** The native
-  live module retains `real_codex` for release selection, verifies the selected
-  G0 binary, and probes the selected login with that executable in an isolated
-  home. An invalid binary pin fails validation. PATH Codex availability applies
+  live module retains `real_codex` for release selection and probes the selected
+  login with that executable in an isolated home. Protocol incompatibility fails
+  in the product path instead of an exact-version gate. PATH Codex availability applies
   separately to exec-origin history seeding. The active-root steer smoke checks
   original turn/generation identity, accepted input, a file effect and retirement.
   Report required live cases as passed, skipped, failed or unexecuted; collection
   and skipped cases do not establish acceptance. HTTP MCP question tests do not
   prove the native server-request/reply contract.
-- **This installation's live gate selects Codex only.** Claude's live CLI and
-  browser tests remain outside routine checks and the release gate, regardless
-  of whether its binary is installed. Keep both backends' offline coverage and
-  supported agent settings; do not probe, install or authenticate Claude for
-  routine checks. Report unexecuted live coverage explicitly.
 - **Persistent state stays in temporary test roots**, including databases,
   account/Wiki/workspace paths and provider output. Live tests reference the
   existing selected credentials without copying secrets or changing defaults.
@@ -554,26 +463,19 @@ or a claim about live-provider coverage.
   protocol events, actual tool data and persisted effects. Do not grade generated
   Wiki wording or require the model to emit optional reasoning records; replay
   tests cover acceptance of those records.
-- **`knowledge_eval` is opt-in**, deselected before setup/CLI probes and outside
-  fast checks, full checks and release gates. It requires
-  `--run-knowledge-evals` and, for real execution, `--run-real`;
-  `wiki_perf` independently requires `--run-wiki-perf`.
-  Both are excluded from `scripts/check.sh` and the Python pre-commit hook.
-  Setup and evidence rules are in
-  [本机测试](local-wsl.md#本机测试). Assess answers against recorded source
-  versions; execution success alone is not semantic acceptance. Natural-language
-  maintenance intent variations also use this tier, retaining their tool and
-  effect assertions. The default live tier keeps the full maintenance flow and
-  Wiki protocol checks; authorization and write boundaries remain hermetic gates.
-- **`wiki_perf` is independently opt-in**, including when answer evaluations are
-  enabled. Keep correctness cases at the smallest useful size and reuse setup
-  across read-only variations; mark dedicated scale/cost measurements instead
-  of excluding Wiki behavior tests as a group.
+- **Opt-in switches are cumulative.** Bare `pytest` selects offline correctness;
+  marker expressions alone do not enable probes. `real`, `knowledge_eval` and
+  `wiki_perf` require `--run-real`, `--run-knowledge-evals` and `--run-wiki-perf`
+  respectively, with every applicable switch required before setup/CLI probes.
+  The two optional tiers are excluded from `scripts/check.sh` and the Python
+  pre-commit hook. Keep small Wiki correctness checks hermetic; mark dedicated
+  scale/cost measurements rather than excluding Wiki behavior as a group.
 
 ## Wiki evaluation method
 
 以下用于明确委托的质量或效率评测；日常、提交和发布门禁仍由
 [Test Coverage](#test-coverage) 选择，不自动运行可选评测。
+执行前使用[本机隔离、凭据与网络约束](local-wsl.md#本机测试)。
 优先测量用户关心的单库约100篇规模，长文、大批次和多库只作增长诊断。
 质量与原文保全合格后，统计完整任务端到端耗时和全部输入、输出 token，包含
 错误、纠错、绕路与重试。调用数、轮数和缓存明细用于解释结果，不单独设下降门槛；
@@ -590,6 +492,39 @@ or a claim about live-provider coverage.
 相加。有效同版结果按验证政策复用，不为证明提速重复已验收的付费样本。
 一次样本不证明普遍提速或 persona 的因果效果；用量和失败原始记录留在本次
 任务产物，长期文档只保留可解释的结论与其条件。
+
+### Knowledge and intent commands
+
+维护同义措辞、询问、否定、范围及文档内指令辨识归 `knowledge_eval`，固定 low
+effort，并保留工具调用、入队范围和提交者未改文件的断言。常规实机仍保留完整
+维护提交 → Weber 执行 → 持久化结算，以及读取、原生助手、resume 指令更新和
+大任务导出协议；授权、写入范围、事务与恢复留在离线门禁。
+
+```bash
+.venv/bin/pytest tests/test_wiki_intent_real.py --run-real --run-knowledge-evals -m knowledge_eval
+.venv/bin/pytest tests/test_wiki_query_real.py --run-real --run-knowledge-evals \
+  --knowledge-eval-output=/path/to/fresh-query-evidence -q
+```
+
+问答命令调用真实 Codex，使用隔离合成样本，不读取个人笔记。输出必须用新目录；
+通过仅表示执行留证成功，语义验收见下文，不为补文档记录重跑。
+
+普通聊天评测使用真实 WebSocket `send_message` 和正常共享提示；不以委托代替，
+不追加逐题评阅提示或强制 Wiki 模式。registration JSON 包含 `source_root`、
+`source_manifest_sha256`、所选 `credential_id` 及一至四项 `questions`
+（各有 `id`、`question`）；gold 不随问题提交。摘要按
+`tests.wiki_query_evidence.source_manifest` 做 Unicode JSON 编码，
+`sort_keys=True, separators=(",", ":")`，再取 UTF-8 SHA-256。
+
+```bash
+.venv/bin/pytest tests/test_wiki_chat_real.py --run-real --run-knowledge-evals \
+  --wiki-chat-registration=/path/to/registration.json \
+  --knowledge-eval-output=/path/to/fresh-chat-evidence -q
+```
+
+该会话固定 `gpt-6.1-sol/high`、正常速度与既有 credential，不改 agent 默认、
+回退登录或先发额外付费探针。报告保留隔离 DB、认证宿主、文件访问和源绑定的
+实际限制；新 cwd/空 memory 不证明盲测，资料变化后须按当前版本评阅。
 
 ### Frozen Wiki reference
 

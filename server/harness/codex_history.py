@@ -58,11 +58,6 @@ class _HistoryDriver(RunDriver):
         await initialize_connection(io, context.working_dir, self.request)
         self.result = await self.operation(self)
 
-    async def prepare(self, io: HarnessRun, context: TurnContext, argv: list[str], kwargs: dict[str, Any]) -> None:
-        from . import codex_app_server
-
-        await asyncio.to_thread(codex_app_server.verify_binary, argv[0])
-
     async def request(self, method: str, params: dict[str, Any], *,
                       before_write: Callable[[str], Awaitable[None]] | None = None) -> dict[str, Any]:
         assert self._io is not None

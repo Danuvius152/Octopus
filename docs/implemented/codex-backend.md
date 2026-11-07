@@ -10,7 +10,7 @@
 
 ## Interactive execution
 
-The ordinary Codex profile uses the pinned native App Server through the common
+The ordinary Codex profile uses the configured native App Server through the common
 Harness. Each request attempt owns one stdio host and one accepted root turn;
 HarnessRun owns its process group and retirement. A logical request can span
 bounded attempts after a recoverable failure. Human steering targets that
@@ -53,17 +53,22 @@ is separate from [rewind](session-rewind.md) and [native-copy fork](session-fork
 Ordinary requests select App Server before preparation. The former
 `OCTOPUS_CODEX_TRANSPORT` selector and ordinary exec path are removed.
 `OCTOPUS_CODEX_APP_SERVER_BINARY` selects the binary
-(default `codex`, resolved on PATH). The driver requires the G0-Base verified
-0.166.0 binary, SHA256
-`b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8`.
-A different binary fails preparation. This default does not rewrite saved agents,
-credentials, model settings or backend identities.
+(default `codex`, resolved on PATH). There is no binary digest allowlist, exact
+release requirement or version gate. Each connection checks initialization,
+effective configuration and required thread/RPC behavior before business input.
+Compatible upgrades and alternate builds use the same path; unsupported required
+methods, configuration or response shapes fail through the existing preparation
+or protocol boundary, preserving input evidence. The [official App Server
+protocol](https://learn.chatgpt.com/docs/app-server) defines the integration surface.
+The 0.166.0 G0 observations remain a historical validation baseline, not a runtime
+requirement. This default does not rewrite saved agents, credentials, model
+settings or backend identities.
 There is no second transport execution or automatic fallback after a failure.
 
 Each attempt has its own managed stdio host. Initialization, effective config,
 thread preparation and controller checks precede `turn/start`. Process and thread
 overrides disable message wake, goals and sleep execution while keeping the
-G0-verified active collaboration features enabled. Effective mode, requested model
+required active collaboration features enabled. Effective mode, requested model
 and permissions are checked before business input. Exact `thread/resume` must
 return the captured native identity; missing or incompatible history fails
 without creating a replacement. Controller checkpoint comparison and trusted
@@ -130,7 +135,7 @@ The guard is a conflict check, not a native configuration parser or a general
 tool allowlist; current tool endpoints still own authorization.
 
 Research's empty MCP table means no Octopus injection; native extra MCP can still
-be visible in the fixed CLI. The leaf remains read-only with no ordinary history
+be visible in the selected CLI. The leaf remains read-only with no ordinary history
 resume/fork. Claude strict config and the tool-free text API worker have their
 own [mode boundaries](harness-layer.md#instruction-assembly).
 The [0.166.0 observations](../reference/runtime-resource-boundaries-20261103.md#mcp-configuration-and-discovery)
@@ -165,21 +170,23 @@ EOF or the collection cutoff ends that responsibility. Raw drain only releases
 descriptors. Missing complete root items, malformed necessary records or overflow
 normally prevent success; a cancelled helper need not have produced an answer.
 The only pure-input exception requires the original Owner's exact, consumed MCP
-cancellation/cleanup receipt on the same attempt. It cannot excuse reader cutoff,
+cancellation/cleanup receipt on the same attempt. The metadata's `codex_version`
+is informational; authenticated scope and exact request/attempt/thread/turn/call
+identity determine correlation. That exception cannot excuse reader cutoff,
 another associated effect gap, a missing identity or an already selected failure.
 The original required-items diagnostic retains its origin and full observed gap
 count; raw integrity stays incomplete and no completed item is fabricated. See
 [original-call retirement](architecture-contract.md#mcp-question-retirement).
 
-Completion obligations follow pinned producer provenance. Uncommitted sampling
-Message/Reasoning and proven Core WebSearch observations may be abandoned with
-or without a retry notice; deltas alone create no completion debt. Context
+Completion obligations follow native producer provenance and item type.
+Uncommitted sampling Message/Reasoning and proven Core WebSearch observations
+may be abandoned with or without a retry notice; deltas alone create no completion debt. Context
 compaction is ordinary maintenance. WebSearch with absent/unknown action and
 ambiguous ImageGeneration retain conservative actual-result obligations;
 extension invocations are not excused by sharing a wire kind with sampling.
 Command, file-change, MCP and dynamic-tool results remain necessary. A cancelled
 collaboration wait may lack completion without proving every child finished.
-The [pinned observation and source evidence](../reference/codex-app-server-g0.md#上游流重试遗留的未完成消息)
+The [0.166.0 observation and source evidence](../reference/codex-app-server-g0.md#上游流重试遗留的未完成消息)
 explain why abandoned sampling does not make an otherwise complete root fail.
 
 The driver validates identity and supported payload before accounting or proof
@@ -196,9 +203,9 @@ If the accepted root has an unfinished `commandExecution`, retirement sends
 The same reader waits for the original thread/turn/item's complete event within
 the existing 0.5-second protocol-interrupt grace. The cleanup ACK only confirms
 submission; it cannot replace command output, exit code or complete-item evidence.
-This order matters for pinned 0.166.0: EOF detaches the notification subscriber
-before native shutdown terminates residual commands, so their completion can
-reach the rollout without reaching the client. No residual root command means no
+The 0.166.0 observation established why this order matters: EOF detaches the
+notification subscriber before native shutdown terminates residual commands,
+so their completion can reach the rollout without reaching the client. No residual root command means no
 cleanup RPC. Stop uses the same retirement path; timeout or cleanup failure keeps
 the existing incomplete-recording failure and process-group retirement.
 A collected failed command remains an error tool result before the final result;
@@ -286,8 +293,8 @@ backlog exceptions and live status refresh are owned by
 
 ### Native questions and output
 
-The pinned protocol permits `request_user_input` only on the root; child
-approvals can still arrive, including during shutdown. Native question forms
+The supported native question path accepts `request_user_input` only on the root;
+child approvals can still arrive, including during shutdown. Native question forms
 and structured answers pass through OwnerQuestions and the existing product
 answer UI. The response uses the original native question IDs on the original
 connection. Root terminal, Stop, serverRequest/resolved and connection loss
@@ -349,8 +356,8 @@ offers path copy and the existing viewer; its working-directory and size policy
 still applies. Other files can be opened locally using the path. Later changes,
 deletion and viewer refusal never turn the record into a historical snapshot.
 
-The pinned native image extension's decoded budget is 32 MiB. Its stdout reader
-allows the corresponding base64 length plus 4 MiB of metadata. At the wire
+The native image decoder's budget is 32 MiB. Its stdout reader allows the
+corresponding base64 length plus 4 MiB of metadata. At the wire
 boundary, a native file ID takes precedence over inline result data. Otherwise
 inline bytes are validated and reduced to byte count and SHA-256 before correlation
 buffers, raw events, persistence and WS. Projected non-media frames still have a
@@ -396,14 +403,14 @@ execution path and is subject to the same effective-config checks.
 Fast requires the native Fast feature and the selected model's advertised
 `priority` tier, including paginated catalogs. It fails preparation when that
 capability or the effective tier is missing. Normal explicitly resets the
-thread to `default`; the pinned native provider request omits that tier field.
+thread to `default`; the 0.166.0 native provider observation omitted that tier field.
 Process and thread overrides keep wake, goals and sleep disabled even when
 the shared native home enables them. They also set
 `features.unbounded_connection_retries=false`; `config/read` must confirm the
-effective false value before input. The pinned runtime then uses its existing
+effective false value before input. The 0.166.0 observations recorded native
 finite retry/backoff and WebSocket-to-HTTP fallback. Stream/request counts have
 different scopes and are not a whole-turn call budget or wall-clock bound.
-Version changes require checking the key and effective value; no CLI fork or
+Every invocation checks the key and effective value; no CLI fork or
 new recovery stage is maintained. Current controller checkpoints are checked
 after exact resume, including compacted history, and changed trusted instructions
 are acknowledged before business input. An uncertain injection blocks sending.
@@ -452,7 +459,7 @@ is retained. Raw RPC errors remain distinguishable for this check.
 With App Server selected, full `/fork` uses `thread/fork` in the selected
 `CODEX_HOME`, for both exec-origin and App Server histories. Paginated native
 storage cannot be cloned by changing a rollout ID or relocating its home.
-The short management driver reuses initialization, the pinned binary and
+The short management driver reuses initialization, the selected executable and
 HarnessRun retirement. It sends no `turn/start`, disables wake/goals/sleep and
 sets `deferGoalContinuation`; unexpected execution is a protocol failure.
 The original SessionOwner owns that host through actual retirement. The existing
@@ -522,7 +529,7 @@ root, matching attempt/thread captured by the logical turn, proven original-run
 retirement and no protocol issues. Success never reopens. A pre-submission
 transient refusal can prepare its unchanged pending input again; possible-send
 without acceptance proof remains unknown. Generic start RPC failure remains
-unknown; the pinned explicit InvalidRequest/InvalidParams rejection can prove
+unknown; an explicit InvalidRequest/InvalidParams rejection can prove
 nonacceptance. Neither old session identity alone nor missing output authorizes
 prompt replay, a new history or a fallback transport. The Owner retains budgets,
 backoff, deadline, authorization and the unique final result under
@@ -606,14 +613,22 @@ from denied cleanup during cold recovery; neither case deletes the source or
 guesses an API-created identity.
 
 `tests/test_codex_app_server_configuration.py` covers transport-aware saves,
-current defaults, Fast rejection and UTF-8 refusal without sending input.
+current defaults, Fast rejection, compatible upgrades across start/resume, required
+RPC incompatibility and UTF-8 refusal without sending input. MCP cleanup tests
+retain exact identity/scope refusals across changed or absent version metadata.
+Unavailable executable tests retain unsent input and explicit recovery for
+missing PATH entries, missing absolute paths and nonexecutable files.
 `tests/test_codex_app_server_authorization.py` checks real HTTP tool denial while
 outcome storage is blocked or the original process is still retiring. Protocol
 correlation also covers a complete 3,000,000-byte non-BMP input before ACK.
-Pinned-host probes with a controlled provider verify effective configuration,
+Versioned native probes with a controlled provider verify effective configuration,
 720,039-byte Chinese input, actual scoped MCP/connector callbacks, late child
 material reads and active owner revocation. Those probes establish native
 assembly and effects at the controlled boundary, not remote model capability.
+
+On 2026-11-07, installed Codex 0.167.0 passed this installation's Codex live and
+browser selections using the existing login. The versioned 0.166.0 fixtures
+remain protocol evidence; they do not restrict the executable used at runtime.
 
 ## Historical evidence
 

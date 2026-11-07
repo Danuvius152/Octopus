@@ -1,9 +1,7 @@
 # 本机 WSL 配置
 
-本文负责本机环境与操作步骤，不追加逐次发布日志或测试项数。代码交付与纯文档
-改动的动作边界统一遵循 [AGENTS.md](../AGENTS.md#repository-and-upstream-maintenance)；
-Wiki 交付历史、证据及未完成需求分别见[开发总结](implemented/wiki-development-summary.md)
-和[未来计划](plans/wiki-future-plan.md)。
+本文负责本机环境与操作步骤；验证规则由 [testing.md](testing.md) 维护，代码交付
+与纯文档改动的动作边界见 [AGENTS.md](../AGENTS.md#repository-and-upstream-maintenance)。
 
 | 操作者任务 | 入口 |
 | --- | --- |
@@ -22,10 +20,6 @@ AI 后端使用已经登录 ChatGPT 的 Linux 版 Codex。`.env` 设置
 `OCTOPUS_DEFAULT_BACKEND=codex`，现有默认代理同样设为 `codex`。新建代理的
 界面和 API 都采用这个默认值，新建普通会话继承代理的后端；继续使用当前
 用户的 CLI 登录，无需复制或重新设置凭据。
-
-本机日常开发与发布的离线测试覆盖 Claude Code 和 Codex；真实模型验证只使用
-Codex。Claude 是否安装、是否做过专项实测，不改变这一默认范围。项目仍支持
-两个后端，不修改其他使用者的后端选择。
 
 ## 配置和数据
 
@@ -110,15 +104,13 @@ bun install --frozen-lockfile
 bun run build
 ```
 
-Python 依赖及兼容边界统一在 `pyproject.toml` 声明，当前 FastMCP 接口使用
-`mcp>=1.30,<2`。[constraints-wiki.txt](../constraints-wiki.txt) 固定 Wiki 解析链：
-markdown-it-py 4.2.0、mdurl 0.1.2、PyYAML 6.0.3、jieba 0.42.1；它仍是解析输入。
-[constraints-python.txt](../constraints-python.txt) 是从干净安装生成的完整声明依赖
-闭包，含运行、test/dev 及构建工具版本。本轮在 CPython 3.14.4 / Linux x86_64
-完成全新验证安装和 runtime-only 安装，分别核对 `pip check`、服务导入及实际闭包；
-验证环境另通过 mypy 和账户/路由/WS 定向检查。运行环境不需要 pytest、mypy、ruff
-或 `packaging`。这是该 Python/平台下的解析版本组合，不承诺跨平台相同 wheel 或
-位级相同构建；其他组合须独立生成并验证。SQLite 和 Codex binary 仍按各自合同核对。
+依赖边界由 [pyproject.toml](../pyproject.toml) 声明；
+[constraints-wiki.txt](../constraints-wiki.txt) 固定 Wiki 解析输入，
+[constraints-python.txt](../constraints-python.txt) 固定运行、test/dev 和构建工具的
+完整声明依赖闭包。该组合已在 CPython 3.14.4 / Linux x86_64 的全新验证及
+runtime-only 安装核对 `pip check`、服务导入和实际闭包，并通过验证环境的 mypy
+及账户/路由/WS 定向检查；不承诺跨平台相同 wheel 或位级相同构建。
+其他组合须独立验证，SQLite 和 Codex binary 仍按各自合同核对。
 
 上面的验证安装用于新环境；运行安装把 `.[test,dev]` 换为 `.`，仍使用同一约束。
 `PIP_CONSTRAINT` 使用绝对路径，使 pip 的隔离构建也消费该快照。不要在运行服务
@@ -140,8 +132,7 @@ python scripts/python_environment.py lock --project "$PWD" --python /path/to/ver
 检查验证安装，运行 `check --python /path/to/runtime/bin/python` 检查运行安装。
 目标解释器只做 stdlib metadata 查询；要求解析工具属于调用者验证环境。保留完整
 解析比较和候选实际消费证据。改变 Wiki 解析依赖还须重新核验原文/换行/坐标、检索
-等价和受影响基线。接口迁移同时核对 MCP 命名空间和账户隔离；账户结构检查支持
-直接路由及 FastAPI included-router context 的嵌套前缀与继承权限依赖。
+等价和受影响基线；接口迁移同时核对 MCP 命名空间和账户隔离。
 
 本机使用 Windows 的 `http://127.0.0.1:7890` HTTP 代理。HTTP/HTTPS 的
 大写和小写代理变量均已持久写入 `~/.bashrc`，新终端不依赖上一终端的环境。
@@ -189,10 +180,8 @@ workspace，测试数据库、账户、服务安装资源和 CLI 输出仍须与
 
 ## 本机测试
 
-日常验证范围、全量测试条件和发布门禁以 [AGENTS.md](../AGENTS.md#verification)
-为准，不在这里复制一份测试清单或固定通过数。下面只补充 WSL 环境、凭据入口
-和可选知识评测的使用方法；文档整理只做受影响链接、索引和差异检查，不触发
-全套测试、构建或付费模型请求。
+测试命令、门禁和可选评测统一见 [testing.md](testing.md#test-coverage)：离线覆盖
+Claude Code 与 Codex，日常实机仅 Codex；文档整理只做链接、索引和差异检查。
 
 全量离线使用四个按文件分组的 pytest worker。WSL 的 `/tmp` 是容量有限的 tmpfs；
 需要磁盘空间或运行真实 Codex 时，在 `~/.cache/octopus-tests/` 下创建本轮独立目录，
@@ -201,26 +190,6 @@ workspace，测试数据库、账户、服务安装资源和 CLI 输出仍须与
 审计回执单独保留；已安装依赖和浏览器仍复用。局部回归和 Codex 实机保持串行，
 公共测试配置不自动开启并行。
 CLI 登录目录与 `TMPDIR` 放在同一本轮运行根下的平行目录，避免辅助程序安装限制。
-
-后台任务可继承服务环境而非当前模型进程的环境。启动实机验证前先核对当前会话的
-凭据绑定，再显式将对应 `CODEX_HOME` 传入后台命令；不能把后台默认目录视为当前
-登录。失败时核对实际读取目录、原模型结果和网络审计，不能只凭退出码或只读
-接口成功认定模型验收通过，也不能未经核对就要求重新登录。
-
-Wiki 规模、性能测量和检索评测脚本的完整查询跑批使用独立的 `wiki_perf` 标记，默认在收集阶段排除，
-`scripts/check.sh`、Python pre-commit 与发布门禁都不运行。权限、事务、恢复和
-小规模跨批次等正确性检查仍在默认全量中。需要分析成本时单独执行：
-
-```bash
-.venv/bin/pytest tests/ --run-wiki-perf -m wiki_perf -v -s
-```
-
-此开关与 `--run-knowledge-evals` 相互独立，不会启用自然问答评测或真实模型请求。
-
-交付报告和审阅任务分别说明离线覆盖、Codex 实机结果和未执行的 Claude 实机
-范围。Claude 的离线单元、协议与模拟 CLI 进程测试属于正常门禁，不因实机排除
-而跳过；这些结果不能代替真实 Claude CLI／浏览器验证。未执行的 Claude 实机
-检查不计为通过，也不作为本机待补发布门禁，完整选择见 [testing.md](testing.md)。
 
 仓库锁定的 Playwright 1.58.2 尚未提供 Ubuntu 26.04 平台包，本机使用它的
 Ubuntu 24.04 Chromium 构建，并已安装官方浏览器依赖。运行浏览器测试前指定
@@ -238,19 +207,14 @@ export no_proxy="$NO_PROXY"
 export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64
 ```
 
-Codex 实机测试按 AGENTS 的 marker 选择。其中 research 测试需要
-目录式凭据，验证时将临时登录目录链接到既有选定 credential 的 `auth.json`，
-并通过 `OCTOPUS_CODEX_HOME_DIR` 指定目录根；临时 DB 同时登记对应凭据元数据，
-认证仍保留在原目录，不复制密钥或重新登录。当前不运行 Claude
-或跨后端的真实模型测试；只有用户明确要求并具备环境后才扩展验证范围。
-
-默认 Codex 实机检查统一使用 `low` 推理档位，不改宿主配置。检查协议事件、工具
-实际返回和持久化结果；Wiki 的回复措辞、整理质量不作为实机通过条件，也不要求
-模型必然产生推理记录。后者的接收、身份和时序边界由可重放日志的离线测试覆盖。
-CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式服务档位完成隔离验证，
-不切换到宿主的另一份登录，也不修改已有 agent 设置。
-后台任务继承服务环境，不能假定它继承当前模型回合的 `CODEX_HOME`；应把本对话
-已核实的凭据路径显式传入后台验证，并核对最终登录链接目标，不读取或复制认证内容。
+research 实机测试需要目录式凭据：临时登录目录链接既有选定 credential 的
+`auth.json`，用 `OCTOPUS_CODEX_HOME_DIR` 指定目录根，并在临时 DB 登记对应
+凭据元数据。后台任务可能继承服务的另一份登录，必须显式传入本对话已核实的
+`CODEX_HOME` 并核对最终链接目标，不读取或复制认证内容。失败时核对实际目录、
+原模型结果和网络审计，不能仅凭退出码或只读接口成功认定通过或要求重新登录。
+CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式服务档位隔离验证，
+不切换宿主登录或修改 agent 默认；默认实机 effort 与断言规则见
+[验证政策](testing.md#markers-providers-and-isolation)。
 
 实机期间不向 `auth.openai.com` 请求认证或刷新，也不申请设备码、新登录。
 只链接已有 auth 文件不足以证明这一点：运行时须阻断认证域的上游访问，并核对
@@ -278,47 +242,8 @@ CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式�
 )
 ```
 
-维护请求的同义措辞、询问、否定、指定范围及文档内指令辨识归入按需的
-`knowledge_eval` 层，固定使用 low effort。这些用例检查模型是否理解请求，
-保留原有工具调用、入队范围和文件未被提交者改写的断言。常规实机验收保留一条
-完整的维护提交 → Weber 执行 → 持久化结算链路，以及 Wiki 读取、原生助手、
-resume 指令更新和大任务导出协议；授权、写入范围、事务及恢复仍由默认离线测试覆盖。
-评估维护意图时单独运行
-`.venv/bin/pytest tests/test_wiki_intent_real.py --run-real --run-knowledge-evals -m knowledge_eval`。
-
-Wiki 自然问答使用独立的 `knowledge_eval` 标记，默认排除，不作发布必过项，
-也不记为通过。只为具体质量问题显式运行，不能为补一条文档记录重跑。
-下列命令会调用真实 Codex，使用隔离合成样本，不读取本人的笔记；输出使用
-新目录，避免覆盖先前证据：
-
-```bash
-cd ~/Octopus
-octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
-.venv/bin/pytest tests/test_wiki_query_real.py --run-real --run-knowledge-evals \
-  --knowledge-eval-output="$octopus_knowledge_evidence" -q
-```
-
-保留源版本、实际读取、完整回答、终态及原始用量；Pytest 通过只说明执行
-留证成功，`not_reviewed` 仍需语义评阅。资料变化后按当前版本判断，不能
-用固定个人事实作 gold；累计 token 不相加，未知总量/费用不补造。
-
-普通聊天入口评测使用真实 WebSocket `send_message` 和正常共享提示装配，不以
-委托代替普通入口。预登记自然问题和源版本，评阅材料不随问题提交，不追加
-逐题评阅提示，也不强制 Wiki 模式。准备 registration JSON，
-包含 `source_root`、`source_manifest_sha256`、当前所选的 `credential_id` 和
-一至四项 `questions`（每项为 `id`、`question`）。源清单摘要按
-`tests.wiki_query_evidence.source_manifest` 的结果做 Unicode JSON 编码，
-`sort_keys=True, separators=(",", ":")`，再计算 UTF-8 SHA-256。
-
-```bash
-.venv/bin/pytest tests/test_wiki_chat_real.py --run-real --run-knowledge-evals \
-  --wiki-chat-registration=/path/to/registration.json \
-  --knowledge-eval-output=/path/to/fresh-chat-evidence -q
-```
-
-测试会话固定 `gpt-6.1-sol/high`、正常速度和既有 credential 绑定，不改用户
-代理默认，不回退其他登录，也不先发额外付费探针。报告保留隔离数据库、
-认证宿主、文件访问及源绑定的实际限制；新 cwd/空 memory 不证明盲测。
+可选 Wiki 测量、维护意图和自然问答命令见
+[Wiki evaluation method](testing.md#wiki-evaluation-method)，仍使用上述隔离与网络约束。
 
 ## Wiki 文件事件与索引进程
 
@@ -357,7 +282,7 @@ schema 及持久协议的已验证代码，或在保留现有状态的基础上�
 制作旧版兼容构建，不维护第二份知识库。不能仅放宽版本检查或恢复旧数据库
 覆盖当前写入。停机期间的
 补偿扫描只能观察最终文件，不能恢复未被观察的瞬时身份历史。实现细节与
-证据边界见[开发总结 §4](implemented/wiki-development-summary.md#4-当前运行合同)。
+证据边界见[Wiki 运行合同](implemented/wiki-development-summary.md#当前运行合同)。
 
 ## 服务管理
 
@@ -528,41 +453,27 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
 电脑、WSL 和服务须持续运行；systemd 不能阻止 Windows 睡眠或 WSL 退出，
 保持 WSL 的方法见[用户指南](user-guide.md#电脑需要保持什么状态)。
 
-2026-10-30 已核验公网首页和 `/ready` 返回 200、未登录会话 API 返回 401；
-390×844 手机尺寸浏览器正常显示账户登录页，无横向溢出和页面异常，WSS 能
-完成握手并以 4001 拒绝无效凭据。核验未登录用户账户或调用模型。隧道 unit
-为 `static`、`Restart=no`，原 Octopus 服务进程保持运行。
-
 ### 自动发布
 
-本节只适用于已授权、完成必要本机检查并推送 main 的代码改变，按用户已授权
-流程直接发布；用户本次另有指令时优先遵循。只提交本任务已验证的代码及必要
-相关文档，排除并行工作，不能把整个脏工作树一起收进提交。
+本节适用于已授权、完成本机门禁并推送 main 的代码交付；“发布”或“上线”即
+授权执行，用户本次指令优先。提交范围及纯文档动作见
+[根仓库规则](../AGENTS.md#repository-and-upstream-maintenance)。
+在验证阶段完成[发布门禁](testing.md#release-and-documentation-checks)，复用有效
+测试和审查，只补缺失或失效项，通过后直接进入以下流程。版本、PID、路径、配置
+和摘要按本轮实际值捕获，由现有守卫核对；仅绑定变化不触发复审或全套重测，
+排空机制、所有权或协议变化则须在验证阶段完成定向检查和必要审查。
 
-纯文档任务的仓库动作统一遵循[根仓库规则](../AGENTS.md#repository-and-upstream-maintenance)。
-本节发布流程仅适用于其中已获授权的代码交付。
-
-用户说“发布”或“上线”即授权执行本节流程。将必要发布检查纳入验证阶段一次完成，
-复用同版本、同环境的有效测试和审查结果；只补缺失或因后续变更失效的检查，
-通过后立即进入下面的构建、排空、切换与验收，不再另起一轮产品或发布审查。
-版本、PID、路径、配置和摘要仍按本轮实际值捕获并由现有守卫核对；仅更新这些
-绑定不触发人工复审或整套测试。排空机制、所有权或协议接口实际变化时，在验证
-阶段完成对应的定向检查和必要审查。
-
-准备连续执行：启动独立发布进程后，从本地 packet 回执取得本轮管理员操作，
-立即执行已有的校验入口，随后结束当前模型回合，让发布进程自行完成排空和验收。
-不通过后台通知唤起模型来接续准备。正常仅简短回报开始和最终结果；只有缺项、
-失败或真实阻塞才中断说明，不再次询问已授权的发布动作。
+准备连续执行：启动独立发布进程，从本地 packet 回执取得并立即执行本轮管理员
+校验操作，随后结束模型回合，让发布进程自行排空、验收；不靠后台通知接续准备。
+正常只回报开始与结果，缺项、失败或阻塞才中断说明，不重复请求已有授权。
 
 1. 为已验证提交创建 `releases/main-<commit>` 的独立工作树，连接本机配置和
    共享依赖，先在候选快照执行 `cd web && bun run build`，再运行
    `/path/to/verify/bin/python scripts/validate-release.py <候选快照> --python /home/jack/Octopus/.venv/bin/python`
-   核验入口引用的 JS / CSS 与实际共享 ExecStart 解释器的运行依赖闭包。不能猜用
-   候选目录里的 `.venv`；以当轮 unit 的实际解释器为准。prepare 由验证环境运行，
-   将该验证解释器写入准备回执；publisher 在切换前、上线后及前向恢复共用同一
-   验证入口，以 `--python` 指定服务目标。准备保存实际 Python 回执及摘要，发布
-   比较资产与必要 Python 事实，无关包诊断不参与门禁。漂移时保留当前服务，不在
-   准备阶段给共享环境安装依赖。
+   核验 JS/CSS 引用及实际 ExecStart 解释器的依赖闭包；`--python` 以当轮 unit
+   为准，不能猜用候选 `.venv`。prepare 由验证环境运行并记录验证解释器、Python
+   回执与摘要；切换前、上线后及前向恢复复用该入口。比较资产与必要依赖事实，
+   无关包诊断不参与门禁；漂移时保留服务，不在准备阶段向共享环境安装依赖。
 2. 用不依赖当前模型回合继续存活的独立发布进程等待自然排空，包括主控会话、
    队列、CLI 和待交付的后台/委托回报。已有发布进程运行时只观察，不叠加切换
    或重启。切换前再确认目标和准入条件仍有效。
@@ -570,29 +481,23 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
    退出，并确认 unit 没有剩余进程或启动任务。保持启动屏蔽，在此边界执行本次
    存量检查、必要的有限转换和当前格式完整核验；通过后才安装/解除屏蔽并幂等
    启动候选。任一库未准备、提交结果未知或跨库部分完成时保持业务关闭，按同一
-   发布计划和实际提交事实前向继续。候选启动只匹配主库7/Wiki17的当前标记，
-   不补做旧格式转换；不变格式的发布也执行完整只读核验。首次受管安装还须完成
-   上面的 unit/profile 过渡。具体合同见[当前存储格式](implemented/current-storage-format.md)。
-   确认实际 MainPID、工作目录、cgroup 和配置绑定属于目标，`/health` 为 ok、
-   `/ready` 为 ready。候选中已构建并验证的前端产物随同一次切换生效。
+   发布计划和实际提交事实前向继续。候选只接受[当前完整格式](implemented/current-storage-format.md)，
+   不在启动时转换；不变格式也须只读完整核验。首次受管安装完成上文 unit/profile
+   过渡，前端产物随候选一次切换。
 4. 验证存活与就绪接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
-   本次提交；在服务快照运行
+   本次提交及 MainPID、工作目录、cgroup、配置绑定，`/health` 为 ok、`/ready`
+   为 ready。在服务快照运行
    `/path/to/verify/bin/python scripts/validate-release.py <服务快照> --python /home/jack/Octopus/.venv/bin/python --base-url http://127.0.0.1:8000`
-   比对实际 HTML / JS / CSS 的 SHA-256。发布进程还须使用本次捕获的受管
-   Settings/provider 环境清理账户模式下未使用的旧目录空壳，并运行
-   `scripts/check-storage-layout.py` 确认不再出现；独立维护时用 `--prune`
-   显式清理。只删除指向本安装且没有数据、链接或已保存工作目录引用的空壳，
-   保留账户目录、旧附件和凭据；清理不使用递归强删，也不能继承模型测试环境。
-   全局 `~/.octopus/attachments` 和 `~/.octopus/large-prompts` 仅剩本安装归属
-   标记且无工作目录引用时也在此步骤退出；先完成旧 writer 退休和账户文件新写入
-   接管，再清理目录，不能只删 marker。沿用捕获的安装配置清理并检查后，账户
-   上传、长输入、安装配置核验及再次启动均不得重新制造这两个全局目录。
-   验收失败时，只有旧构建仍兼容实际
-   schema 和持久协议才可恢复旧指向并重启验证。更高 schema 迁移已提交时，
-   不自动切回不兼容的旧构建，保留当前状态并采用兼容代码恢复或前向修复；
-   不恢复旧 DB，不清理尚需诊断的代码快照。另以只读检查核对现有数据库、
-   Wiki schema 与持久协议兼容性，保留历史及会话设置。通知创建成功只表示
-   已接纳通知任务；部署验收和通知实际交付分别记录，不等待发布进程自身通知。
+   比对实际 HTML/JS/CSS 的 SHA-256。用本轮捕获的受管 Settings/provider 环境
+   清理旧目录空壳，运行 `scripts/check-storage-layout.py` 确认；独立维护用
+   `--prune`。只删除属于本安装、没有数据/链接/已保存工作目录引用的空壳，不递归
+   强删或继承模型测试环境。全局 attachments/large-prompts 须在旧 writer 退休、
+   账户新写入接管后，确认仅剩归属标记且无引用才清退整个空壳，不能只删 marker；
+   后续上传、长输入、配置核验和重启不得重建它们。保留账户目录、旧附件及凭据。
+   只读核对实际数据库、Wiki schema 与持久协议；验收失败仅在旧构建仍兼容时恢复
+   旧指向并重启验证，否则保留现状前向修复。不回灌旧 DB、不清理诊断所需快照，
+   保留历史与会话设置。通知接纳、实际交付和部署验收分别记录，不等待发布进程
+   自身通知。
 5. 验收全部通过且旧工作树干净、没有进程继续使用后，用 `git worktree remove`
    退役旧源码，不强制删除脏工作树。交接及发布验收、恢复责任全部完成后，
    同时退出本次有限转换和仅服务本次转换的测试材料；未完成时保留原计划及所需

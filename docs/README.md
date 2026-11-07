@@ -126,6 +126,7 @@
 
 ## 活动审阅材料
 
+- 基于 `0a56386` 的架构精读与 deep module 入门（正文缺失，待补 `review/architecture/Octopus_Architecture_Deep_Dive.html`）：从调用者知识、内部责任和故障测试深入讲解 SessionOwner、HarnessRun、返回接管与 Wiki 快照；包含前后图解、练习和两项待探索的深化候选。这项临时学习材料不代表候选已实施或生产已部署。
 - [基于 `fd7ab9c` 的架构精读](review/architecture/architecture-review-20261102-191500.html)：用七个现行实例解释返回接纳、原请求完成、协议适配、配置捕获、资源退休、前端观察和 Wiki 快照；五项旧候选已有实现，一处 BG 详情观察问题有内存探针复现。提议另行标注；这是临时学习与审阅材料。
 
 ## 版本参考与历史证据
@@ -135,10 +136,11 @@
 - [2026-11-03 MCP 与资源边界](reference/runtime-resource-boundaries-20261103.md)：固定 Codex 的原生配置继承/工具发现、controller 扫描与 native 准备、真实 Wiki Store 成本和 256 KiB 支持政策的证据与限制。
 - [2026-09-25 工程整理](post-mortems/2026-09-25-polish-pass.md)：历史缺陷、测量与因果记录，数值和部署范围属于当时版本。
 - [后台结果管线](post-mortems/2026-05-18-bg-pipeline-hardening.md)：四类历史故障；当时 `server/backends/` 现为 `server/harness/`。
-- [SessionOwner 范围遗漏](post-mortems/session-owner-scope-creep.md)：遗漏消费者、未收敛接口与错过目标故障的验证；补记原调用清理、页面草稿与完成分类。
+- [SessionOwner 范围遗漏](post-mortems/session-owner-scope-creep.md)：责任切分、消费者交接与目标故障验证；覆盖原调用清理、页面草稿和完成分类。
+- [前端反复修改](post-mortems/frontend-async-state-boundaries.md)：防旧误伤有效结果、等待与确认边界、归档／删除与连接身份，以及页面意图和可见位置的回归经验。
 - [会话／委派的三个完成点](post-mortems/session-delegation-completion-boundaries.md)：子任务结束、返回接纳与父执行处理分别取证等待；保留多子返回、工作轮复用、收束竞争与 ACK 未知的反例。
 - [账户 setup 退役](post-mortems/account-setup-retirement.md)：身份夹具、冷恢复假设及验证范围。
-- [OAuth 连续修复](post-mortems/oauth-repeated-boundary-bugs.md)：登录、刷新、绑定、取消与 UI 的责任断点；补记原登录发布、只读 status 与退休责任。
+- [OAuth 连续修复](post-mortems/oauth-repeated-boundary-bugs.md)：登录、刷新、绑定、取消与 UI 的责任断点，以及原登录发布、只读 status 和退休条件。
 - [/research 连续修改](post-mortems/research-completion-boundaries.md)：叶子证据、报告与处理、取消与退休、首次创建及原身份恢复；补充原生完成分类与报告处理的组合反例。
 - [/wiki 证据与范围](post-mortems/wiki-evidence-scope-recovery.md)：意图与权限、原文与终稿证据、来源复核、阅读覆盖及成本验证；明确冷读义务与未测量风险。
 - [Wiki 任务效果、派发与观察](post-mortems/wiki-effects-dispatch-and-observation.md)：原执行结算、派发交接与旧聊天当前观察；原生输入取消收窄仍不能替代效果 receipt。

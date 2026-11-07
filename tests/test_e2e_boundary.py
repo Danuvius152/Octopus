@@ -26,7 +26,6 @@ async def test_original_harness_path_would_dispatch_before_attachment_interrupt(
     monkeypatch.setattr(module.asyncio, "create_subprocess_exec", refuse)
     run = get_harness(backend).create_run(RunConfig(mcp_servers=[]))
     if backend == "codex":
-        monkeypatch.setattr("server.harness.codex_app_server.verify_binary", lambda path: None)
         native_submission(run, "dispatch-probe", "dispatch-attempt")
     try:
         with pytest.raises(RuntimeError, match="safe dispatch spy"):
