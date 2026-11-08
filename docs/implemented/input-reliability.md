@@ -10,6 +10,7 @@
 | 问题回答、到期或无人值守等待 | [问题结算](#问题结算)、[交互策略](#原工作交互策略与等待) | MCP 清理归[Harness](harness-layer.md#mcp-question-retirement)，原生写帧归[Codex](codex-backend.md#native-question-control) |
 | BG/Research/委派返回 | [公共返回接管](#公共返回接管) | 改来源材料、重试或恢复才读对应领域合同 |
 | compact | [原生维护输入](#native-compaction-requests) | 协议及效果证据归[Codex](codex-backend.md#native-compaction)或[Claude](harness-layer.md#claude-native-compaction) |
+| 聊天或应用修改框刷新恢复 | [浏览器文本草稿](#browser-text-drafts) | App 回执及弹层寿命归[列表与视图合同](frontend-list-reconciliation.md#应用修改草稿与视图寿命)，聊天归[共享聊天稿](frontend-list-reconciliation.md#共享聊天文字与操作寿命) |
 
 The database owns the complete accepted input and its execution status.
 SessionOwner decides when it can run. Acceptance commits the text,
@@ -75,6 +76,67 @@ terminal remain review-only. Historical refusal receipts stay read-only.
 Managed startup retirement and current-generation retirement keep their
 existing authority; hiding a saved input proves neither execution exit nor
 permission to dispatch.
+
+<a id="browser-application-text-drafts"></a>
+
+## Browser text drafts
+
+`textDrafts` saves application-change and ordinary chat text in the current tab's `sessionStorage`.
+Its versioned namespace keys contain the confirmed stable `identity.user_id`,
+draft kind and object identity: `application` with App ID, or `chat` with `shared`.
+Chat keeps one shared text across session switches and view remounts, rather than
+one draft per conversation. Values contain only text. Runtime draft
+versions and record identities prevent an old acknowledgment from clearing a
+new edit, but are not persisted or interpreted as server receipts.
+`accountGeneration` retires runtime ownership and is never the cross-refresh
+account key.
+
+Restore waits for confirmed account identity. A null identity during startup
+does not mean logout. If the user edits before identity arrives, the new version
+wins over stored text and is saved once identity is known. Edits and clearing
+write synchronously rather than waiting for an effect or unload callback.
+Token/account changes clear the previous draft namespace, including entries for
+Apps not opened in this page lifetime; identity confirmation removes entries
+belonging to other accounts. Confirmed App deletion also clears an unopened
+App's saved text, including when identity has not arrived yet.
+Confirmed deletion of the current session clears the shared chat text and
+advances its version even while ChatView is unmounted. Archiving or deleting
+another session does not clear it.
+
+At App submission, the captured version immediately leaves unsent-text recovery.
+Its in-memory text remains available while the result is pending or unknown;
+later edits are saved as a new unsent version. A matching success clears only
+its own version. Refresh never restores busy/error or an old operation's rights,
+and never sends or replays work. This browser text copy is separate from saved
+accepted inputs, unknown submission observation and explicit input recovery;
+it cannot establish whether a build was accepted or completed. App submission
+and view ownership follow the [App draft contract](frontend-list-reconciliation.md#应用修改草稿与视图寿命).
+
+Ordinary message sending clears the composer and its saved text synchronously.
+Its rejected/unknown receipt and attachment recovery remain separate business
+paths. `/compact` immediately consumes the submitted version for refresh recovery,
+while retaining its in-memory command during observation or unknown admission.
+Acceptance clears only the matching original version; later edits, even identical
+characters, remain unsent text. When its composer retires, a still-consumed command
+is cleared so remount cannot present it without the original confirmation context.
+New edits survive that cleanup. Refresh restores neither confirmation IDs nor
+operation rights, and never submits automatically. Message and compact remain
+distinct in receipt observation and explicit recovery.
+
+Fork prefill waits for identity restoration. It fills only an empty draft whose
+version has not changed since selecting that conversation. Stored text, typing
+and deliberate clearing during identity/metadata waits take precedence. Historical
+editing in another conversation does not disable a newly selected fork's prefill.
+The one current prefill target survives view remounts, without persisting a task
+or building a per-session draft map. Details follow the
+[chat view contract](frontend-list-reconciliation.md#共享聊天文字与操作寿命).
+
+Denied reads, quota failures or failed writes/removals leave editing and sending
+available and show a visible save warning. When storage refuses access, recovery
+and cleanup cannot be guaranteed; the in-memory text remains usable. This is a
+current-tab text convenience, without attachment, closed-tab or cross-device
+recovery guarantees. No server draft table or storage root is added, and
+browser drafts are outside [account archives](../backup-and-migrate.md#account-export-and-import).
 
 ## 原请求完成与失败交接
 
@@ -212,6 +274,11 @@ seq。Owner 只在完整根 `final_answer` item 已提交后纳入引用；comme
 | 委派完成返回 | 新原生答案使用共同正文格式；旧 terminal attempt 正文仍连续拼接后 strip。成功空正文用既有占位；坏引用走 reply_unavailable，失败走 agent-error。 |
 | App 历史状态与刷新 | 新原生答案使用共同正文格式，历史消息只投影被选中的原生正文行；旧正文仍双换行拼接、不整体 strip。失败可带已保存正文；无 terminal 区分 running/queued/unknown。 |
 | App 实时 ask/SSE | `LiveReply` 依原 request/attempt 接收，新 attempt/retry 清旧正文；原生进展使用 progress，根 final item 使用 message。terminal 固定共同选择，成功另需原通知前缀送达。 |
+
+委派初始与显式 follow-up 的实际送模协议沿上述条件说明正文选择，不承诺全部
+commentary 都会回传，也不改变本节的关联与校验规则。原工作可能经必要后代
+返回触发多次执行，不能把首次输出结束当成整轮完成。自足回复、结果收集及
+会话与轮次的区别归[委派合同](agent-collaboration.md#1-invocation-and-identity)。
 
 实时消费保留事件流，不强制改为事后 DB 查询；重建 receipt 不虚构 delivered。
 新原生正文的共同格式为忽略空片段、按双换行连接后整体 strip；完整记录仍保留

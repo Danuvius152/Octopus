@@ -349,13 +349,17 @@ async def test_custom_http_mcp_uses_each_owned_installations_definition_concurre
 
     destinations = []
 
-    def upstream(method, url, *, headers, **kwargs):
-        destinations.append((url, headers["Authorization"]))
-        return httpx.Response(200, json={"ok": True})
+    send = httpx.AsyncHTTPTransport.handle_async_request
+
+    async def upstream(transport, request):
+        if request.url.host in {"a.example.invalid", "b.example.invalid"}:
+            destinations.append((str(request.url), request.headers["Authorization"]))
+            return httpx.Response(200, json={"ok": True}, request=request)
+        return await send(transport, request)
 
     monkeypatch.delenv("OCTOPUS_CONNECTOR_API_BASE", raising=False)
     monkeypatch.setenv("OCTOPUS_INSTALLATION_ID", "wrong-process-installation")
-    monkeypatch.setattr(httpx, "request", upstream)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", upstream)
     api = await start_callback_api(
         connectors_mod.router, readiness_token=mint("readiness", user_id=owner),
     )

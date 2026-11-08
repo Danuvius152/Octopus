@@ -42,6 +42,7 @@ export class ApplicationList {
   private closed = false;
   private metadataReads = new Set<ReturnType<typeof observeSession>>();
   private unsubscribe: () => void;
+  private deletionListeners = new Set<(id: string) => void>();
 
   constructor() {
     this.unsubscribe = useSessionStore.subscribe((state, before) => {
@@ -98,6 +99,15 @@ export class ApplicationList {
   accountGuard(): () => boolean {
     const scope = this.scope();
     return () => this.sameAccount(scope);
+  }
+
+  onDeleted(listener: (id: string) => void): () => void {
+    this.deletionListeners.add(listener);
+    return () => { this.deletionListeners.delete(listener); };
+  }
+
+  private deleted(id: string): void {
+    for (const listener of this.deletionListeners) listener(id);
   }
 
   connect(source: ListEventSource): void {
@@ -284,6 +294,7 @@ export class ApplicationList {
       const state = useSessionStore.getState();
       const row = event.type === "application_archived" ? event.application : undefined;
       const id = event.application_id ?? row?.id;
+      if (id && type === "application_deleted") this.deleted(id);
       if (row && type === "application_archived") this.row({ ...row, archived: true });
       else if (id) this.commit(state.applications.filter((item) => item.id !== id),
         type === "application_deleted" ? state.archivedApplications.filter((item) => item.id !== id) : state.archivedApplications, id);
@@ -339,11 +350,14 @@ export class ApplicationList {
 
   create(input: api.NewApplication): Promise<Application> { return this.write((token) => api.createApplication(token, input), (row) => this.row(row)); }
   build(id: string, prompt: string): Promise<Application> { return this.write((token) => api.buildApplication(token, id, prompt), (row) => this.row(row)); }
-  remove(id: string, keepFiles: boolean): Promise<void> {
-    return this.write((token) => api.deleteApplication(token, id, keepFiles), () => {
+  async remove(id: string, keepFiles: boolean): Promise<void> {
+    const accountCurrent = this.accountGuard();
+    await this.write((token) => api.deleteApplication(token, id, keepFiles), () => {
       const state = useSessionStore.getState();
       this.commit(state.applications.filter((row) => row.id !== id), state.archivedApplications.filter((row) => row.id !== id), id);
     });
+    // Deletion is a confirmed account fact even when row admission was skipped.
+    if (accountCurrent()) this.deleted(id);
   }
   archive(id: string): Promise<Application> { return this.write((token) => api.archiveApplication(token, id), (row) => this.row(row)); }
   restore(id: string): Promise<Application> { return this.write((token) => api.unarchiveApplication(token, id), (row) => this.row(row)); }

@@ -15,14 +15,20 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .evidence import (
+    ClaimEvidence,
+    EvidenceBounds,
+    ResearchEvidence,
+    SearchEvidence,
+    claim_status,
+)
 from .leaf import LeafResult, run_reason_leaf, run_web_leaf
 from .schemas import (
     Finding,
     dedup_and_rank,
     parse_angles,
-    parse_findings,
-    parse_verdict,
-    positively_verified,
+    parse_search,
+    parse_vote,
     scope_prompt,
     search_prompt,
     synthesize_prompt,
@@ -69,6 +75,7 @@ class ResearchReport:
     # scope/synthesis cost is NOT included. Codex reports no USD at all → often
     # None. Treat as a partial lower bound, not a total (Vera review).
     cost: float | None = None
+    evidence: ResearchEvidence = field(default_factory=ResearchEvidence)
 
 
 class ResearchSynthesisError(Exception):
@@ -124,7 +131,7 @@ async def run_research(
     await _emit("scope", "Decomposing the question into search angles…")
     scope_res = await reason(scope_prompt(question, limits.max_angles))
     cost += scope_res.cost or 0.0
-    angles = parse_angles(scope_res.text, question=question, max_angles=limits.max_angles)
+    angles = parse_angles("" if scope_res.error else scope_res.text, question=question, max_angles=limits.max_angles)
 
     # 2. Search (parallel web leaves, bounded) ---------------------------------
     await _emit("search", f"Searching {len(angles)} angle(s)…", angles=len(angles))
@@ -139,13 +146,17 @@ async def run_research(
         ]
     search_results = [task.result() for task in search_tasks]
     findings: list[Finding] = []
+    bounds = EvidenceBounds()
+    searches = []
     for angle, res in zip(angles, search_results, strict=True):
         cost += res.cost or 0.0
-        if res.error:
-            continue
-        findings.extend(
-            parse_findings(res.text, angle=angle, max_findings=limits.max_findings_per_angle)
-        )
+        parsed = None if res.error else parse_search(res.text, angle=angle, max_findings=limits.max_findings_per_angle)
+        found = parsed[0] if parsed is not None else []
+        bounds.omitted |= parsed is not None and parsed[1]
+        searches.append(SearchEvidence(angle=bounds.text(angle, 256),
+            status="failed" if parsed is None else "findings" if found else "empty",
+            findings=len(found), reason=bounds.text(res.error or ("Invalid search output" if parsed is None else ""), 256)))
+        findings.extend(found)
 
     # 3. Dedup + rank (pure) ---------------------------------------------------
     claims = dedup_and_rank(findings, max_claims=limits.max_claims)
@@ -153,9 +164,7 @@ async def run_research(
     # 4. Verify (K adversarial votes each; strict-majority refute kills) -------
     await _emit("verify", f"Verifying {len(claims)} claim(s)…",
                 claims=len(claims), gathered=len(findings))
-    kill_threshold = limits.votes_per_claim // 2 + 1
-
-    async def _verify(f: Finding) -> tuple[bool, float]:
+    async def _verify(f: Finding) -> tuple[ClaimEvidence, float]:
         async with asyncio.TaskGroup() as vote_group:
             vote_tasks = [
                 vote_group.create_task(_bounded(
@@ -164,23 +173,35 @@ async def run_research(
                 for _ in range(limits.votes_per_claim)
             ]
         votes = [task.result() for task in vote_tasks]
-        valid = [v for v in votes if not v.error and parse_verdict(v.text) is not None]
-        refutes = sum(parse_verdict(v.text) is True for v in valid)
-        supports = sum(positively_verified(v.text) for v in valid)
-        f.verification = ("verified" if supports >= kill_threshold else
-                          "unverified" if valid else "failed")
+        checks = [parse_vote(v.text, v.error, bounds) for v in votes]
+        refutes = sum(v.status == "refute" for v in checks)
+        supports = sum(v.status == "support" for v in checks)
+        failed = sum(v.status == "failed" for v in checks)
+        status = claim_status(supports, refutes, failed, len(votes))
+        if len(checks) > 8:
+            bounds.omitted = True
+        claim = ClaimEvidence(claim=bounds.text(f.claim, 512), url=bounds.url(f.url),
+            angle=bounds.text(f.angle, 256), status=status, support=supports, refute=refutes,
+            unverified=len(votes) - supports - refutes - failed, failed=failed, votes=checks[:8])
         leaf_cost = sum(v.cost or 0.0 for v in votes)
-        return refutes < kill_threshold, leaf_cost
+        return claim, leaf_cost
 
-    survivors: list[Finding] = []
+    checked_claims = []
     if claims:
         async with asyncio.TaskGroup() as claim_group:
             claim_tasks = [claim_group.create_task(_verify(f)) for f in claims]
         verdicts = [task.result() for task in claim_tasks]
-        for f, (survived, c) in zip(claims, verdicts, strict=True):
+        for checked, c in verdicts:
             cost += c
-            if survived:
-                survivors.append(f)
+            checked_claims.append(checked)
+
+    evidence = ResearchEvidence(searches=searches[:5], claims=checked_claims[:12], votes_per_claim=limits.votes_per_claim,
+        scope_note=bounds.text(scope_res.error or "", 256),
+        omitted=bounds.omitted or len(searches) > 5 or len(checked_claims) > 12 or len(findings) > len(claims))
+    survivors = [Finding(claim=c.claim, url=c.url, angle=c.angle, verification=c.status)
+                 for c in evidence.claims if c.status != "refuted"]
+    sources = sorted({f.url for f in survivors if f.url} |
+                     {url for c in evidence.claims for v in c.votes for url in v.sources})
 
     # 5. Synthesize ------------------------------------------------------------
     verified = sum(f.verification == "verified" for f in survivors)
@@ -190,22 +211,21 @@ async def run_research(
     await _emit("synthesize", f"Writing the report from {verified} verified and {unverified} unverified finding(s)…",
                 **counts)
     partial = ResearchReport(
-        question=question, report="", findings=findings,
-        sources=sorted({f.url for f in findings if f.url}), angles=angles,
-        claims_examined=len(claims), cost=cost or None,
+        question=question, report="", findings=survivors,
+        sources=sources, angles=[s.angle for s in evidence.searches],
+        claims_examined=len(claims), cost=cost or None, evidence=evidence,
     )
     # Provider failures are LeafResult.error. Unknown exceptions include
     # unconfirmed subprocess retirement and must retain their failure owner.
-    synth_res = await reason(synthesize_prompt(question, survivors))
+    synth_res = await reason(synthesize_prompt(question, evidence))
     cost += synth_res.cost or 0.0
     partial.cost = cost or None
     if synth_res.error or not synth_res.text.strip():
         raise ResearchSynthesisError(
             f"Report synthesis failed: {synth_res.error or 'the model produced no report'}", partial,
         )
-    report_text = synth_res.text
+    report_text = evidence.markdown() + "\n\n---\n\n" + synth_res.text
 
-    sources = sorted({f.url for f in survivors if f.url})
     await _emit("done", "Research complete.",
                 **counts, sources=len(sources))
     return ResearchReport(
@@ -216,4 +236,5 @@ async def run_research(
         angles=angles,
         claims_examined=len(claims),
         cost=cost or None,
+        evidence=evidence,
     )

@@ -140,8 +140,8 @@ Octopus 网页登录与 Codex 模型登录是两回事。本机已登录 Codex�
 ### 保存 One-line role 和 System prompt
 
 打开智能体的编辑页面，或在选中智能体后通过左下角菜单进入 **Agent settings**。
-把 [agent-prompts.md](agent-prompts.md) 中对应角色的内容（Octo/Vera 为英文，Weber 为中文）分别复制到
-**One-line role** 和 **System prompt**，保存即可；后续轮次会读取更新后的配置。
+分别在 **One-line role** 和 **System prompt** 中填写该角色的职责与持续指令，
+保存即可；后续轮次会读取更新后的配置。
 
 | 字段 | 用途 |
 | --- | --- |
@@ -151,8 +151,7 @@ Octopus 网页登录与 Codex 模型登录是两回事。本机已登录 Codex�
 | Tools / MCP | 决定可调用的工具；prompt 只能指导模型使用已启用的工具 |
 
 角色和 prompt 保存在本机 SQLite 数据库的 `agents.description`、
-`agents.system_prompt` 中。[agent-prompts.md](agent-prompts.md) 是便于复制的
-参考文件，编辑该文件不会自动更新界面的智能体配置。
+`agents.system_prompt` 中。修改文档中的示例不会自动更新已保存的智能体配置。
 
 ## 4. 四个智能体怎样配合
 
@@ -402,7 +401,6 @@ Applications 中调用 `/apps/{id}/agent/chat` 的应用则使用 SSE，因此�
 | 隧道的网络代理环境 | `~/.config/octopus-tunnel/proxy.env`，权限 `0600` |
 | 智能体记忆、应用、附件和账户数据 | `/home/jack/.octopus/` 下的相应目录 |
 | Codex 自身登录和会话数据 | 本机 `~/.codex/` |
-| 智能体 prompt 参考文件 | [agent-prompts.md](agent-prompts.md) |
 | Obsidian 知识库 | 你另行指定的实际 vault 目录 |
 
 创建账户会使用账户对应的数据目录。当前允许访问的工作目录，以 Account

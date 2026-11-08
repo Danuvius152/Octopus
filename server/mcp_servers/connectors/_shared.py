@@ -9,8 +9,14 @@ are capped so a large payload can't trip the CLI premature-exit bug
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
+import time
+from collections.abc import Callable
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -25,6 +31,106 @@ logger = logging.getLogger(__name__)
 # tool_result event; we truncate and tell the model to narrow/paginate.
 MAX_RESULT_BYTES = 32 * 1024
 _HTTP_TIMEOUT = 10.0
+RESOURCE_CALL_BUDGET_SECONDS = 30.0
+
+
+def request_failure(reason: str, *, retry_safe: bool, operation: str, check: str) -> str:
+    """Preserve the original write and its reconciliation target for the caller."""
+    # Bound fields separately so long tool arguments cannot hide the outcome
+    # or the check target. Even JSON escaping control characters stays <32 KiB.
+    return "Error: " + to_text({
+        "outcome": "failed" if retry_safe else "outcome_unknown",
+        "operation": truncate(operation, cap=1024),
+        "reason": truncate(reason, cap=1024),
+        "next_step": truncate(check, cap=1024) + ("" if retry_safe else " Do not repeat the write before checking its result."),
+    })
+
+
+def response_failure(
+    response: httpx.Response, *, retry_safe: bool, operation: str, check: str,
+    rejected_statuses: frozenset[int] = frozenset(),
+) -> str | None:
+    """Only a provider's documented pre-effect rejection can reject a write."""
+    status = response.status_code
+    if 200 <= status < 300:
+        return None
+    reason = f"HTTP {status}: {response.text[:300]}"
+    if 300 <= status < 400:
+        reason = f"HTTP {status}: upstream redirect refused; check the original API target."
+    if status in rejected_statuses:
+        return f"Error: rejected: {reason}"
+    return request_failure(reason, retry_safe=retry_safe, operation=operation, check=check)
+
+
+def retry_after(response: httpx.Response) -> float | None:
+    """HTTP delay-seconds or HTTP-date; an invalid hint supplies no deadline."""
+    value = response.headers.get("Retry-After", "").strip()
+    if value.isascii() and value.isdigit():
+        try:
+            return float(value)
+        except OverflowError:
+            return math.inf
+    try:
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=UTC)
+        return max(0.0, date.timestamp() - time.time())
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def retry_delay(response: httpx.Response, attempt: int) -> float | None:
+    if response.status_code != 429 and response.status_code < 500:
+        return None
+    delay = retry_after(response)
+    return max(float(2**attempt), delay) if delay is not None else float(2**attempt)
+
+
+async def request_with_retry(
+    method: str, url: str, *, retry_safe: bool, operation: str, check: str,
+    delay_for_response: Callable[[httpx.Response, int], float | None] = retry_delay,
+    **kwargs: Any,
+) -> tuple[httpx.Response | None, str | None]:
+    """One resource budget includes response bodies, all attempts and backoff.
+
+    Host token/rejection callbacks retain their separate existing timeout. Use
+    the host loop: closing a per-call asyncio.run would wait for DNS threads.
+    """
+    deadline = time.monotonic() + RESOURCE_CALL_BUDGET_SECONDS
+    reason = f"resource call budget ({RESOURCE_CALL_BUDGET_SECONDS:g}s) exhausted"
+    try:
+        async with asyncio.timeout(RESOURCE_CALL_BUDGET_SECONDS):
+            async with httpx.AsyncClient(follow_redirects=False) as client:
+                for attempt in range(3):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    response = await client.request(method, url, timeout=remaining, **kwargs)
+                    delay = delay_for_response(response, attempt)
+                    if delay is None:
+                        return response, None
+                    limited = response.status_code in {403, 429}
+                    reason = f"{'rate_limited' if limited else 'upstream_unavailable'}: HTTP {response.status_code}; retry delay at least {delay:g}s"
+                    if not retry_safe:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if delay >= remaining:
+                        reason += f"; required wait {delay:g}s exceeds remaining resource call budget ({max(0.0, remaining):g}s)"
+                        break
+                    if attempt == 2:
+                        reason += "; three attempts exhausted"
+                        break
+                    await asyncio.sleep(delay)
+                    if time.monotonic() >= deadline:
+                        reason += "; resource call budget exhausted during wait"
+                        break
+    except TimeoutError:
+        reason = f"resource call budget ({RESOURCE_CALL_BUDGET_SECONDS:g}s) exhausted"
+    except httpx.HTTPError as error:
+        # Preserve the old direct-failure behavior for transport errors. An
+        # unsafe write may already have taken effect before any such error.
+        reason = f"request failed: {error}"
+    return None, request_failure(reason, retry_safe=retry_safe, operation=operation, check=check)
 
 
 class ConnectorContext:

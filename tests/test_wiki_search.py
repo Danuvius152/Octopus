@@ -1,6 +1,7 @@
 """Observable lexical relevance, current evidence and derived-index recovery."""
 
 import json
+import re
 import uuid
 from pathlib import Path
 
@@ -43,6 +44,241 @@ CASES = [
 ]
 
 
+@pytest.fixture(scope="module")
+def technical_store(tmp_path_factory):
+    directory = tmp_path_factory.mktemp("technical-search-corpus")
+    root = directory / "vault"
+    root.mkdir()
+    documents = {
+        "one.md": "# Systems baseline\n\nC provides explicit 内存管理。\n",
+        "two.md": "# Template model\n\nC++ provides generic 内存管理。\n",
+        "three.md": "# Managed runtime\n\nＣ＃ provides managed 内存管理。\n",
+        "four.md": "# Engine integration\n\nAcme-C++-Bridge integrates engines.\n",
+        "five.md": "# Runtime bindings\n\nAcme-C#-Bridge binds runtimes.\n",
+        "six.md": "# Project guide\n\nOpen-Source-Toolkit 使用 OAuth2 认证。\n",
+        "noise.md": "# Unrelated build tool\n\nCMake builds engines.\n",
+    }
+    for path, text in documents.items():
+        (root / path).write_text(text)
+    store = WikiStore(root, directory / "state", str(uuid.uuid4()), create=True)
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("intent", [None, "lookup"])
+@pytest.mark.parametrize("view", ["full", "compact"])
+@pytest.mark.parametrize("query,expected", [
+    ("C", {"one.md"}),
+    ("C++", {"two.md", "four.md"}),
+    ("C#", {"three.md", "five.md"}),
+])
+def test_technical_language_identity_uses_body_terms_without_cross_language_hits(technical_store, intent, view, query, expected):
+    # Neutral paths/titles and no aliases force lookup through lexical terms.
+    result = technical_store.search(query, intent=intent, view=view)
+    assert {item["path"] for item in result["items"]} == expected
+    assert result["match_mode"] == "lexical"
+
+
+@pytest.mark.parametrize("intent", [None, "lookup"])
+@pytest.mark.parametrize("view", ["full", "compact"])
+@pytest.mark.parametrize("query,expected", [
+    ("ｃ", {"one.md"}),
+    ("（Ｃ＋＋），", {"two.md", "four.md"}),
+    ("[c#]。", {"three.md", "five.md"}),
+    ("C++内存管理", {"two.md"}),
+    ("Ｃ＃内存管理", {"three.md"}),
+    ("acme-c++-bridge", {"four.md"}),
+    ("Acme-C#-Bridge", {"five.md"}),
+    ("acme c++ bridge", {"four.md"}),
+    ("open source toolkit", {"six.md"}),
+    ("OAuth2认证", {"six.md"}),
+])
+def test_technical_normalization_mixed_script_and_project_names_keep_only_labeled_hits(technical_store, intent, view, query, expected):
+    result = technical_store.search(query, intent=intent, view=view)
+    assert {item["path"] for item in result["items"]} == expected
+
+
+@pytest.fixture(scope="module")
+def identifier_store(tmp_path_factory):
+    directory = tmp_path_factory.mktemp("identifier-search-corpus")
+    root = directory / "vault"
+    root.mkdir()
+    identifiers = {
+        "r01.md": ".NET", "r02.md": "NET",
+        "r03.md": "Node.js", "r04.md": "Node/js",
+        "r05.md": "std::vector", "r06.md": "std/vector",
+        "r07.md": "user_id", "r08.md": "user-id",
+        "r09.md": "@team/widget", "r10.md": "@other/widget", "r11.md": "widget",
+        "r12.md": "C++17", "r13.md": "C17",
+        "r14.md": "Helios2.7", "r15.md": "Helios27",
+        "r16.md": "Lumen++", "r17.md": "Lumen#", "r18.md": "Lumen",
+        "r19.md": "_cache", "r20.md": "cache",
+        "r21.md": "__init__", "r22.md": "init",
+    }
+    for path, identifier in identifiers.items():
+        (root / path).write_text(f"# Reference {path}\n\nThis implementation uses ({identifier}).\n")
+    store = WikiStore(root, directory / "state", str(uuid.uuid4()), create=True)
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("intent", [None, "lookup"])
+@pytest.mark.parametrize("view", ["full", "compact"])
+@pytest.mark.parametrize("query,expected", [
+    (".NET", {"r01.md"}), ("NET", {"r01.md", "r02.md"}),
+    ("（Ｎｏｄｅ．ｊｓ）", {"r03.md"}), ("Node/js", {"r04.md"}),
+    ("std::vector", {"r05.md"}), ("std/vector", {"r06.md"}),
+    ("user_id", {"r07.md"}), ("user-id", {"r08.md"}),
+    ("@team/widget", {"r09.md"}), ("widget", {"r09.md", "r10.md", "r11.md"}),
+    ("C++17", {"r12.md"}), ("C17", {"r13.md"}),
+    ("Helios2.7", {"r14.md"}), ("Helios27", {"r15.md"}),
+    ("Lumen++", {"r16.md"}), ("Lumen#", {"r17.md"}), ("Lumen", {"r18.md"}),
+    ("_cache", {"r19.md"}), ("cache", {"r19.md", "r20.md"}),
+    ("__init__", {"r21.md"}), ("init", {"r21.md", "r22.md"}),
+    ('"Node.js."', {"r03.md"}), (".NET,", {"r01.md"}),
+])
+def test_identifier_structure_preserves_namespaces_packages_versions_and_unlisted_names(identifier_store, intent, view, query, expected):
+    # Explicit structure preserves identity; ordinary words retain discovery
+    # of names containing those words, including Markdown emphasis.
+    result = identifier_store.search(query, intent=intent, view=view)
+    assert {item["path"] for item in result["items"]} == expected
+    assert result["match_mode"] == "lexical"
+
+
+def test_hyphen_discovery_preserves_each_structured_segment(store):
+    (store.root / "bridge.md").write_text("# Integration\nBridge-Node.js-C++17 connects engines.\n")
+    (store.root / "decoy.md").write_text("# Other integration\nBridge-Node/js-C17 connects engines.\n")
+    for query in ["Node.js", "C++17", "Bridge Node.js C++17"]:
+        assert [item["path"] for item in store.search(query)["items"]] == ["bridge.md"]
+    for query in ["C", "17"]:
+        assert "bridge.md" not in {item["path"] for item in store.search(query)["items"]}
+    assert {item["path"] for item in store.search("Node")["items"]} == {"bridge.md", "decoy.md"}
+
+
+@pytest.mark.parametrize("intent", [None, "lookup"])
+def test_path_discovery_keeps_directories_filenames_stems_and_filename_words(store, intent):
+    folder = store.root / "Library" / "pkg"
+    folder.mkdir(parents=True)
+    for filename in ["Node.js.md", "Other_tool.md"]:
+        (folder / filename).write_text("# General reference\nSubstantive implementation notes.\n")
+    for query, expected in [
+        ("pkg", {"Library/pkg/Node.js.md", "Library/pkg/Other_tool.md"}),
+        ("Node.js", {"Library/pkg/Node.js.md"}),
+        ("Node.js.md", {"Library/pkg/Node.js.md"}),
+        ("Node", {"Library/pkg/Node.js.md"}),
+        ("Other_tool", {"Library/pkg/Other_tool.md"}),
+        ("Other", {"Library/pkg/Other_tool.md"}),
+        ("Library/pkg", {"Library/pkg/Node.js.md", "Library/pkg/Other_tool.md"}),
+        ("pkg/Node.js", {"Library/pkg/Node.js.md"}),
+    ]:
+        assert {item["path"] for item in store.search(query, intent=intent)["items"]} == expected
+
+
+@pytest.mark.parametrize("intent", [None, "lookup"])
+def test_ordinary_words_still_discover_markdown_emphasis_and_structured_names(store, intent):
+    (store.root / "plain.md").write_text("# Reference\nFeedback and retention follow practice.\n")
+    (store.root / "emphasis.md").write_text("# Conditions\nPractice needs _feedback_ and __retention__.\n")
+    (store.root / "identifier.md").write_text("# Implementation\nThe `feedback_store` provides `retention_policy`.\n")
+    for query in ["feedback", "retention"]:
+        paths = {item["path"] for item in store.search(query, intent=intent, directory=None)["items"]}
+        assert {"plain.md", "emphasis.md", "identifier.md"} <= paths
+    assert [item["path"] for item in store.search("feedback_store", intent=intent)["items"]] == ["identifier.md"]
+
+
+@pytest.mark.parametrize("identifier", ["C++", "Node.js"])
+def test_structured_identifiers_remain_discoverable_across_common_markdown_formatting(store, identifier):
+    for path, text in [
+        ("emphasis.md", f"_{identifier}_"),
+        ("asterisk.md", f"*{identifier}*"),
+        ("code.md", f"`{identifier}`"),
+    ]:
+        (store.root / path).write_text(f"# General reference\nThis implementation uses {text}.\n")
+    for intent in [None, "lookup"]:
+        assert {item["path"] for item in store.search(identifier, intent=intent)["items"]} == {"emphasis.md", "asterisk.md", "code.md"}
+
+
+@pytest.mark.parametrize("intent", [None, "lookup"])
+def test_partial_path_discovery_does_not_borrow_scattered_body_words(store, intent):
+    folder = store.root / "Library" / "pkg"
+    folder.mkdir(parents=True)
+    (folder / "note.md").write_text("# General reference\nSubstantive implementation notes.\n")
+    (store.root / "noise.md").write_text("# Different subject\nLibrary and pkg describe unrelated systems in this note.\n")
+    for query in ["Library/pkg", "pkg/note"]:
+        assert [item["path"] for item in store.search(query, intent=intent)["items"]] == ["Library/pkg/note.md"]
+
+
+@pytest.mark.parametrize("name", ["Arclight", "Arc.Node"])
+def test_named_project_discovery_keeps_body_coverage_ahead_of_generic_title_noise(store, name):
+    (store.root / "project.md").write_text(f"# {name}\n\n{name} performance requires measured feedback.\n")
+    (store.root / "generic.md").write_text("# Performance report\n\nGeneric performance advice.\n")
+    result = store.search(f"{name} performance report")
+    assert result["items"][0]["path"] == "project.md"
+
+
+def test_old_technical_index_upgrades_without_changing_originals_identity_ownership_or_history(tmp_path, monkeypatch):
+    from server.wiki import search_index
+
+    root, state, vault_id = tmp_path / "vault", tmp_path / "state", str(uuid.uuid4())
+    root.mkdir()
+    originals = {
+        "one.md": b"# First reference\r\n\r\nC provides explicit memory control.\r\n",
+        "two.md": b"# Second reference\n\nC++ provides templates.\n",
+        "three.md": b"# Third reference\n\nC# provides a managed runtime.\n",
+    }
+    for path, raw in originals.items():
+        (root / path).write_bytes(raw)
+    # Build actual v10 terms, not just a stale version label on a new index.
+    with monkeypatch.context() as old_rules:
+        old_rules.setattr(search_index, "VERSION", "sections-v10")
+        old_rules.setattr(search_index, "_pieces", re.compile(
+            r"[\u3400-\u9fff]+|(?:(?![\u3400-\u9fff])[^\W_])+(?:[-+](?:(?![\u3400-\u9fff])[^\W_])+)*", re.UNICODE))
+        original = WikiStore(root, state, vault_id, create=True)
+        try:
+            assert {item["path"] for item in original.search("C++")["items"]} == set(originals)
+            documents = {path: original.read(path) for path in originals}
+            owned = documents["two.md"]
+            with original.connect() as db:
+                db.execute("INSERT INTO managed_notes VALUES(?,?,?,?,?)", (
+                    owned["path"], owned["revision"], owned["revision"], "[]", json.dumps({"tags": ["retained-owner"]})))
+            original.refresh()
+            history = WikiHistory(original)
+            history.record("two.md", None, originals["two.md"], "human", "preserve technical audit", "applied")
+            audit = history.history("two.md")["items"]
+            with original.connect() as db:
+                owners = [tuple(row) for row in db.execute("SELECT * FROM managed_notes")]
+                materials = [tuple(row) for row in db.execute("SELECT * FROM raw_materials ORDER BY doc_id")]
+                assert {row[0] for row in db.execute("SELECT version FROM search_documents")} == {"sections-v10"}
+        finally:
+            original.close()
+    upgraded = WikiStore(root, state, vault_id)
+    try:
+        for query, path in [("C", "one.md"), ("C++", "two.md"), ("C#", "three.md")]:
+            assert [item["path"] for item in upgraded.search(query, intent="lookup")["items"]] == [path]
+        with upgraded.connect() as db:
+            assert {row[0] for row in db.execute("SELECT version FROM search_documents")} == {"sections-v11"}
+        for explicit_rebuild in [False, True]:
+            if explicit_rebuild:
+                upgraded.rebuild_search()
+            for path, document in documents.items():
+                current = upgraded.read(path)
+                assert (root / path).read_bytes() == originals[path]
+                assert (current["id"], current["revision"]) == (document["id"], document["revision"])
+                for identity in [path, document["id"], document["title"]]:
+                    hit = upgraded.search(identity, intent="lookup")
+                    assert hit["match_mode"] == "exact" and hit["items"][0]["id"] == document["id"]
+            assert WikiHistory(upgraded).history("two.md")["items"] == audit
+            assert upgraded.search("retained-owner")["items"][0]["id"] == owned["id"]
+            with upgraded.connect() as db:
+                assert [tuple(row) for row in db.execute("SELECT * FROM managed_notes")] == owners
+                assert [tuple(row) for row in db.execute("SELECT * FROM raw_materials ORDER BY doc_id")] == materials
+    finally:
+        upgraded.close()
+
+
 @pytest.mark.parametrize("query", ["vidu实时报告", "Vidu实时报告", "Ｖｉｄｕ实时报告"])
 def test_mixed_script_terms_do_not_require_spaces(store, query):
     path = store.root / "vidu.md"
@@ -70,7 +306,7 @@ def test_partial_question_retains_distinctive_indexed_object(store):
     result = store.search("那篇 Vidu 论文")
     assert result["match_mode"] == "lexical_partial"
     assert result["items"][0]["path"] == "vidu.md"
-    assert {item["path"] for item in result["items"]} == {"vidu.md", "泛泛论文.md"}
+    assert {item["path"] for item in result["items"]} == {"vidu.md"}
 
 
 def test_partial_english_terms_keep_more_relevant_body_candidates(store):
@@ -80,17 +316,17 @@ def test_partial_english_terms_keep_more_relevant_body_candidates(store):
     assert result["match_mode"] == "lexical_partial"
     paths = [item["path"] for item in result["items"]]
     assert paths[0] == "research.md"
-    assert paths.index("research.md") < paths.index("tool.md")
+    assert "tool.md" not in paths  # A title alone cannot support relaxed recall.
     assert "Library/Research/学习方法.md" in paths
 
 
-def test_equal_total_coverage_prefers_body_evidence_before_latin_title_signal(store):
+def test_relaxed_coverage_requires_body_evidence_despite_latin_title_signal(store):
     (store.root / "research.md").write_text("# Spacing study\nFeedback improves retention.\n")
     (store.root / "tool.md").write_text("# Feedback retention tool\nInstallation instructions.\n")
     result = store.search("feedback retention evidence")
     assert result["match_mode"] == "lexical_partial"
     paths = [item["path"] for item in result["items"]]
-    assert paths[0] == "research.md" and paths.index("research.md") < paths.index("tool.md")
+    assert paths[0] == "research.md" and "tool.md" not in paths
     assert "Library/Research/学习方法.md" in paths
 
 

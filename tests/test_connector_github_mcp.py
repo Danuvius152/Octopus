@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 
+import httpx
 import pytest
 
 from server.mcp_servers.connectors import _shared
@@ -102,10 +103,12 @@ def authed(monkeypatch):
 
 
 def _patch_request(monkeypatch, handler):
-    monkeypatch.setattr(gh.httpx, "request", handler)
+    async def send(self, method, url, **kwargs):
+        return handler(method, url, **kwargs)
+    monkeypatch.setattr(httpx.AsyncClient, "request", send)
 
 
-def test_search_issues_projects(monkeypatch, authed):
+async def test_search_issues_projects(monkeypatch, authed):
     def handler(method, url, **kw):
         assert method == "GET" and url.endswith("/search/issues")
         return FakeResp(
@@ -124,58 +127,57 @@ def test_search_issues_projects(monkeypatch, authed):
         )
 
     _patch_request(monkeypatch, handler)
-    out = gh.search_issues(query="is:open", limit=10)
+    out = await gh.search_issues(query="is:open", limit=10)
     assert '"repo": "o/n"' in out
     assert '"number": 5' in out
     assert '"is_pr": false' in out
 
 
-def test_get_file_decodes_base64(monkeypatch, authed):
+async def test_get_file_decodes_base64(monkeypatch, authed):
     content = base64.b64encode(b"hello world").decode()
     _patch_request(
         monkeypatch,
         lambda m, u, **k: FakeResp(json_body={"encoding": "base64", "content": content}),
     )
-    assert gh.get_file(repo="o/n", path="README.md") == "hello world"
+    assert await gh.get_file(repo="o/n", path="README.md") == "hello world"
 
 
-def test_get_file_directory_listing(monkeypatch, authed):
+async def test_get_file_directory_listing(monkeypatch, authed):
     _patch_request(
         monkeypatch,
         lambda m, u, **k: FakeResp(
             json_body=[{"name": "a.py", "type": "file"}, {"name": "sub", "type": "dir"}]
         ),
     )
-    out = gh.get_file(repo="o/n", path="src")
+    out = await gh.get_file(repo="o/n", path="src")
     assert "a.py" in out and "sub" in out
 
 
-def test_get_file_truncates_large(monkeypatch, authed):
+async def test_get_file_truncates_large(monkeypatch, authed):
     content = base64.b64encode(b"A" * (_shared.MAX_RESULT_BYTES + 500)).decode()
     _patch_request(
         monkeypatch,
         lambda m, u, **k: FakeResp(json_body={"encoding": "base64", "content": content}),
     )
-    out = gh.get_file(repo="o/n", path="big.txt")
+    out = await gh.get_file(repo="o/n", path="big.txt")
     assert "truncated" in out
 
 
-def test_401_marks_reconnect(monkeypatch, authed):
+async def test_401_marks_reconnect(monkeypatch, authed):
     _patch_request(monkeypatch, lambda m, u, **k: FakeResp(status=401))
-    out = gh.get_issue(repo="o/n", number=1)
+    out = await gh.get_issue(repo="o/n", number=1)
     assert "reconnect" in out.lower()
     assert authed == ["stamp"]
 
 
-def test_retry_on_429_then_success(monkeypatch, authed):
-    monkeypatch.setattr(gh.time, "sleep", lambda *_: None)
+async def test_retry_on_429_then_success(monkeypatch, authed):
     seq = [FakeResp(status=429, headers={"Retry-After": "0"}), FakeResp(json_body=[])]
     _patch_request(monkeypatch, lambda m, u, **k: seq.pop(0))
-    out = gh.list_repos()
+    out = await gh.list_repos()
     assert out == "[]"  # second attempt succeeded with an empty repo list
 
 
-def test_create_issue_writes(monkeypatch, authed):
+async def test_create_issue_writes(monkeypatch, authed):
     cap = {}
 
     def handler(method, url, **kw):
@@ -183,15 +185,15 @@ def test_create_issue_writes(monkeypatch, authed):
         return FakeResp(json_body={"number": 7, "html_url": "https://github.com/o/n/issues/7"})
 
     _patch_request(monkeypatch, handler)
-    out = gh.create_issue(repo="o/n", title="T", body="B")
+    out = await gh.create_issue(repo="o/n", title="T", body="B")
     assert cap["method"] == "POST"
     assert cap["json"] == {"title": "T", "body": "B"}
     assert '"number": 7' in out
 
 
-def test_token_unavailable_returns_error(monkeypatch):
+async def test_token_unavailable_returns_error(monkeypatch):
     def unavailable():
         raise _shared.ConnectorTokenError("unavailable", kind="temporary", code="transport")
     monkeypatch.setattr(gh.ctx, "token_info", unavailable)
-    out = gh.search_issues(query="x")
+    out = await gh.search_issues(query="x")
     assert "reconnect" in out.lower() or "unavailable" in out.lower()

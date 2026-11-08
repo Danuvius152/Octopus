@@ -5490,6 +5490,8 @@ export interface components {
             index_errors_truncated: boolean;
             /** Match Mode */
             match_mode: string;
+            /** Match Explanation */
+            match_explanation: string;
             /** Query Terms */
             query_terms: string[];
             /** Index Epoch */

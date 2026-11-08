@@ -1,0 +1,80 @@
+{
+  "all_failed": {
+    "version": 1,
+    "searches": [
+      {
+        "angle": "safety",
+        "status": "failed",
+        "findings": 0,
+        "reason": "controlled provider refusal"
+      },
+      {
+        "angle": "cost",
+        "status": "failed",
+        "findings": 0,
+        "reason": "controlled provider refusal"
+      }
+    ],
+    "claims": [],
+    "votes_per_claim": 2,
+    "scope_note": "",
+    "omitted": false,
+    "notices": [
+      "Insufficient evidence: All searches failed.",
+      "Insufficient evidence: no usable claims were found."
+    ]
+  },
+  "refuted": {
+    "version": 1,
+    "searches": [
+      {
+        "angle": "performance",
+        "status": "findings",
+        "findings": 1,
+        "reason": ""
+      }
+    ],
+    "claims": [
+      {
+        "claim": "Always reliable",
+        "url": "https://vendor.test/claim",
+        "angle": "performance",
+        "status": "refuted",
+        "support": 0,
+        "refute": 2,
+        "unverified": 0,
+        "failed": 1,
+        "votes": [
+          {
+            "status": "refute",
+            "note": "Fails under load",
+            "conditions": "above 100 requests",
+            "sources": [
+              "https://counter.test/load"
+            ]
+          },
+          {
+            "status": "refute",
+            "note": "Independent replication",
+            "conditions": "",
+            "sources": []
+          },
+          {
+            "status": "failed",
+            "note": "lost response",
+            "conditions": "",
+            "sources": []
+          }
+        ]
+      }
+    ],
+    "votes_per_claim": 3,
+    "scope_note": "",
+    "omitted": false,
+    "notices": [
+      "Insufficient evidence: no claim has positive majority support.",
+      "Refuted claims are excluded from recommendations; counterevidence is retained below.",
+      "Evidence gaps: some checks did not provide their supporting or contradicting source URLs."
+    ]
+  }
+}

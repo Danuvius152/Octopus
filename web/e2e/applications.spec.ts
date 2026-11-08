@@ -84,6 +84,66 @@ async function getApp(request: APIRequestContext, name: string): Promise<AppRow>
 // ---------------------------------------------------------------------------
 
 test.describe("Applications UI", () => {
+  async function draftApps(page: Page) {
+    const rows = ["a", "b"].map((id, index) => ({
+      id: `draft-${id}`, name: `Draft App ${id.toUpperCase()}`, description: "", icon: "📝",
+      agent_id: "draft-agent", session_id: null, app_dir: `/tmp/draft-${id}`, entrypoint: "index.html",
+      status: "ready", error: null, archived: false, pinned: true, pin_order: index,
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", last_built_at: null,
+    }));
+    await page.route(/\/api\/applications(?:\?.*)?$/, route => route.fulfill({ json: rows }));
+    await page.route("**/apps/draft-*/**", route => route.fulfill({ contentType: "text/html", body: "<p>Local draft fixture</p>" }));
+    return rows;
+  }
+  async function openDraft(page: Page, id: "A" | "B") {
+    await page.locator(".application-item", { hasText: `Draft App ${id}` }).click();
+    await page.locator(".btn-application-iterate").click();
+    return page.locator(".application-request-input");
+  }
+
+  test("App text drafts survive refresh separately and clearing does not revive or submit them", async ({ page }) => {
+    await draftApps(page);
+    let builds = 0;
+    await page.route("**/api/applications/draft-*/build", route => {
+      builds++;
+      return route.fulfill({ status: 503, json: { detail: "Unexpected build" } });
+    });
+    await login(page);
+    await (await openDraft(page, "A")).fill("unsent A after deleted build session");
+    await (await openDraft(page, "B")).fill("unsent B");
+    await page.reload();
+    await expect(await openDraft(page, "A")).toHaveValue("unsent A after deleted build session");
+    await expect(page.locator(".btn-application-open-session")).toHaveCount(0);
+    await expect(await openDraft(page, "B")).toHaveValue("unsent B");
+    await page.locator(".application-request-input").fill("");
+    await page.reload();
+    await expect(await openDraft(page, "B")).toHaveValue("");
+    expect(builds).toBe(0);
+  });
+
+  test("refresh after an unacknowledged App submission does not restore or resubmit the sent version", async ({ page }) => {
+    const rows = await draftApps(page);
+    let builds = 0;
+    let release!: () => void;
+    const receipt = new Promise<void>(resolve => { release = resolve; });
+    await page.route("**/api/applications/draft-a/build", async route => {
+      builds++;
+      await receipt;
+      await route.fulfill({ json: rows[0] }).catch(() => {});
+    });
+    try {
+      await login(page);
+      await (await openDraft(page, "A")).fill("submitted exactly once");
+      await page.locator(".btn-application-request").click();
+      await expect.poll(() => builds).toBe(1);
+      await page.reload();
+      release();
+      await expect(await openDraft(page, "A")).toHaveValue("");
+      await expect(page.locator(".btn-application-request")).toBeDisabled();
+      expect(builds).toBe(1);
+    } finally { release(); }
+  });
+
   test("the sidebar section opens the create pane and validates it", async ({
     page,
   }) => {

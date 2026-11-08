@@ -127,7 +127,10 @@ class GmailConnector(ConnectorBase):
     )
     blurb_intro = (
         "Read and triage the linked Gmail account: search, read messages, "
-        "manage labels, and draft replies. Composing a draft is safe. "
+        "manage labels, and draft replies. Creating a draft does not send it. "
+        "To reply, give create_draft the Gmail message id from search/get; "
+        "it retrieves the thread and RFC headers. Omit to/subject to use the "
+        "original reply recipient and subject, or supply explicit recipients. "
         "Before calling send_draft, ALWAYS show the drafted message and get "
         "an explicit yes via mcp__ask__user in the same turn — never send "
         "without the user's OK."

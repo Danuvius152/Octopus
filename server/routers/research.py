@@ -36,11 +36,6 @@ class ResearchSeenRequest(BaseModel):
     version: int = Field(ge=1)
 
 
-def _public_job(row: dict[str, Any]) -> dict[str, Any]:
-    """The context is a server-owned contract, never public job metadata."""
-    return {key: value for key, value in row.items() if key != "knowledge_context"}
-
-
 async def _own_session(
     session_manager: SessionManager, session_id: str, user_id: str | None
 ) -> None:
@@ -67,7 +62,7 @@ async def start_research(
     if session_manager.get_session(session_id, user_id) is None:
         raise HTTPException(404, "Session not found")
     try:
-        return _public_job(await research_manager.start(session_id, req.question, scope=verify(_)))
+        return await research_manager.public_job(await research_manager.start(session_id, req.question, scope=verify(_)))
     except ResearchError as e:
         raise HTTPException(e.status_code, e.message)
 
@@ -82,7 +77,7 @@ async def list_research(
     await _own_session(session_manager, session_id, user_id)
     if research_manager.db is None:
         return []
-    return [_public_job(row) for row in await research_manager.db.list_research_jobs_for_session(session_id)]
+    return [await research_manager.public_job(row) for row in await research_manager.db.list_research_jobs_for_session(session_id)]
 
 
 @router.get("/{session_id}/research/{research_id}")
@@ -99,7 +94,7 @@ async def get_research(
     row = await research_manager.db.get_research_job(research_id)
     if row is None or row["session_id"] != session_id:
         raise HTTPException(404, "research job not found")
-    return _public_job(row)
+    return await research_manager.public_job(row)
 
 
 @router.post("/{session_id}/research/{research_id}/cancel")
@@ -119,7 +114,7 @@ async def cancel_research(
     if existing is None or existing["session_id"] != session_id:
         raise HTTPException(404, "research job not found")
     try:
-        return _public_job(await research_manager.cancel(research_id))
+        return await research_manager.public_job(await research_manager.cancel(research_id))
     except ResearchError as e:
         raise HTTPException(e.status_code, e.message)
 

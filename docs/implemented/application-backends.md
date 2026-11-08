@@ -273,12 +273,42 @@ is not exposed on the network, and the tunnel exposes Octopus, not the app.
 
 ## 8. Logs, because a dead backend with no output is useless
 
-Every `install.sh` and `start.sh` invocation writes to
-`<slug>.runtime/logs/{install,start}.log`, capped and rotated, with the tail
-kept in memory for the UI. The application view gets a **Backend** panel: state
-(stopped / installing / starting / running / failed), the port, uptime, and the
-last N lines — the same treatment build output already gets, for the same
-reason.
+Every `install.sh` and `start.sh` invocation appends to the same
+`<slug>.runtime/logs/backend.log`, alongside supervisor lifecycle messages.
+There is no automatic rotation, capacity limit or capacity-based deletion.
+The supervisor preserves decoded output text, including whitespace and newline
+boundaries, independently of the display tail. UTF-8 decoding is incremental;
+invalid sequences, including an incomplete sequence at EOF, use replacement
+characters. This is a text diagnostic, not a byte-for-byte archive. A disk-write
+failure does not stop the application, so completeness is not guaranteed when
+the filesystem rejects a write.
+
+The original supervisor consumes the merged stdout/stderr pipe in reads of at
+most 4 KiB, without waiting for a newline. The UTF-8 decoder retains at most
+three incomplete bytes. Display assembly retains less than 4,096 characters
+between reads and at most 8,192 while processing a read. A long line becomes
+4,096-character payload fragments with a `[continued]` marker; an unfinished
+short fragment waits for a newline or EOF. Neither splitting nor display
+eviction truncates the disk text. Lifecycle display messages are bounded by
+the same payload limit.
+
+The existing in-memory deque holds at most 200 fragments, each with at most
+4,096 payload characters plus its fixed source tag and continuation marker.
+The public `log_tail` also has at most 200 entries; after eviction its first
+entry says `[earlier output omitted from display]`. These are character and
+entry bounds, not a disk limit or an exact total-process memory budget. The
+application **Backend** panel shows this tail with state, port and uptime.
+
+Process/group exit, output EOF and supervisor retirement are separate facts.
+After confirming process and group exit, cleanup allows readers five seconds
+to finish EOF, including decoder finalization and a final unterminated fragment.
+On timeout it records that remaining output may be truncated, requests
+cancellation and allows another five seconds for reader exit. A reader still
+running keeps its reference and blocks retirement and slot release. Outer
+operation and lifecycle-lock waits allow these two cleanup windows in addition
+to the existing process/group grace periods, including a concurrent stop joining
+idle reaping that already holds the lifecycle lock. A later stop can join late
+cleanup.
 
 ## 9. Status: two axes, not one
 

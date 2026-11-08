@@ -33,10 +33,13 @@ def test_parse_angles_tolerates_fences_and_falls_back():
 
 
 def test_parse_findings_and_verdict():
-    fs = schemas.parse_findings(
+    parsed = schemas.parse_search(
         '[{"claim":"A","url":"http://a"},{"claim":"B","source":"http://b"}]',
         angle="ang", max_findings=5,
     )
+    assert parsed is not None
+    fs, omitted = parsed
+    assert not omitted
     assert [(f.claim, f.url, f.angle) for f in fs] == [
         ("A", "http://a", "ang"), ("B", "http://b", "ang")
     ]
@@ -148,7 +151,8 @@ async def test_run_research_survives_leaf_errors():
     # No findings (all searches errored), but the job completes with a report.
     assert report.findings == []
     assert report.angles == ["my question"]
-    assert report.report == "final report"
+    assert report.report.endswith("final report")
+    assert "All searches failed" in report.report
 
 
 async def test_parseable_partial_search_is_excluded_from_findings():

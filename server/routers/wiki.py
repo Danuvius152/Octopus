@@ -468,6 +468,7 @@ class SearchResult(BaseModel):
     index_error_count: int
     index_errors_truncated: bool = False
     match_mode: str
+    match_explanation: str
     query_terms: list[str]
     index_epoch: int
     index_checked_at: str | None

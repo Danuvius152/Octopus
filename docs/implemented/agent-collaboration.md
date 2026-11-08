@@ -30,6 +30,22 @@ formatting also resolves file paths with I/O; it is not a shared pure formatter.
 Keep these rules in their existing entry points rather than introducing another
 validator/formatter service that callers must coordinate.
 
+Initial and explicit follow-up inputs carry the same runtime delegation protocol
+from `server/delegations.py`. It asks for core evidence and a self-contained final
+reply when the original work completes, including necessary owned-descendant
+results. A round can span multiple executions; the first model output is not a
+deadline that permits ignoring those returns. Return admission proves handoff,
+not the receiving model's semantic understanding.
+
+The protocol describes the conditional [reply selection](#53-reply-delivery-the-original-request-completion):
+valid final-answer references select only that answer; records without a reference
+retain their associated-fragment policy. It promises neither all commentary nor
+tool output. Tools and background work can contribute, but necessary results must
+arrive and be included before the round completes. Independent late results do
+not resend an old reply; work that cannot be returned within the round must be
+reported as a limitation with a concrete follow-up request. Editing a saved
+persona or a documentation snapshot does not change this runtime protocol text.
+
 ### 5.2 Sub-session lifecycle
 
 A delegation child session keeps the ordinary session retention policy:
@@ -132,8 +148,11 @@ reply retains the existing empty-text placeholder.
 
 Request/carrier/terminal/attempt association and committed body selection belong
 to the shared [session result reader](input-reliability.md#原请求结果读取).
-Delegation alone owns continuous concatenation/strip, its empty-answer text and
-agent-error delivery meaning; it does not maintain another association rule.
+Delegation alone owns legacy continuous concatenation/strip, its empty-answer
+text and agent-error delivery meaning; it does not maintain another association
+rule. A selected empty final retains the empty-text placeholder; an invalid final
+reference follows `reply_unavailable` without borrowing commentary. Non-message
+terminals are not replies.
 
 Permanent integrity refusal records `stopped`. After a lost acknowledgment,
 timeout or unavailable channel, the common operation checks the original receipt

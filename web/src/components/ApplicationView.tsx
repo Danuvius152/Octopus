@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useStore } from "zustand";
 import {
   IconAlertTriangle,
   IconArchive,
@@ -15,6 +16,7 @@ import {
 } from "../api/applications";
 import { selectSession } from "../lib/selectSession";
 import { applications as applicationList } from "../lib/applicationList";
+import { applicationDraft } from "../lib/applicationDrafts";
 import { useSessionStore } from "../stores/sessionStore";
 import { PageHeader } from "./PageHeader";
 import { Button } from "./ui/button";
@@ -44,6 +46,12 @@ export function ApplicationView({
 }: {
   onToggleSidebar: () => void;
 }) {
+  const account = useSessionStore(s => s.accountGeneration);
+  const id = useSessionStore(s => s.activeApplicationId);
+  return <ApplicationPane key={`${account}:${id}`} onToggleSidebar={onToggleSidebar} />;
+}
+
+function ApplicationPane({ onToggleSidebar }: { onToggleSidebar: () => void }) {
   const token = useSessionStore((s) => s.token);
   const applications = useSessionStore((s) => s.applications);
   const read = useSessionStore((s) => s.applicationReads.live);
@@ -67,26 +75,16 @@ export function ApplicationView({
     [sessions, app?.id]
   );
 
-  const [request, setRequest] = useState("");
-  const [operation, setOperation] = useState<{ current: () => boolean } | null>(null);
-  const busy = !!operation?.current();
-  const [error, setError] = useState<string | null>(null);
+  const draft = useMemo(() => applicationDraft(activeApplicationId ?? ""), [activeApplicationId]);
+  const { text: request, saveError } = useStore(draft.text.store);
+  const { busy, error } = useStore(draft.store);
   const [iterateOpen, setIterateOpen] = useState(false);
-  // Bumped to force the iframe to re-navigate (a same-src assignment is a
-  // no-op). Also bumped on every fresh `last_built_at`, so a finished rebuild
-  // swaps in without the user reaching for reload.
+  const dialog = useRef<symbol | null>(null);
+  useEffect(() => () => { dialog.current = null; }, []);
+  const closeIterate = () => { dialog.current = null; setIterateOpen(false); };
+  // Manual reload and a fresh build timestamp both change the iframe URL.
   const [nonce, setNonce] = useState(0);
-  const lastBuiltRef = useRef<string | null>(null);
-
   const lastBuiltAt = app?.last_built_at ?? null;
-
-  useEffect(() => {
-    if (!app) return;
-    if (lastBuiltRef.current !== lastBuiltAt) {
-      lastBuiltRef.current = lastBuiltAt;
-      setNonce((n) => n + 1);
-    }
-  }, [app, lastBuiltAt]);
 
   // The iframe and everything it loads authenticate with this cookie — an
   // iframe can't carry an Authorization header (applications.md §3). This has
@@ -99,8 +97,8 @@ export function ApplicationView({
   }, [token]);
 
   const src = useMemo(
-    () => (app ? applicationUrl(app.id, nonce) : ""),
-    [app, nonce]
+    () => (app ? applicationUrl(app.id, `${lastBuiltAt ?? ""}:${nonce}`) : ""),
+    [app, lastBuiltAt, nonce]
   );
 
   if (!app) {
@@ -119,12 +117,7 @@ export function ApplicationView({
       )
     )
       return;
-    const current = applicationList.currentGuard();
-    try {
-      await applicationList.archive(app.id);
-    } catch (e) {
-      if (current()) setError(e instanceof Error ? e.message : "Failed to archive");
-    }
+    await draft.archive();
   };
 
   const openBuildSession = () => {
@@ -132,22 +125,8 @@ export function ApplicationView({
   };
 
   const askForChanges = async () => {
-    const prompt = request.trim();
-    if (!prompt || busy) return;
-    const current = applicationList.currentGuard();
-    setOperation({ current });
-    setError(null);
-    try {
-      await applicationList.build(app.id, prompt);
-      if (!current()) return;
-      setRequest("");
-      // The status badge in this same header takes over from here.
-      setIterateOpen(false);
-    } catch (e) {
-      if (current()) setError(e instanceof Error ? e.message : "Failed to start the build");
-    } finally {
-      if (current()) setOperation(null);
-    }
+    const originalDialog = dialog.current;
+    if (await draft.build() && originalDialog && dialog.current === originalDialog) closeIterate();
   };
 
   const statusBadge = (
@@ -218,6 +197,7 @@ export function ApplicationView({
               onClick={archive}
               title="Archive this application"
               aria-label="Archive this application"
+              disabled={busy}
             >
               <IconArchive size={16} />
             </button>
@@ -253,7 +233,7 @@ export function ApplicationView({
 
             <Popover
               open={iterateOpen}
-              onClose={() => setIterateOpen(false)}
+              onClose={closeIterate}
               label={`Ask ${agent?.name ?? "the agent"} for a change`}
               panelClassName="w-[320px]"
               trigger={
@@ -261,7 +241,10 @@ export function ApplicationView({
                   variant="outline"
                   size="sm"
                   className="btn-application-iterate"
-                  onClick={() => setIterateOpen((v) => !v)}
+                  onClick={() => {
+                    dialog.current = iterateOpen ? null : Symbol();
+                    setIterateOpen(!iterateOpen);
+                  }}
                   aria-expanded={iterateOpen}
                   title={`Ask ${agent?.name ?? "the agent"} for a change`}
                 >
@@ -273,7 +256,7 @@ export function ApplicationView({
               <textarea
                 className="application-request-input w-full min-h-[72px] max-h-40 resize-none rounded-xl border-[0.7px] border-gray-400 bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none transition-colors focus:border-primary/70 focus:ring-[3px] focus:ring-primary/10"
                 value={request}
-                onChange={(e) => setRequest(e.target.value)}
+                onChange={(e) => draft.text.edit(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
@@ -318,19 +301,14 @@ export function ApplicationView({
         {error || `List not synchronized: ${read.error}`}
         {read.error && <button onClick={() => void applicationList.refresh()} className="ml-2 underline">Refresh applications</button>}
       </div>}
+      {saveError && <div role="alert" className="px-3 py-2 text-xs text-destructive">{saveError}</div>}
 
       <div className="application-frame-wrap flex-1 min-h-0 bg-background relative">
         {app.deletion ? (
           <div className="p-6 space-y-3" role="alert">
             <p>Application deletion is unfinished.</p>
             <p className="text-sm text-muted-foreground">{app.deletion.error || "Stopping work and cleaning up files…"}</p>
-            <Button disabled={busy} onClick={async () => {
-              const current = applicationList.currentGuard();
-              setOperation({ current });
-              try { await applicationList.remove(app.id, app.deletion!.keep_files); }
-              catch (e) { if (current()) setError(e instanceof Error ? e.message : "Deletion is unfinished"); }
-              finally { if (current()) setOperation(null); }
-            }}>Retry deletion</Button>
+            <Button disabled={busy} onClick={() => void draft.remove(app.deletion!.keep_files)}>Retry deletion</Button>
           </div>
         ) : app.status === "ready" ? (
           <iframe

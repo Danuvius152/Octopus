@@ -19,6 +19,8 @@ beforeEach(() => {
   mockChatViewport();
   useSessionStore.setState({
     token: "",
+    accountGeneration: useSessionStore.getState().accountGeneration + 1,
+    identity: null,
     activeSessionId: session.id, sessions: [session], agents: [],
     messages: {}, streamingText: {}, dispatchUnavailable: {}, pendingQuestions: {},
     dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [],

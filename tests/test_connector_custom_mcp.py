@@ -4,6 +4,7 @@ the tool is a plain callable in this FastMCP version."""
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from server.mcp_servers.connectors import custom as cu
@@ -35,7 +36,13 @@ def authed(monkeypatch):
     return recon
 
 
-def test_request_get_projects_url_and_auth(monkeypatch, authed):
+def _patch(monkeypatch, handler):
+    async def send(self, method, url, **kwargs):
+        return handler(method, url, follow_redirects=self.follow_redirects, **kwargs)
+    monkeypatch.setattr(httpx.AsyncClient, "request", send)
+
+
+async def test_request_get_projects_url_and_auth(monkeypatch, authed):
     cap: dict = {}
 
     def handler(method, url, headers=None, params=None, json=None, timeout=None, follow_redirects=None):
@@ -43,8 +50,8 @@ def test_request_get_projects_url_and_auth(monkeypatch, authed):
         assert follow_redirects is False
         return FakeResp(json_body={"ok": True})
 
-    monkeypatch.setattr(cu.httpx, "request", handler)
-    out = cu.request(method="get", path="/issues", query={"q": "open"})
+    _patch(monkeypatch, handler)
+    out = await cu.request(method="get", path="/issues", query={"q": "open"})
     assert cap["method"] == "GET"
     assert cap["url"] == "https://api.x.com/v1/issues"
     assert cap["params"] == {"q": "open"}
@@ -52,35 +59,35 @@ def test_request_get_projects_url_and_auth(monkeypatch, authed):
     assert '"ok": true' in out
 
 
-def test_request_post_sends_body(monkeypatch, authed):
+async def test_request_post_sends_body(monkeypatch, authed):
     cap: dict = {}
 
     def handler(method, url, **k):
         cap["method"], cap["json"] = method, k.get("json")
         return FakeResp(json_body={"id": 1})
 
-    monkeypatch.setattr(cu.httpx, "request", handler)
-    cu.request(method="post", path="issues", body={"title": "hi"})
+    _patch(monkeypatch, handler)
+    await cu.request(method="post", path="issues", body={"title": "hi"})
     assert cap["method"] == "POST" and cap["json"] == {"title": "hi"}
 
 
-def test_request_401_marks_reconnect(monkeypatch, authed):
-    monkeypatch.setattr(cu.httpx, "request", lambda *a, **k: FakeResp(status=401))
-    out = cu.request(method="get", path="/x")
+async def test_request_401_marks_reconnect(monkeypatch, authed):
+    _patch(monkeypatch, lambda *a, **k: FakeResp(status=401))
+    out = await cu.request(method="get", path="/x")
     assert "reconnect" in out.lower()
     assert authed == ["stamp"]
 
 
-def test_request_no_api_base(monkeypatch):
+async def test_request_no_api_base(monkeypatch):
     monkeypatch.setattr(cu.ctx, "token_info", lambda: {"access_token": "tok"})
-    assert "misconfigured" in cu.request(method="get", path="/x").lower()
+    assert "misconfigured" in (await cu.request(method="get", path="/x")).lower()
 
 
-def test_request_no_token(monkeypatch):
+async def test_request_no_token(monkeypatch):
     def unavailable():
         raise cu.ConnectorTokenError("unavailable", kind="temporary", code="transport")
     monkeypatch.setattr(cu.ctx, "token_info", unavailable)
-    out = cu.request(method="get", path="/x").lower()
+    out = (await cu.request(method="get", path="/x")).lower()
     assert "unavailable" in out or "reconnect" in out
 
 
@@ -90,15 +97,15 @@ def test_request_no_token(monkeypatch):
     "/%2e%2e/outside", "/%252e%252e/outside", "/%2foutside",
     "\\\\unrelated.invalid/collect", "/safe/../../outside", "\n//unrelated.invalid",
 ])
-def test_request_rejects_origin_and_prefix_escapes(monkeypatch, authed, path):
+async def test_request_rejects_origin_and_prefix_escapes(monkeypatch, authed, path):
     def unexpected(*args, **kwargs):
         pytest.fail("invalid path must not send the OAuth token")
 
-    monkeypatch.setattr(cu.httpx, "request", unexpected)
-    assert "Error:" in cu.request("GET", path)
+    _patch(monkeypatch, unexpected)
+    assert "Error:" in await cu.request("GET", path)
 
 
-def test_request_does_not_follow_an_upstream_redirect(monkeypatch, authed):
+async def test_request_does_not_follow_an_upstream_redirect(monkeypatch, authed):
     destinations = []
 
     def send(method, url, **kwargs):
@@ -106,6 +113,6 @@ def test_request_does_not_follow_an_upstream_redirect(monkeypatch, authed):
         destinations.append(url)
         return FakeResp(status=302, headers={"Location": "https://unrelated.invalid/collect"})
 
-    monkeypatch.setattr(cu.httpx, "request", send)
-    assert "redirect refused" in cu.request("GET", "/issues")
+    _patch(monkeypatch, send)
+    assert "redirect refused" in await cu.request("GET", "/issues")
     assert destinations == ["https://api.x.com/v1/issues"]

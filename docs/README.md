@@ -41,7 +41,7 @@
 
 - [用户指南](user-guide.md)：启动、Agent 和手机访问。
 - [Connector 设置](connectors-setup.md)：浏览器中的 GitHub、Gmail 和自定义 OAuth。
-- [Agent 提示词](agent-prompts.md)：可复制的角色配置快照；编辑文件不会更新保存配置。
+- [Agent 角色配置](user-guide.md#保存-one-line-role-和-system-prompt)：通过设置页保存职责与持续指令。
 - [本机测试](local-wsl.md#本机测试)：直接选择 PATH/代理、离线目录或 live 凭据与网络条件。
 - [领域词汇](../GLOSSARY.md)、[任务与 skills 约定](agents/issue-tracker.md)、[状态标签](agents/triage-labels.md)和[领域文档规则](agents/domain.md)。
 - [完整合同与计划目录](catalog.md)：生成索引、活动审阅及固定版本证据；新增或移动正文后运行现有目录生成器。

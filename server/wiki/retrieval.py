@@ -135,7 +135,7 @@ def search(store, query, limit, offset, kind, include_assets, directory, intent,
             total, terms, mode = exact_total, [], "exact" if exact_total <= 1 else "ambiguous"
             selection = [(row, None) for row in exact_rows]
         else:
-            hits, total, terms, mode = search_index.select(db, query, kind, include_assets, offset, limit, directory, exclude_roles=intent != "lookup", deduplicate=intent != "lookup", comparison=intent == "compare", diversify=intent == "overview")
+            hits, total, terms, mode = search_index.select(db, query, kind, include_assets, offset, limit, directory, exclude_roles=intent != "lookup", deduplicate=intent != "lookup", comparison=intent == "compare", diversify=intent == "overview", topic=intent in {None, "question", "overview"})
             if view == "compact":
                 rows = lexical_page(db, [(hit["doc_id"], hit["start"], hit["end"]) for hit in hits])
                 selection = list(zip(rows, hits, strict=True))
@@ -155,7 +155,19 @@ def search(store, query, limit, offset, kind, include_assets, directory, intent,
                 items.append(store.navigation(row, db=db) | {"snippet": snippet, "snippet_start": position, "score": -hit["cost"] if hit else 0.0, "section": sections[0], "sections": sections})
         state = store._index_state(db, error_limit=COMPACT_ERROR_LIMIT if view == "compact" else None)
     next_offset = offset + limit if offset + limit < total else None
-    result = {"items": items, "total": total, "next_offset": next_offset, "next_cursor": continuation(next_offset, epoch, fingerprint), "match_mode": mode, "query_terms": terms, "view": view, "intent": intent or "question", **(compact_index(state) if view == "compact" else state)}
+    explanation = {
+        "exact": "Resolved identity or exact lookup title/alias.",
+        "ambiguous": "Multiple exact lookup titles/aliases; disambiguate before reading.",
+        "lexical": "Requires all query term groups in the document; not necessarily a contiguous phrase. Ordered body terms take precedence over scattered terms at equal coverage.",
+        "comparison": "Comparison candidates may cover different terms in separate chapters.",
+        "lexical_partial": (
+            "Complete term coverage returned zero results. Relaxed whole concepts in one body section "
+            "of at most 6000 original characters, including a substantive subsection's heading context. "
+            "Mixed-script objects and structured identifiers stay in the document; at most one other concept "
+            "may be absent locally. Lexical coverage does not establish semantic relevance; read to confirm."
+        ),
+    }[mode]
+    result = {"items": items, "total": total, "next_offset": next_offset, "next_cursor": continuation(next_offset, epoch, fingerprint), "match_mode": mode, "match_explanation": explanation, "query_terms": terms, "view": view, "intent": intent or "question", **(compact_index(state) if view == "compact" else state)}
     if model_response:
         from .model_response import page
 

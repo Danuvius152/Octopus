@@ -14,6 +14,19 @@ The old pre-account business mode, installation adoption, global access-token
 rotation and its recovery route have been retired. Current account transfer is
 the explicit [offline operation](../backup-and-migrate.md#account-export-and-import).
 
+`CurrentUser` and `ScopeUser` receive their account service through the same
+FastAPI `UserMgr` dependency (`Depends(get_user_manager)`). Overriding that one
+dependency controls account-token resolution in both paths without setting the
+global manager. Both retain real token resolution from the header, query or App
+cookie. `CurrentUser` requires an active account bearer and returns the account;
+`ScopeUser` returns its ID and also accepts an authorized signed MCP scope.
+Malformed/revoked tokens and disabled accounts remain refused.
+
+This request-dependency override does not replace `verify_token` /
+`resolve_principal` or runtime-owner authorization: those retain the account
+service bound at startup. A runtime scope still needs its signature, live
+work/run lease and available owner; account-only `CurrentUser` rejects it.
+
 Passwords authenticate; opaque server-side tokens authorize API/WebSocket access.
 Session/PAT tokens are stored by digest with revocation and applicable expiry.
 Changing a password commits the new hash and revocation of other bearers in one

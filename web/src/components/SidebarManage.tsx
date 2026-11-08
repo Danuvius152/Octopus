@@ -41,6 +41,7 @@ export function SidebarManage() {
   const credentials = useSessionStore((s) => s.credentials);
   const setCredentials = useSessionStore((s) => s.setCredentials);
   const installations = useSessionStore((s) => s.connectorInstallations);
+  const installationRead = useSessionStore((s) => s.connectorRead);
   const identity = useSessionStore((s) => s.identity);
 
   const load = useCallback(async () => {
@@ -58,7 +59,8 @@ export function SidebarManage() {
     if (token) load();
   }, [token, accountGeneration, load]);
 
-  const connectorError = installations.some((i) => i.needs_reconnect);
+  const needsReconnect = installations.some((i) => i.needs_reconnect);
+  const connectorError = needsReconnect || !!installationRead.error;
   const credentialError = credentials.some(
     (c) => c.needs_reconnect
   );
@@ -91,10 +93,10 @@ export function SidebarManage() {
           onClick={() => openManage("connectors")}
           summary={
             <>
-              {connectorError ? (
+              {installationRead.error ? "not synchronized" : needsReconnect ? (
                 <span className="text-warn-foreground">needs reconnect</span>
               ) : (
-                installations.length
+                installationRead.loading && !installationRead.loaded && !installations.length ? "loading…" : installations.length
               )}
               <span
                 className={`inline-block size-1.5 rounded-full ${

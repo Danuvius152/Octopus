@@ -1,19 +1,22 @@
 # 前端列表：读取、推送与操作回执契约
 
-> **Status:** implemented — 应用、计划、会话及 Wiki 任务观察各有业务入口，保留排序、身份和重连边界。
+> **Status:** implemented — 应用、计划、会话、Connector 安装及 Wiki 任务观察各有业务入口，保留排序、身份和重连边界。
 
 
 | 任务 | 首读范围 | 扩读条件 |
 | --- | --- | --- |
 | 应用/计划列表与排序 | [共享身份](#共享观察身份)、[读取冲突](#读取与冲突规则)、[排序](#排序保留乐观反馈限制重复提交) | 新增入口再查[调用责任](#当前接口及调用责任) |
 | 会话列表、创建/删除或重连确认 | [会话列表](#会话列表与跨重连写入确认) | 页面草稿变化查[问题草稿](#页面问题草稿与原回执) |
+| Connector 安装、断开与连接完成 | [安装列表](#connector-安装列表) | 服务端安装与授权归属查 [Connector 合同](connectors.md) |
+| 应用 Iterate 草稿及迟到回执 | [应用修改草稿](#应用修改草稿与视图寿命) | 刷新恢复及存储失败查[输入恢复](input-reliability.md#browser-application-text-drafts) |
+| 普通聊天共享文字、发送及恢复 | [共享聊天稿](#共享聊天文字与操作寿命) | 稳定账户与存储规则归[输入恢复](input-reliability.md#browser-text-drafts) |
 | 打开会话、上下文或 Stop | [会话打开](#会话打开与辅助数据)、[执行快照](#执行快照与-stop) | 改辅助卡片再扩读下项 |
 | BG/Research/Wiki 卡片与详情 | [辅助读取](#辅助任务的读取与事件合并)及对应业务小节 | 改历史读取再查[分页](#历史分页与阅读锚点) |
 | 问题提交、回执未知或重挂 | [页面问题草稿](#页面问题草稿与原回执) | 改服务端结算才读[问题规则](input-reliability.md#问题结算) |
 
 ## 决策与范围
 
-应用、计划和会话列表模块分别拥有更新责任，页面通过领域入口提交操作，WebSocket
+应用、计划、会话和 Connector 安装列表模块分别拥有更新责任，页面通过领域入口提交操作，WebSocket
 通过事件入口提交变化。各模块分别拥有列表更新规则，现有 Zustand store
 继续承载供 React 订阅的数据。应用模块同时维护在线与归档列表。
 
@@ -21,7 +24,8 @@
 判定顺序的变化安排后续 GET；不增加服务端 revision。
 “合并”指集中这些更新责任，不表示把应用、计划和 agent 合成一个实体或通用框架。
 
-本文拥有前端同步设计；应用生命周期仍由 [applications.md](applications.md)
+本文拥有前端同步设计；Connector 安装与授权仍由 [connectors.md](connectors.md)
+定义，应用生命周期仍由 [applications.md](applications.md)
 定义，置顶和排序规则仍由 [sidebar-pins.md](sidebar-pins.md) 定义，计划事件
 语义仍由 [schedule-tool.md](schedule-tool.md) 定义。本文不改变服务端写入事务、
 权限、归档保留文件、计划触发和 agent 列表既有逻辑。
@@ -73,6 +77,37 @@ flowchart LR
 展示数据，模块只持有顺序基线与临时读取资格。完整 HTTP 快照、稀疏 WS 事件和
 写回执分别接纳；业务自己的 seq、revision、终态和删除确认条件见各任务章节。
 
+## Connector 安装列表
+
+`web/src/lib/connectorInstallations.ts` 拥有 `refresh()`、`disconnect(id)`、
+`removeCustomDefinition(kind)` 与 `connectionCompleted(originalAccount)`。
+ConnectorsPage 首读、SidebarAgents、OAuth 轮询成功及取消撞成功后的确认均进入
+这一入口；组件不再直接提交安装数组。`connectorInstallations` 是 Zustand 中
+唯一展示数组，`connectorRead` 只保存加载、过期与错误状态。SidebarManage 的计数
+及 AgentFormPage 的启用选项订阅同一事实，不另增刷新者。Catalog 仍由原职责更新。
+
+普通刷新复用一个有效在途 GET；重复刷新不会使它失效。断开成功确认时，在当前
+数组上移除原 ID，custom 定义删除成功则移除当前账户该 kind 的全部安装；这与
+服务端删除定义的事务效果一致。随后退休所有重叠 GET，包括 DELETE 等待期间
+才发起的读取，并立即开始确认 GET。两个并发断开的成功回执分别作用于当前
+数组，不因另一次删除或读取失效而丢弃。明确删除失败不移除卡片，页面显示错误；
+定义删除失败在原弹层中显示。以上操作都不自动重发 DELETE。
+
+连接完成携带开始时的账户/token 身份，退休登录完成前的读取并开启确认 GET。
+已知登录 ID 的 error 或结果未知同样请求核对当前安装，不将这些回执解释为
+确定没有安装效果；OAuth 视图资格与原登录收尾由 [Connector 合同](connectors.md#browser-oauth-operations)
+定义，列表入口只裁定原账户观察是否适用。
+若此 GET 又被断开淘汰，断开后的后继 GET 仍确认完整列表，使其他新安装可以
+进入。已确认连接或删除成功与列表同步成功分别结算；读失败保留当前数组和
+同步错误，页面提供刷新，侧栏显示 not synchronized，不把连接成功改成登录失败。
+
+当前读取对象本身决定观察资格，无服务端 revision、永久删除标记或第二份数组。
+账户/token 变化会永久退休旧观察，切走再返回也不复活；服务代次变化时，有效
+在途读取被退休并补读。迟到读取的成功、错误或清理只能影响它自己，不能清掉
+后继读取。每次读取含响应体解码有 30 秒本地期限；超时结算该次失败、释放入口，
+忽略迟到响应，不自动重试。页面卸载不退休共享列表读取，也不丢弃同账户有效
+删除回执。列表观察取消不代表远端业务被取消；OAuth 视图及原登录收尾另有责任。
+
 ## 当前接口及调用责任
 
 实现位于 `web/src/lib/applicationList.ts` 与 `scheduleList.ts`，列表数据
@@ -120,12 +155,58 @@ WS 集成入口只接收已解析的应用事件、计划失效通知，以及�
 它不是供页面任意灌入快照的公共接口。连接来源身份由 hook 捕获并传入，模块
 核对后才改变列表或触发失败提示、会话补取等副作用。
 
+### 应用修改草稿与视图寿命
+
+`applicationDrafts` 按 App 保留修改文字的归属，以及构建、归档和 Retry deletion
+的 busy/错误。等待期间文字仍可编辑，切换 App 或离开页面不移交这些状态。
+构建操作始终由 `ApplicationList.build` 接纳实际结果；草稿清理使用原记录及稿版本，
+不依赖包含连接资格的 `currentGuard()`，连接变化不会把已经确认的提交留作未发送稿。
+
+提交时捕获稿版本，并立即让该版本退出可恢复未发送稿；文字暂留内存供检查。
+成功回执只清仍属于原记录的同一版本，后续编辑即使文字相同也有新版本，不能被
+旧回执清除。失败保留原 App 的内存文字及错误，结果未知不自动重发。忙碌和错误
+不随页面刷新恢复；文本存储与账户规则归[输入恢复合同](input-reliability.md#browser-application-text-drafts)。
+
+ApplicationView 的 App/账户视图寿命与 Iterate 弹层寿命分别控制关窗资格。
+A→B→A、关闭后重开或卸载重挂均不能让旧回执关闭新弹层；普通成功仍会关闭
+持续有效的原弹层。视图失效不丢弃原账户有效的列表结果，也不取消服务端构建。
+
+`ApplicationList.onDeleted` 发布原账户已确认的 DELETE 和有效
+`application_deleted` 事实，独立于该回执是否有资格直接应用列表行。草稿入口同步
+移除原 App 的内存/存储并退休记录，旧 ACK、catch 和 finally 不能重新创建它。
+未打开过的已存 App 同样清理；归档、列表暂缺或删除失败不证明删除，不清稿。
+这里只退休当前记录，不增加永久删除标记或第二份应用列表。
+
+旧构建会话删除后的现有 Iterate 初始化、
+应用文件、错误和 Ready 含义保持原合同，不增加构建结果摘要或历史回填。
+
+### 共享聊天文字与操作寿命
+
+`textDrafts` 拥有账户内一份共享聊天文字、版本及同步保存错误；切换会话与
+ChatView 卸载重挂不拆成每会话一份。`chatDraft` 接收已确认删除时捕获的
+`wasActive`，在页面不在时也能清空当前会话的共享文字并推进版本。记录继续
+有效，让仍挂载的输入框可以编辑下一稿；不使用永久墓碑或第二份会话列表。
+存储与刷新恢复规则归[输入恢复合同](input-reliability.md#browser-text-drafts)。
+
+ChatView 的 typing、history、slash、显式恢复、清空及两种发送均写入同一同步
+文字入口。普通消息仍立即清空；原 submitted/rejected/unknown、恢复来源、附件
+完整性及 message/compact 判断保持在原业务路径。compact 发出即让所属版本退出
+刷新恢复，当前组件保留原 ID 的 GET 确认与内存命令；成功只清匹配稿版本，
+卸载只清尚未被后续编辑替换的消费版本。不会将无原确认上下文的命令在重挂时
+变回未发送稿，也不恢复旧操作资格或自动 POST。
+
+fork 预填只持当前选择的记录、进入版本和是否已处理，寿命跟随共享 composer，
+而非单次组件挂载。它等待 identity/metadata，保护已恢复文字与等待期间的编辑
+或明确清空；先前会话的历史编辑不阻止新 fork 正常预填。账户退休后原记录
+失效，旧回执不能清除新账户或相同字符的新版本。
+
 ### 聊天 reset 与延后 fork
 
 [`useSessionFork`](../../web/src/hooks/useSessionFork.ts) 提供 queueFork、cancelFork、
 reset 业务动作，拥有 reset 回执阻挡、唯一 fork watcher、每会话在途操作、重试和
 清理。`sessionStore.pendingForks` 仍是唯一意图事实；hook 只保存原意图的引用及
-临时 timer/请求状态，不建立第二个任务 store。ChatView 继续拥有普通输入草稿、附件和滚动；
+临时 timer/请求状态，不建立第二个任务 store。ChatView 继续拥有输入提交、附件和滚动；
+共享文字与保存由上述聊天稿入口负责。
 Research 提交继续使用现有 `lib/research` 入口，不迁入通用聊天 controller。
 
 每个 fork 请求捕获意图对象。旧 A 的成功、409、硬拒绝或网络错误均不能清除后来的
@@ -167,6 +248,8 @@ decoder 和真实 hook/store 消费同一产物。Owner 结构化结果另复用
 证据。HTTP OpenAPI 生成检查仅证明复用的 HTTP 字段，不能代替这条 WS 契约检查。
 
 ## 读取与冲突规则
+
+本节描述应用与计划的读取调度；Connector 使用独立的[安装列表规则](#connector-安装列表)。
 
 ### 每个模块最多一个有效在途 GET
 
@@ -324,7 +407,9 @@ HTTP 结束后可再次操作，旧确认 GET 不得清除新操作的排序意�
 
 `session_deleted`、成功删除回执或有效的包含归档完整快照确认删除后，统一调用
 `SessionList.remove`：清除选中视图及所属消息、问题、Research、派发等缓存，并
-同步通知页面清理该会话的临时文字、附件和恢复草稿。在途提交也沿原草稿对象
+在 commit/forgetSession 前捕获 `wasActive`，同步通知共享文字入口及页面清理
+该会话的文字、附件和恢复草稿。当前会话的共享文字在页面卸载时仍会清理；
+其他会话删除不清共享文字。在途提交也沿原草稿对象
 核验所有权，删除后迟到的拒绝、unknown 或失败回执不能重新放回草稿。
 发出删除请求或删除失败均不触发这项清理。
 

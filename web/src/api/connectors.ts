@@ -30,6 +30,35 @@ async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** Only the original OAuth operation may observe these receipts after sign-out.
+ * All other connector calls retain accountFetch's account admission checks. */
+async function oauthJson<T>(path: string, init: RequestInit): Promise<T> {
+  const controller = new AbortController();
+  const abort = () => controller.abort(init.signal?.reason);
+  const timer = setTimeout(() => controller.abort(new DOMException("OAuth response timed out", "TimeoutError")), 30_000);
+  init.signal?.addEventListener("abort", abort, { once: true });
+  if (init.signal?.aborted) abort();
+  let rejectAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAbort = () => reject(controller.signal.reason);
+    controller.signal.addEventListener("abort", rejectAbort, { once: true });
+    if (controller.signal.aborted) rejectAbort();
+  });
+  try {
+    return await Promise.race([
+      (async () => {
+        controller.signal.throwIfAborted();
+        return json<T>(await globalThis.fetch(`${API}${path}`, { ...init, signal: controller.signal }));
+      })(),
+      aborted,
+    ]);
+  } finally {
+    clearTimeout(timer);
+    init.signal?.removeEventListener("abort", abort);
+    controller.signal.removeEventListener("abort", rejectAbort);
+  }
+}
+
 export async function fetchCatalog(token: string): Promise<ConnectorCatalogEntry[]> {
   return json(
     await fetch(`${API}/api/connectors/catalog`, { headers: authHeaders(token) })
@@ -37,9 +66,9 @@ export async function fetchCatalog(token: string): Promise<ConnectorCatalogEntry
 }
 
 export async function fetchInstallations(
-  token: string
+  token: string, signal?: AbortSignal,
 ): Promise<ConnectorInstallationInfo[]> {
-  return json(await fetch(`${API}/api/connectors`, { headers: authHeaders(token) }));
+  return json(await fetch(`${API}/api/connectors`, { headers: authHeaders(token), signal }));
 }
 
 export async function startConnectorOAuth(
@@ -47,35 +76,33 @@ export async function startConnectorOAuth(
   kind: string,
   label?: string
 ): Promise<ConnectorOAuthStartResponse> {
-  return json(
-    await fetch(`${API}/api/connectors/oauth/start`, {
-      method: "POST",
-      headers: authHeaders(token),
-      body: JSON.stringify({ kind, label: label ?? null }),
-    })
-  );
+  return oauthJson("/api/connectors/oauth/start", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ kind, label: label ?? null }),
+  });
 }
 
 export async function pollConnectorOAuth(
   token: string,
-  loginId: string
+  loginId: string,
+  signal?: AbortSignal,
 ): Promise<ConnectorOAuthStatusResponse> {
-  return json(
-    await fetch(`${API}/api/connectors/oauth/status/${loginId}`, {
-      headers: authHeaders(token),
-    })
-  );
+  return oauthJson(`/api/connectors/oauth/status/${loginId}`, {
+    headers: authHeaders(token),
+    signal,
+  });
 }
 
 export async function cancelConnectorOAuth(
   token: string,
   loginId: string
 ): Promise<ConnectorOAuthStatusResponse> {
-  return json(await fetch(`${API}/api/connectors/oauth/cancel`, {
+  return oauthJson("/api/connectors/oauth/cancel", {
     method: "POST",
     headers: authHeaders(token),
     body: JSON.stringify({ login_id: loginId }),
-  }));
+  });
 }
 
 export async function updateInstallation(

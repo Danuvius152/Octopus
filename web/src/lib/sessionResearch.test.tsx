@@ -51,7 +51,7 @@ it("confirms the original creation after the first detail establishes its genera
   expect(reads()).toHaveLength(1);
   const saved = { ...job, status: "completed", phase: "done", report_path: "report.md" };
   await act(async () => { confirmation.resolve(Response.json([saved])); });
-  expect(useSessionStore.getState().research.s1).toEqual([saved]);
+  expect(useSessionStore.getState().research.s1).toEqual([{ ...saved, evidence: null, evidence_state: "unavailable" }]);
   expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
 
@@ -318,7 +318,7 @@ it("reloads research on WS reconnect after establishing the detail's service gen
   }));
   renderHook(() => useWebSocket());
   await act(async () => { Socket.instances[0].readyState = 1; Socket.instances[0].onopen?.(); });
-  await waitFor(() => expect(useSessionStore.getState().research.s1).toEqual([job]));
+  await waitFor(() => expect(useSessionStore.getState().research.s1).toEqual([{ ...job, evidence: null, evidence_state: "unavailable" }]));
 });
 
 it.each(["old-first", "new-first"])("keeps recovered completion across overlapping empty-baseline snapshots (%s)", async (order) => {

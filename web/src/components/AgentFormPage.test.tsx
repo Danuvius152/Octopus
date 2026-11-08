@@ -9,6 +9,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 
 import { AgentFormPage } from "./AgentFormPage";
 import { handleWsMessage } from "../hooks/useWebSocket";
+import { connectorInstallations } from "../lib/connectorInstallations";
 import {
   useSessionStore, type Agent, type BackendKind, type SessionInfo,
 } from "../stores/sessionStore";
@@ -129,7 +130,15 @@ describe("AgentFormPage", () => {
 
   it("loads connector enablement, rolls back a failed toggle and removes deleted installations", async () => {
     let patches = 0;
+    let removed = false;
+    const installation = {
+      id: "installation", kind: "github", label: "GitHub account", auth_type: "oauth" as const,
+      external_account_id: "owner", scopes: [], enable_by_default: false, needs_reconnect: false,
+      token_expires_at: null, last_refresh_error_code: null, created_at: "2026-10-19",
+    };
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") { removed = true; return new Response(null, { status: 204 }); }
+      if (url.endsWith("/api/connectors")) return json(removed ? [] : [installation]);
       if (url.endsWith("/connectors")) return json({ installation_ids: ["installation"] });
       if (init?.method === "PATCH") {
         patches += 1;
@@ -138,11 +147,7 @@ describe("AgentFormPage", () => {
       return json([]);
     });
     mount("ag1");
-    act(() => useSessionStore.getState().setConnectorInstallations([{
-      id: "installation", kind: "github", label: "GitHub account", auth_type: "oauth",
-      external_account_id: "owner", scopes: [], enable_by_default: false, needs_reconnect: false,
-      token_expires_at: null, last_refresh_error_code: null, created_at: "2026-10-19",
-    }]));
+    await act(async () => { await connectorInstallations.refresh(); });
     const checkbox = await screen.findByRole("checkbox", { name: /GitHub account/ });
     await waitFor(() => expect(checkbox).toBeChecked());
     fireEvent.click(checkbox);
@@ -153,7 +158,7 @@ describe("AgentFormPage", () => {
     await waitFor(() => expect(checkbox).not.toBeChecked());
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/api/agents/ag1/connectors/installation"),
       expect.objectContaining({ method: "PATCH", body: JSON.stringify({ enabled: false }) }));
-    act(() => useSessionStore.getState().removeConnectorInstallation("installation"));
+    await act(async () => { await connectorInstallations.disconnect("installation"); });
     expect(screen.queryByRole("checkbox", { name: /GitHub account/ })).toBeNull();
   });
 

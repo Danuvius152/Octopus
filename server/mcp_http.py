@@ -109,7 +109,7 @@ def _offload_sync_tools(server: Any) -> None:
     made them wrong, so the fix belongs here rather than in nine tool modules —
     and threading a sync handler is what FastAPI does for a `def` endpoint.
 
-    The bound is anyio's default thread limiter (40). Ask alone uses its async
+    The bound is anyio's default thread limiter (40). Async tools own their
     cancellation/retirement contract; ordinary synchronous side-effect tools
     retain their original worker until their operation has returned.
     """

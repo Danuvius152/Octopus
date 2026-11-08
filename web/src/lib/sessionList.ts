@@ -32,7 +32,7 @@ export class SessionList {
   private closed = false;
   // Only outstanding reads are retained, including targets not yet in a list.
   private observations = new Map<SessionObservation, string>();
-  private deletionListeners = new Set<(id: string) => void>();
+  private deletionListeners = new Set<(id: string, wasActive: boolean) => void>();
   // Provisional identities only until the inclusive confirmation succeeds.
   // They never filter incoming rows or claim deletion by themselves.
   private unconfirmedMissing = new Set<string>();
@@ -83,7 +83,7 @@ export class SessionList {
     this.observations.set(observation, id);
     return { observation, finish: () => { this.observations.delete(observation); } };
   }
-  onDeleted(listener: (id: string) => void): () => void {
+  onDeleted(listener: (id: string, wasActive: boolean) => void): () => void {
     this.deletionListeners.add(listener);
     return () => { this.deletionListeners.delete(listener); };
   }
@@ -291,9 +291,10 @@ export class SessionList {
     this.invalidateTarget(id);
     this.unconfirmedMissing.delete(id);
     const store = useSessionStore.getState();
+    const wasActive = store.activeSessionId === id;
     this.commit(store.sessions.filter((row) => row.id !== id), store.archivedSessions.filter((row) => row.id !== id));
     useSessionStore.getState().forgetSession(id);
-    for (const listener of this.deletionListeners) listener(id);
+    for (const listener of this.deletionListeners) listener(id, wasActive);
     return true;
   }
   dispose(): void {

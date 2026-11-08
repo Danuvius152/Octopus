@@ -22,6 +22,34 @@ reasoning call synthesizes the report. Only a strict majority of explicit positi
 verification counts as verified. Non-refutation without support remains unverified;
 no valid verdict is a verification failure, retained as such.
 
+The pipeline constructs one bounded evidence summary, consumed by synthesis,
+the deterministic evidence section at the start of the saved report, and the
+ResearchCard. Each angle records findings, a successful empty result, or a
+failure with its reason. Unparseable search output is a failure, not a successful
+empty search; parseable partial output from a failed leaf supplies no findings
+or verification votes. If every search fails but synthesis produces a gap
+report, execution may complete: the report and card prominently show insufficient
+evidence, and the card opens the failed angles and reasons by default.
+
+Each checked claim retains support, refutation, unverified and failed votes,
+their reasons, conditions and the source URLs actually supplied by the checks.
+Missing check sources remain missing; the original claim URL is never borrowed
+as a counterevidence source. Strict majority uses the original scheduled vote
+count, including failures. Refuted claims leave the recommendation findings but
+remain in the summary and synthesis input with their counterevidence and
+disposition. Votes and angles are not independent sources. Positive verification
+is a leaf's explicit support verdict, not proof that its URL was read or that
+the whole question has sufficient evidence.
+
+The original job/claim/vote limits still govern work. The summary retains at
+most five angles, twelve claims, eight vote details per claim and three URLs
+per vote; aggregate counts retain the original denominator when details are
+omitted. Construction caps angle text at 256 UTF-8 bytes, claim text at 512,
+reasons/conditions/errors at 256, and URLs at 512. Overlong URLs are omitted,
+never changed into new addresses. Shortening or omission is disclosed. The
+saved envelope is limited to 256 KiB. These limits bound retained material;
+they do not increase search or voting budgets or establish content quality.
+
 ## 4. Web leaves
 
 Web capability is supplied by the selected profile. The leaf executor uses a
@@ -58,7 +86,7 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
 - Starts a research job for `(session_id, question)`, returns a `research_id`
   immediately, runs the pipeline as a tracked `asyncio.Task`.
 - A failed or empty final synthesis ends the job as `failed`, preserving the
-  reason and gathered findings in the account-owned job directory as
+  reason, retained findings and the same evidence summary in the account-owned job directory as
   `synthesis-failure.json`. It emits no successful completion or report
   injection; a placeholder is not a completed report.
 - Owns a **hard overall timeout** and an **idle/heartbeat** — the gap that let
@@ -85,8 +113,10 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   split status without changing its version or browser confirmation.
   Terminal delivery retains its original source identity and admission receipt.
   Completion, cancellation, failure and interruption share one guarded
-  `running`-to-terminal transaction. Completion requires the report file and
-  its directory entry to be synced before committing the completed row.
+  `running`-to-terminal transaction. Completion requires the report and evidence
+  files and their directory entries to be synced before committing the completed
+  row. A save refusal publishes failure, not a completed report; files left by a
+  losing completion attempt are not proof of completion.
   A cancellation control captures the original pipeline and takes ownership
   before its first database wait. It survives cancellation of its HTTP waiter;
   repeated calls join the same control while it remains active. A cancelled row,
@@ -194,9 +224,26 @@ run and its result evidence separately from the retirement error.
 ## 7. Invocation, files and verification
 
 The research tool and `/research` command admit the same account/session-owned
-job. Progress and the report card are projections of that job. Reports and failure
-materials live under the account-owned research job directory; the original
+job. Progress and the report card are projections of that job. Within the account
+research root, the report is `{job_id}.md`, the versioned summary is
+`{job_id}/evidence.json`, and synthesis failure retains the summary in
+`{job_id}/synthesis-failure.json`; the original
 caller receives a separate follow-up with stable delivery identity.
+
+The manager projects the same summary into GET/list snapshots and completed WS
+events. Reading binds its envelope to the persisted account/session/job and a
+fixed path within the account research root, accepts only regular files within
+the size limit, and requires every v1 field, including nested reasons, conditions
+and sources. Old jobs without a summary, missing or damaged files and unsupported
+versions yield explicit unavailable evidence, clearing the card's cached summary.
+Missing material after completion does not revise the committed job outcome.
+This adds no database field, pipeline replay or second lifecycle owner.
+
+Session deletion cascades job rows but follows the existing policy of retaining
+account research files. The [account archive](../backup-and-migrate.md#account-export-and-import)
+recursively carries these materials while excluding session/job history; restored
+files do not restore cards or execution authority. Complete backups preserve both
+the existing rows and their files. There is no sidecar cleanup shortcut.
 The completed card retains a Download report link through
 `GET /api/sessions/{sid}/research/{rid}/report`, independently of admission or
 processing. The route checks the original account/session and an existing file

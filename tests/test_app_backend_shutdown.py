@@ -297,6 +297,8 @@ async def test_shutdown_reports_a_reaper_that_retains_the_backend_lock(tmp_path,
     task = asyncio.create_task(reaper())
     supervisor._reaper = task
     await locked.wait()
+    monkeypatch.setattr(app_backends, "_TERM_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(app_backends, "_KILL_TIMEOUT_SECONDS", 0.03)
     monkeypatch.setattr(app_backends, "_TASK_DRAIN_SECONDS", 0.03)
     try:
         with pytest.raises(RuntimeError, match="reaper did not exit"):

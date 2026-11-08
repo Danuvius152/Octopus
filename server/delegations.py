@@ -8,7 +8,7 @@ results use). That parent-injection is what gives the parent agent a
 fresh turn to react to the child's reply.
 
 For agent collaboration, the operation is "spawn a child Session under
-another agent and run one turn there". A delegation is **not** a new
+another agent and complete a work round there". A delegation is **not** a new
 persistence concept — it is a normal `Session` row with
 ``origin='delegation'`` and ``parent_session_id`` set. The delegation id
 *is* the child session id; we don't invent a parallel id space.
@@ -101,6 +101,29 @@ _T = TypeVar("_T")
 # (three delegated agents under the human) but rejects deeper. A small
 # constant on purpose — agent fan-out is meant to be shallow.
 DEPTH_CAP = 3
+
+# Both submission paths send the same round and reply contract to the model.
+_DELEGATION_PROTOCOL = (
+    "**Delegation protocol — read before responding:**\n"
+    "- This delegation round returns one reply when its original work completes. "
+    "A round may include multiple executions as owned descendants return; collect "
+    "their necessary results before completing the work. Return admission records "
+    "handoff, not proof that the receiving model understood the material.\n"
+    "- Complete the requested work and put its core evidence and result in a "
+    "self-contained final reply. A progress-only preamble is not a completed task.\n"
+    "- Reply text comes from the committed result: with a valid final-answer "
+    "reference, only the selected final answer is returned; without a final-answer "
+    "reference, the existing associated text-fragment policy applies. An explicit "
+    "empty final answer stays empty; an invalid reference does not borrow other "
+    "text. Do not assume all commentary or tool output will reach the caller.\n"
+    "- Tools and background work may help, but necessary results must be collected "
+    "and included before this round completes. Independent late results do not "
+    "automatically resend an old round's reply. If essential work cannot return "
+    "within this round, state the limitation and the concrete follow-up needed "
+    "from the caller.\n"
+    "- The conversation remains open; human follow-ups do not resend this round's "
+    "reply. Only an explicit caller follow-up starts a new delegation round."
+)
 
 TerminalDisposition = Literal[
     "accepted", "duplicate", "steered", "closed", "unbound", "unavailable", "not_replayed", "stopped", "unknown",
@@ -974,7 +997,7 @@ class DelegationManager:
             composed = (
                 f"Agent **{parent_name}** has a follow-up for you in the "
                 f"same line of work — your previous reply is above in "
-                f"this transcript. Their new request follows.\n\n"
+                f"this transcript.\n\n{_DELEGATION_PROTOCOL}\n\nTheir new request follows.\n\n"
                 f"---\n{request.strip()}"
             )
             if self.session_mgr.get_session(parent_session_id) is not parent:
@@ -1246,21 +1269,7 @@ class DelegationManager:
             f"You were asked by agent **{parent_name}** "
             f"(session `{parent_session_id}`) to handle a task on their behalf.",
             "",
-            "**Delegation protocol — read before responding:**",
-            "- This is a **single-turn delegation**. When your turn ends, "
-            "everything you have written is delivered to the caller as one "
-            "reply for this round. Your conversation remains open; human "
-            "follow-ups do not send another reply to the caller. The caller "
-            "can explicitly start a new delegation round in this conversation.",
-            "- **Do the work now, in this turn.** Do not send a preliminary "
-            '"I\'ll start reviewing…" message and stop — that preamble would '
-            "become the entire reply the caller receives.",
-            "- Use your tools (read files, run commands, etc.) to complete the "
-            "task fully before writing your response. Do **not** use "
-            "`mcp__bg__run` for the core work — background tasks run after your "
-            "turn ends and their results will not reach the caller.",
-            "- End with a clear, self-contained summary of your findings or "
-            "output so the caller can act on it without needing to ask again.",
+            _DELEGATION_PROTOCOL,
             "",
             f"The request from **{parent_name}** follows.",
             "",

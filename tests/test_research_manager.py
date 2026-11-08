@@ -1167,7 +1167,8 @@ async def test_research_shutdown_preserves_selected_completion_with_closed_deliv
     assert final["status"] == "completed"
     assert final["injection_status"] == "failed"
     assert final["error"] == "delivery suppressed: session admission is closed"
-    assert Path(final["report_path"]).read_text().strip() == '["one angle"]'
+    assert Path(final["report_path"]).read_text().strip().endswith('["one angle"]')
+    assert "Evidence and gaps" in Path(final["report_path"]).read_text()
 
 
 @pytest.mark.asyncio

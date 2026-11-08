@@ -15,6 +15,7 @@ and the reasoning behind it are in the plan doc §3.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import logging
 import os
@@ -62,13 +63,21 @@ IDLE_TIMEOUT_S = 15 * 60.0
 REAP_INTERVAL_S = 60.0
 # Hard cap on concurrently running backends, least-recently-used evicted first.
 MAX_RUNNING = 4
-# Log tail kept in memory for the UI; the full log is on disk.
+# Display fragments and their tail are bounded independently of the disk log.
 LOG_TAIL_LINES = 200
+LOG_FRAGMENT_CHARS = 4096
+_LOG_READ_BYTES = 4096
 # A crashed backend is retried, but not in a tight loop.
 RETRY_BACKOFF_S = 30.0
 _TERM_TIMEOUT_SECONDS = 5.0
 _KILL_TIMEOUT_SECONDS = 5.0
 _TASK_DRAIN_SECONDS = 5.0
+
+
+def _process_stop_timeout() -> float:
+    # TERM and KILL each wait for both leader and group; readers get an EOF
+    # window followed by a cancellation window. Outer owners must allow both.
+    return 2 * (_TERM_TIMEOUT_SECONDS + _KILL_TIMEOUT_SECONDS + _TASK_DRAIN_SECONDS)
 
 
 def _free_port() -> int:
@@ -236,6 +245,7 @@ class BackendState:
     failed_at: float | None = None
     process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_TAIL_LINES), repr=False)
+    _log_truncated: bool = field(default=False, repr=False)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     # Serialize this app's admission while its lifecycle lock is released
     # for another app's retirement. Stop/install never acquire this lock.
@@ -260,7 +270,8 @@ class BackendState:
                 if self.started_at and self.state == RUNNING
                 else None
             ),
-            "log_tail": list(self.log),
+            "log_tail": (["[earlier output omitted from display]", *list(self.log)[1:]]
+                         if self._log_truncated else list(self.log)),
         }
 
 
@@ -323,19 +334,52 @@ class BackendSupervisor:
     # -------------------------------------------------------------- logging
 
     def _log(self, st: BackendState, line: str) -> None:
-        st.log.append(line)
+        self._write_log(st, line + "\n")
+        for start in range(0, max(1, len(line)), LOG_FRAGMENT_CHARS):
+            fragment = line[start:start + LOG_FRAGMENT_CHARS]
+            if start + LOG_FRAGMENT_CHARS < len(line):
+                fragment += " [continued]"
+            self._log_tail(st, fragment)
+
+    def _log_tail(self, st: BackendState, fragment: str) -> None:
+        if len(st.log) == LOG_TAIL_LINES:
+            st._log_truncated = True
+        st.log.append(fragment)
+
+    def _write_log(self, st: BackendState, text: str) -> None:
         path = os.path.join(runtime_dir_for(st.app_dir), "logs")
         try:
             os.makedirs(path, exist_ok=True)
             with open(os.path.join(path, "backend.log"), "a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+                fh.write(text)
         except OSError:
             pass  # a log we can't write must never break the app
 
     async def _pump(self, st: BackendState, stream: asyncio.StreamReader, tag: str) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        pending = ""
         try:
-            async for raw in stream:
-                self._log(st, f"[{tag}] {raw.decode(errors='replace').rstrip()}")
+            while True:
+                raw = await stream.read(_LOG_READ_BYTES)
+                text = decoder.decode(raw, final=not raw)
+                self._write_log(st, text)
+                pending += text
+                while pending:
+                    newline = pending.find("\n", 0, LOG_FRAGMENT_CHARS + 1)
+                    if newline >= 0:
+                        line = pending[:newline].removesuffix("\r")
+                        self._log_tail(st, f"[{tag}] {line}")
+                        pending = pending[newline + 1:]
+                    elif len(pending) >= LOG_FRAGMENT_CHARS:
+                        self._log_tail(st, f"[{tag}] {pending[:LOG_FRAGMENT_CHARS]} [continued]")
+                        pending = pending[LOG_FRAGMENT_CHARS:]
+                    elif not raw:
+                        self._log_tail(st, f"[{tag}] {pending}")
+                        pending = ""
+                    else:
+                        break
+                if not raw:
+                    break
         except asyncio.CancelledError:
             pass  # the backend is being stopped; the pump goes with it
         except Exception:
@@ -608,7 +652,9 @@ class BackendSupervisor:
 
     async def _retire_process(self, st: BackendState) -> None:
         try:
-            await asyncio.wait_for(st.lock.acquire(), timeout=_TASK_DRAIN_SECONDS)
+            # Idle reaping also holds this lock through process/reader cleanup,
+            # without an _operation. Every prior lock owner gets that window.
+            await asyncio.wait_for(st.lock.acquire(), timeout=_process_stop_timeout())
         except TimeoutError as error:
             raise RuntimeError(f"Application {st.app_id} stop lock did not become available") from error
         try:
@@ -693,13 +739,19 @@ class BackendSupervisor:
                         task.cancel()
                 raise RuntimeError(f"Application {st.app_id} process exit unconfirmed")
             st._waiter.result()
-        # Keep output draining while the child handles TERM. Cancelling the
-        # pumps first can fill a pipe and prevent its process waiter finishing.
-        for task in st._readers:
-            if not task.done() and not task.cancelling():
-                task.cancel()
+        # Confirmed process exit can precede consumption of buffered output.
+        # Give readers their EOF window before requesting cancellation.
         if st._readers:
             readers_done, pending = await asyncio.wait(st._readers, timeout=_TASK_DRAIN_SECONDS)
+            if pending:
+                diagnostic = "backend output EOF drain timed out; remaining output may be truncated"
+                self._log(st, diagnostic)
+                logger.warning("Application %s: %s", st.app_id, diagnostic)
+                for task in pending:
+                    if not task.cancelling():
+                        task.cancel()
+                cancelled, pending = await asyncio.wait(pending, timeout=_TASK_DRAIN_SECONDS)
+                readers_done |= cancelled
             for task in readers_done:
                 await drain_cancelled(task, f"application {st.app_id} backend output")
             st._readers = list(pending)
@@ -822,7 +874,7 @@ class BackendSupervisor:
         pending: set[asyncio.Task[Any]] = set()
         if owners:
             _, pending = await asyncio.wait(
-                owners, timeout=_TERM_TIMEOUT_SECONDS + _KILL_TIMEOUT_SECONDS + _TASK_DRAIN_SECONDS,
+                owners, timeout=_process_stop_timeout(),
             )
         for st in states:
             app_id = st.app_id

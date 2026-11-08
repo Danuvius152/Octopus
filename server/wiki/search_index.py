@@ -16,11 +16,16 @@ from .extract import HTML_BODY_VERSION, HTMLBodyAnalyzer
 from .formats import MARKDOWN_SQL
 from .line_coordinates import LineCoordinates
 
-VERSION = "sections-v10"
+VERSION = "sections-v11"
 _tokenizer = jieba.Tokenizer()
 jieba.setLogLevel(logging.WARNING)
 _letter = r"(?:(?![\u3400-\u9fff])[^\W_])"
-_pieces = re.compile(rf"[\u3400-\u9fff]+|{_letter}+(?:[-+]{_letter}+)*", re.UNICODE)
+# Structural identifiers, not a vocabulary of known languages or products.
+# Dots/@ may prefix a name; connectors require another segment, so sentence
+# punctuation stays outside. Underscores and operator suffixes retain identity.
+_atom = rf"(?:{_letter}|_)+"
+_technical_word = rf"[.@]?{_atom}(?:[.+#:/@-]+{_atom})*[+#]*"
+_pieces = re.compile(rf"[\u3400-\u9fff]+|{_technical_word}", re.UNICODE)
 _chinese = re.compile(r"[\u3400-\u9fff]+\Z")
 _stop = set(
     "的 了 和 与 或 是 在 有 我 我的 我们 你 这个 那个 一下 如何 怎么 什么 哪些 "
@@ -64,11 +69,21 @@ def encoded(word: str, prefix="w") -> str:
 
 
 def tokens(text: str) -> str:
-    lexical = []
+    lexical: list[str] = []
     for word in words(text):
-        lexical.append(encoded(word))
-        if "-" in word:
-            lexical.extend(encoded(part) for part in word.split("-"))
+        variants = [word, *filter(None, word.split("-"))] if "-" in word else [word]
+        lexical.extend(encoded(variant) for variant in variants)
+        # Boundary underscores can decorate any identifier in Markdown. Keep
+        # its original identity and its undecorated form, with internal
+        # namespace/version/operator structure intact.
+        lexical.extend(encoded(variant.strip("_")) for variant in variants
+                       if variant.strip("_") and variant.strip("_") != variant)
+        # Ordinary words still discover namespace/package components and
+        # Markdown emphasis. A separate token prevents explicit identifiers
+        # or the hyphen phrase alternative from borrowing those fragments.
+        for variant in variants:
+            lexical.extend(encoded(part, "d") for part in re.split(r"[._:/@]+", variant)
+                           if part and part != variant)
     # Keep order and frequency. A query uses a whole contiguous bigram phrase,
     # never ORs arbitrary fragments from an unknown term.
     bigrams: list[str] = []
@@ -76,6 +91,18 @@ def tokens(text: str) -> str:
         bigrams.extend(encoded(chunk[i : i + 2], "b") for i in range(len(chunk) - 1))
         bigrams.append("boundary")
     return " ".join([*lexical, *bigrams])
+
+
+def path_tokens(path: str) -> str:
+    # Paths also support discovery by directory, filename/stem and filename
+    # words. This projection belongs only to the path field: a scoped name in
+    # prose must not acquire its unscoped suffix as another identifier.
+    components = path.split("/")
+    projections = dict.fromkeys([
+        path, *components, components[-1].rsplit(".", 1)[0],
+        re.sub(r"[/._]+", " ", path),
+    ])
+    return " ".join(tokens(value) for value in projections)
 
 
 def query_groups(query: str) -> tuple[list[str], list[str]]:
@@ -102,8 +129,17 @@ def query_groups(query: str) -> tuple[list[str], list[str]]:
             )
             group = f'({group} OR "{phrase}")'
         elif "-" in word:
-            phrase = " ".join(encoded(part) for part in word.split("-"))
+            phrase = " ".join(encoded(part) for part in word.split("-") if part)
             group = f'({group} OR "{phrase}")'
+        elif re.fullmatch(rf"{_letter}+", word):
+            group = f'({group} OR "{encoded(word, "d")}")'
+        if "/" in word:
+            # A partial path can use indexed path components, never unrelated
+            # prose. Full paths/IDs still resolve before lexical retrieval.
+            path_groups = [part_group for component in word.split("/")
+                           for part_group in query_groups(component)[1]]
+            if path_groups:
+                group = f'({group} OR path : ({" AND ".join(path_groups)}))'
         groups.append(group)
     return terms, groups
 
@@ -236,7 +272,7 @@ def index(db, row, metadata, *, parsed: document_format.DocumentFormat | None = 
             part["readable_body"] = metadata["html_body_readable"]
     fields = [
         tokens(row["title"]),
-        tokens(row["path"]),
+        path_tokens(row["path"]),
         tokens(" ".join(aliases)),
         tokens(" ".join(tags) + " " + metadata.get("description", "")),
     ]
@@ -288,10 +324,70 @@ def index(db, row, metadata, *, parsed: document_format.DocumentFormat | None = 
     )
 
 
-def select(db, query, kind, include_assets, offset, limit, directory=None, exclude_roles=False, deduplicate=False, comparison=False, diversify=False):
+def topic_groups(terms: list[str]) -> tuple[list[str], list[str], list[int]]:
+    """Relax a compound into whole concepts, never independent characters."""
+    expanded = []
+    mandatory = set()
+    mixed = any(_chinese.fullmatch(term) for term in terms)
+    for term in terms:
+        parts: list[str] = []
+        pending = ""
+        candidates = [term]
+        if _chinese.fullmatch(term):
+            # Existing search-mode words provide component discovery. Choose
+            # non-overlapping spans so a compound and its parts do not count
+            # as independent coverage of the same characters.
+            candidates = []
+            end = 0
+            for word, start, stop in sorted(_tokenizer.tokenize(term, mode="search", HMM=False),
+                                             key=lambda part: (part[1], len(part[0]))):
+                if start >= end:
+                    if start > end:
+                        candidates.append(term[end:start])
+                    candidates.append(word)
+                    end = stop
+            if end < len(term):
+                candidates.append(term[end:])
+        for word in candidates:
+            if word in _stop:
+                continue
+            if len(word) == 1 and _chinese.fullmatch(word):
+                if parts:
+                    parts[-1] += word
+                else:
+                    pending += word
+            else:
+                parts.append(pending + word)
+                pending = ""
+        parts = parts or [term]
+        expanded.extend(parts)
+        if not _chinese.fullmatch(term) and (mixed or not re.fullmatch(rf"{_letter}+", term)):
+            # A mixed-script object or structured identifier is not a word
+            # that the fallback may silently omit from the request.
+            mandatory.add(term)
+    expanded, groups = query_groups(" ".join(expanded))
+    required = [index for index, term in enumerate(expanded) if term in mandatory]
+    return expanded, groups, required
+
+
+def select(db, query, kind, include_assets, offset, limit, directory=None, exclude_roles=False, deduplicate=False, comparison=False, diversify=False, topic=False):
     terms, groups = query_groups(query)
     if not groups:
         return [], 0, terms, "lexical"
+    options = dict(directory=directory, exclude_roles=exclude_roles,
+                   deduplicate=deduplicate, comparison=comparison, diversify=diversify)
+    result = _select(db, query, kind, include_assets, offset, limit, terms, groups, **options)
+    # The filtered total, rather than an empty page, decides whether to relax.
+    if result[1] == 0 and topic:
+        expanded, expanded_groups, mandatory = topic_groups(terms)
+        if len(expanded_groups) > 1:
+            return _select(db, query, kind, include_assets, offset, limit,
+                           expanded, expanded_groups, relaxed=True,
+                           mandatory=mandatory, **options)
+    return result
+
+
+def _select(db, query, kind, include_assets, offset, limit, terms, groups, *, directory, exclude_roles, deduplicate, comparison, diversify, relaxed=False, mandatory=()):
     filters, arguments = [MARKDOWN_SQL], []
     if kind:
         filters.append("d.kind=?")
@@ -319,28 +415,55 @@ def select(db, query, kind, include_assets, offset, limit, directory=None, exclu
           JOIN search_sections s ON s.id=search_fts.rowid JOIN documents d ON d.id=s.doc_id
           WHERE search_fts MATCH ?""" + predicate,
           ["{title path aliases} : (" + " OR ".join(latin_names) + ")", *arguments])]
+    phrase = None
+    if not comparison and len(terms) > 1:
+        # Prefer an ordered body name (including indexed hyphen equivalents)
+        # over scattered full coverage, while retaining both candidates.
+        sequences = ['"' + " ".join(encoded(term) for term in terms) + '"']
+        if all(_chinese.fullmatch(term) for term in terms):
+            joined = "".join(terms)
+            sequences.append('"' + " ".join(encoded(joined[i:i + 2], "b")
+                                             for i in range(len(joined) - 1)) + '"')
+        phrase = "{key_note body} : (" + " OR ".join(sequences) + ")"
+    phrase_sql = "(h.id IN (SELECT rowid FROM search_fts WHERE search_fts MATCH ?))" if phrase else "0"
     # Coverage belongs to a document, not a chapter: a comparison can discuss
     # the queried concepts in separate sections. Rank actual reading locations
     # only after choosing documents with complete term-group coverage.
-    group_sql = (
-        """WITH group_hits AS MATERIALIZED (
+    def hit_query(fields=None):
+        match = f"('{fields} : (' || t.value || ')')" if fields else "t.value"
+        return ("""
       SELECT s.id,s.doc_id,t.key AS term
-      FROM json_each(?) t JOIN search_fts ON search_fts MATCH t.value
+      FROM json_each(?) t JOIN search_fts ON search_fts MATCH """ + match + """
       JOIN search_sections s ON s.id=search_fts.rowid
       JOIN documents d ON d.id=s.doc_id WHERE 1=1"""
-        + predicate
-        + ") "
-    )
+        + predicate)
+
+    group_sql = "WITH group_hits AS MATERIALIZED (" + hit_query() + ") "
+    # Identity belongs to the document; support belongs to an original-text
+    # section (at most 6000 characters). A real subsection heading supplies
+    # context for its body, but a document title alone is not local evidence.
+    # At most one non-identity concept may be absent from that location.
+    minimum = max(0, len(groups) - len(mandatory) - 1)
+    eligibility = ""
+    if relaxed:
+        eligibility = f""" WHERE (h.actual_body_hit OR
+            (h.readable_body=1 AND h.title<>(SELECT json_extract(part.value,'$.title')
+              FROM documents d,json_each(d.metadata,'$.body_sections') part
+              WHERE d.id=h.doc_id AND coalesce(json_extract(part.value,'$.title'),'')<>''
+              ORDER BY CAST(part.key AS INTEGER) LIMIT 1)))
+          AND h.local_coverage>={1 if mandatory else 2}
+          AND (SELECT count(*) FROM local_hits l WHERE l.id=h.id
+            AND l.term NOT IN(SELECT value FROM json_each(?)))>={minimum}
+          AND NOT EXISTS(SELECT 1 FROM json_each(?) required
+            WHERE NOT EXISTS(SELECT 1 FROM group_hits g
+              WHERE g.doc_id=h.doc_id AND g.term=required.value))"""
+    local_fields = "{key_note heading body}" if relaxed else "{key_note body}"
+    body_source = "body_hits" if relaxed else "local_hits"
+    body_sql = f"EXISTS(SELECT 1 FROM {body_source} b WHERE b.id=h.id)" if relaxed else "1"
     prefix = (
-        group_sql + """, local_hits AS MATERIALIZED (
-      SELECT s.id,s.doc_id,t.key AS term
-      FROM json_each(?) t JOIN search_fts
-        ON search_fts MATCH ('{key_note body} : (' || t.value || ')')
-      JOIN search_sections s ON s.id=search_fts.rowid
-      JOIN documents d ON d.id=s.doc_id WHERE 1=1"""
-        + predicate
-        + """
-    ), coverage AS (
+        group_sql + ",local_hits AS MATERIALIZED (" + hit_query(local_fields) + ")"
+        + (",body_hits AS MATERIALIZED (" + hit_query("{key_note body}") + ")" if relaxed else "")
+        + """, coverage AS (
       SELECT doc_id,count(DISTINCT term) AS covered FROM group_hits GROUP BY doc_id
     ), hits AS MATERIALIZED (
       SELECT s.*, bm25(search_fts,18,12,16,5,4,6,1) AS cost
@@ -350,29 +473,34 @@ def select(db, query, kind, include_assets, offset, limit, directory=None, exclu
         + predicate
         + """
     ), locations AS (
-      SELECT h.*, c.covered,
+      SELECT h.*, c.covered,""" + phrase_sql + """ AS phrase_hit,""" + body_sql + """ AS actual_body_hit,
         (SELECT count(*) FROM local_hits l WHERE l.id=h.id) AS local_coverage,
-        (SELECT count(DISTINCT term) FROM local_hits l WHERE l.doc_id=h.doc_id) AS local_doc_coverage,
+        (SELECT count(DISTINCT term) FROM """ + body_source + """ l WHERE l.doc_id=h.doc_id) AS local_doc_coverage,
         (SELECT count(*) FROM group_hits g WHERE g.id=h.id) AS section_coverage,
         (SELECT json_group_array(term) FROM group_hits g WHERE g.id=h.id) AS term_hits,
         (SELECT json_group_array(term) FROM local_hits l WHERE l.id=h.id) AS local_term_hits
       FROM hits h JOIN coverage c ON c.doc_id=h.doc_id WHERE c.covered>=?
+    ), eligible AS (
+      SELECT h.* FROM locations h""" + eligibility + """
     ), ranked AS (
       SELECT h.*, CASE WHEN n.path=? THEN 4 WHEN n.title=? THEN 3
         WHEN EXISTS (SELECT 1 FROM json_each(n.aliases) WHERE value=?) THEN 2
         ELSE 0 END AS exact,
         CASE WHEN h.doc_id IN (SELECT value FROM json_each(?)) THEN 1 ELSE 0 END AS name_hit,
         row_number() OVER (PARTITION BY h.doc_id
-          ORDER BY local_coverage DESC,section_coverage DESC,cost,start) AS position
-      FROM locations h JOIN search_documents n ON n.doc_id=h.doc_id
+          ORDER BY local_coverage DESC,section_coverage DESC,phrase_hit DESC,cost,start) AS position
+      FROM eligible h JOIN search_documents n ON n.doc_id=h.doc_id
     ) """
     )
     normalized = normalize(query)
     expression = " OR ".join(groups)
-    common = [json.dumps(groups), *arguments, json.dumps(groups), *arguments, expression, *arguments]
+    common = [json.dumps(groups), *arguments, json.dumps(groups), *arguments,
+              *([json.dumps(groups), *arguments] if relaxed else []),
+              expression, *arguments, *([phrase] if phrase else [])]
 
     def parameters(required):
-        return [*common, required, normalized, normalized, normalized, json.dumps(named_documents)]
+        admission = [json.dumps(mandatory), json.dumps(mandatory)] if relaxed else []
+        return [*common, required, *admission, normalized, normalized, normalized, json.dumps(named_documents)]
 
     def count(required):
         return db.execute(
@@ -380,13 +508,8 @@ def select(db, query, kind, include_assets, offset, limit, directory=None, exclu
             [json.dumps(groups), *arguments, required],
         ).fetchone()[0]
 
-    required = 1 if comparison else len(groups)
-    total = count(required)
-    mode = "comparison" if comparison else "lexical"
-    if total == 0 and len(groups) > 1:
-        mode = "lexical_partial"
-        required = 1
-        total = count(required)
+    required = 1 if comparison or relaxed else len(groups)
+    mode = "lexical_partial" if relaxed else "comparison" if comparison else "lexical"
     chosen = "SELECT * FROM ranked WHERE position=1"
     if deduplicate:
         # Direct, resolved identities alone define a representation group.
@@ -396,13 +519,14 @@ def select(db, query, kind, include_assets, offset, limit, directory=None, exclu
         # expand relationships or borrow the source's identity/coordinates.
         chosen = """SELECT * FROM (SELECT candidate.*,row_number() OVER (
             PARTITION BY representation_group
-            ORDER BY (doc_id=representation_group) DESC,exact DESC,covered DESC,local_doc_coverage DESC,name_hit DESC,cost,doc_id) AS duplicate_position
+            ORDER BY (doc_id=representation_group) DESC,exact DESC,covered DESC,local_doc_coverage DESC,phrase_hit DESC,name_hit DESC,cost,doc_id) AS duplicate_position
             FROM (SELECT ranked.*,coalesce((SELECT target_doc FROM wiki_edges
                 WHERE source_doc=ranked.doc_id AND relation='representation_of' AND target_doc IS NOT NULL
                 ORDER BY ordinal LIMIT 1),ranked.doc_id) AS representation_group
                 FROM ranked WHERE position=1) candidate) WHERE duplicate_position=1"""
-        total = db.execute(prefix + "SELECT count(*) FROM (" + chosen + ")", parameters(required)).fetchone()[0]
-    order = "exact DESC,covered DESC,local_doc_coverage DESC,name_hit DESC,cost,doc_id"
+    total = (db.execute(prefix + "SELECT count(*) FROM (" + chosen + ")", parameters(required)).fetchone()[0]
+             if deduplicate or relaxed else count(required))
+    order = "exact DESC,covered DESC,local_doc_coverage DESC,phrase_hit DESC,name_hit DESC,cost,doc_id"
     if comparison or diversify:
         direction = "json_extract(candidate.term_hits,'$[0]')" if comparison else "coalesce(nullif((SELECT json_extract(metadata,'$.tags[0]') FROM documents WHERE id=candidate.doc_id),''),candidate.doc_id)"
         chosen = "SELECT candidate.*,row_number() OVER (PARTITION BY " + direction + " ORDER BY " + order + ") AS direction_position FROM (" + chosen + ") candidate"

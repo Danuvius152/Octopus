@@ -69,6 +69,66 @@ current guarantees. Complete long-result access, sensitive-write authorization,
 health checks and per-tool policy have their own
 [capability plan](../plans/connector-capabilities.md).
 
+## Browser OAuth operations
+
+`ConnectorOAuthOperation` owns one login, independently of the dialog that
+started it. ConnectorsPage creates and retains the operation before sending
+start. It captures the original token, account generation and service identity.
+Closing during start, unmounting, replacing the operation, or changing that
+identity permanently removes its view rights. Reopening, account ABA or service
+identity ABA cannot restore them. A retired operation cannot open a tab, resume
+the waiting UI or close a newer operation's dialog.
+
+The original operation still consumes a late start response. With a login ID,
+it cancels using its original token and consumes the actual server receipt.
+Waiting-stage close shows cancellation in progress until that receipt; a success
+that won the binding lock is still success. A normal cancellation receipt already
+settles local cancellation, so there is no additional confirmation phase.
+Provider authorization remains separate from local cancellation.
+
+Only start, status and cancel use the narrow OAuth HTTP adapter, which can
+consume original-account receipts after the browser changes identity. All other
+Connector requests retain `accountFetch` admission. Server authentication and
+login ownership checks remain authoritative. Each OAuth request has a 30-second
+deadline including response-body consumption. Retirement interrupts the current
+status read and its timer, while start remains observed until its response or
+deadline because that response may contain the only login ID. Active status
+reads run at 1.5-second intervals within a five-minute polling window. An
+in-flight status request retains its independent 30-second deadline. If the
+login remains unsettled when that request finishes, expiry is checked before
+another poll and requests local cancellation.
+A cancelled receipt retains the timeout explanation, while success, error or an
+unknown outcome is reported as received.
+
+Start and cancel are never automatically replayed. A lost start response without
+an ID has no recovery operation in the current API and is not proof that no login
+was created. Start/cancel transport failure, 401/404 and local timeout are unknown
+outcomes, not cancellation success. Failed status reads continue polling within
+the original deadline and do not settle the login. An attached dialog reports
+start/cancel uncertainty and asks
+the user to inspect connections before starting again; a retired view receives
+no new status UI. These browser owners are finite and in memory, with no cleanup
+queue or persistence across a page reload.
+
+Success, terminal error and unknown outcomes with a known login ID ask the
+installation entry to observe current facts under the original account scope.
+Error can mean local saving was unconfirmed, so it does not prove installation
+absence. Leaving the view does not discard an applicable observation; changing
+accounts prevents it from committing into the new account. List synchronization
+failure remains separate from the login result.
+
+## Browser installation observations
+
+The management page, sidebar and completed OAuth flows share the finite
+`connectorInstallations` business entry. Confirmed disconnects and custom
+definition deletion remove the affected current-account installations and retire
+overlapping reads before a follow-up GET. Zustand remains the single displayed
+list, including the sidebar count and Agent settings' installation choices.
+Read failure retains known rows and reports a synchronization error; it does not
+reverse an already confirmed connection or deletion. Catalog refresh stays with
+the page. Full admission, account, timeout and view-lifetime rules belong to the
+[frontend installation contract](frontend-list-reconciliation.md#connector-安装列表).
+
 ## Refresh ownership and shutdown
 
 After each caller's current account/installation check, the manager registers a
@@ -121,9 +181,99 @@ message; none of those latter cases falsely asks the current login to reconnect.
 Only the first applied state change emits the reconnect-needed metric; every
 resource rejection remains a call-failure observation.
 
-This does not change the shared HTTP retry policy or replay a resource operation
-after authorization failure. Write idempotence and unknown external effects
-remain independently scoped work.
+Authorization rejection does not replay a resource operation. For custom APIs,
+the grant receipt settles authorization state only: an arbitrary upstream 401
+cannot prove that the business write did not take effect.
+
+## Resource HTTP operations and unknown effects
+
+GitHub, Gmail and custom tools declare retry safety at the operation boundary;
+the shared HTTP executor owns attempts, delays and the resource I/O budget.
+Typed reads and custom GET/HEAD/OPTIONS can retry 429/5xx responses, with at most
+three attempts including the first. Transport errors retain their direct-failure
+behavior. Current writes, including Gmail label changes and custom PUT/DELETE,
+have no enabled guarantee of safe replay and therefore make only one attempt.
+This does not assert that those providers' operations are necessarily
+non-idempotent; no sufficient remote deduplication contract has been established
+for the current tools. Local UUIDs and HTTP method names do not establish one.
+
+An uncertain write returns `outcome_unknown`, a bounded description of the
+original operation, its reason and a concrete check target. The caller must
+check the original result before considering another write. This covers 429,
+5xx, transport failures and unproven error responses. Built-in validation,
+permission and missing-resource rejections use their documented provider
+semantics; an arbitrary custom 4xx or redirect is still uncertain. Custom 401
+also keeps the original authorization receipt, and no provider redirect is
+followed. A missing Gmail draft alone does not prove that mail was delivered.
+There is no automatic replay queue or new persistent operation state.
+
+Each provider resource HTTP call has one 30-second budget, including network
+I/O, response-body reads, every attempt and all backoff. Async tools use the
+host loop and cancel resource I/O at the deadline; closing a per-call event loop
+could instead wait for outstanding DNS threads. The executor checks a monotonic
+deadline before another attempt and after waiting. `Retry-After` accepts seconds
+or HTTP-date and is never shortened to fit. If the required wait exhausts the
+remaining budget, the tool returns the reason without waiting or resending.
+Safe reads otherwise use bounded exponential backoff. GitHub 403/429 rate limits
+also respect the primary reset time; secondary limits without a usable hint
+require at least a minute and thus exceed this budget. Ordinary GitHub permission
+403 remains distinct. HTTP-date/reset conversion uses wall time, separately from
+elapsed-time accounting.
+
+The budget belongs to a resource HTTP call, not an entire multi-request tool:
+Gmail search can make separate list and metadata calls. Host token and rejection
+callbacks keep their existing independent timeout and execute off the host loop;
+OAuth refresh ownership remains as described above. Cancellation of a waiter or
+resource I/O does not prove that an external write was cancelled.
+
+The retry policy follows [HTTP replay semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2)
+and [Retry-After](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3), with
+[GitHub's rate-limit rules](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit)
+and [Gmail's error semantics](https://developers.google.com/workspace/gmail/api/guides/handle-errors).
+General provider retry advice is not evidence of safe write replay. The current
+[GitHub issue](https://docs.github.com/en/rest/issues/issues#create-an-issue),
+[comment](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment),
+[Gmail draft creation](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.drafts/create),
+[draft lifecycle](https://developers.google.com/workspace/gmail/api/guides/drafts)
+and [label modification](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/modify)
+contracts do not establish the reliable replay capability required here.
+
+## Gmail reply drafts
+
+`create_draft.in_reply_to_message_id` is a Gmail message ID returned by
+`search`/`get`. The tool reads that message's metadata before creating a draft;
+callers do not supply RFC identifiers or construct the reference chain. The
+returned Gmail message ID must match the lookup, `threadId` must be present,
+and the original RFC Message-ID and Subject must be available. Missing or invalid required
+metadata, failed reads and conflicting subjects stop before the create request.
+Ordinary drafts retain the existing recipient, subject and body arguments.
+
+A reply submits `message.threadId` together with MIME `In-Reply-To` containing
+the parent's RFC Message-ID. `References` retains the parent's reference history
+and appends that ID. If there is no history, a parent In-Reply-To containing one
+valid identifier is retained before appending the parent ID. A multi-parent
+In-Reply-To is not substituted for reference history. Header names are case
+insensitive; legal continuation lines are unfolded, and bare CR/LF is refused.
+Received legacy ID/display-name syntax remains usable, while actual parse errors
+and damaged reference history fail before creation.
+
+An omitted reply subject inherits the original. An explicit subject must match
+it exactly; the tool does not assume Gmail normalizes a changed subject or a
+new `Re:` prefix into the same thread. Explicit `to` always wins. If omitted,
+the tool selects the original Reply-To, otherwise From, and requires at least
+one mailbox. An empty address group fails before creation; an unusable Reply-To
+does not fall back to From. Original To/Cc/Bcc are never copied into the reply. Standalone drafts
+require `to`; an omitted subject is empty. Creating a draft does not send mail,
+and `send_draft` retains its existing confirmation instructions.
+
+These rules implement [Gmail's thread requirements](https://developers.google.com/workspace/gmail/api/guides/threads)
+and the received-header/reply rules in [RFC 5322](https://www.rfc-editor.org/rfc/rfc5322.html#section-3.6.4).
+References validation uses the stdlib msg-id tokenizer inside the Gmail codec:
+[Python 3.12](https://raw.githubusercontent.com/python/cpython/3.12/Lib/email/headerregistry.py)
+does not parse References as an ID list, so relying only on header diagnostics
+would silently vary across supported Python versions. The narrow dependency
+reuses the existing grammar and accepts comments/quoted IDs rather than splitting
+on spaces or angle brackets. It adds no provider retry or compatibility state.
 
 ## Navigation and verification
 

@@ -7,6 +7,7 @@ import {
   loadResearchSnapshot,
 } from "../lib/hydrateSession";
 import { decodeWsEvent, type WsEvent } from "../lib/wsEvents";
+import { readResearchEvidence } from "../lib/researchEvidence";
 import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList } from "../lib/sessionList";
 import { refreshAgents } from "../lib/refreshAgents";
@@ -482,6 +483,8 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         id: data.research_id,
         status: "completed",
         phase: "done",
+        evidence: data.evidence_state === "available" ? readResearchEvidence(data.evidence) : null,
+        evidence_state: data.evidence_state === "available" ? "available" : "unavailable",
         ...(typeof data.report_path === "string" ? { report_path: data.report_path } : {}),
         ...("sources" in data ? { sources: data.sources } : {}),
         ...("verified" in data ? { verified: data.verified } : {}),

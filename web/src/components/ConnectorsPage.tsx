@@ -1,18 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { IconArrowLeft, IconBolt, IconPlus, IconX } from "@tabler/icons-react";
 import {
-  cancelConnectorOAuth,
   createCustomConnector,
-  deleteCustomConnector,
-  deleteInstallation,
   fetchCatalog,
-  fetchInstallations,
   getOAuthClient,
-  pollConnectorOAuth,
   setOAuthClient,
-  startConnectorOAuth,
 } from "../api/connectors";
 import { useSessionStore } from "../stores/sessionStore";
+import { connectorInstallations } from "../lib/connectorInstallations";
+import { ConnectorOAuthOperation, type ConnectorOAuthFlow } from "../lib/connectorOAuth";
 import { PageHeader } from "./PageHeader";
 import { Button } from "./ui/button";
 import {
@@ -24,13 +20,6 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-
-type Flow =
-  | { kind: "idle" }
-  | { kind: "starting" }
-  | { kind: "waiting"; loginId: string }
-  | { kind: "cancelling" }
-  | { kind: "error"; message: string };
 
 type View = "catalog" | "setup" | "custom";
 
@@ -50,16 +39,17 @@ export function ConnectorsPage({
   onToggleSidebar: () => void;
 }) {
   const token = useSessionStore((s) => s.token);
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const catalog = useSessionStore((s) => s.connectorCatalog);
   const setCatalog = useSessionStore((s) => s.setConnectorCatalog);
   const installations = useSessionStore((s) => s.connectorInstallations);
-  const setInstallations = useSessionStore((s) => s.setConnectorInstallations);
-  const removeInstallation = useSessionStore((s) => s.removeConnectorInstallation);
+  const installationRead = useSessionStore((s) => s.connectorRead);
+  const [installationError, setInstallationError] = useState<string | null>(null);
 
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<View>("catalog");
-  const [flow, setFlow] = useState<Flow>({ kind: "idle" });
-  const polling = useRef<string | null>(null);
+  const [flow, setFlow] = useState<ConnectorOAuthFlow>({ kind: "idle" });
+  const operation = useRef<ConnectorOAuthOperation | null>(null);
 
   // Setup-a-built-in form.
   const [setupKind, setSetupKind] = useState("");
@@ -92,19 +82,20 @@ export function ConnectorsPage({
   useEffect(() => {
     if (!token) return;
     refreshCatalog();
-    fetchInstallations(token).then(setInstallations).catch(() => {});
+    void connectorInstallations.refresh();
+    setInstallationError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [token, accountGeneration]);
 
-  useEffect(() => {
-    if (!open) polling.current = null;
-  }, [open]);
-  useEffect(() => () => { polling.current = null; }, [token]);
+  useEffect(() => () => { operation.current?.retire(); }, []);
 
   const resetDialog = () => {
+    operation.current?.retire();
+    operation.current = null;
     setView("catalog");
     setFlow({ kind: "idle" });
     setFormError(null);
+    setInstallationError(null);
     setClientId("");
     setClientSecret("");
     setCustom({ ...blankCustom });
@@ -112,47 +103,14 @@ export function ConnectorsPage({
 
   // --- OAuth install (popup + poll) ---------------------------------------
 
-  const connect = async (kind: string) => {
-    polling.current = null;
-    setFlow({ kind: "starting" });
-    try {
-      const { login_id, authorize_url } = await startConnectorOAuth(token, kind);
-      window.open(authorize_url, "_blank", "noopener,noreferrer");
-      setFlow({ kind: "waiting", loginId: login_id });
-      polling.current = login_id;
-      const deadline = Date.now() + 5 * 60 * 1000;
-      while (polling.current === login_id && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 1500));
-        if (polling.current !== login_id) return;
-        let st;
-        try {
-          st = await pollConnectorOAuth(token, login_id);
-        } catch {
-          continue;
-        }
-        if (polling.current !== login_id) return;
-        if (st.status === "success") {
-          const connected = await fetchInstallations(token);
-          if (polling.current !== login_id) return;
-          setInstallations(connected);
-          polling.current = null;
-          setFlow({ kind: "idle" });
-          setOpen(false);
-          return;
-        }
-        if (st.status === "error" || st.status === "cancelled") {
-          polling.current = null;
-          setFlow({ kind: "error", message: st.message || "Sign-in failed." });
-          return;
-        }
-      }
-      if (polling.current === login_id) {
-        polling.current = null;
-        setFlow({ kind: "error", message: "Timed out waiting for sign-in." });
-      }
-    } catch (e) {
-      setFlow({ kind: "error", message: (e as Error).message });
-    }
+  const connect = (kind: string) => {
+    operation.current?.retire();
+    const login = new ConnectorOAuthOperation(setFlow, () => {
+      setFlow({ kind: "idle" });
+      setOpen(false);
+    });
+    operation.current = login;
+    void login.start(kind);
   };
 
   // --- configure a built-in connector's OAuth client ----------------------
@@ -214,50 +172,38 @@ export function ConnectorsPage({
   };
 
   const removeCustom = async (kind: string) => {
+    const original = useSessionStore.getState();
+    setInstallationError(null);
     try {
-      await deleteCustomConnector(token, kind);
+      await connectorInstallations.removeCustomDefinition(kind);
+      if (useSessionStore.getState().accountGeneration !== original.accountGeneration) return;
       await refreshCatalog();
-    } catch {
-      // ignore; a refetch reconciles
+    } catch (error) {
+      if (useSessionStore.getState().accountGeneration === original.accountGeneration) {
+        setInstallationError(`Could not remove connector definition: ${(error as Error).message}`);
+      }
     }
   };
 
-  const handleOpenChange = async (v: boolean) => {
+  const handleOpenChange = (v: boolean) => {
     if (!v && flow.kind === "cancelling") return;
     if (!v && flow.kind === "waiting") {
-      const start = useSessionStore.getState();
-      const current = () => {
-        const store = useSessionStore.getState();
-        return store.accountGeneration === start.accountGeneration && store.dispatchGeneration === start.dispatchGeneration;
-      };
-      polling.current = null;
-      setFlow({ kind: "cancelling" });
-      try {
-        const result = await cancelConnectorOAuth(token, flow.loginId);
-        if (!current()) return;
-        if (result.status === "success") {
-          const connected = await fetchInstallations(token);
-          if (!current()) return;
-          setInstallations(connected);
-        } else if (result.status !== "cancelled") {
-          setFlow({ kind: "error", message: result.message || "Connection state could not be confirmed." });
-          return;
-        }
-      } catch (error) {
-        if (current()) setFlow({ kind: "error", message: (error as Error).message });
-        return;
-      }
+      operation.current?.cancel();
+      return;
     }
     if (!v) resetDialog();
     setOpen(v);
   };
 
   const disconnect = async (id: string) => {
+    const original = useSessionStore.getState();
+    setInstallationError(null);
     try {
-      await deleteInstallation(token, id);
-      removeInstallation(id);
-    } catch {
-      /* leave the row; a refetch reconciles */
+      await connectorInstallations.disconnect(id);
+    } catch (error) {
+      if (useSessionStore.getState().accountGeneration === original.accountGeneration) {
+        setInstallationError(`Could not disconnect: ${(error as Error).message}`);
+      }
     }
   };
 
@@ -312,6 +258,11 @@ export function ConnectorsPage({
       />
 
       <div className="page-body">
+        {!open && installationError && <p role="alert" className="mb-3 text-sm text-destructive">{installationError}</p>}
+        {installationRead.error && <p role="alert" className="mb-3 text-sm text-destructive">
+          Connections not synchronized: {installationRead.error}
+          <button className="ml-2 underline" onClick={() => void connectorInstallations.refresh()}>Refresh connections</button>
+        </p>}
         <div className="connector-list grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {installations.map((inst) => (
             <div
@@ -404,6 +355,7 @@ export function ConnectorsPage({
 
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="connector-catalog">
+          {installationError && <p role="alert" className="text-sm text-destructive">{installationError}</p>}
           {view === "catalog" && (
             <>
               <DialogHeader>

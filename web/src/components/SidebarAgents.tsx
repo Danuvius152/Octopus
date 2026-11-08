@@ -11,7 +11,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import { reorderAgentPins, setAgentPinned } from "../api/agents";
-import { fetchInstallations } from "../api/connectors";
+import { connectorInstallations } from "../lib/connectorInstallations";
 import { selectSession } from "../lib/selectSession";
 import { loadSessionSnapshot } from "../lib/hydrateSession";
 import { sidebarAgents } from "../lib/sidebarPins";
@@ -54,9 +54,7 @@ export function SidebarAgents() {
   const mainView = useSessionStore((s) => s.mainView);
   const openAgentForm = useSessionStore((s) => s.openAgentForm);
   const setAvailableBackends = useSessionStore((s) => s.setAvailableBackends);
-  const setConnectorInstallations = useSessionStore(
-    (s) => s.setConnectorInstallations
-  );
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const showDelegations = useSessionStore((s) => s.showDelegations);
   const pendingQuestions = useSessionStore((s) => s.pendingQuestions);
 
@@ -103,11 +101,12 @@ export function SidebarAgents() {
         if (d?.tool_policy) useSessionStore.getState().setBackendToolPolicies(d.tool_policy);
       })
       .catch(() => {});
-    // Connector installations are global; the agent form reads them to render
-    // each agent's per-connector toggles.
-    fetchInstallations(token).then(setConnectorInstallations).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
+
+  useEffect(() => {
+    if (token) void connectorInstallations.refresh();
+  }, [token, accountGeneration]);
 
   // Keep a valid agent selected — but do NOT unfold it. Every agent starts
   // folded, on every load: the sidebar's job at rest is to show what agents

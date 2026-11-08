@@ -3,6 +3,8 @@ import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
 import { createResearch } from "../lib/research";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useStore } from "zustand";
+import { chatDraft, prefillChatDraft } from "../lib/chatDraft";
 import {
   IconArrowUp,
   IconCpu,
@@ -131,7 +133,12 @@ export function ChatView({
   onToggleSidebar,
   onOpenSchedules,
 }: Props) {
-  const [input, setInput] = useState("");
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
+  const draftOwner = useSessionStore((s) => s.identity?.user_id);
+  const textDraft = chatDraft();
+  const { text: input, saveError } = useStore(textDraft.store);
+  const setInput = useCallback((text: string) => textDraft.edit(text), [textDraft]);
+  useEffect(() => () => textDraft.clearConsumed(), [textDraft]);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [restoredInput, setRestoredInput] = useState<{ sessionId: string; clientId: string } | null>(null);
@@ -145,7 +152,7 @@ export function ChatView({
     recoveryOfClientId?: string;
     uncertain?: { id: string };
     confirming?: boolean;
-    compactDraft?: { accountGeneration: number; revision: number };
+    compactDraft?: { accountGeneration: number; revision: number; version: number };
   }[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Fork dialog (session-rewind.md §6.1-6.2). `null` = closed; `{}` = the
@@ -165,7 +172,6 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const composerRevision = useRef(0);
   const compactSending = useRef<AbortController | null>(null);
   useEffect(() => () => {
@@ -192,7 +198,7 @@ export function ChatView({
       setRestoredInput((draft) => draft && sessionId && draft.sessionId !== sessionId ? draft : null);
       setRestoredQuestion((draft) => draft && sessionId && draft.sessionId !== sessionId ? draft : null);
       if (!sessionId || sessionId === activeSessionId) {
-        setInput(""); clearAttachments(); setRequiredAttachmentCount(0); setSubmissionError(""); setHistory(HISTORY_IDLE);
+        clearAttachments(); setRequiredAttachmentCount(0); setSubmissionError(""); setHistory(HISTORY_IDLE);
       }
     };
     const deleted = sessionList.onDeleted(discard);
@@ -235,7 +241,7 @@ export function ChatView({
     setHistory(HISTORY_IDLE);
     setRestoredInput({ sessionId: activeSessionId, clientId: saved.client_request_id });
     textareaRef.current?.focus();
-  }, [activeSessionId, input, pendingAttachments, isArchived, transcriptDamaged, addFiles]);
+  }, [activeSessionId, input, pendingAttachments, isArchived, transcriptDamaged, addFiles, setInput]);
   const dispatchStates = useSessionStore((s) => s.dispatchStates);
   const chatMessages = useMemo(() => nativeChatMessages(messages,
     Object.values(activeSessionId ? subagentSnapshots[activeSessionId] || {} : {}),
@@ -343,20 +349,11 @@ export function ChatView({
   // Prefilled chat input on fork open (session-rewind.md §6.1). When the
   // active session carries a non-null fork_prefilled_prompt (the rewound user
   // message text, set in fork_metadata until the first turn), populate the
-  // input once. The ref keeps us from clobbering the user's edits, and once
-  // they send, the backend clears fork_metadata so it won't re-prefill.
-  const prefilledForRef = useRef<string | null>(null);
+  // input once, after account restoration. Saved text and newer edits take
+  // precedence; the backend clears fork_metadata after the first turn.
   useEffect(() => {
-    const prompt = activeSession?.fork_prefilled_prompt;
-    if (
-      activeSessionId &&
-      prompt &&
-      prefilledForRef.current !== activeSessionId
-    ) {
-      prefilledForRef.current = activeSessionId;
-      setInput(prompt);
-    }
-  }, [activeSessionId, activeSession?.fork_prefilled_prompt]);
+    prefillChatDraft(textDraft, activeSessionId, activeSession?.fork_prefilled_prompt);
+  }, [activeSessionId, activeSession?.fork_prefilled_prompt, draftOwner, textDraft]);
 
   const isRunning = activeSession?.status === "running";
   // Whether a message typed right now goes INTO the running turn or queues
@@ -393,7 +390,7 @@ export function ChatView({
       setRequiredAttachmentCount(recovery.attachment_ids.length);
     }
     textareaRef.current?.focus();
-  }, [activeSessionId, input.length, pendingAttachments.length, restoreAttachments]);
+  }, [activeSessionId, input.length, pendingAttachments.length, restoreAttachments, setInput]);
 
   // The body per message shape. Wrapped by `renderMessage` below, which is
   // where the hover-revealed timestamp is attached — one place, so every shape
@@ -698,11 +695,11 @@ export function ChatView({
     }
   };
 
-  const clearCompactCommand = (draft: { sessionId: string; text: string; compactDraft?: { accountGeneration: number; revision: number } }) => {
+  const clearCompactCommand = (draft: { sessionId: string; text: string; compactDraft?: { accountGeneration: number; revision: number; version: number } }) => {
     const state = useSessionStore.getState();
     if (mounted.current && draft.compactDraft && state.accountGeneration === draft.compactDraft.accountGeneration &&
         state.activeSessionId === draft.sessionId && composerRevision.current === draft.compactDraft.revision) {
-      setInput((current) => current === draft.text ? "" : current);
+      textDraft.clear(draft.compactDraft.version);
     }
   };
 
@@ -717,13 +714,14 @@ export function ChatView({
     catch (error) { setSubmissionError(error instanceof Error ? error.message : "Secure randomness is unavailable."); return; }
     const state = useSessionStore.getState();
     const draft = { id, sessionId: activeSessionId, text: input, attachments: [],
-      compactDraft: { accountGeneration: state.accountGeneration, revision: composerRevision.current } };
+      compactDraft: { accountGeneration: state.accountGeneration, revision: composerRevision.current, version: textDraft.store.getState().version } };
     const url = `${window.location.origin}/api/sessions/${encodeURIComponent(draft.sessionId)}/submissions`;
     const headers = { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" };
     const current = () => mounted.current && useSessionStore.getState().accountGeneration === draft.compactDraft.accountGeneration;
     const observer = new AbortController();
     compactSending.current = observer;
     setSubmissionError("");
+    textDraft.consume(draft.compactDraft.version);
     try {
       let reply: { accepted: boolean; message?: string; state?: string };
       try {
@@ -1382,6 +1380,7 @@ export function ChatView({
     ) : null;
 
   const savedDrafts = <div className="shrink-0 max-h-72 overflow-auto px-6">
+          {saveError && <p role="alert" className="mb-2 text-sm text-destructive">{saveError}</p>}
           {submissionError && <p role="alert" className="mb-2 text-sm text-destructive">{submissionError}</p>}
           {activeSessionId && <QuestionDraftRecovery sessionId={activeSessionId}
             composerOccupied={input.length > 0 || pendingAttachments.length > 0 || isArchived}

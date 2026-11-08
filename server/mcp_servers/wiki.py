@@ -81,8 +81,10 @@ def search(
     Read several known targets or ranges together with read_many().
     section/sections give revision-bound positions for read(); snippets are not
     reading evidence. compact is default; full adds metadata within the same
-    byte limit. lexical_partial indicates absent query terms; inspect index
-    status/errors before concluding no knowledge. directory is a literal prefix.
+    byte limit. lexical requires all term groups, not necessarily a phrase.
+    lexical_partial marks a zero-result relaxation into body-supported concepts;
+    match_explanation describes the constraints. Inspect index status/errors
+    before concluding no knowledge. directory is a literal prefix.
     All filters remain Markdown-only; read explicit HTML/TXT originals directly.
     """
     return call(

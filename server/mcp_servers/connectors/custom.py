@@ -8,14 +8,12 @@ Token fetch + reconnect handling are shared with the typed connectors.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
-import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
-
-import httpx
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -26,6 +24,9 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from server.mcp_servers.connectors._shared import (  # noqa: E402
     ConnectorContext,
     ConnectorTokenError,
+    request_failure,
+    request_with_retry,
+    response_failure,
     to_text,
     token_failure_message,
     truncate,
@@ -65,7 +66,7 @@ def _request_url(api_base: str, path: str) -> str:
 
 
 @mcp.tool(name="request")
-def request(
+async def request(
     method: str, path: str, query: dict | None = None, body: Any = None
 ) -> str:
     """Make an authenticated HTTP call to this connector's API. `method` is
@@ -74,9 +75,9 @@ def request(
     JSON body for writes. The connector's OAuth token is attached automatically.
     """
     try:
-        info = ctx.token_info()
-    except ConnectorTokenError as error:
-        return token_failure_message(error)
+        info = await asyncio.to_thread(ctx.token_info)
+    except ConnectorTokenError as token_error:
+        return token_failure_message(token_error)
     api_base = info.get("api_base")
     if not api_base:
         return "Error: connector misconfigured (no API base)."
@@ -86,35 +87,29 @@ def request(
         return f"Error: {exc}"
     token = info["access_token"]
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    for attempt in range(3):
-        try:
-            r = httpx.request(
-                method.upper(),
-                url,
-                headers=headers,
-                params=query,
-                json=body,
-                timeout=30.0,
-                follow_redirects=False,
-            )
-        except httpx.HTTPError as e:
-            return f"Error: request failed: {e}"
-        if r.status_code == 401:
-            return ctx.rejection_message(info)
-        if r.status_code in {301, 302, 303, 307, 308}:
-            return "Error: upstream redirect refused; use a path within this connector's API base."
-        if r.status_code == 429 or r.status_code >= 500:
-            if attempt < 2:
-                time.sleep(min(float(r.headers.get("Retry-After", "1") or 1), 5.0))
-                continue
-            return f"Error: upstream unavailable ({r.status_code})."
-        if r.status_code >= 400:
-            return f"Error: HTTP {r.status_code}: {r.text[:300]}"
-        try:
-            return truncate(to_text(r.json()))
-        except Exception:
-            return truncate(r.text)
-    return "Error: rate-limited; try again shortly."
+    method = method.upper()
+    retry_safe = method in {"GET", "HEAD", "OPTIONS"}
+    operation = f"{method} {url} query={query!r} body={body!r}"
+    check = f"Check the original operation's result at {url} using this provider's read tools or interface."
+    r, error = await request_with_retry(
+        method, url, retry_safe=retry_safe, operation=operation, check=check,
+        headers=headers, params=query, json=body,
+    )
+    if error:
+        return error
+    assert r is not None
+    if r.status_code == 401:
+        authorization = await asyncio.to_thread(ctx.rejection_message, info)
+        return authorization if retry_safe else request_failure(
+            authorization, retry_safe=False, operation=operation, check=check,
+        )
+    error = response_failure(r, retry_safe=retry_safe, operation=operation, check=check)
+    if error:
+        return error
+    try:
+        return truncate(to_text(r.json()))
+    except ValueError:
+        return truncate(r.text)
 
 
 if __name__ == "__main__":

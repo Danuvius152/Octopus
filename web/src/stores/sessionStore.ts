@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readResearchEvidence, type ResearchEvidence } from "../lib/researchEvidence";
 import { mergeAuxiliarySnapshot, mergeCardSnapshot } from "../lib/cardSnapshots";
 import { agentRequestIsCurrent, beginAgentRequest, canApplyAgent, endAgentRequest, recordAgentChanges, recordAgentSnapshot, type AgentRequest } from "../lib/agentUpdates";
 import { withPinOrder } from "../lib/sidebarPins";
@@ -334,9 +335,7 @@ interface SessionStore {
   connectorCatalog: ConnectorCatalogEntry[];
   setConnectorCatalog: (c: ConnectorCatalogEntry[]) => void;
   connectorInstallations: ConnectorInstallationInfo[];
-  setConnectorInstallations: (c: ConnectorInstallationInfo[]) => void;
-  upsertConnectorInstallation: (c: ConnectorInstallationInfo) => void;
-  removeConnectorInstallation: (id: string) => void;
+  connectorRead: ListReadState;
 
   // Text the model is streaming right now, per session, accumulated from
   // `assistant_delta` frames and dropped the moment the completed block
@@ -462,6 +461,8 @@ export interface ResearchJob {
   sources?: string[];
   verified?: number;
   unverified?: number;
+  evidence?: ResearchEvidence | null;
+  evidence_state?: "available" | "unavailable";
   delivery_receipt?: {
     request_id: string;
     version: number;
@@ -472,6 +473,11 @@ export interface ResearchJob {
   } | null;
   error?: string | null;
   injection_status?: "pending" | "delivered" | "failed" | "unknown";
+}
+
+function normalizeResearchEvidence<T extends Partial<ResearchJob>>(job: T): T {
+  const evidence = job.evidence_state === "available" ? readResearchEvidence(job.evidence) : null;
+  return { ...job, evidence, evidence_state: evidence ? "available" : "unavailable" };
 }
 
 // HTTP responses are complete; live events may omit limits and delivery facts.
@@ -938,27 +944,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   connectorCatalog: [],
   setConnectorCatalog: (connectorCatalog) => set({ connectorCatalog }),
   connectorInstallations: [],
-  setConnectorInstallations: (connectorInstallations) =>
-    set({ connectorInstallations }),
-  upsertConnectorInstallation: (c) =>
-    set((s) => {
-      const idx = s.connectorInstallations.findIndex((i) => i.id === c.id);
-      const connectorInstallations =
-        idx >= 0
-          ? [
-              ...s.connectorInstallations.slice(0, idx),
-              c,
-              ...s.connectorInstallations.slice(idx + 1),
-            ]
-          : [...s.connectorInstallations, c];
-      return { connectorInstallations };
-    }),
-  removeConnectorInstallation: (id) =>
-    set((s) => ({
-      connectorInstallations: s.connectorInstallations.filter(
-        (i) => i.id !== id
-      ),
-    })),
+  connectorRead: unreadList(),
 
   wikiJobs: {},
   wikiJobReadErrors: {},
@@ -1171,6 +1157,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   }),
   upsertResearch: (sessionId, job) =>
     set((s) => {
+      if (job.status === "completed" || "evidence" in job) job = normalizeResearchEvidence(job);
       const current = s.research[sessionId] || [];
       const idx = current.findIndex((j) => j.id === job.id);
       if (idx < 0) {
@@ -1195,7 +1182,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }),
   setResearch: (sessionId, jobs, baseline, advanceOnly) => set((s) => {
     const current = s.research[sessionId] || [];
-    const rows = mergeAuxiliarySnapshot(jobs, current, baseline, researchUpdates, advanceOnly).map((item) => {
+    const rows = mergeAuxiliarySnapshot(jobs.map(normalizeResearchEvidence), current, baseline, researchUpdates, advanceOnly).map((item) => {
       const before = current.find((row) => row.id === item.id)?.delivery_receipt;
       const receipt = item.delivery_receipt;
       if (!receipt || before?.request_id !== receipt.request_id || !before.browser_confirmed_version ||

@@ -164,6 +164,7 @@ const definitions = [
   event("research_started", { ...inSession, research_id: id, question: text }),
   event("research_progress", { ...inSession, research_id: id, phase: maybeText, detail: optional(text), counts: optional(numberMap) }),
   event("research_completed", { ...inSession, research_id: id, report_path: maybeText, sources: optional(array(text)),
+    evidence: optional(nullable(record)), evidence_state: optional(text),
     verified: optional(integer), unverified: optional(integer), injection_status: optional(oneOf("pending", "delivered", "failed", "unknown")) }),
   event("research_failed", { ...inSession, research_id: id, status: optional(oneOf("failed", "cancelled", "interrupted")), error: maybeText }),
   event("research_delivery", { ...inSession, research_id: id, injection_status: oneOf("pending", "delivered", "failed", "unknown"),

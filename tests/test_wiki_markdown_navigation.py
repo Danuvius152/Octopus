@@ -88,13 +88,19 @@ def test_format_filter_precedes_lexical_relaxation_and_representation_groups(sto
     for intent, view in product([None, "question", "overview", "compare"], VIEWS):
         result = store.search("Realtime calibration", intent=intent, view=view)
         assert result["total"] == 1 and result["items"][0]["path"] == "summary.md"
-    # A complete HTML match cannot prevent partial Markdown matches from
-    # becoming candidates when no Markdown covers every requested term.
+    # A complete HTML match cannot prevent supported partial Markdown matches
+    # when no Markdown covers every requested term.
     write(store, "legacy.html", "<p>Realtime calibration invisiblefullterm</p>")
     for intent, view in product([None, "question", "overview", "compare"], VIEWS):
-        result = store.search("Realtime invisiblefullterm", intent=intent, view=view)
+        result = store.search("Realtime calibration invisiblefullterm", intent=intent, view=view)
         assert result["total"] == 1 and result["items"][0]["path"] == "summary.md"
         assert result["match_mode"] == ("comparison" if intent == "compare" else "lexical_partial")
+    # One incidental ordinary word is insufficient for question/overview.
+    # Comparison retains its independent cross-document candidate policy.
+    for intent, view in product([None, "question", "overview", "compare"], VIEWS):
+        result = store.search("Realtime invisiblefullterm", intent=intent, view=view)
+        assert result["total"] == (1 if intent == "compare" else 0)
+        assert [item["path"] for item in result["items"]] == (["summary.md"] if intent == "compare" else [])
 
 
 @pytest.mark.parametrize("view", VIEWS)

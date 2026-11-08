@@ -20,11 +20,15 @@ import asyncio
 import json
 import logging
 import os
+import re
+import stat
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+from pydantic import ValidationError
 
 from ..aio import complete_cleanup
 from ..config import settings
@@ -55,6 +59,7 @@ from ..sessions.submission import (
     receipt_for_input,
 )
 from ..workspace import paths_for
+from .evidence import MAX_EVIDENCE_BYTES, ResearchEvidence
 from .orchestrator import (
     ResearchLimits,
     ResearchProgress,
@@ -383,7 +388,8 @@ class ResearchManager:
         except ResearchSynthesisError as exc:
             evidence = os.path.join(_research_dir(session.user_id), job_id, "synthesis-failure.json")
             with open(evidence, "w", encoding="utf-8") as handle:
-                json.dump({"error": str(exc), **asdict(exc.partial)}, handle, ensure_ascii=False, indent=2)
+                json.dump({"error": str(exc), **asdict(exc.partial), "evidence": exc.partial.evidence.model_dump()},
+                          handle, ensure_ascii=False, indent=2)
             await self._finalize_failed(job_id, session_id, "failed", str(exc))
         except TimeoutError:
             if report is not None or self._closing:
@@ -412,8 +418,9 @@ class ResearchManager:
     ) -> None:
         assert self.db is not None
         report_path = self._write_report(job_id, report.report, user_id)
-        if report_path is None:
-            await self._finalize_failed(job_id, session_id, "failed", "Research report could not be saved")
+        summary_saved = self._write_evidence(job_id, session_id, report.evidence, user_id)
+        if report_path is None or not summary_saved:
+            await self._finalize_failed(job_id, session_id, "failed", "Research report and evidence could not both be saved")
             return
         won, _ = await self.db.confirm_research_outcome(
             job_id, "completed", cost=report.cost,
@@ -421,6 +428,9 @@ class ResearchManager:
         )
         if not won:
             return
+        row = await self.db.get_research_job(job_id)
+        assert row is not None
+        projection = await self.public_job(row)
         await self._broadcast({
             "type": "research_completed",
             "session_id": session_id,
@@ -430,6 +440,8 @@ class ResearchManager:
             "unverified": sum(getattr(f, "verification", "unverified") != "verified" for f in report.findings),
             "injection_status": "pending",
             "report_path": report_path,
+            "evidence": projection["evidence"],
+            "evidence_state": projection["evidence_state"],
         })
         try:
             await self._inject_report(job_id, session_id, question, report)
@@ -652,10 +664,24 @@ class ResearchManager:
                 task.result()
 
     def _write_report(self, job_id: str, report: str, user_id: str | None) -> str | None:
+        path = os.path.join(paths_for(user_id).research, f"{job_id}.md")
+        return path if self._write_material(path, report) else None
+
+    def _write_evidence(self, job_id: str, session_id: str, evidence: ResearchEvidence, user_id: str | None) -> bool:
+        path = os.path.join(paths_for(user_id).research, job_id, "evidence.json")
+        payload = json.dumps({"job_id": job_id, "session_id": session_id, "user_id": user_id,
+                              "evidence": evidence.model_dump()}, ensure_ascii=False)
+        if len(payload.encode("utf-8")) > MAX_EVIDENCE_BYTES:
+            logger.error("research %s: evidence exceeds its size limit", job_id)
+            return False
+        return self._write_material(path, payload)
+
+    @staticmethod
+    def _write_material(path: str, text: str) -> bool:
         try:
-            path = os.path.join(_research_dir(user_id), f"{job_id}.md")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write(report)
+                fh.write(text)
                 fh.flush()
                 os.fsync(fh.fileno())
             directory = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
@@ -663,10 +689,46 @@ class ResearchManager:
                 os.fsync(directory)
             finally:
                 os.close(directory)
-            return path
+            return True
         except Exception:
-            logger.exception("research %s: could not write report file", job_id)
-            return None
+            logger.exception("research: could not write material %s", path)
+            return False
+
+    async def public_job(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Read an original job's bounded material; never infer a new outcome.
+
+        The caller checks access to the session. The persisted session binding,
+        fixed job path and envelope independently bind the file to its owner.
+        Missing old or damaged material is explicit, clearing cached evidence.
+        """
+        public = {key: value for key, value in row.items() if key != "knowledge_context"}
+        public.update(evidence=None, evidence_state="unavailable")
+        if row["status"] != "completed" or self.db is None or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", row["id"]):
+            return public
+        binding = await self.db.get_session_binding(row["session_id"])
+        if binding is None:
+            return public
+        root = paths_for(binding["user_id"]).research.resolve()
+        path = root / row["id"] / "evidence.json"
+        try:
+            if not path.resolve().is_relative_to(root):
+                return public
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    return public
+                content = handle.read(MAX_EVIDENCE_BYTES + 1)
+            if len(content) > MAX_EVIDENCE_BYTES:
+                return public
+            envelope = json.loads(content)
+            if (not isinstance(envelope, dict) or envelope.get("job_id") != row["id"]
+                    or envelope.get("session_id") != row["session_id"] or envelope.get("user_id") != binding["user_id"]):
+                return public
+            evidence = ResearchEvidence.model_validate(envelope.get("evidence"), context="stored")
+        except (OSError, ValueError, UnicodeError, ValidationError, RecursionError):
+            return public
+        public.update(evidence=evidence.model_dump(), evidence_state="available")
+        return public
 
     async def _broadcast(self, msg: dict[str, Any]) -> None:
         if self.session_mgr is not None:

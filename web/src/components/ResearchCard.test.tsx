@@ -9,6 +9,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 
 import { ResearchCard } from "./ResearchCard";
 import { useSessionStore, type ResearchJob } from "../stores/sessionStore";
+import { handleWsMessage } from "../hooks/useWebSocket";
+import evidenceSamples from "../lib/researchEvidenceFixtures.json";
 
 function job(overrides: Partial<ResearchJob> = {}): ResearchJob {
   return {
@@ -36,6 +38,46 @@ afterEach(() => {
 });
 
 describe("ResearchCard", () => {
+  it.each(["all_failed", "refuted"] as const)("retains actual %s evidence through WS validation, store and card", (sample) => {
+    useSessionStore.getState().setResearch("s1", [job()]);
+    handleWsMessage({ type: "research_completed", session_id: "s1", research_id: "r1",
+      evidence_state: "available", evidence: evidenceSamples[sample], verified: 9, sources: ["stale source"] });
+    render(<ResearchCard sessionId="s1" />);
+    expect(screen.getByText(/delivery pending/)).toBeTruthy();
+    expect(screen.queryByText(/9 verified findings/)).toBeNull();
+    if (sample === "all_failed") {
+      expect(screen.getByText(/All searches failed/)).toBeTruthy();
+      expect(screen.getByText(/safety: 0 finding.*controlled provider refusal/)).toBeVisible();
+      expect(screen.getByText(/cost: 0 finding.*controlled provider refusal/)).toBeVisible();
+    } else {
+      expect(screen.getByText(/Refuted claims are excluded/)).toBeTruthy();
+      expect(screen.getByText(/Fails under load.*above 100 requests.*https:\/\/counter.test\/load/)).toBeTruthy();
+      expect(screen.getByText(/failed.*lost response/)).toBeTruthy();
+      expect(screen.getByText(/all 3 scheduled votes/)).toBeTruthy();
+    }
+  });
+
+  it.each([undefined, null, { version: 999 }, { version: 1, claims: "damaged" }])("clears cached evidence on an unavailable completion: %s", (evidence) => {
+    useSessionStore.getState().setResearch("s1", [job({ status: "completed", evidence_state: "available",
+      evidence: evidenceSamples.all_failed as ResearchJob["evidence"] })]);
+    const view = render(<ResearchCard sessionId="s1" />);
+    expect(screen.getByText(/All searches failed/)).toBeTruthy();
+    act(() => handleWsMessage({ type: "research_completed", session_id: "s1", research_id: "r1", evidence_state: "available", evidence }));
+    expect(screen.getByText(/Evidence unknown or unavailable/)).toBeTruthy();
+    expect(screen.queryByText(/All searches failed/)).toBeNull();
+    view.unmount();
+  });
+
+  it("clears unavailable snapshot evidence while retaining the completed job and delivery fact", () => {
+    useSessionStore.getState().setResearch("s1", [job({ status: "completed", evidence_state: "available",
+      evidence: evidenceSamples.refuted as ResearchJob["evidence"], injection_status: "delivered" })]);
+    render(<ResearchCard sessionId="s1" />);
+    act(() => useSessionStore.getState().setResearch("s1", [job({ status: "completed", evidence_state: "unavailable", evidence: null, injection_status: "delivered" })]));
+    expect(screen.getByText(/Evidence unknown or unavailable/)).toBeTruthy();
+    expect(screen.getByText(/Report accepted for follow-up; processing unconfirmed/)).toBeTruthy();
+    expect(screen.queryByText(/Refuted claims are excluded/)).toBeNull();
+  });
+
   it("shows a rejected cancellation without changing the research outcome", async () => {
     fetchMock.mockResolvedValue(Response.json({ detail: "Research control unavailable" }, { status: 503 }));
     useSessionStore.setState({ research: { s1: [job()] } });
@@ -64,7 +106,8 @@ describe("ResearchCard", () => {
     });
     render(<ResearchCard sessionId="s1" />);
     expect(screen.getByText(/Report accepted for follow-up; processing unconfirmed/)).toBeTruthy();
-    expect(screen.getByText(/3 verified findings/)).toBeTruthy();
+    expect(screen.queryByText(/3 verified findings/)).toBeNull();
+    expect(screen.getByText(/Evidence unknown or unavailable/)).toBeTruthy();
     expect(screen.queryByTitle("Cancel research")).toBeNull();
   });
 

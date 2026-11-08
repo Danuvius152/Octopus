@@ -6,7 +6,7 @@
 
 | Content | Owner |
 | --- | --- |
-| Role, collaboration and delivery behavior | Saved agent persona; [agent-prompts.md](../agent-prompts.md) is a copyable snapshot |
+| Role, collaboration and delivery behavior | Saved agent persona, edited through [Agent settings](../user-guide.md#保存-one-line-role-和-system-prompt) |
 | Current engineering and operational contracts | Current guides and `implemented/` contracts; unfinished changes in `plans/`, found through [the documentation index](../README.md) |
 | Stable user preferences, role methods and a small number of project entry points | The responsible role's private memory; shared memory only for agreements that actually apply across roles |
 | Tool parameters, live authorization and maintenance scope | Current tool descriptions, operation cards and assignments |

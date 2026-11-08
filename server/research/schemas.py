@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .evidence import EvidenceBounds, ResearchEvidence, VoteEvidence
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 
@@ -87,8 +89,10 @@ def search_prompt(angle: str, question: str, max_findings: int) -> str:
     )
 
 
-def parse_findings(text: str, *, angle: str, max_findings: int) -> list[Finding]:
+def parse_search(text: str, *, angle: str, max_findings: int) -> tuple[list[Finding], bool] | None:
     val = _extract_json(text)
+    if not isinstance(val, list):
+        return None
     out: list[Finding] = []
     if isinstance(val, list):
         for item in val:
@@ -104,9 +108,8 @@ def parse_findings(text: str, *, angle: str, max_findings: int) -> list[Finding]
                         angle=angle,
                     )
                 )
-            if len(out) >= max_findings:
-                break
-    return out
+    # Only an actual empty array means a successful search without material.
+    return (out[:max_findings], len(out) > max_findings) if out or not val else None
 
 
 # ------------------------------------------------------------------ dedup + rank
@@ -145,7 +148,9 @@ def verify_prompt(claim: str, url: str, question: str) -> str:
     return (
         "Fact-check the CLAIM using your web tools. Actively search for evidence "
         "that CONTRADICTS it. Return ONLY a JSON object with keys "
-        '"refuted" (true/false), "verified" (true/false), and "note" (one short sentence). Mark refuted '
+        '"refuted" (true/false), "verified" (true/false), "note" (reason), '
+        '"conditions" (limits or exceptions), and "sources" (array of URLs for the '
+        'supporting or contradicting evidence actually found, empty if none). Mark refuted '
         "true ONLY if you find credible contradicting evidence; if it checks "
         "out or is merely unverifiable, refuted is false. Mark verified true "
         "ONLY when credible evidence positively supports the claim; an absence "
@@ -174,22 +179,33 @@ def positively_verified(text: str) -> bool:
     return isinstance(val, dict) and val.get("verified") is True and parse_verdict(text) is False
 
 
+def parse_vote(text: str, error: str | None, bounds: EvidenceBounds) -> VoteEvidence:
+    val = _extract_json(text)
+    if error or parse_verdict(text) is None or not isinstance(val, dict):
+        return VoteEvidence(status="failed", note=bounds.text(error or "Invalid verification output", 256))
+    urls = val.get("sources")
+    sources = [url.strip() for url in urls if isinstance(url, str) and url.startswith(("https://", "http://"))] if isinstance(urls, list) else []
+    if len(sources) > 3:
+        bounds.omitted = True
+    note, conditions = val.get("note"), val.get("conditions")
+    return VoteEvidence(status="refute" if parse_verdict(text) else "support" if positively_verified(text) else "unverified",
+        note=bounds.text(note if isinstance(note, str) else "Reason not provided", 256),
+        conditions=bounds.text(conditions if isinstance(conditions, str) else "", 256),
+        sources=[bounded for url in sources[:3] if (bounded := bounds.url(url))])
+
+
 # ------------------------------------------------------------------ synthesize
 
 
-def synthesize_prompt(question: str, findings: list[Finding]) -> str:
-    bullets = "\n".join(
-        f"- [{f.verification}] {f.claim}" + (f"  [source: {f.url}]" if f.url else "")
-        for f in findings
-    )
-    if not bullets:
-        bullets = "(no findings)"
+def synthesize_prompt(question: str, evidence: ResearchEvidence) -> str:
     return (
         "Write a concise, well-structured research report that answers the "
-        "QUESTION using ONLY the FINDINGS below. Each finding has a verification "
+        "QUESTION using ONLY the EVIDENCE below. Each claim has a verification "
         "status: explicitly qualify unverified findings; failed verification or "
         "absence of refutation is not supporting evidence. Cite sources inline "
         "as [url]. If the findings are insufficient, say so plainly. Use "
-        "Markdown.\n\n"
-        f"QUESTION: {question}\n\nFINDINGS:\n{bullets}"
+        "Markdown. Refuted claims must NOT be recommendations: explain their "
+        "counterevidence, conditions and disposition. Preserve search failures "
+        "and evidence gaps. Counts of votes or angles do not prove independent sources.\n\n"
+        f"QUESTION: {question}\n\nEVIDENCE:\n{evidence.markdown()}"
     )

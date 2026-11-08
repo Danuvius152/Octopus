@@ -82,7 +82,7 @@ async def test_each_consumer_reports_only_its_own_grant(client, monkeypatch, con
                 token_set=OAuthTokenSet("B", None, time.time() + 3600), user_id=owner)
             assert updated["id"] == inst["id"]
             if change == "concurrent":
-                result = await asyncio.to_thread(tool)
+                result = await tool()
                 assert not result.startswith("Error:")
         elif change == "delete":
             await manager.delete_installation(inst["id"], owner)
@@ -90,18 +90,19 @@ async def test_each_consumer_reports_only_its_own_grant(client, monkeypatch, con
             await manager.db.update_user_field(owner, disabled_at="now")
         before = await manager.db.get_connector_installation(inst["id"])
 
-    def resource(method, url, **kwargs):
-        calls.append(kwargs["headers"]["Authorization"])
-        if kwargs["headers"]["Authorization"] == "Bearer B":
+    async def resource(request):
+        calls.append(request.headers["Authorization"])
+        if request.headers["Authorization"] == "Bearer B":
             return httpx.Response(200, json=[] if consumer is github else {"labels": [], "ok": True})
-        asyncio.run_coroutine_threadsafe(change_authority(), loop).result(3)
+        await change_authority()
         return httpx.Response(401)
 
     monkeypatch.setattr(httpx, "get", lambda url, **kw: callback("GET", url, **kw))
     monkeypatch.setattr(httpx, "post", lambda url, **kw: callback("POST", url, **kw))
-    monkeypatch.setattr(httpx, "request", resource)
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original_client(**kw, transport=httpx.MockTransport(resource)))
     tool = github.list_repos if consumer is github else gmail.list_labels if consumer is gmail else lambda: custom.request("GET", "/items")
-    output = await asyncio.to_thread(tool)
+    output = await tool()
     assert calls == (["Bearer A", "Bearer B"] if change == "concurrent" else ["Bearer A"])
     after = await manager.db.get_connector_installation(inst["id"])
     if change == "none":

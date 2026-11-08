@@ -140,12 +140,12 @@ CurrentUser = Annotated[dict, Depends(current_user)]
 
 async def scope_user_id(
     request: Request,
+    manager: UserMgr,
     creds: _BearerCreds,
     token: _QueryToken = None,
 ) -> str | None:
     """Resolve a current account for both human and authorized runtime requests."""
     presented = _presented(request, creds, token)
-    manager = get_user_manager()
     user = await manager.resolve_token(presented)
     if user is not None:
         return user["id"]

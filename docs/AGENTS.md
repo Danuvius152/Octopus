@@ -82,5 +82,5 @@ links and anchors, both generated indexes and `git diff --check`. Follow
 
 Prompt text that reaches a model can change behavior. Identify the actual
 runtime source and verify affected representative tasks when applying it.
-[agent-prompts.md](agent-prompts.md) is a copyable snapshot; editing it alone
-does not update saved agent settings. Keep unchanged settings intact.
+Save persona changes through Agent settings; editing documentation examples
+alone does not update saved agent settings. Keep unchanged settings intact.

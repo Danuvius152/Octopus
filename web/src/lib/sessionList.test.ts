@@ -67,7 +67,7 @@ it.each(["archived", "deleted"])("confirms a missing selected session after reco
   expect(calls).toHaveLength(2);
   calls[1].resolve(Response.json(outcome === "archived" ? [{ ...row(), archived: true }] : [])); await flush();
   expect(useSessionStore.getState().activeSessionId).toBe(outcome === "archived" ? "old" : null);
-  expect(deleted.mock.calls).toEqual(outcome === "deleted" ? [["old"]] : []);
+  expect(deleted.mock.calls).toEqual(outcome === "deleted" ? [["old", true]] : []);
   unsubscribe();
 });
 
@@ -82,7 +82,7 @@ it.each([false, true])("confirms every missing session for draft cleanup through
     expect(calls).toHaveLength(2);
     calls[1].resolve(Response.json([row("selected")])); await flush();
   }
-  expect(deleted.mock.calls).toEqual([["old"]]);
+  expect(deleted.mock.calls).toEqual([["old", false]]);
   expect(useSessionStore.getState().messages.old).toBeUndefined();
   expect(useSessionStore.getState().activeSessionId).toBe("selected");
 });

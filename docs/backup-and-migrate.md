@@ -48,11 +48,20 @@ content and applications. It does not use a fixed instance-specific file list.
 | Chats and native continuity | Exclude old sessions/messages, input receipts and native input evidence, native transcripts/resume state, BG/delegation execution history and their return diagnostics, and extra external/fork work trees collected solely for old conversations; ordinary files already inside the account's included roots remain included |
 | Schedules and execution | Exclude recurring/one-shot definitions, enablement, pending triggers and live process/PID/socket/lease state; no post-import schedule activation step |
 | Login state | Exclude model CLI subscription tokens, refresh tokens and authentication caches wherever stored; target credentials require reauthorization. Octopus account password/key material remains included; sign in again on the target |
+| Browser text drafts | Current-tab `sessionStorage` text is browser-local and excluded from account archives and server backups. Import does not collect or restore it; [draft recovery](implemented/input-reliability.md#browser-application-text-drafts) grants no submission or execution authority. |
 | Host network entry | Host-level tunnel binaries, systemd units and proxy settings outside account roots are not account resources. Reinstall them separately; importing an account does not open a public tunnel |
 
 Knowledge history and source/effect evidence are not executable work and must
 not be discarded as a cache. Exclusion from an archive does not delete or
 reconfigure source chats, tasks, logins or files.
+
+Research reports, versioned `{job_id}/evidence.json` summaries and
+`synthesis-failure.json` materials follow the existing recursive account-tree
+collection. Session and `research_jobs` history remain excluded: import preserves
+the original files without restoring task cards or execution authority. Session
+deletion likewise retains these account files; unavailable or malformed summaries
+are not permission to delete them. A complete backup preserves the existing rows
+and matching research tree together. See the [Research file contract](implemented/native-deep-research.md#7-invocation-files-and-verification).
 
 Agent context-setting revisions belong to the source comparison authority,
 not the user's model configuration: account import preserves the settings and

@@ -6,6 +6,7 @@ import { sessions } from "../lib/sessionList";
 import { observeSessionAuxiliary } from "../lib/hydrateSession";
 import { useTaskControl } from "../hooks/useTaskControl";
 import { TaskControlFeedback } from "./TaskControlFeedback";
+import { readResearchEvidence } from "../lib/researchEvidence";
 
 const API = window.location.origin;
 const EMPTY_JOBS: ResearchJob[] = [];
@@ -72,6 +73,14 @@ export function ResearchCard({ sessionId }: { sessionId: string }) {
 function ResearchJobCard({ sessionId, job, token }: { sessionId: string; job: ResearchJob; token: string }) {
   const control = useTaskControl(sessionId, job.id);
   const running = job.status === "running";
+  const evidence = job.evidence_state === "available" ? readResearchEvidence(job.evidence) : null;
+  const findings = evidence?.claims.filter((claim) => claim.status !== "refuted");
+  const verified = findings?.filter((claim) => claim.status === "verified").length;
+  const unverified = findings ? findings.length - (verified ?? 0) : 0;
+  const sourceCount = new Set([
+    ...(findings?.map((claim) => claim.url).filter(Boolean) ?? []),
+    ...(evidence?.claims.flatMap((claim) => claim.votes.flatMap((vote) => vote.sources)) ?? []),
+  ]).size;
   const phaseIdx = PHASES.indexOf(job.phase ?? "scope");
   const cancel = () => control.cancel(`${API}/api/sessions/${encodeURIComponent(sessionId)}/research/${encodeURIComponent(job.id)}/cancel`, undefined, (value) => {
     const result = value as ResearchJob;
@@ -139,14 +148,14 @@ function ResearchJobCard({ sessionId, job, token }: { sessionId: string; job: Re
               : job.injection_status === "unknown"
                 ? `Report admission is unconfirmed; report retained${job.error ? ` — ${job.error}` : ""}`
                 : job.error ? `Report delivery stopped; report retained — ${job.error}` : "Report ready; delivery pending"}
-          {typeof job.verified === "number"
-            ? ` · ${job.verified} verified finding${job.verified === 1 ? "" : "s"}`
+          {verified !== undefined
+            ? ` · ${verified} verified finding${verified === 1 ? "" : "s"}`
             : ""}
-          {typeof job.unverified === "number" && job.unverified > 0 ? ` · ${job.unverified} unverified` : ""}
+          {unverified > 0 ? ` · ${unverified} unverified` : ""}
           {job.delivery_receipt?.browser_confirmed_version === job.delivery_receipt?.version && job.delivery_receipt
             ? " · Browser received this status" : ""}
-          {job.sources && job.sources.length
-            ? ` · ${job.sources.length} source${job.sources.length === 1 ? "" : "s"}`
+          {sourceCount > 0
+            ? ` · ${sourceCount} source${sourceCount === 1 ? "" : "s"}`
             : ""}
         </span>
       ) : (
@@ -157,6 +166,25 @@ function ResearchJobCard({ sessionId, job, token }: { sessionId: string; job: Re
         </span>
       )}
     </div>
+    {job.status === "completed" && <div className="research-evidence mt-2 text-xs">
+      {!evidence ? <p role="status">Evidence unknown or unavailable. The saved outcome does not establish evidence sufficiency.</p> : <>
+        {evidence.notices.map((notice) => <p key={notice} className="font-medium text-amber-700 dark:text-amber-400">{notice}</p>)}
+        <details open={evidence.searches.length > 0 && evidence.searches.every((search) => search.status === "failed")}>
+          <summary className="cursor-pointer">Evidence and gaps</summary>
+          {evidence.scope_note && <p>Planning: {evidence.scope_note}</p>}
+          <ul>{evidence.searches.map((search, index) => <li key={index}>
+            [{search.status}] {search.angle}: {search.findings} finding(s). {search.reason}
+          </li>)}</ul>
+          <p>Strict majority uses all {evidence.votes_per_claim} scheduled votes, including failures. Votes and search angles are not independent sources.</p>
+          <ul>{evidence.claims.map((claim, index) => <li key={index}>
+            [{claim.status}] {claim.claim} (claim source: {claim.url || "not provided"}). Support {claim.support}; refute {claim.refute}; unverified {claim.unverified}; failed {claim.failed}.
+            <ul>{claim.votes.map((vote, voteIndex) => <li key={voteIndex}>
+              [{vote.status}] {vote.note} Conditions: {vote.conditions || "not provided"}. Check sources: {vote.sources.join(", ") || "not provided"}
+            </li>)}</ul>
+          </li>)}</ul>
+        </details>
+      </>}
+    </div>}
     <TaskControlFeedback control={control} onRefresh={() => { void control.refresh(() => observeSessionAuxiliary(sessionId, "research")); }} />
   </div>
   );

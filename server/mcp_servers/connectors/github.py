@@ -4,13 +4,15 @@ Spawned as `python -m server.mcp_servers.connectors.github` with the shared
 callback env + OCTOPUS_INSTALLATION_ID. Each tool fetches the installation's
 token from the host, calls the GitHub REST API, projects the response to the
 fields the model needs, and caps the result size. 401 → mark the installation
-needs-reconnect and tell the model to ask the user; 429/5xx → bounded retry.
+needs-reconnect and tell the model to ask the user; only safe reads retry.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+import math
 import sys
 import time
 from pathlib import Path
@@ -28,6 +30,11 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from server.mcp_servers.connectors._shared import (  # noqa: E402
     ConnectorContext,
     ConnectorTokenError,
+    request_failure,
+    request_with_retry,
+    response_failure,
+    retry_after,
+    retry_delay,
     to_text,
     token_failure_message,
     truncate,
@@ -50,7 +57,32 @@ _GH_HEADERS = {
 }
 
 
-def _gh(method: str, path: str, **kw: Any) -> tuple[Any, str | None]:
+def _github_retry_delay(response: httpx.Response, attempt: int) -> float | None:
+    """GitHub primary/secondary limits can use 403 as well as 429."""
+    limited = response.status_code == 429 or (
+        response.status_code == 403 and (
+            "Retry-After" in response.headers
+            or response.headers.get("X-RateLimit-Remaining") == "0"
+            or "rate limit" in response.text.lower()
+        )
+    )
+    if not limited:
+        return retry_delay(response, attempt)
+    delay = retry_after(response)
+    if response.headers.get("X-RateLimit-Remaining") == "0":
+        try:
+            reset = float(response.headers["X-RateLimit-Reset"])
+            reset_delay = max(0.0, reset - time.time()) if math.isfinite(reset) else 60.0
+        except (KeyError, ValueError, OverflowError):
+            reset_delay = 60.0
+        delay = max(delay or 0.0, reset_delay)
+    return max(float(2**attempt), delay if delay is not None else 60.0)
+
+
+async def _gh(
+    method: str, path: str, *, retry_safe: bool = False,
+    operation: str = "", check: str = "Check the original GitHub resource.", **kw: Any,
+) -> tuple[Any, str | None]:
     """Authenticated GitHub call. Returns (parsed_body, None) on success or
     ({}, error_message) on failure — the error string is itself a fine tool
     result.
@@ -63,28 +95,32 @@ def _gh(method: str, path: str, **kw: Any) -> tuple[Any, str | None]:
     type checker stops reporting the 20-odd `data.get(...)` calls that are
     already guarded."""
     try:
-        info = ctx.token_info()
-    except ConnectorTokenError as error:
-        return {}, token_failure_message(error)
+        info = await asyncio.to_thread(ctx.token_info)
+    except ConnectorTokenError as token_error:
+        return {}, token_failure_message(token_error)
     headers = {**_GH_HEADERS, "Authorization": f"Bearer {info['access_token']}"}
     url = path if path.startswith("http") else f"{_API}{path}"
-    for attempt in range(3):
-        try:
-            r = httpx.request(method, url, headers=headers, timeout=30.0, **kw)
-        except httpx.HTTPError as e:
-            return {}, f"Error: GitHub request failed: {e}"
-        if r.status_code == 401:
-            return {}, ctx.rejection_message(info)
-        if r.status_code == 429 or r.status_code >= 500:
-            if attempt < 2:
-                retry_after = float(r.headers.get("Retry-After", "1") or 1)
-                time.sleep(min(retry_after, 5.0))
-                continue
-            return {}, f"Error: GitHub temporarily unavailable ({r.status_code})."
-        if r.status_code >= 400:
-            return {}, f"Error: GitHub {r.status_code}: {r.text[:300]}"
+    operation = operation or f"{method} {url}"
+    r, error = await request_with_retry(
+        method, url, retry_safe=retry_safe, operation=operation,
+        check=check, delay_for_response=_github_retry_delay, headers=headers, **kw,
+    )
+    if error:
+        return {}, error
+    assert r is not None
+    if r.status_code == 401:
+        authorization = await asyncio.to_thread(ctx.rejection_message, info)
+        return {}, "Error: rejected: " + authorization.removeprefix("Error: ")
+    error = response_failure(
+        r, retry_safe=retry_safe, operation=operation, check=check,
+        rejected_statuses=frozenset({400, 403, 404, 422}),
+    )
+    if error:
+        return {}, error
+    try:
         return (r.json() if r.content else {}), None
-    return {}, "Error: GitHub rate-limited; try again shortly."
+    except ValueError:
+        return {}, request_failure("Invalid GitHub JSON response", retry_safe=retry_safe, operation=operation, check=check)
 
 
 def _issue_brief(it: dict) -> dict:
@@ -102,11 +138,11 @@ def _issue_brief(it: dict) -> dict:
 
 
 @mcp.tool(name="search_issues")
-def search_issues(query: str, limit: int = 20) -> str:
+async def search_issues(query: str, limit: int = 20) -> str:
     """Search issues and pull requests with GitHub search syntax
     (e.g. 'repo:owner/name is:open label:bug'). Returns brief matches."""
-    data, err = _gh(
-        "GET", "/search/issues", params={"q": query, "per_page": min(limit, 50)}
+    data, err = await _gh(
+        "GET", "/search/issues", retry_safe=True, params={"q": query, "per_page": min(limit, 50)}
     )
     if err:
         return err
@@ -115,10 +151,10 @@ def search_issues(query: str, limit: int = 20) -> str:
 
 
 @mcp.tool(name="get_issue")
-def get_issue(repo: str, number: int) -> str:
+async def get_issue(repo: str, number: int) -> str:
     """Full issue: title, state, author, labels, and body. `repo` is
     'owner/name'."""
-    data, err = _gh("GET", f"/repos/{repo}/issues/{number}")
+    data, err = await _gh("GET", f"/repos/{repo}/issues/{number}", retry_safe=True)
     if err:
         return err
     out = {
@@ -135,10 +171,10 @@ def get_issue(repo: str, number: int) -> str:
 
 
 @mcp.tool(name="get_pr")
-def get_pr(repo: str, number: int) -> str:
+async def get_pr(repo: str, number: int) -> str:
     """Full pull request: title, state, head→base branches, merge state,
     and body. `repo` is 'owner/name'."""
-    data, err = _gh("GET", f"/repos/{repo}/pulls/{number}")
+    data, err = await _gh("GET", f"/repos/{repo}/pulls/{number}", retry_safe=True)
     if err:
         return err
     out = {
@@ -157,11 +193,12 @@ def get_pr(repo: str, number: int) -> str:
 
 
 @mcp.tool(name="list_repos")
-def list_repos(limit: int = 30) -> str:
+async def list_repos(limit: int = 30) -> str:
     """The authenticated user's repositories, most-recently-updated first."""
-    data, err = _gh(
+    data, err = await _gh(
         "GET",
         "/user/repos",
+        retry_safe=True,
         params={"per_page": min(limit, 100), "sort": "updated"},
     )
     if err:
@@ -179,11 +216,11 @@ def list_repos(limit: int = 30) -> str:
 
 
 @mcp.tool(name="get_file")
-def get_file(repo: str, path: str, ref: str | None = None) -> str:
+async def get_file(repo: str, path: str, ref: str | None = None) -> str:
     """Read a file's text from a repo. `repo` is 'owner/name'; `ref` is an
     optional branch/tag/sha."""
     params = {"ref": ref} if ref else None
-    data, err = _gh("GET", f"/repos/{repo}/contents/{path}", params=params)
+    data, err = await _gh("GET", f"/repos/{repo}/contents/{path}", retry_safe=True, params=params)
     if err:
         return err
     if isinstance(data, list):  # a directory
@@ -198,11 +235,11 @@ def get_file(repo: str, path: str, ref: str | None = None) -> str:
 
 
 @mcp.tool(name="search_code")
-def search_code(query: str, limit: int = 20) -> str:
+async def search_code(query: str, limit: int = 20) -> str:
     """Search code with GitHub code-search syntax (e.g. 'addEventListener
     repo:owner/name'). Returns matching file paths."""
-    data, err = _gh(
-        "GET", "/search/code", params={"q": query, "per_page": min(limit, 50)}
+    data, err = await _gh(
+        "GET", "/search/code", retry_safe=True, params={"q": query, "per_page": min(limit, 50)}
     )
     if err:
         return err
@@ -218,11 +255,13 @@ def search_code(query: str, limit: int = 20) -> str:
 
 
 @mcp.tool(name="create_issue")
-def create_issue(repo: str, title: str, body: str = "") -> str:
+async def create_issue(repo: str, title: str, body: str = "") -> str:
     """Open a new issue. This WRITES to GitHub — explain what you're filing
     before calling. `repo` is 'owner/name'."""
-    data, err = _gh(
-        "POST", f"/repos/{repo}/issues", json={"title": title, "body": body}
+    data, err = await _gh(
+        "POST", f"/repos/{repo}/issues", json={"title": title, "body": body},
+        operation=f"create_issue repo={repo!r} title={title!r}",
+        check=f"Check issues in https://github.com/{repo}/issues for the original title and body.",
     )
     if err:
         return err
@@ -232,11 +271,13 @@ def create_issue(repo: str, title: str, body: str = "") -> str:
 
 
 @mcp.tool(name="comment")
-def comment(repo: str, number: int, body: str) -> str:
+async def comment(repo: str, number: int, body: str) -> str:
     """Comment on an issue or PR. This WRITES to GitHub. `repo` is
     'owner/name'; `number` is the issue/PR number."""
-    data, err = _gh(
-        "POST", f"/repos/{repo}/issues/{number}/comments", json={"body": body}
+    data, err = await _gh(
+        "POST", f"/repos/{repo}/issues/{number}/comments", json={"body": body},
+        operation=f"comment repo={repo!r} number={number} body={body!r}",
+        check=f"Check comments on https://github.com/{repo}/issues/{number} for the original text.",
     )
     if err:
         return err

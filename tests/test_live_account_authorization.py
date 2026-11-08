@@ -11,7 +11,7 @@ from server.agent_manager import AgentManager
 from server.app_agent import AppAgentManager
 from server.app_backends import backend_supervisor
 from server.applications import ApplicationManager, app_scope_token
-from server.mcp_identity import mint
+from server.mcp_identity import close_work, mint, register_run, revoke_run
 from server.routers import applications as app_router
 from server.session_manager import session_manager
 from server.workspace import paths_for
@@ -55,6 +55,34 @@ async def test_disabling_owner_revokes_signed_mcp_at_the_public_authentication_b
 async def test_signed_mcp_claim_needs_an_existing_owner(accounts):
     headers = {"Authorization": "Bearer " + mint("removed-owner-execution", user_id="no-such-account")}
     assert (await accounts["http"].get("/api/agents", headers=headers)).status_code == 401
+
+
+@pytest.mark.parametrize("retirement", ["run", "work", "account"])
+async def test_scope_dependency_keeps_live_runtime_checks_and_current_user_rejects_scopes(accounts, retirement):
+    http, users = accounts["http"], accounts["users"]
+    owner = accounts["owner"]["id"]
+    session, lease, work = "dependency-session", "dependency-lease", "dependency-work-" + owner
+    register_run(lease, session, owner, work)
+    token = mint(session, user_id=owner, run_lease_id=lease, work_id=work)
+    headers = {"Authorization": "Bearer " + token}
+    try:
+        # Real startup wiring, account rows, signature and live run all admit it.
+        identity = await http.get("/api/auth/identity", headers=headers)
+        assert identity.status_code == 200, identity.text
+        assert identity.json()["user_id"] == owner
+        assert (await http.post("/api/auth/logout", headers=headers)).status_code == 401
+        tampered = token[:-1] + ("0" if token[-1] != "0" else "1")
+        assert (await http.get("/api/auth/identity", headers={"Authorization": "Bearer " + tampered})).status_code == 401
+        if retirement == "run":
+            revoke_run(lease)
+        elif retirement == "work":
+            close_work(work)
+        else:
+            await users.set_disabled(owner, True)
+        assert (await http.get("/api/auth/identity", headers=headers)).status_code == 401
+    finally:
+        revoke_run(lease)
+        close_work(work)
 
 
 @pytest.fixture

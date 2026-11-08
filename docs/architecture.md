@@ -398,8 +398,9 @@ explicit directory/read-write protocol through controller instructions. Neither
 moves auth/native history from its selected runtime home. Account shared memory
 holds genuinely shared agreements outside one Agent's deletion lifetime.
 [Memory](implemented/memory.md) and [Harness assembly](implemented/harness-layer.md#instruction-assembly)
-own the details; a copyable [persona snapshot](agent-prompts.md) does not update
-saved settings by itself.
+own the details. Persona changes take effect through
+[saved Agent settings](user-guide.md#保存-one-line-role-和-system-prompt),
+not documentation examples.
 
 ## Configuration (`OCTOPUS_*`)
 
