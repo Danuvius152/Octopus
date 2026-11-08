@@ -67,12 +67,16 @@ def technical_store(tmp_path_factory):
         store.close()
 
 
+# Spellings exercise selection in compact view; each family also checks a
+# full-view sample. Projection, coordinates and pagination have dedicated cases.
 @pytest.mark.parametrize("intent", [None, "lookup"])
-@pytest.mark.parametrize("view", ["full", "compact"])
-@pytest.mark.parametrize("query,expected", [
-    ("C", {"one.md"}),
-    ("C++", {"two.md", "four.md"}),
-    ("C#", {"three.md", "five.md"}),
+@pytest.mark.parametrize("query,expected,view", [
+    ("C++", {"two.md", "four.md"}, "full"),
+    *((query, expected, "compact") for query, expected in [
+        ("C", {"one.md"}),
+        ("C++", {"two.md", "four.md"}),
+        ("C#", {"three.md", "five.md"}),
+    ]),
 ])
 def test_technical_language_identity_uses_body_terms_without_cross_language_hits(technical_store, intent, view, query, expected):
     # Neutral paths/titles and no aliases force lookup through lexical terms.
@@ -82,18 +86,20 @@ def test_technical_language_identity_uses_body_terms_without_cross_language_hits
 
 
 @pytest.mark.parametrize("intent", [None, "lookup"])
-@pytest.mark.parametrize("view", ["full", "compact"])
-@pytest.mark.parametrize("query,expected", [
-    ("ｃ", {"one.md"}),
-    ("（Ｃ＋＋），", {"two.md", "four.md"}),
-    ("[c#]。", {"three.md", "five.md"}),
-    ("C++内存管理", {"two.md"}),
-    ("Ｃ＃内存管理", {"three.md"}),
-    ("acme-c++-bridge", {"four.md"}),
-    ("Acme-C#-Bridge", {"five.md"}),
-    ("acme c++ bridge", {"four.md"}),
-    ("open source toolkit", {"six.md"}),
-    ("OAuth2认证", {"six.md"}),
+@pytest.mark.parametrize("query,expected,view", [
+    ("Ｃ＃内存管理", {"three.md"}, "full"),
+    *((query, expected, "compact") for query, expected in [
+        ("ｃ", {"one.md"}),
+        ("（Ｃ＋＋），", {"two.md", "four.md"}),
+        ("[c#]。", {"three.md", "five.md"}),
+        ("C++内存管理", {"two.md"}),
+        ("Ｃ＃内存管理", {"three.md"}),
+        ("acme-c++-bridge", {"four.md"}),
+        ("Acme-C#-Bridge", {"five.md"}),
+        ("acme c++ bridge", {"four.md"}),
+        ("open source toolkit", {"six.md"}),
+        ("OAuth2认证", {"six.md"}),
+    ]),
 ])
 def test_technical_normalization_mixed_script_and_project_names_keep_only_labeled_hits(technical_store, intent, view, query, expected):
     result = technical_store.search(query, intent=intent, view=view)
@@ -127,19 +133,21 @@ def identifier_store(tmp_path_factory):
 
 
 @pytest.mark.parametrize("intent", [None, "lookup"])
-@pytest.mark.parametrize("view", ["full", "compact"])
-@pytest.mark.parametrize("query,expected", [
-    (".NET", {"r01.md"}), ("NET", {"r01.md", "r02.md"}),
-    ("（Ｎｏｄｅ．ｊｓ）", {"r03.md"}), ("Node/js", {"r04.md"}),
-    ("std::vector", {"r05.md"}), ("std/vector", {"r06.md"}),
-    ("user_id", {"r07.md"}), ("user-id", {"r08.md"}),
-    ("@team/widget", {"r09.md"}), ("widget", {"r09.md", "r10.md", "r11.md"}),
-    ("C++17", {"r12.md"}), ("C17", {"r13.md"}),
-    ("Helios2.7", {"r14.md"}), ("Helios27", {"r15.md"}),
-    ("Lumen++", {"r16.md"}), ("Lumen#", {"r17.md"}), ("Lumen", {"r18.md"}),
-    ("_cache", {"r19.md"}), ("cache", {"r19.md", "r20.md"}),
-    ("__init__", {"r21.md"}), ("init", {"r21.md", "r22.md"}),
-    ('"Node.js."', {"r03.md"}), (".NET,", {"r01.md"}),
+@pytest.mark.parametrize("query,expected,view", [
+    ("@team/widget", {"r09.md"}, "full"),
+    *((query, expected, "compact") for query, expected in [
+        (".NET", {"r01.md"}), ("NET", {"r01.md", "r02.md"}),
+        ("（Ｎｏｄｅ．ｊｓ）", {"r03.md"}), ("Node/js", {"r04.md"}),
+        ("std::vector", {"r05.md"}), ("std/vector", {"r06.md"}),
+        ("user_id", {"r07.md"}), ("user-id", {"r08.md"}),
+        ("@team/widget", {"r09.md"}), ("widget", {"r09.md", "r10.md", "r11.md"}),
+        ("C++17", {"r12.md"}), ("C17", {"r13.md"}),
+        ("Helios2.7", {"r14.md"}), ("Helios27", {"r15.md"}),
+        ("Lumen++", {"r16.md"}), ("Lumen#", {"r17.md"}), ("Lumen", {"r18.md"}),
+        ("_cache", {"r19.md"}), ("cache", {"r19.md", "r20.md"}),
+        ("__init__", {"r21.md"}), ("init", {"r21.md", "r22.md"}),
+        ('"Node.js."', {"r03.md"}), (".NET,", {"r01.md"}),
+    ]),
 ])
 def test_identifier_structure_preserves_namespaces_packages_versions_and_unlisted_names(identifier_store, intent, view, query, expected):
     # Explicit structure preserves identity; ordinary words retain discovery

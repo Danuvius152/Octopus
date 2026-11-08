@@ -4,10 +4,13 @@
 
 ## 3.1 The harness contract
 
-`Harness.prepare_fork` returns a native resume handle and/or `needs_replay`.
-Current Claude and Codex rewind profiles use history replay; a full-session
-[/fork](session-fork.md) instead copies an existing native transcript when available.
-Callers use the capability and returned artifact, not a backend-name branch.
+The session saga owns rewind's history-replay policy for both Claude and Codex.
+`can_fork` declares that the backend supports the retained product history in
+the first user input, followed by native resume of the new session. Rewind has
+no provider-specific native-preparation hook: neither supported backend can
+prepare a native prefix at an arbitrary product-message boundary. A full-session
+[/fork](session-fork.md) instead uses Harness to copy existing native history
+when available, retaining its artifact and cleanup collaborators.
 
 ## 3.5 Channel discipline
 
@@ -43,11 +46,14 @@ an explicit label changes its name, otherwise it retains the parent's name.
 The parent is archived after successful branch creation. A rewind shares its
 working directory; full-copy `/fork` leaves the parent open and copies the tree.
 
-Database insertion and message copying commit before external transcript/file
-operations. Preparation failure compensates its owned artifacts before removing
-the row; failed cleanup retains the initializing identity for recovery. SQLite
-rollback cannot undo filesystem effects. The original parent's account scope
-and retained attachment ownership remain enforced throughout.
+The retained prefix must satisfy the replay message contract before insertion;
+damaged message metadata refuses creation without archiving the parent.
+Database insertion and message copying commit with no native resume identity.
+Replay metadata is saved before optional file revert and publication of the
+ready child. An interrupted initialization retains its row for recovery; rewind
+creates no native artifact before its first input. SQLite rollback cannot undo
+the optional Git effects. The original parent's account scope and retained
+attachment ownership remain enforced throughout.
 
 ### 5.3.2 History replay and first-turn state
 

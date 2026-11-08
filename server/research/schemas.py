@@ -94,20 +94,19 @@ def parse_search(text: str, *, angle: str, max_findings: int) -> tuple[list[Find
     if not isinstance(val, list):
         return None
     out: list[Finding] = []
-    if isinstance(val, list):
-        for item in val:
-            if not isinstance(item, dict):
-                continue
-            claim = item.get("claim")
-            url = item.get("url") or item.get("source") or ""
-            if isinstance(claim, str) and claim.strip():
-                out.append(
-                    Finding(
-                        claim=claim.strip(),
-                        url=(url.strip() if isinstance(url, str) else ""),
-                        angle=angle,
-                    )
+    for item in val:
+        if not isinstance(item, dict):
+            continue
+        claim = item.get("claim")
+        url = item.get("url") or item.get("source") or ""
+        if isinstance(claim, str) and claim.strip():
+            out.append(
+                Finding(
+                    claim=claim.strip(),
+                    url=(url.strip() if isinstance(url, str) else ""),
+                    angle=angle,
                 )
+            )
     # Only an actual empty array means a successful search without material.
     return (out[:max_findings], len(out) > max_findings) if out or not val else None
 
@@ -159,36 +158,20 @@ def verify_prompt(claim: str, url: str, question: str) -> str:
     )
 
 
-def parse_verdict(text: str) -> bool | None:
-    """Keep an invalid verdict distinct from a valid non-refutation."""
-    val = _extract_json(text)
-    if isinstance(val, dict):
-        r = val.get("refuted")
-        if isinstance(r, bool):
-            return r
-        if isinstance(r, str):
-            if r.strip().lower() in ("true", "yes", "1"):
-                return True
-            if r.strip().lower() in ("false", "no", "0"):
-                return False
-    return None
-
-
-def positively_verified(text: str) -> bool:
-    val = _extract_json(text)
-    return isinstance(val, dict) and val.get("verified") is True and parse_verdict(text) is False
-
-
 def parse_vote(text: str, error: str | None, bounds: EvidenceBounds) -> VoteEvidence:
     val = _extract_json(text)
-    if error or parse_verdict(text) is None or not isinstance(val, dict):
+    refuted = val.get("refuted") if isinstance(val, dict) else None
+    if isinstance(refuted, str):
+        refuted = {"true": True, "yes": True, "1": True,
+                   "false": False, "no": False, "0": False}.get(refuted.strip().lower())
+    if error or not isinstance(refuted, bool) or not isinstance(val, dict):
         return VoteEvidence(status="failed", note=bounds.text(error or "Invalid verification output", 256))
     urls = val.get("sources")
     sources = [url.strip() for url in urls if isinstance(url, str) and url.startswith(("https://", "http://"))] if isinstance(urls, list) else []
     if len(sources) > 3:
         bounds.omitted = True
     note, conditions = val.get("note"), val.get("conditions")
-    return VoteEvidence(status="refute" if parse_verdict(text) else "support" if positively_verified(text) else "unverified",
+    return VoteEvidence(status="refute" if refuted else "support" if val.get("verified") is True else "unverified",
         note=bounds.text(note if isinstance(note, str) else "Reason not provided", 256),
         conditions=bounds.text(conditions if isinstance(conditions, str) else "", 256),
         sources=[bounded for url in sources[:3] if (bounded := bounds.url(url))])

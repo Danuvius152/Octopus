@@ -375,11 +375,11 @@ partial output, the deadline boundary, late exit and actual retirement.
 
 Transcript import/export and fork are separate capabilities. Claude's transcript
 codec supports handoff/pull; lack of a Codex codec produces an explicit unsupported
-result. Both backends support rewind replay and full native-copy fork through
-their respective profile functions; see [rewind](session-rewind.md) and
-[full copy](session-fork.md). Fork support does not imply a public export codec.
-`ForkPrepare`, `ForkCopy` and `ForkCleanup` express the exact profile signatures,
-using the existing `ForkArtifact`, `ForkHooks`, message and credential types.
+result. Both backends support [rewind replay](session-rewind.md), whose policy
+belongs to the session saga. Their profile functions implement
+[full native-copy fork](session-fork.md) and artifact cleanup. Fork support does
+not imply a public export codec. `ForkCopy` and `ForkCleanup` express the exact
+profile signatures using `ForkArtifact`, `ForkHooks` and credential types.
 Adapters reject unsupported native artifacts explicitly. The original session
 saga still owns reservation, saved identity and compensation ordering; moving it
 into another manager would not reduce a caller's responsibility.

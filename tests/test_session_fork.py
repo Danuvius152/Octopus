@@ -1,8 +1,7 @@
 """Integration tests for the fork saga (session-rewind.md §5.1).
 
 Drives `SessionManager.fork_session` against a real in-memory DB with both
-backends (Claude NATIVE_TRANSCRIPT synthesizing a JSONL under a temp HOME, and
-Codex HISTORY_REPLAY), plus crash recovery, the `_forking` mutex, side-effect
+backends' history replay, plus crash recovery, the `_forking` mutex, side-effect
 classification routing, safe-revert, and dispatch-only replay wrapping.
 """
 
@@ -145,11 +144,10 @@ async def test_fork_settings_snapshot_matches_database_during_parent_update(mana
 
 
 @pytest.mark.asyncio
-async def test_codex_fork_resume_id_null_survives_restart(manager):
-    # Vera review BLOCKING #1: a HISTORY_REPLAY fork must NOT keep the
-    # pre-minted resume-id hint in the DB, else a restart before the first
-    # turn reloads the bogus id and spawns `codex resume <bogus>`.
-    parent = await _seed_parent(manager, backend="codex")
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+async def test_fork_resume_id_null_survives_restart(manager, backend):
+    # A rewind establishes native identity only on its first user input.
+    parent = await _seed_parent(manager, backend=backend)
     fork = await manager.fork_session(parent.id, 2)
     assert fork.claude_session_id is None
     rows = {r["id"]: r for r in await manager.db.load_sessions(include_archived=True)}
@@ -335,56 +333,25 @@ async def test_forking_flag_blocks_start_message(manager):
         await manager.start_message(parent.id, "hello")
 
 
-# ------------------------------------------------------------------ saga compensation
+# ------------------------------------------------------------------ replay validation
 
 
 @pytest.mark.asyncio
-async def test_prepare_fork_failure_compensates(manager, monkeypatch):
-    parent = await _seed_parent(manager, backend="claude-code")
-    harness = get_harness("claude-code")
-    cleaned = {}
-
-    async def boom(*a, **k):
-        raise RuntimeError("synthesis failed")
-
-    async def fake_cleanup(working_dir, resume_id_hint, fork_id, *, credential=None, artifact=None, hooks=None):
-        cleaned["called"] = (working_dir, resume_id_hint, fork_id)
-
-    monkeypatch.setattr(harness, "prepare_fork", boom)
-    monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", fake_cleanup)
-
-    with pytest.raises(RuntimeError):
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+async def test_invalid_replay_prefix_leaves_parent_available_without_creating_child(manager, backend):
+    parent = await _seed_parent(manager, backend=backend)
+    # The selected user message is valid; the retained assistant prefix has
+    # decodable JSON that does not satisfy the replay message contract.
+    async with manager.db.transaction(write=True) as tx:
+        await tx.execute("UPDATE messages SET runtime_metadata=? WHERE session_id=? AND seq=1",
+                         (json.dumps({"request_id": "missing-attempt"}), parent.id))
+    with pytest.raises(ForkError, match="attempt_id"):
         await manager.fork_session(parent.id, 2)
-    # Cleanup ran FIRST, then the row was deleted — no orphan fork row.
-    assert "called" in cleaned
     rows = await manager.db.load_sessions(include_archived=True)
-    assert not any(r["origin"] == "fork" for r in rows)
-    # `_forking` was released even on failure.
+    assert [row["id"] for row in rows] == [parent.id]
+    assert not rows[0]["archived"]
+    assert manager.get_session(parent.id) is parent
     assert parent._forking is False
-
-
-@pytest.mark.asyncio
-async def test_prepare_fork_failure_cleanup_raises_leaves_row(manager, monkeypatch):
-    parent = await _seed_parent(manager, backend="claude-code")
-    harness = get_harness("claude-code")
-
-    async def boom(*a, **k):
-        raise RuntimeError("synthesis failed")
-
-    async def cleanup_boom(*a, **k):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(harness, "prepare_fork", boom)
-    monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", cleanup_boom)
-
-    with pytest.raises(OSError):
-        await manager.fork_session(parent.id, 2)
-    # Row stays as 'initializing' so the next boot retries idempotently.
-    rows = await manager.db.load_incomplete_forks()
-    assert len(rows) == 1 and rows[0]["fork_status"] == "initializing"
-    assert parent._forking is False
-    # …but the in-memory session is dropped so the failed fork can't appear
-    # as a normal idle session (Vera review SHOULD-FIX #2).
     assert not any(s.origin == "fork" for s in manager.sessions.values())
 
 

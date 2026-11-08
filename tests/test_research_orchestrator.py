@@ -12,6 +12,7 @@ import json
 import pytest
 
 from server.research import schemas
+from server.research.evidence import EvidenceBounds
 from server.research.leaf import LeafResult
 from server.research.orchestrator import ResearchLimits, run_research
 
@@ -32,7 +33,7 @@ def test_parse_angles_tolerates_fences_and_falls_back():
     assert schemas.parse_angles("[\"1\",\"2\",\"3\"]", question="q", max_angles=2) == ["1", "2"]
 
 
-def test_parse_findings_and_verdict():
+def test_parse_findings():
     parsed = schemas.parse_search(
         '[{"claim":"A","url":"http://a"},{"claim":"B","source":"http://b"}]',
         angle="ang", max_findings=5,
@@ -43,9 +44,34 @@ def test_parse_findings_and_verdict():
     assert [(f.claim, f.url, f.angle) for f in fs] == [
         ("A", "http://a", "ang"), ("B", "http://b", "ang")
     ]
-    assert schemas.parse_verdict('{"refuted": true}') is True
-    assert schemas.parse_verdict('{"refuted": false}') is False
-    assert schemas.parse_verdict("unparseable") is None
+
+
+@pytest.mark.parametrize("refuted,expected", [
+    (True, "refute"), (False, "support"),
+    (" true ", "refute"), ("YES", "refute"), ("1", "refute"),
+    (" false ", "support"), ("NO", "support"), ("0", "support"),
+    (0, "failed"), (1, "failed"), (0.0, "failed"), (1.0, "failed"),
+    (None, "failed"), ([], "failed"), ({}, "failed"), ("unknown", "failed"),
+])
+def test_parse_vote_retains_verdict_types_and_refutation_priority(refuted, expected):
+    text = json.dumps({"refuted": refuted, "verified": True})
+    vote = schemas.parse_vote(text, None, EvidenceBounds())
+    assert vote.status == expected
+
+
+@pytest.mark.parametrize("verified", [False, 1, "true", None])
+def test_parse_vote_requires_explicit_positive_verification(verified):
+    text = json.dumps({"refuted": False, "verified": verified})
+    assert schemas.parse_vote(text, None, EvidenceBounds()).status == "unverified"
+
+
+@pytest.mark.parametrize("text,error,note", [
+    ("unparseable", None, "Invalid verification output"),
+    ('{"refuted": false, "verified": true}', "leaf failed", "leaf failed"),
+])
+def test_parse_vote_preserves_failure_over_partial_output(text, error, note):
+    vote = schemas.parse_vote(text, error, EvidenceBounds())
+    assert vote.status == "failed" and vote.note == note
 
 
 def test_dedup_and_rank_prefers_cross_angle_corroboration():

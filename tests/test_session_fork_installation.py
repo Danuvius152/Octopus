@@ -17,20 +17,20 @@ async def test_fork_candidate_is_unavailable_until_its_original_artifacts_are_pr
 ):
     manager, parent_id, client, directory = installation
     entered, release = asyncio.Event(), asyncio.Event()
-    harness = get_harness("codex")
-    preparation = "prepare_fork_copy" if full_copy else "prepare_fork"
-    prepare = getattr(harness, preparation)
+    target = get_harness("codex") if full_copy else manager.db
+    preparation = "prepare_fork_copy" if full_copy else "create_fork_session"
+    prepare = getattr(target, preparation)
     captured = []
 
-    async def hold_prepared_artifact(*args, **kwargs):
-        artifact = await prepare(*args, **kwargs)
+    async def hold_original_preparation(*args, **kwargs):
+        result = await prepare(*args, **kwargs)
         rows = await manager.db.load_incomplete_forks()
         captured.extend(row["id"] for row in rows)
         entered.set()
         await release.wait()
-        return artifact
+        return result
 
-    monkeypatch.setattr(harness, preparation, hold_prepared_artifact)
+    monkeypatch.setattr(target, preparation, hold_original_preparation)
     rewinding = asyncio.create_task(client.post(
         f"/api/sessions/{parent_id}/duplicate" if full_copy else f"/api/sessions/{parent_id}/fork",
         json={} if full_copy else {"rewind_to_msg_seq": 0},
@@ -71,7 +71,7 @@ async def test_failed_candidate_retains_recovery_evidence_without_becoming_a_liv
 ):
     manager, parent_id, client, _directory = installation
     harness = get_harness("codex")
-    prepare, cleanup = harness.prepare_fork, harness.cleanup_incomplete_fork_artifacts
+    prepare, cleanup = harness.prepare_fork_copy, harness.cleanup_incomplete_fork_artifacts
 
     async def reject_preparation(*args, **kwargs):
         await prepare(*args, **kwargs)
@@ -81,10 +81,10 @@ async def test_failed_candidate_retains_recovery_evidence_without_becoming_a_liv
         await cleanup(*args, **kwargs)
         raise OSError("Artifact cleanup remains unavailable.")
 
-    monkeypatch.setattr(harness, "prepare_fork", reject_preparation)
+    monkeypatch.setattr(harness, "prepare_fork_copy", reject_preparation)
     monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", reject_cleanup)
     with pytest.raises(OSError, match="cleanup remains unavailable"):
-        await manager.fork_session(parent_id, 0)
+        await manager.duplicate_session(parent_id)
     retained = await manager.db.load_incomplete_forks()
     assert len(retained) == 1
     child_id = retained[0]["id"]

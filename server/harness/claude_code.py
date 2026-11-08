@@ -30,7 +30,6 @@ from ..context_models import (
     ContextReading,
     ContextSource,
 )
-from ..models import MessageContent
 from ..session_operations import CompactResult, NativeCompactCommand
 from .driver import RunDriver
 from .events import (
@@ -295,8 +294,6 @@ class ClaudeDriver(RunDriver):
         self._message_ids: deque[str] = deque(maxlen=256)
         self._boundaries: deque[str] = deque(maxlen=256)
         self._compacting = False
-        self._compact_requested = False
-        self._compact_input_id: str | None = None
         self._compact_started = False
         self._compact_items: list[str] = []
         self._compact_command: NativeCompactCommand | None = None
@@ -316,8 +313,6 @@ class ClaudeDriver(RunDriver):
         self._last_message_id = None
         self._message_ids.clear()
         self._compacting = False
-        self._compact_requested = False
-        self._compact_input_id = None
         self._compact_started = False
         self._compact_items.clear()
         self._compact_command = None
@@ -338,14 +333,12 @@ class ClaudeDriver(RunDriver):
         if not self.compaction_available:
             raise ValueError("This Claude environment does not advertise native compact")
         self._compact_io = io
-        self._compact_requested = True
-        self._compact_input_id = str(uuid.uuid4())
-        self._compact_command = NativeCompactCommand(input_uuid=self._compact_input_id)
-        await io.send_input("/compact", input_id=self._compact_input_id)
+        self._compact_command = NativeCompactCommand(input_uuid=str(uuid.uuid4()))
+        await io.send_input("/compact", input_id=self._compact_command.input_uuid)
 
     @property
     def steering_open(self) -> bool:
-        return not self._compact_requested
+        return self._compact_command is None
 
     @property
     def compact_result(self) -> CompactResult:
@@ -466,7 +459,7 @@ class ClaudeDriver(RunDriver):
             compacting=self._compacting))
 
     def _input_sample(self, obj: dict[str, Any]) -> list[HarnessEvent]:
-        if self._compact_requested or self._identity is None or not self._matches_input(obj):
+        if self._compact_command is not None or self._identity is None or not self._matches_input(obj):
             return []
         message = obj.get("message") or {}
         if not isinstance(message, dict):
@@ -536,7 +529,7 @@ class ClaudeDriver(RunDriver):
                     or not isinstance(metadata, dict) or metadata.get("trigger") not in {"auto", "manual"}):
                 return []
             self._boundaries.append(identifier)
-            if self._compact_requested and self._compact_started and metadata["trigger"] == "manual":
+            if self._compact_command is not None and self._compact_started and metadata["trigger"] == "manual":
                 self._compact_items.append(identifier)
             self._sample = None
             self._last_message_id = None
@@ -560,8 +553,8 @@ class ClaudeDriver(RunDriver):
         if self._compact_binding_rejected:
             return ParseOutput(activity=False)
         kind = obj.get("type")
-        if (kind == "command_lifecycle" and self._compact_requested and obj.get("session_id") == self._session_id
-                and obj.get("command_uuid") == self._compact_input_id and obj.get("state") == "started"):
+        if (kind == "command_lifecycle" and self._compact_command is not None and obj.get("session_id") == self._session_id
+                and obj.get("command_uuid") == self._compact_command.input_uuid and obj.get("state") == "started"):
             self._compact_started = True
             return ParseOutput()
         origin = obj.get("origin")
@@ -572,7 +565,7 @@ class ClaudeDriver(RunDriver):
             return ParseOutput(activity=False)
         if kind == "system" and obj.get("subtype") == "init":
             sid = obj.get("session_id")
-            if self._compact_requested and sid != self._session_id:
+            if self._compact_command is not None and sid != self._session_id:
                 # An explicit wrong resume disproves this stream's authority
                 # over the admitted history. Retire it without rebinding or
                 # adopting later frames from the contradictory host.
@@ -594,15 +587,15 @@ class ClaudeDriver(RunDriver):
         if kind == "system":
             out.events.extend(self._context_boundary(obj))
         elif kind == "assistant":
-            if self._compact_requested:
+            if self._compact_command is not None:
                 self._local_command(obj)
                 out.events.clear()
             else:
                 out.events.extend(self._input_sample(obj))
-        elif kind in {"stream_event", "user"} and self._compact_requested:
+        elif kind in {"stream_event", "user"} and self._compact_command is not None:
             out.events.clear()
         elif kind == "result":
-            if self._compact_requested:
+            if self._compact_command is not None:
                 self._compact_end(obj, out)
             out.events[:0] = self._complete_sample(obj) + self._finish_context()
             self._identity = None
@@ -1018,34 +1011,7 @@ class _JsonlTranscriptCodec:
         write_jsonl_file(Path(path), messages, session_id or "", working_dir or "")
 
 
-# ------------------------------------------------------------------ fork (HISTORY_REPLAY)
-#
-# Claude forks use HISTORY_REPLAY, NOT NATIVE_TRANSCRIPT (session-rewind.md
-# §5.3 + Phase-5 finding). We originally synthesized a resumable JSONL on disk
-# and spawned `claude --resume <id>`, but the real CLI resolves `--resume`
-# against a session-discovery path that does NOT reliably see an externally
-# written transcript: through the production spawn path it fails ~all the time
-# with "No conversation found", silently starting a fresh (empty) session.
-# `claude` resumes its OWN sessions reliably, so HISTORY_REPLAY sidesteps the
-# problem: the fork's FIRST turn carries the truncated parent transcript wrapped
-# into its user prompt (a normal fresh `claude --print` turn — done in
-# SessionManager._execute_claimed_request), and turn 2+ resumes claude's own captured
-# session id natively. Same contract + trade-offs as Codex (a heavier first
-# turn, no parent-prefix cache reuse). NATIVE_TRANSCRIPT can return as a cache
-# optimization if/when the CLI gains reliable external-transcript resume.
-
-
-async def _fork_prepare_replay(
-    messages: list[MessageContent],
-    working_dir: str,
-    resume_id_hint: str | None,
-    fork_id: str,
-) -> ForkArtifact:
-    """No on-disk work. The first fork turn's user prompt is wrapped with the
-    truncated history (in SessionManager._execute_claimed_request); `session_started`
-    captures claude's real session id on turn 1; turn 2+ uses native resume of
-    that own-session id. The `resume_id_hint` is ignored. Used by /rewind."""
-    return ForkArtifact(resume_id=None, needs_replay=True)
+# ------------------------------------------------------------------ native full-copy history
 
 
 def _claude_project_dir(working_dir: str) -> Path:
@@ -1301,7 +1267,6 @@ CLAUDE_CODE = RuntimeProfile(
     # build_turn_argv, so no system-prompt blurb is needed.
     injects_memory_prompt=False,
     can_fork=True,  # /rewind: HISTORY_REPLAY; /fork: native transcript copy
-    fork_prepare=_fork_prepare_replay,
     fork_copy=_fork_copy,
     fork_cleanup=_fork_cleanup,
     login=_OAuthLoginDriver(),

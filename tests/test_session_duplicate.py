@@ -413,18 +413,24 @@ async def test_failed_rewind_recovery_preserves_its_full_copy_parent(manager, tm
     sentinel.write_text("Changes made after the full copy must survive.")
     harness = sm_forking.get_harness(copied.backend)
     cleanup = harness.cleanup_incomplete_fork_artifacts
+    update = manager.db.update_session_field
 
-    async def fail_prepare(*args, **kwargs):
-        raise RuntimeError("rewind preparation failed")
+    async def fail_replay_metadata(session_id, **fields):
+        if session_id != copied.id and fields.get("fork_needs_replay"):
+            raise OSError("rewind metadata save failed")
+        return await update(session_id, **fields)
 
     async def fail_cleanup(*args, **kwargs):
         raise OSError("temporary artifact cleanup failure")
 
-    monkeypatch.setattr(harness, "prepare_fork", fail_prepare)
+    monkeypatch.setattr(manager.db, "update_session_field", fail_replay_metadata)
     monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", fail_cleanup)
-    with pytest.raises(OSError, match="temporary artifact cleanup failure"):
+    with pytest.raises(OSError, match="rewind metadata save failed"):
         await manager.fork_session(copied.id, 2)
-    assert len(await manager.db.load_incomplete_forks()) == 1
+    retained = await manager.db.load_incomplete_forks()
+    assert len(retained) == 1 and retained[0]["resume_id"] is None
+    await manager._recover_incomplete_forks()
+    assert await manager.db.load_incomplete_forks() == retained
     assert sentinel.read_text() == "Changes made after the full copy must survive."
 
     monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", cleanup)
@@ -639,7 +645,7 @@ async def test_duplicate_copy_failure_removes_partial_dir(manager, tmp_path, mon
 
 @pytest.mark.asyncio
 async def test_duplicate_cleanup_failure_leaves_row_and_dir(manager, tmp_path, monkeypatch):
-    # If artifact cleanup ALSO fails after prepare_fork blew up, leave both the
+    # If artifact cleanup ALSO fails after native-copy preparation, leave both the
     # 'initializing' row AND the copied dir for the startup sweep to retry — do
     # NOT strand the row pointing at a deleted working_dir.
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

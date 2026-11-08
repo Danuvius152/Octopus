@@ -248,9 +248,9 @@ class ForkingMixin(SessionManagerBase):
         `seq=rewind_to_msg_seq` and re-spawning as a new branch
         (session-rewind.md §5.1). Returns the new fork Session. The saga is
         ordered (NOT a single transaction — SQLite rollback can't undo FS/git):
-        validate → lock+`_forking` → classify → DB-only insert → `prepare_fork`
-        (with compensation) → stamp ephemeral metadata → optional safe-revert.
-        No `if backend ==` anywhere — the harness owns the strategy."""
+        validate → lock+`_forking` → classify → DB-only insert → stamp replay
+        metadata → optional safe-revert. Rewind replays product messages;
+        native history copying belongs to the separate full-copy operation."""
 
         # Scoped, and through the same error as a missing parent: "belongs to
         # somebody else" must be indistinguishable from "does not exist", or the
@@ -302,10 +302,6 @@ class ForkingMixin(SessionManagerBase):
         source = await owner.call_runtime(ReserveFork(True))
 
         fork_id = uuid.uuid4().hex[:12]
-        # Pre-mint the backend resume id BEFORE the INSERT so startup recovery
-        # can locate an orphan artifact by exact path. NATIVE backends use it
-        # as the artifact name; REPLAY backends ignore it.
-        resume_id_hint = str(uuid.uuid4())
         try:
             # 4. Classify side effects over the rewound turn onward (seq >= M).
             summary = await fork_helpers.classify_side_effects(self.db, parent_id, M)
@@ -319,6 +315,10 @@ class ForkingMixin(SessionManagerBase):
             # wins when the caller wants a distinct name.
             fork_name = label or parent.name
             copied = [m for m in messages if m["seq"] <= fork_after_seq]
+            # Stored JSON is not yet a valid replay message. Refuse a damaged
+            # prefix before creating a child or archiving its parent.
+            for message in copied:
+                MessageContent(**message)
             await self.db.create_fork_session(
                 fork_id=fork_id,
                 name=fork_name,
@@ -332,7 +332,7 @@ class ForkingMixin(SessionManagerBase):
                 user_id=parent.user_id,
                 agent_id=parent.agent_id,
                 credential_id=source.credential_id,
-                resume_id=resume_id_hint,
+                resume_id=None,
                 fork_after_seq=fork_after_seq,
             )
             fork = Session(
@@ -340,7 +340,6 @@ class ForkingMixin(SessionManagerBase):
                 name=fork_name,
                 working_dir=parent.working_dir,
                 created_at=now,
-                claude_session_id=resume_id_hint,
                 credential_id=source.credential_id,
                 model=source.model,
                 reasoning_effort=source.reasoning_effort,
@@ -356,42 +355,7 @@ class ForkingMixin(SessionManagerBase):
             # Copied M messages (seq 0..M-1); next assigned seq is M.
             fork.restore_message_state(len(copied), M, 0)
 
-            # 6. prepare_fork (external state) with explicit compensation.
-            try:
-                artifact = await harness.prepare_fork(
-                    [MessageContent(**m) for m in copied],
-                    parent.working_dir,
-                    resume_id_hint,
-                    fork_id,
-                )
-            except Exception:
-                # Compensate in order (§5.1 step 6): cleanup artifacts FIRST
-                # (the row still anchors resume_id_hint/fork_id), then delete.
-                try:
-                    await harness.cleanup_incomplete_fork_artifacts(
-                        parent.working_dir, resume_id_hint, fork_id
-                    )
-                except Exception:
-                    logger.exception(
-                        "fork %s: artifact cleanup failed during compensation; "
-                        "leaving DB row 'initializing' for startup retry",
-                        fork_id,
-                    )
-                    # The candidate was never installed. Its durable row stays
-                    # available to the startup artifact cleanup protocol.
-                    raise
-                await self.db.delete_session(fork_id)
-                raise
-
-            fork.claude_session_id = artifact.resume_id
-            fork.fork_needs_replay = artifact.needs_replay
-            await self.db.update_session_field(
-                fork_id,
-                claude_session_id=artifact.resume_id,
-                fork_needs_replay=artifact.needs_replay,
-            )
-
-            # 7. Stamp ephemeral fork_metadata + promote fork_status.
+            # Stamp replay metadata before promoting the candidate to ready.
             note = fork_helpers.render_first_turn_note(
                 parent_label=parent.name, n=M, summary=summary, reverted=False
             )
@@ -402,8 +366,9 @@ class ForkingMixin(SessionManagerBase):
                 "first_turn_note": note,
             }
             fork.fork_metadata = json.dumps(metadata)
+            fork.fork_needs_replay = True
             await self.db.update_session_field(
-                fork_id, fork_metadata=fork.fork_metadata
+                fork_id, fork_metadata=fork.fork_metadata, fork_needs_replay=True
             )
             if revert_files:
                 fork.fork_status = "reverting"

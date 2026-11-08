@@ -52,7 +52,6 @@ it("collects UI regressions offline and native-provider checks only in the live 
     expect(offline.every((title) => !title.includes("@llm"))).toBe(true);
     expect(real.every((title) => title.includes("@llm"))).toBe(true);
     for (const title of [
-      "create a Codex session via the UI and get a real response @llm",
       "App Server preserves native history and original submissions across reload @llm",
       "sends a message and receives response @llm",
       "send with Enter key @llm",

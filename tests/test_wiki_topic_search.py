@@ -10,14 +10,14 @@ from tests import wiki_api
 client = wiki_api.client
 
 DOCUMENTS = {
-    "one.md": "# Expression control\n数字人的表情驱动是这项研究的对象，实验比较了两种控制方案。\n",
+    "one.md": "# Implementation notes\n\n数字人的表情驱动是这项研究的对象，实验比较了两种控制方案。\n",
     "two.md": "# Engine integration\nQuasar++ 用于数字人的实时驱动，研究评估控制延迟。\n",
     "three.md": "# Other runtime\nQuasar# 用于数字人的实时驱动，研究评估控制延迟。\n",
     "four.md": "# Video methods\n实时生成的视频使用蒸馏压缩教师模型。\n",
     "five.md": "# Project report\nVidu 的技术报告讨论缓存。\n",
     "six.md": "# Learning conditions\nFeedback improves retention.\n",
     "generic.md": "# Writing\n论文的一般写作方法与研究计划。\n",
-    "letters.md": "# Records\n数字用于编号。人负责签字。研究普通表格的排版。\n",
+    "letters.md": "# Unrelated notes\n\n数字用于编号。人负责签字。研究普通表格的排版。\n",
     "far.md": "# Separate subjects\n数字人用于展示。" + "另一件事情需要单独记录。" * 80 + "研究纸张的生产。\n",
     "chapters.md": "# Separate chapters\n## Display\n数字人用于展览。\n## Paper\n研究纸张的生产。\n",
     "metadata.md": "# Feedback retention evidence\nInstallation instructions.\n",
@@ -63,7 +63,12 @@ def test_labeled_topic_recall_has_body_support_and_no_unrelated_top_k(topic_stor
         evidence = topic_store.read(hit["id"], start=part["start"],
                                     length=part["end"] - part["start"],
                                     expected_revision=hit["revision"])
+        assert evidence["content"]
         assert evidence["content"] in DOCUMENTS[hit["path"]]
+        if hit["path"] == "one.md":
+            assert "数字人的表情驱动是这项研究的对象" in evidence["content"]
+        if view == "full":
+            assert hit["section"] == part
         assert hit["path"] in expected | unrelated
 
 
@@ -240,25 +245,3 @@ async def test_search_http_preserves_relaxation_explanation_and_current_body(cli
     assert page["total"] == 1 and page["match_mode"] == "lexical_partial"
     assert "body section" in page["match_explanation"]
     assert page["items"][0]["path"] == "one.md"
-
-
-def test_continuous_topic_recalls_supported_prose_without_disconnected_characters(tmp_path):
-    root = tmp_path / "vault"
-    root.mkdir()
-    (root / "supported.md").write_text(
-        "# Implementation notes\n\n数字人的表情驱动是这项研究的对象，实验比较了两种控制方案。\n"
-    )
-    (root / "noise.md").write_text(
-        "# Unrelated notes\n\n数字用于编号。人负责签字。研究普通表格的排版。\n"
-    )
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
-    try:
-        result = store.search("数字人研究")
-        assert [item["path"] for item in result["items"]] == ["supported.md"]
-        hit = result["items"][0]
-        evidence = store.read(hit["id"], start=hit["section"]["start"],
-                              length=hit["section"]["end"] - hit["section"]["start"],
-                              expected_revision=hit["revision"])
-        assert "数字人的表情驱动是这项研究的对象" in evidence["content"]
-    finally:
-        store.close()

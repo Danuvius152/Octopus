@@ -279,18 +279,18 @@ async def test_parent_writer_failure_during_preparation_preserves_the_ready_chil
 ):
     manager, parent_id, client, directory = installation
     entered, release = asyncio.Event(), asyncio.Event()
-    harness = get_harness("codex")
-    preparation = "prepare_fork_copy" if full_copy else "prepare_fork"
-    prepare = getattr(harness, preparation)
+    target = get_harness("codex") if full_copy else manager.db
+    preparation = "prepare_fork_copy" if full_copy else "create_fork_session"
+    prepare = getattr(target, preparation)
     read = manager.db.has_delivery_notice
     captured = []
 
-    async def hold_original_artifact(*args, **kwargs):
-        artifact = await prepare(*args, **kwargs)
+    async def hold_original_preparation(*args, **kwargs):
+        result = await prepare(*args, **kwargs)
         captured.extend(row["id"] for row in await manager.db.load_incomplete_forks())
         entered.set()
         await release.wait()
-        return artifact
+        return result
 
     async def fail_after_original_read(session_id, delivery_id):
         result = await read(session_id, delivery_id)
@@ -298,7 +298,7 @@ async def test_parent_writer_failure_during_preparation_preserves_the_ready_chil
             raise RuntimeError("Original parent writer failed while its prepared fork was owned")
         return result
 
-    monkeypatch.setattr(harness, preparation, hold_original_artifact)
+    monkeypatch.setattr(target, preparation, hold_original_preparation)
     creating = asyncio.create_task(
         manager.duplicate_session(parent_id) if full_copy else manager.fork_session(parent_id, 0)
     )

@@ -21,7 +21,6 @@ from typing import Any
 
 from ..config import settings
 from ..diagnostics import diagnostic_text, exception_diagnostic
-from ..models import MessageContent
 from .assembly import assemble_turn
 from .events import HarnessCredential, HarnessOneshotError
 from .fork import ForkArtifact, ForkCheckpoint, ForkHooks
@@ -196,28 +195,6 @@ class Harness:
     @property
     def can_fork(self) -> bool:
         return self.profile.can_fork
-
-    async def prepare_fork(
-        self,
-        messages: list[MessageContent],
-        working_dir: str,
-        resume_id_hint: str | None,
-        fork_id: str,
-    ) -> ForkArtifact:
-        """Prepare backend-specific state so a new fork session can spawn at the
-        branch point (session-rewind.md §3.1). Returns a `ForkArtifact`.
-
-        Both supported rewind adapters return `needs_replay=True` without
-        creating native history. Full-copy preparation has its own collaborator.
-        Raises
-        `BackendForkNotSupported` only when the backend has no strategy."""
-        from .fork import BackendForkNotSupported
-
-        if not self.profile.can_fork or self.profile.fork_prepare is None:
-            raise BackendForkNotSupported(self.backend)
-        return await self.profile.fork_prepare(
-            messages, working_dir, resume_id_hint, fork_id
-        )
 
     async def prepare_fork_copy(
         self,

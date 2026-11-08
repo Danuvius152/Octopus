@@ -282,7 +282,7 @@ class SessionsMixin(DatabaseBase):
     ) -> None:
         """The DB-only half of the fork saga (session-rewind.md §5.1 step
         5): INSERT the fork `sessions` row (origin='fork',
-        fork_status='initializing', pre-minted resume id) and INSERT-SELECT the
+        fork_status='initializing', optional native-copy resume hint) and INSERT-SELECT the
         parent's messages with ``seq <= fork_after_seq`` — copied verbatim,
         including their git anchors. For M=0 (`fork_after_seq == -1`) the SELECT
         matches nothing. `fork_metadata` is written at INSERT (not deferred) so a
@@ -835,11 +835,10 @@ class SessionsMixin(DatabaseBase):
                 "fork_status",
             }
             # Columns that must be writable to NULL. `fork_metadata` clears after
-            # the fork's first result; `claude_session_id` must be clearable so a
-            # HISTORY_REPLAY fork (Codex) can overwrite the pre-minted resume_id
-            # hint with NULL post-prepare_fork — otherwise a restart before the
-            # first turn reloads the bogus hint and spawns `codex resume <bogus>`
-            # (Vera review BLOCKING #1). Other columns omitted by the caller are
+            # the fork's first result; `claude_session_id` must be clearable when
+            # full-copy preparation falls back to replay without native history.
+            # Otherwise a restart would adopt its unused pre-minted resume hint.
+            # Other columns omitted by the caller are
             # left untouched. Model, effort and credential overrides clear to
             # NULL to restore inheritance.
             nullable = {"fork_metadata", "claude_session_id", "model", "reasoning_effort", "credential_id", "service_tier", "context_state"}

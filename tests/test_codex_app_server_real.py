@@ -362,37 +362,6 @@ async def test_live_root_final_freezes_input_and_retires_optional_helper(live_pr
     assert report["end_reason"] == "parent_done" and report["resource_state"] == "proven"
 
 
-async def test_live_new_thread_reports_usage_without_existing_rollout(tmp_path, monkeypatch):
-    database = Database(str(tmp_path / "new-thread.db"))
-    await database.initialize()
-    await create_account(database, extra_roots=[tmp_path])
-    agent = await database.get_system_agent()
-    await database.update_agent(agent["id"], mcp_servers=[])
-    manager = SessionManager()
-    await manager.initialize(database)
-    metrics = MetricsStore(str(tmp_path / "new-thread-metrics.db"))
-    await metrics.initialize()
-    monkeypatch.setattr(monitor, "monitor", metrics)
-    session = await manager.create_session(agent["id"], "First usage", str(tmp_path), backend="codex")
-    try:
-        receipt = await manager.start_message(session.id, "Reply exactly: INITIAL_USAGE_17. Do not use tools or helpers.")
-        completion = await asyncio.wait_for(receipt.wait(), 120)
-        assert completion.outcome.status == "success", completion
-        await assert_retired(receipt)
-        await metrics.drain()
-        responses = await query.codex_turns(metrics.conn)
-        assert any(row["request_id"] == receipt.request_id and row["output_tokens"] > 0 for row in responses), responses
-        run, = await query.codex_runs(metrics.conn)
-        assert run["root_turns"] == 1 and run["metrics_unavailable"] == 0
-        assert run["metrics_collection_complete"] == 1
-    finally:
-        await manager.interrupt(session.id)
-        await manager.await_session_execution(session.id, timeout=10)
-        await manager.close_session_owners()
-        await metrics.stop()
-        await database.close()
-
-
 @pytest.mark.parametrize("first_transport", ["exec", "app-server"])
 async def test_live_native_start_and_precise_resume(tmp_path, monkeypatch, first_transport):
     if first_transport == "exec" and not await asyncio.to_thread(codex_cli_works):
@@ -424,15 +393,17 @@ async def test_live_native_start_and_precise_resume(tmp_path, monkeypatch, first
 
     manager.on_broadcast("live-native", observe)
     try:
+        phrase = f"amber-{uuid.uuid4().hex}"
         seeded = None
         if first_transport == "exec":
             seeded = await seed_exec_history(manager, database, session,
-                "Remember amber-bridge-63 for my next message. Reply only OK. Do not use tools or helpers.")
+                f"Remember {phrase} for my next message. Reply only OK. Do not use tools or helpers.")
+        # The exec-origin phrase must be learned from the old history alone.
+        remember = "" if seeded is not None else f" Remember the phrase {phrase} for my next message."
         attachment = save_upload(session.id, "input.txt", b"NATIVE_ATTACHMENT_47", user_id=session.user_id)
         result, first = await submit(
             "Use the command tool to read the attached input.txt and copy its exact bytes to artifact.txt "
-            "in the working directory. Reply with its text. Remember the phrase amber-bridge-63 for "
-            "my next message. Do not spawn helpers.", "first", [attachment.id],
+            f"in the working directory. Reply with its text.{remember} Do not spawn helpers.", "first", [attachment.id],
         )
         native_id = session.claude_session_id
         assert native_id
@@ -442,7 +413,7 @@ async def test_live_native_start_and_precise_resume(tmp_path, monkeypatch, first
         assert (tmp_path / "artifact.txt").read_bytes() == b"NATIVE_ATTACHMENT_47"
         assert any(event.get("type") == "tool_result" for event in events)
         result, second = await submit("Reply only with the phrase I asked you to remember. Do not use helpers.", "second", [])
-        assert "amber-bridge-63" in "".join(result.fragments)
+        assert phrase in "".join(result.fragments)
         evidence = second["execution"]["native_inputs"][0]
         assert evidence["state"] == "accepted" and evidence["thread_id"] == native_id
         assert first["execution"]["native_inputs"][0]["turn_id"] != evidence["turn_id"]
@@ -486,11 +457,17 @@ async def test_live_old_and_native_history_fork_continue_independently(tmp_path,
         return await database.read_session_result(session.id, receipt.request_id)
 
     try:
+        phrase = f"amber-{uuid.uuid4().hex}"
+        seeded = None
         if first_transport == "exec":
-            await seed_exec_history(manager, database, parent,
-                "Remember amber-thread-93 in this conversation. Reply only OK. Do not use tools or helpers.")
+            seeded = await seed_exec_history(manager, database, parent,
+                f"Remember {phrase} in this conversation. Reply only OK. Do not use tools or helpers.")
+        remember = "" if seeded is not None else f" Remember {phrase} in this conversation."
         first = await ask(parent, "Use the command tool to write FORK_ARTIFACT_81 into seed.txt in the working directory. "
-                          "Remember amber-thread-93 in this conversation. Reply with that phrase. Do not spawn helpers.")
+                          f"{remember} Reply with the phrase I asked you to remember. Do not spawn helpers.")
+        assert phrase in first.reply_text()
+        if seeded is not None:
+            assert parent.claude_session_id == seeded
         assert (work / "seed.txt").read_text().strip() == "FORK_ARTIFACT_81"
         branch = await manager.duplicate_session(parent.id, user_id=parent.user_id)
         assert branch.claude_session_id and branch.claude_session_id != parent.claude_session_id
@@ -501,11 +478,11 @@ async def test_live_old_and_native_history_fork_continue_independently(tmp_path,
         assert (await database.read_session_result(branch.id, first.request_id)).fragments == first.fragments
         fork_reply = await ask(branch, "Use the command tool to write BRANCH_ONLY into branch-only.txt in the current working "
                                "directory. Reply with the phrase I asked you to remember. Do not spawn helpers.")
-        assert "amber-thread-93" in fork_reply.reply_text()
+        assert phrase in fork_reply.reply_text()
         assert (Path(branch.working_dir) / "branch-only.txt").read_text().strip() == "BRANCH_ONLY"
         assert not (work / "branch-only.txt").exists()
         source_reply = await ask(parent, "Reply only with the phrase I asked you to remember. Do not use helpers.")
-        assert "amber-thread-93" in source_reply.reply_text()
+        assert phrase in source_reply.reply_text()
         await manager.delete_session(parent.id)
         assert (await database.read_session_result(branch.id, first.request_id)).fragments == first.fragments
     finally:

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from .events import HarnessCredential, HarnessEvent
-from .fork import ForkCleanup, ForkCopy, ForkPrepare
+from .fork import ForkCleanup, ForkCopy
 from .login import LoginDriver
 from .model_settings import ModelSettings
 
@@ -282,10 +282,9 @@ class RuntimeProfile:
     # (native memory, pointed at the canonical dir via an env override).
     injects_memory_prompt: bool = False
     # Whether this backend can be forked (session-rewind.md §3). A
-    # backend supplies `prepare_fork` + a working resume strategy
-    # (NATIVE_TRANSCRIPT or HISTORY_REPLAY). Both v1 backends set True; a
-    # future backend with no strategy leaves it False and the "Fork from
-    # here" affordance renders disabled. Surfaced via `SessionInfo.can_fork`.
+    # backend accepts the retained product history in the first user input,
+    # then resumes its own native session. Both supported backends set True.
+    # Surfaced via `SessionInfo.can_fork` for the "Fork from here" affordance.
     can_fork: bool = False
     # Model names this harness's CLI is known to accept, offered by `/model`.
     # A *shortlist*, not a whitelist: the route stores whatever string it is
@@ -304,12 +303,8 @@ class RuntimeProfile:
     prepare_resume: Callable[[TurnContext, list[str], dict[str, Any]], Coroutine[Any, Any, None]] | None = None
     login: LoginDriver | None = None
     transcript_codec: TranscriptCodec | None = None
-    # Fork strategy collaborators (session-rewind.md §3). `fork_prepare`
-    # synthesizes backend-specific resume state and returns a `ForkArtifact`;
-    # `fork_cleanup` sweeps any partial artifacts left by an incomplete saga.
-    # Both async. None on a backend with no fork strategy (can_fork stays
-    # False).
-    fork_prepare: ForkPrepare | None = None
+    # Clean native artifacts from incomplete full copies and retained recovery
+    # rows. Rewind itself creates no native history before the first input.
     fork_cleanup: ForkCleanup | None = None
     # Full-copy fork (session-fork.md): prepare independent native history by
     # file copy or the backend's API, without running a model turn. The actual

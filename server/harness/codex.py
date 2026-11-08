@@ -25,12 +25,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ..models import MessageContent
 from .codex_activity import CodexActivityObserver, diagnostic_environment
 from .codex_control import controller_message, turn_message
 from .driver import ArgvDriver
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
-from .fork import ForkArtifact
 from .harness import Harness
 from .login import LoginMethod, OAuthCompletion, OAuthCredentialWriter
 from .model_settings import ModelOption, ModelSettings
@@ -796,22 +794,6 @@ def parse_oneshot_stdout(stdout: str) -> str:
     except ValueError:
         return ""
     return result.get("text", "") if isinstance(result, dict) and isinstance(result.get("text"), str) else ""
-
-
-# ------------------------------------------------------------------ fork (HISTORY_REPLAY)
-
-
-async def _fork_prepare_replay(
-    messages: list[MessageContent],
-    working_dir: str,
-    resume_id_hint: str | None,
-    fork_id: str,
-) -> ForkArtifact:
-    """Rewind uses product seq, which can split one native turn at a steer.
-    The retained history therefore travels in the first explicit USER input,
-    without approximating it as a native turn count. No creation or model
-    execution occurs here; the hint is unused."""
-    return ForkArtifact(resume_id=None, needs_replay=True)
 
 
 def _codex_sessions_dir(credential: HarnessCredential | None) -> Path:

@@ -33,7 +33,6 @@ from .codex import (
     _OCTOPUS_SYSTEM_PROMPT_CODEX,
     _apply_home_dir,
     _apply_mcp_bearers,
-    _fork_prepare_replay,
     _mcp_config_args,
 )
 from .codex_activity import CodexActivityObserver
@@ -91,7 +90,7 @@ def profile(base: RuntimeProfile) -> RuntimeProfile:
                    turn_binary=ordinary_binary,
                    activity_observer=None, prepare_resume=None, can_steer=True,
                    native_input_evidence=True, tools_prompt=_OCTOPUS_SYSTEM_PROMPT_CODEX,
-                   injects_memory_prompt=True, can_fork=True, fork_prepare=_fork_prepare_replay,
+                   injects_memory_prompt=True, can_fork=True,
                    reusable=False, can_continue=True, can_observe_context=True, can_compact=True, stale_session_patterns=(),
                    auth_error_patterns=(), transient_error_patterns=_CODEX_TRANSIENT_ERROR_PATTERNS,
                    transient_error_codes=("server_overloaded", "native_provider_transient"), inline_large_inputs=True,

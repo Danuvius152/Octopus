@@ -1,6 +1,5 @@
-"""History collaborators for rewind replay and independent full-copy forks.
+"""History collaborators for independent full-copy forks.
 
-Both supported rewind adapters return replay of the retained product messages.
 Full copy uses Claude's native transcript file or Codex's non-executing history
 API. ForkArtifact carries the actual continuation identity; ForkCheckpoint
 retains creation evidence even before path validation or cleanup permission.
@@ -15,7 +14,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
 
 if TYPE_CHECKING:
-    from ..models import MessageContent
     from .events import HarnessCredential
     from .run import HarnessRun
 
@@ -26,7 +24,7 @@ HISTORY_REPLAY = "history_replay"
 
 @dataclass
 class ForkArtifact:
-    """What ``Harness.prepare_fork`` returns.
+    """What ``Harness.prepare_fork_copy`` returns.
 
     Native preparation returns the actual resume handle with no replay. File
     copies use the caller's hint; a native API can allocate a different ID and
@@ -88,9 +86,6 @@ def read_fork_checkpoint(value: object) -> ForkCheckpoint:
     if "path" in value:
         result["path"] = value["path"]
     return result
-
-
-ForkPrepare = Callable[[list["MessageContent"], str, str | None, str], Awaitable[ForkArtifact]]
 
 
 class ForkCopy(Protocol):
