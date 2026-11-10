@@ -28,6 +28,8 @@ import type { ClientSubmissionStatus } from "../api";
 import { WikiJobCards } from "./WikiJobCards";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
 import { MessageBubble } from "./MessageBubble";
+import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
+import { matchesPendingQuestion } from "../lib/questionPresentation";
 import { DispatchQueue, type CancelCompact } from "./DispatchQueue";
 import { ContextMeter } from "./ContextMeter";
 import { CommandNotices } from "./CommandNotices";
@@ -399,7 +401,7 @@ export function ChatView({
     (_index: number, msg: Message) => {
       if (msg.type === "question_request") {
         const pending = pendingQuestions.find(
-          (q) => q.question_id === msg.tool_use_id
+          (q) => matchesPendingQuestion(msg, q)
         );
         if (pending && activeSessionId) {
           return (
@@ -448,7 +450,7 @@ export function ChatView({
           agentName={activeAgent?.name}
           agentAvatar={activeAgent?.avatar}
           onFork={(seq) => setForkDialog({ seq })}
-          onRestoreInput={() => restoreRejectedInput(msg)}
+          onRestoreInput={restoreRejectedInput}
           restoreInputDisabled={input.length > 0 || pendingAttachments.length > 0}
         />
       );
@@ -469,7 +471,11 @@ export function ChatView({
 
   const renderMessage = useCallback(
     (index: number, msg: Message) => {
-      const body = renderMessageBody(index, msg);
+      const body = msg.type === "question_request" && !pendingQuestions.some((question) => matchesPendingQuestion(msg, question))
+        ? <MessageDetails sessionId={activeSessionId!} message={msg}>{(full) => full === msg
+          ? renderMessageBody(index, msg)
+          : <SavedMessageRecord message={full} label="Full saved question record" />}</MessageDetails>
+        : renderMessageBody(index, msg);
       if (body === null) return body;
       return (
         <div className="msg-row group/msg relative" data-message-key={chatMessageKey(msg)}>
@@ -478,7 +484,7 @@ export function ChatView({
         </div>
       );
     },
-    [renderMessageBody]
+    [renderMessageBody, pendingQuestions, activeSessionId]
   );
 
   // ---- attachments: upload, paste, drop, picker, chips ------------------
@@ -1535,6 +1541,16 @@ export function ChatView({
         increaseViewportBy={{ top: 400, bottom: 400 }}
         components={{ Header: olderHeader, Footer: footer }}
       />
+
+      <div aria-label="Questions outside the history window" className="max-h-[40vh] shrink-0 overflow-y-auto empty:hidden">
+      {pendingQuestions.filter((question) => !chatMessages.some((message) =>
+        matchesPendingQuestion(message, question))).map((question) =>
+        <div key={`${activeSessionId}:${question.question_id}:${question.attempt_id}`} className="px-4 py-2">
+          <QuestionPrompt sessionId={activeSessionId!} question={question} agentLabel={agentLabel}
+            onSnooze={snoozeQuestion ? (id, target) => snoozeQuestion(activeSessionId!, id, target) : undefined}
+            onSubmit={(id, answers, target) => answerQuestion(activeSessionId!, id, answers, target)} />
+        </div>)}
+      </div>
 
       {activeSessionId && (
         <div className="research-card-wrap shrink-0 px-4 empty:hidden">

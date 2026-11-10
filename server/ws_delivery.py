@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 from fastapi import WebSocket, WebSocketDisconnect
 
 from . import deps
+from .browser_messages import EVENT_BYTES
 
 if TYPE_CHECKING:
     from .sessions import SessionManager
@@ -74,7 +75,8 @@ class SocketDelivery:
             self.request_close(1011, "Reconnect to synchronize")
             return
         size = len(text.encode("utf-8"))
-        if (self._pending_frames + 1 > MAX_PENDING_FRAMES
+        if (size > EVENT_BYTES
+                or self._pending_frames + 1 > MAX_PENDING_FRAMES
                 or self._pending_bytes + size > MAX_PENDING_BYTES):
             self.request_close(1013, "Reconnect to synchronize")
             return

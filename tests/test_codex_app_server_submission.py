@@ -251,7 +251,7 @@ async def test_committed_history_resumes_when_session_started_was_not_consumed(n
     try:
         await asyncio.wait_for(offered.wait(), 3)
         committed_id = await database.get_session_resume_id(session.id)
-        assert committed_id and session.claude_session_id is None
+        assert committed_id
         if ending == "stop":
             await manager.interrupt(session.id)
             release.set()
@@ -261,7 +261,10 @@ async def test_committed_history_resumes_when_session_started_was_not_consumed(n
     first = await submission_status(manager, session.id, "first")
     assert first["outcome"]["status"] == ("interrupted" if ending == "stop" else "failed")
     native_id = first["execution"]["native_inputs"][0]["thread_id"]
-    assert native_id == committed_id and session.claude_session_id is None
+    assert native_id == committed_id
+    # The input recorder may also refresh the read model. Explicitly retain a
+    # stale projection so resuming cannot depend on either notification.
+    session.claude_session_id = None
     mode[0] = "normal"
     await submit_client_message(manager, session.id, "Continue that exact history", [], "next", wiki_mode=None)
     await wait_dispatch_idle(manager, session.id)

@@ -20,13 +20,13 @@
 
 模型编辑总是继承调用方的具体来源要求，不以 payload 是否含正文区分。fire 也在同一写入屏障内取得已提交的定义快照，随即释放屏障；已回滚的修改不会成为一次执行的依据，后续合法编辑也不回溯影响已接纳的 fire。
 
-旧结果没有合同或版本未知时，保留仍有当前职责的输出、报告和可见交付状态；不据正文补造 read/auto 请求。现有计划定义缺少合同会保留并停用，`invalid_reason=knowledge_contract_missing`；经认证的人类可在计划页面查看原消息，明确选择 Wiki 维护控制（API 的 `wiki_mode`：auto/read/maintain）重新授权，再另行恢复运行。模型不能靠改正文或省略字段恢复权限。已捕获的 fire 使用自己的定义快照，计划后续编辑或删除不会改变该次执行。
+旧结果没有合同或版本未知时，保留仍有当前职责的输出、报告和可见交付状态；不据正文补造 read/auto 请求。现有计划定义缺少合同会保留并停用，`invalid_reason=knowledge_contract_missing`；经认证的人类可在计划页面查看原消息，明确选择 Wiki 维护控制（API 的 `wiki_mode`：auto/read/maintain）重新授权，再另行恢复运行。模型不能靠改正文或省略字段恢复权限。周期 fire 保留已捕获的 prompt 与知识合同，计划后续编辑、暂停或删除不会撤销该次在途执行。一次性 fire 仍须在持久输入接纳事务中比较原定义；读取快照不等于输入已接纳，边界归[计划触发](scheduled-runs.md#captured-fire-definitions)。
 
 新的 API、MCP 与界面控制只接受 `auto`、`read`、`maintain`；携带 `wiki_mode=off` 的新 POST 返回 422，在接管对话、任务或执行前拒绝。缺少或无法验证的计划合同保留并停用，不从正文或旧控制重建权限。
 
 当前启动只接受现行完整主库格式或真正空库，不执行旧格式0–3升级到4的历史流程。当前格式声明、发布期有限转换与资料保全归[存储合同](current-storage-format.md)。旧 `off` 展示值、旧请求清退及当时的转换取舍查[固定历史版本](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/knowledge-requests.md)；不能把旧转换条件当成当前启动能力。
 
-`previous_writers_retired` 仍由受管安装的原生命周期提供，并参与当前输入和 Wiki 任务恢复：它只证明原代 writer 已退出，不证明模型消费、历史通知 ACK 或未知效果成功。独立来源返回仍按自己的身份和合同完成交付。任务恢复与原引用的使用见[Wiki合同](wiki-development-summary.md#恢复存储与性能)和[安装生命周期](installation-lifecycle.md)。
+`previous_writers_retired` 仍由受管安装的原生命周期提供，并参与当前输入和 Wiki 任务恢复：它只证明原代 writer 已退出，不证明模型消费、历史通知 ACK 或未知效果成功。独立来源返回仍按自己的身份和合同完成交付。任务恢复与原引用的使用见[Wiki合同](wiki-development-summary.md#恢复与效果核验)和[安装生命周期](installation-lifecycle.md)。
 
 当前三态受理的原始 payload、payload_sha256 与 client_id 保持不变；鉴权 `GET /api/sessions/{session_id}/submissions/{client_id}`、同ID去重、恢复权限上限及唯一后继继续有效。当前缺少旧身份查询结果也不能证明从未受理，客户端不得据此自动重发。详见[输入接纳与恢复](input-reliability.md)。
 

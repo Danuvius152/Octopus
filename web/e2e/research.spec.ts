@@ -188,13 +188,14 @@ test("the /research command surfaces a live research card", async ({ page, reque
 test("research submitted before the first detail is confirmed by one current read", async ({ page, request }) => {
   const name = "Research first generation E2E";
   const session = await importSession(request, name);
-  const detail = deferred<void>(), receipt = deferred<void>(), posted = deferred<void>();
+  const detail = deferred<void>(), detailStarted = deferred<void>(), receipt = deferred<void>(), posted = deferred<void>();
   const question = "Confirm the original research creation";
   const job = { id: "research-first-generation", session_id: session.id, question,
     status: "completed", phase: "done", report_path: "report.md" };
   let posts = 0, reads = 0, receiptSent = false;
-  await page.route(`**/api/sessions/${session.id}`, async (route) => {
+  await page.route((url) => url.pathname === `/api/sessions/${session.id}`, async (route) => {
     const response = await route.fetch();
+    detailStarted.resolve();
     await detail.promise;
     await route.fulfill({ response });
   });
@@ -215,6 +216,7 @@ test("research submitted before the first detail is confirmed by one current rea
     await login(page);
     await page.locator(".session-item .session-name", { hasText: name }).click();
     await expect(page.locator(".chat-header .crumb-current")).toHaveText(name);
+    await detailStarted.promise;
     const composer = page.locator(".chat-input-bar textarea");
     await composer.fill(`/research ${question}`);
     await composer.press("Enter");

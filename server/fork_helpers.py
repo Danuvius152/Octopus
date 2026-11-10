@@ -26,6 +26,15 @@ from .tool_pairs import pair_tool_records
 
 logger = logging.getLogger(__name__)
 
+
+def consumed_fork_metadata(metadata: str | None) -> str | None:
+    """Installation retires composer hints, preserving copied-directory identity."""
+    if not metadata:
+        return None
+    meta = json.loads(metadata)
+    durable = {key: meta[key] for key in ("full_copy", "duplicated_from") if key in meta}
+    return json.dumps(durable) if durable else None
+
 # Tools that read but don't change the world — excluded from side-effect
 # disclosure so the popover isn't drowned in "47 Read calls".
 _READONLY_TOOLS = {

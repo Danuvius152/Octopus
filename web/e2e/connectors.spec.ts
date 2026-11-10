@@ -1,9 +1,14 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "./test";
+import { deferred } from "../src/test-support/deferred";
 
 // Connectors UI against the real backend. No real third-party OAuth is needed:
 // configuring an OAuth client (or creating a custom connector) just flips a
 // connector to "available" — which is the browser-only setup flow we verify.
+
+// OAuth client configuration is global per kind: keep all real client writes
+// and cleanup in this file, sequentially even if the suite enables parallelism.
+test.describe.configure({ mode: "default" });
 
 const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
@@ -128,4 +133,106 @@ test.describe("Connectors", () => {
       "No connectors installed"
     );
   });
+});
+
+const setupAPI = "http://localhost:8765/api/connectors";
+const setupHeaders = { Authorization: `Bearer ${TEST_BEARER}` };
+const catalog = ["gmail", "github"].map((kind) => ({ kind, display_name: kind, available: false }));
+
+async function start(page: Page) {
+  await page.route("**/api/connectors/catalog", (route) => route.fulfill({ json: catalog }));
+  await page.goto("/");
+  await enterAccountCredentials(page);
+  await page.locator(".btn-manage-connectors").click();
+  await page.locator(".btn-connector-add").click();
+}
+async function setup(page: Page, kind: string) {
+  await page.locator(".connector-catalog-item", { hasText: kind }).getByRole("button", { name: "Set up" }).click();
+}
+
+for (const kind of ["gmail", "github"]) {
+  test(`late Gmail and current ${kind} reads preserve the current PUT's credentials`, async ({ page, request }) => {
+    const old = deferred<void>();
+    const current = deferred<void>();
+    let reads = 0;
+    await page.route("**/api/connectors/*/oauth-client", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const first = ++reads === 1;
+      await (first ? old.promise : current.promise);
+      await route.fulfill({ json: {
+        client_id: first ? "old-gmail" : "saved-current",
+        redirect_uri: `https://${first ? "old" : "current"}.test/callback`,
+      } });
+    });
+    try {
+      await start(page);
+      await setup(page, "gmail");
+      await expect.poll(() => reads).toBe(1);
+      await page.getByRole("button", { name: "Back" }).click();
+      await setup(page, kind);
+      await expect.poll(() => reads).toBe(2);
+      await page.getByLabel("Client ID", { exact: true }).fill("typed-current");
+      await page.getByLabel("Client secret", { exact: true }).fill("current-secret");
+      current.resolve();
+      await expect(page.locator("code")).toHaveText("https://current.test/callback");
+      const received = page.waitForResponse((response) => response.url().endsWith("/gmail/oauth-client"));
+      old.resolve();
+      await received;
+      await expect(page.getByLabel("Client ID", { exact: true })).toHaveValue("typed-current");
+      await expect(page.getByLabel("Client secret", { exact: true })).toHaveValue("current-secret");
+      await expect(page.locator("code")).toHaveText("https://current.test/callback");
+      const submitted = page.waitForRequest((sent) => sent.method() === "PUT" && sent.url().endsWith(`/${kind}/oauth-client`));
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      expect((await submitted).postDataJSON()).toEqual({ client_id: "typed-current", client_secret: "current-secret" });
+      await expect(page.getByLabel("Client ID", { exact: true })).toBeHidden();
+      const stored = await request.get(`${setupAPI}/${kind}/oauth-client`, { headers: setupHeaders });
+      expect(stored.ok()).toBe(true);
+      expect(await stored.json()).toMatchObject({ client_id: "typed-current", configured: true });
+    } finally {
+      old.resolve(); current.resolve();
+    }
+  });
+}
+
+test("a committed Gmail setup cannot close or unlock a newer GitHub submission", async ({ page, request }) => {
+  const old = deferred<void>();
+  const current = deferred<void>();
+  const committed = deferred<void>();
+  await page.route("**/api/connectors/*/oauth-client", async (route) => {
+    if (route.request().method() !== "PUT") return route.fallback();
+    const response = await route.fetch();
+    expect(response.ok()).toBe(true);
+    if (route.request().url().includes("/gmail/")) {
+      committed.resolve();
+      await old.promise;
+    } else await current.promise;
+    await route.fulfill({ response });
+  });
+  try {
+    await start(page);
+    await setup(page, "gmail");
+    await page.getByLabel("Client ID", { exact: true }).fill("gmail-original");
+    await page.getByLabel("Client secret", { exact: true }).fill("gmail-secret");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await committed.promise;
+    const stored = await request.get(`${setupAPI}/gmail/oauth-client`, { headers: setupHeaders });
+    expect(await stored.json()).toMatchObject({ client_id: "gmail-original", configured: true });
+    await page.getByRole("button", { name: "Back" }).click();
+    await setup(page, "github");
+    await page.getByLabel("Client ID", { exact: true }).fill("github-current");
+    await page.getByLabel("Client secret", { exact: true }).fill("github-secret");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    const received = page.waitForResponse((response) => response.request().method() === "PUT"
+      && response.url().endsWith("/gmail/oauth-client"));
+    old.resolve();
+    await received;
+    await expect(page.getByLabel("Client ID", { exact: true })).toHaveValue("github-current");
+    await expect(page.getByRole("button", { name: "Saving…", exact: true })).toBeDisabled();
+    current.resolve();
+    await expect(page.getByLabel("Client ID", { exact: true })).toBeHidden();
+    const github = await request.get(`${setupAPI}/github/oauth-client`, { headers: setupHeaders });
+    expect(await github.json()).toMatchObject({ client_id: "github-current", configured: true });
+  } finally {
+    old.resolve(); current.resolve(); committed.resolve();
+  }
 });

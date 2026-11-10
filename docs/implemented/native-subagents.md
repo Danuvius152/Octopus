@@ -125,6 +125,14 @@ with its reason rather than a chip that simply stops moving.
 Expanding a native card reads the collected body and tool items through
 `GET /api/sessions/{session_id}/native-details/{anchor_seq}`. The client sends
 an original product message sequence, never an arbitrary native thread ID.
+Browser reads explicitly select `view=browser`; message previews and full-item
+GETs follow the [browser representation contract](frontend-list-reconciliation.md#浏览器有界预览与按需全文).
+The byte-limited page retains the earliest contiguous matching items and uses
+the last actually returned seq as its forward cursor. An individual saved item
+can be expanded separately; these bodies stay local to that detail view.
+If an item's original association could not fit the preview, expansion displays
+the full readonly saved record, including runtime metadata, without changing the
+live helper or restoring an input form.
 Within one read transaction, the server checks the exact account/session,
 resolves request/attempt/root and child thread/turn, and reads only matching
 saved rows. Archived sessions use the same reader. A spawn observation can
@@ -144,6 +152,10 @@ cache, add usage or change saved messages.
 Available items, uncollected history and query errors are distinct. Saved
 partial output remains readable with the helper's actual status and stop
 reason; neither helper completion nor a readable body proves parent consumption.
+Large live prompt/summary hints are marked as truncated. They are not saved in
+the native card row, so its seq must not promise a full-message read of those
+omitted hints. Only collected child items have saved body references; an
+uncollected helper remains explicitly unavailable without starting a host.
 Malformed saved content is a query failure, not uncollected history. Necessary
 complete-item recording failures still follow the original execution failure
 contract, rather than being excused as unavailable optional details.

@@ -8,12 +8,93 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 
 import { MessageBubble } from "./MessageBubble";
 import { useSessionStore } from "../stores/sessionStore";
 
 afterEach(cleanup);
+
+it("keeps an asynchronous question visible when its saved body needs expansion", () => {
+  const view = render(<MessageBubble sessionId="question-preview" message={{ role: "assistant", type: "text", seq: 4,
+    content: "Question body preview…", body_state: "preview", detail_ref: "/api/sessions/question-preview/messages/4",
+    tool_input: { async_questions_preview: true } }} />);
+  expect(view.getByRole("region", { name: "Question for you" })).toBeVisible();
+  expect(view.getByRole("button", { name: "View full message" })).toBeVisible();
+});
+
+describe("saved message previews", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const preview = { role: "assistant" as const, type: "text", seq: 7, content: "Saved preview…",
+    body_state: "preview" as const, detail_ref: "/api/sessions/original/messages/7" };
+
+  it("loads only on expansion, retains preview on failure and retries the full GET", async () => {
+    useSessionStore.setState({ token: "preview-token" });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response("missing", { status: 503 }))
+      .mockResolvedValueOnce(Response.json({ role: "assistant", type: "text", seq: 7, content: "Complete original answer" }));
+    vi.stubGlobal("fetch", fetcher);
+    const view = render(<MessageBubble sessionId="original" message={preview} />);
+    expect(fetcher).not.toHaveBeenCalled();
+    fireEvent.click(view.getByRole("button", { name: "View full message" }));
+    await waitFor(() => expect(view.getByRole("alert")).toHaveTextContent("503"));
+    expect(view.getByText("Saved preview…")).toBeVisible();
+    fireEvent.click(view.getByRole("button", { name: "Retry full message" }));
+    await waitFor(() => expect(view.getByText("Complete original answer")).toBeVisible());
+    expect(view.getByText("Full message")).toBeVisible();
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([preview.detail_ref, preview.detail_ref]);
+  });
+
+  it("renders the complete saved card record after expansion without replacing live card state", async () => {
+    const card = { role: "system" as const, type: "native_subagent", seq: 7, body_state: "preview" as const,
+      detail_ref: "/api/sessions/original/messages/7", tool_input: { card_id: "card", task_id: "task", status: "failed", name: "Preview helper" } };
+    useSessionStore.setState({ token: "card-token", messages: { original: [card] }, subagents: {} });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ role: "system", type: "native_subagent", seq: 7,
+      runtime_metadata: { request_id: "complete-saved-request", attempt_id: "complete-saved-attempt" },
+      tool_input: { ...card.tool_input, name: "Complete saved helper name", description: "Complete saved card description", steps: ["Complete saved step"] } })));
+    const view = render(<MessageBubble sessionId="original" message={card} />);
+    fireEvent.click(view.getByRole("button", { name: "View full message" }));
+    await waitFor(() => expect(view.getByText(/Complete saved card description/)).toBeVisible());
+    expect(view.getByText(/Complete saved step/)).toBeVisible();
+    expect(view.getByText(/complete-saved-request/)).toBeVisible();
+    expect(useSessionStore.getState().messages.original[0].tool_input?.name).toBe("Preview helper");
+  });
+
+  it("exposes original identity fields when an unavailable association is read in full", async () => {
+    useSessionStore.setState({ token: "identity-reader" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ role: "assistant", type: "question_request", seq: 7,
+      runtime_metadata: { request_id: "original-request", attempt_id: "original-attempt", native: {
+        thread_id: "Original native identity", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn" } },
+      tool_input: { questions: [{ question: "Original question", options: [{ label: "Original saved option" }] }] } })));
+    const view = render(<MessageBubble sessionId="original" message={{ ...preview, type: "notice",
+      content: "Original associations are unavailable in this preview.", identity_unavailable: true }} />);
+    fireEvent.click(view.getByRole("button", { name: "View full message" }));
+    await waitFor(() => expect(view.getByText(/Original native identity/)).toBeVisible());
+    expect(view.getByText(/Original saved option/)).toBeVisible();
+    expect(view.queryByRole("button", { name: "Submit" })).not.toBeInTheDocument();
+  });
+
+  it.each(["message", "account", "window"])("does not publish an unfinished or retired read across %s changes", async (boundary) => {
+    useSessionStore.setState({ token: "preview-token" });
+    let finish!: (value: unknown) => void;
+    const body = new Promise((resolve) => { finish = resolve; });
+    const fetcher = vi.fn().mockResolvedValue({ ok: true, json: () => body });
+    vi.stubGlobal("fetch", fetcher);
+    const view = render(<MessageBubble sessionId="original" message={preview} />);
+    fireEvent.click(view.getByRole("button", { name: "View full message" }));
+    await waitFor(() => expect(view.getByText("Loading full message…")).toBeVisible());
+    expect(view.queryByText("Full message")).not.toBeInTheDocument();
+    if (boundary === "message") view.rerender(<MessageBubble sessionId="next" message={{ ...preview, seq: 8, content: "Next preview…",
+      detail_ref: "/api/sessions/next/messages/8" }} />);
+    else act(() => {
+      if (boundary === "account") useSessionStore.setState({ accountGeneration: useSessionStore.getState().accountGeneration + 1 });
+      else useSessionStore.getState().setMessages("original", []);
+    });
+    expect(fetcher.mock.calls[0][1].signal.aborted).toBe(true);
+    finish({ role: "assistant", type: "text", seq: 7, content: "Retired original answer" });
+    await waitFor(() => expect(view.getByText(boundary === "message" ? "Next preview…" : "Saved preview…")).toBeVisible());
+    expect(view.queryByText("Retired original answer")).not.toBeInTheDocument();
+  });
+});
 
 it.each(["missing", "other-request", "other-attempt", "commentary", "other-root"])(
   "does not claim saved output for an unconfirmed %s reference", (damage) => {

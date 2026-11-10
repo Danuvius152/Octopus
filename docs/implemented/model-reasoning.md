@@ -150,6 +150,13 @@ workspace-specific CLI overrides can still affect settings inherited from the
 CLI. Explicit Octopus overrides take command-line precedence. A cached catalog
 is the client's last advertised list, not a new availability check.
 
+评测固定有效 model、effort、tier 及所选凭据来源；会话覆盖为空时继续核对 Agent
+继承值和实际解析的同一目录，不把继承误判为登录回退。Normal 的配置值是
+`service_tier="default"`；配置生效与原生响应的计费档位观察分别记录，后者缺失时
+仍为未知。原生 response 用量关联原 request／attempt／thread／turn，cached input
+和 reasoning output 是各自总量的子集，不重复相加，也不从帧字节推算 token 或费用。
+输入测量只支持其固定条件下的结论，方法归[验证政策](../testing.md#optional-resource-experiments)。
+
 ## 上下文样本与配置绑定
 
 `sessions.context_state`保存最近可信原生root样本及其适用范围，与Monitor累计
@@ -160,7 +167,8 @@ thread/turn和观察序号；独立revision表达完整替换顺序，binding re
 展示资格，不创建或等待执行Owner；NULL无事实直接返回。绑定尚未对齐或原Owner
 已失败时pending为true，保留样本供历史详情，但不显示为当前比例。需要对齐时
 只唤醒已有Owner，不承诺即时通知；后续合法Owner建立后沿原路径对齐。原Owner
-仍是唯一持久写者，纯读不制造revision或采样时间，历史诊断读取不依赖其命令推进。
+仍是原生运行时样本的唯一持久写者，纯读不制造revision或采样时间，历史诊断读取
+不依赖其命令推进。
 
 Codex App Server使用精确绑定根turn的`last.totalTokens`和同通知有效window，
 排除child、旧turn/连接、resume replay和重复通知，不将累计total作为采样序号。
@@ -203,6 +211,13 @@ model/credential实际改变及凭据删除在原事务推进`context_settings_r
 名称、头像及不改变上下文绑定的effort/speed不推进该版本。继承A→B→A仍失效，
 丢通知也不能跳过版本比较。首次原生ID补全不淘汰证明该ID的原attempt；已知ID
 替换、清除或reset推进失效边界，旧attempt的晚到样本不能重新配对当前配置。
+
+context、原生ID和会话配置的持久写入在提交前校验已有writer的Session身份、
+失败状态及当前task；样本另须通过原request、attempt、binding和观察顺序校验。
+COMMIT确认后才更新内存事实并通知捕获的同一Owner。合法的无Owner配置对齐
+可以保存事实，不为通知安装执行者；context没有变化时保留原短路。真实存储错误
+仍执行既定fail-stop，不由归档门禁或通知路径吞掉。归档关闭新接纳与原执行的
+有限收尾资格分别成立，见[原请求完成](input-reliability.md#原请求完成与失败交接)。
 
 启动在开放准入前，随原输入恢复事务对本次可能已发送的未完成执行保存失效，
 覆盖普通消息中的自动压缩。明确未发送/被拒及纯pending保留其不同证据；旧

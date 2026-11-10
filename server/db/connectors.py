@@ -40,27 +40,32 @@ class ConnectorsMixin(DatabaseBase):
             ) is None:
                 raise ValueError("Custom connector definition no longer exists")
             if expected_existing_id is not None:
-                existing = await tx.fetch_one(
-                    "SELECT id FROM connector_installations WHERE id=? AND user_id IS ? "
-                    "AND kind=? AND external_account_id=?",
-                    (expected_existing_id, user_id, kind, external_account_id),
+                # Reauthorization updates the captured target, including custom
+                # NULL identities. A disappeared target must never be inserted.
+                row = await tx.fetch_one(
+                    "UPDATE connector_installations SET label=?, scopes=?, token_expires_at=?, "
+                    "needs_reconnect=0, last_refresh_error_code=NULL "
+                    "WHERE id=? AND user_id IS ? AND kind=? AND external_account_id IS ? "
+                    f"RETURNING {self._CONNECTOR_COLS}",
+                    (label, json.dumps(scopes), token_expires_at, expected_existing_id, user_id, kind, external_account_id),
                 )
-                if existing is None:
+                if row is None:
                     raise ValueError("connector installation not found")
-            row = await tx.fetch_one(
-                "INSERT INTO connector_installations "
-                "(id, kind, label, auth_type, external_account_id, scopes, "
-                "enable_by_default, needs_reconnect, token_expires_at, created_at, user_id) "
-                "VALUES (?, ?, ?, 'oauth', ?, ?, 0, 0, ?, ?, ?) "
-                "ON CONFLICT(COALESCE(user_id, ''), kind, external_account_id) "
-                "WHERE external_account_id IS NOT NULL DO UPDATE SET "
-                "label=excluded.label, scopes=excluded.scopes, "
-                "token_expires_at=excluded.token_expires_at, "
-                "needs_reconnect=0, last_refresh_error_code=NULL "
-                f"RETURNING {self._CONNECTOR_COLS}",
-                (installation_id, kind, label, external_account_id, json.dumps(scopes),
-                 token_expires_at, created_at, user_id),
-            )
+            else:
+                row = await tx.fetch_one(
+                    "INSERT INTO connector_installations "
+                    "(id, kind, label, auth_type, external_account_id, scopes, "
+                    "enable_by_default, needs_reconnect, token_expires_at, created_at, user_id) "
+                    "VALUES (?, ?, ?, 'oauth', ?, ?, 0, 0, ?, ?, ?) "
+                    "ON CONFLICT(COALESCE(user_id, ''), kind, external_account_id) "
+                    "WHERE external_account_id IS NOT NULL DO UPDATE SET "
+                    "label=excluded.label, scopes=excluded.scopes, "
+                    "token_expires_at=excluded.token_expires_at, "
+                    "needs_reconnect=0, last_refresh_error_code=NULL "
+                    f"RETURNING {self._CONNECTOR_COLS}",
+                    (installation_id, kind, label, external_account_id, json.dumps(scopes),
+                     token_expires_at, created_at, user_id),
+                )
             assert row is not None
             installation = self._row_to_connector(row)
             await tx.execute(

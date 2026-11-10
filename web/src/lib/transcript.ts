@@ -83,7 +83,7 @@ export function observeOlderMessages(sessionId: string, beforeMerge?: () => void
       if (!sessionId || !start.token || !start.hasMoreMessages[sessionId] || typeof oldest !== "number" || oldest <= 0) return { state: "unneeded" };
       if (inFlight.has(sessionId)) return { state: "in_flight" };
       inFlight.set(sessionId, identity);
-      const response = await fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/messages?before_seq=${oldest}`, {
+      const response = await fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/messages?before_seq=${oldest}&view=browser`, {
         headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(30_000),
       });
       if (!response.ok) throw new Error(`Could not load earlier messages (HTTP ${response.status}).`);

@@ -564,31 +564,12 @@ async def test_codex_first_turn_wraps_dispatch_only(manager, monkeypatch):
     msgs = await manager.db.load_messages(fork.id)
     user_rows = [m for m in msgs if m["role"] == "user" and m["seq"] == 2]
     assert user_rows and user_rows[0]["content"] == "edited prompt"
-    # First result cleared the ephemeral fork state.
-    assert fork.fork_needs_replay is False
-    assert fork.fork_metadata is None
+    # This generic run proves dispatch and raw persistence, not native storage.
+    # Native consumption and the following unwrapped turn are covered through
+    # actual protocol drivers in test_fork_replay_input.py.
+    assert fork.fork_needs_replay is True
+    assert json.loads(fork.fork_metadata)["prefilled_prompt"] == "q1"
     assert fork.claude_session_id == "newthread"
-
-
-@pytest.mark.asyncio
-async def test_codex_turn_two_not_wrapped(manager, monkeypatch):
-    parent = await _seed_parent(manager, backend="codex")
-    fork = await manager.fork_session(parent.id, 2)
-    fake = _FakeRun()
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
-    receipt = await manager.start_message(fork.id, "turn one")
-    completion = await asyncio.wait_for(receipt.wait(), 2)
-    assert completion.recording_state == "committed" and completion.outcome.status == "success"
-    await manager.await_session_execution(fork.id)
-    # Turn 2: replay flag cleared → no wrap.
-    fake2 = _FakeRun()
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake2)
-    receipt = await manager.start_message(fork.id, "turn two")
-    completion = await asyncio.wait_for(receipt.wait(), 2)
-    assert completion.recording_state == "committed" and completion.outcome.status == "success"
-    await manager.await_session_execution(fork.id)
-    assert "<fork-history" not in fake2.started_prompt
-    assert fake2.started_prompt == "turn two"
 
 
 @pytest.mark.asyncio

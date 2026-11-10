@@ -732,11 +732,16 @@ describe("session-owned attachment drafts", () => {
     expect(send).not.toBeDisabled();
   });
 
-  const recordQueuedFailure = () => act(() => useSessionStore.getState().addMessage(session.id, {
-    role: "system", type: "result",
+  const queuedFailure = {
+    role: "system" as const, type: "result", seq: 7,
     content: { kind: "outcome", operation: "message", request_id: "accepted-files", status: "failed", code: "attachment_unavailable",
       message: "Some attachments are unavailable. Re-upload the files in this conversation.", recovery: {} },
     tool_input: { rejected_input: { content: "Queued complete input", attachment_ids: ["lost-file"] } },
+  };
+  const recordQueuedFailure = (preview = false) => act(() => useSessionStore.getState().addMessage(session.id, {
+    ...queuedFailure, tool_input: preview ? undefined : queuedFailure.tool_input,
+    body_state: preview ? "preview" : undefined,
+    detail_ref: preview ? `/api/sessions/${session.id}/messages/7` : undefined,
   }));
 
   it("restores a queued-input failure using its original File objects", async () => {
@@ -755,9 +760,21 @@ describe("session-owned attachment drafts", () => {
     expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Queued complete input", ["replacement-file"], undefined);
   });
 
-  it("requires file reselection when restoring a durable failure after reload", async () => {
+  it.each(["inline", "expanded"])("requires file reselection when restoring a durable %s failure after reload", async (representation) => {
+    if (representation === "expanded") {
+      useSessionStore.setState({ token: "restore-original-token" });
+      const upload = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(url), window.location.origin).pathname;
+        if (path === `/api/sessions/${session.id}/messages/7`) return Promise.resolve(Response.json(queuedFailure));
+        if (path.endsWith("/submissions")) return Promise.resolve(Response.json({ items: [], next_cursor: null }));
+        if (init?.method === "POST" && path.endsWith("/attachments")) return upload(url, init);
+        return Promise.resolve(Response.json([]));
+      }));
+    }
     const { input, send, sendMessage } = setup();
-    recordQueuedFailure();
+    recordQueuedFailure(representation === "expanded");
+    if (representation === "expanded") fireEvent.click(await screen.findByRole("button", { name: "View full message" }));
     fireEvent.click(await screen.findByRole("button", { name: "Restore draft and re-upload files" }));
     expect(input).toHaveValue("Queued complete input");
     expect(send).toBeDisabled();

@@ -9,8 +9,11 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sqlite3
+import subprocess
 import sys
 import traceback
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
@@ -174,6 +177,88 @@ def _fake_report(question="q"):
         question=question, report="# Final report\nThe answer [http://a].",
         findings=[], sources=["http://a"], angles=["x"], claims_examined=3, cost=0.05,
     )
+
+
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize("material_available", [False, True])
+def test_synthesis_outcome_commit_failure_keeps_storage_fail_stop(tmp_path, committed, material_available):
+    program = """
+import asyncio
+import builtins
+import sys
+from pathlib import Path
+from server.database import Database
+from server.research import orchestrator
+from server.research.leaf import LeafResult
+from server.research.manager import ResearchManager
+from server.session_manager import SessionManager
+from tests.accounts import create_account
+
+async def main():
+    database = Database(sys.argv[1])
+    await database.initialize()
+    await create_account(database)
+    manager = SessionManager()
+    await manager.initialize(database)
+    agent = await database.get_system_agent()
+    session = await manager.create_session(agent["id"], "Original research")
+    research = ResearchManager()
+    research.bind(manager, database)
+    async def reason(*args, prompt, **kwargs):
+        return LeafResult(text='["safety"]') if "Decompose" in prompt else LeafResult(text="", error="original synthesis refusal")
+    async def search(*args, **kwargs):
+        return LeafResult(text="[]")
+    orchestrator.run_reason_leaf, orchestrator.run_web_leaf = reason, search
+    original_open = builtins.open
+    def open_material(path, mode="r", *args, **kwargs):
+        if str(path).endswith("synthesis-failure.json") and "w" in mode:
+            Path(sys.argv[4]).touch()
+            if sys.argv[5] == "False":
+                raise OSError("diagnostic material unavailable before terminal commit")
+        return original_open(path, mode, *args, **kwargs)
+    builtins.open = open_material
+    async def observe(event):
+        if event["type"] in {"research_failed", "research_completed"}:
+            Path(sys.argv[3]).touch()
+    manager.on_broadcast("terminal-publication", observe)
+    execute, commit = database.conn._execute, database.conn.commit
+    terminal_write = False
+    async def track_execute(function, *args, **kwargs):
+        nonlocal terminal_write
+        result = await execute(function, *args, **kwargs)
+        if args and isinstance(args[0], str) and args[0].startswith("UPDATE research_jobs SET status=") and args[1][0] == "failed":
+            terminal_write = True
+        return result
+    async def failed_commit():
+        if terminal_write:
+            if sys.argv[2] == "True":
+                await commit()
+            raise OSError("original research terminal COMMIT unacknowledged")
+        await commit()
+    database.conn._execute, database.conn.commit = track_execute, failed_commit
+    await research.start(session.id, "Original synthesis failure")
+    await research.wait_for_idle()
+    Path(sys.argv[3]).touch()
+
+asyncio.run(main())
+"""
+    path, marker, attempted = tmp_path / "research.db", tmp_path / "terminal-published", tmp_path / "material-attempted"
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(path), str(committed), str(marker), str(attempted), str(material_available)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 70, result.stderr
+    assert attempted.exists() and not marker.exists()
+    with closing(sqlite3.connect(path)) as stored:
+        row = stored.execute("SELECT status, completed_at, error FROM research_jobs").fetchone()
+    if committed:
+        assert row[0] == "failed" and row[1] and row[2].startswith("Report synthesis failed: original synthesis refusal")
+        if material_available:
+            assert row[2] == "Report synthesis failed: original synthesis refusal"
+        else:
+            assert "Synthesis diagnostic material unavailable: OSError: diagnostic material unavailable before terminal commit" in row[2]
+    else:
+        assert row == ("running", None, None)
 
 
 @pytest.fixture

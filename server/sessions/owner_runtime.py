@@ -1307,6 +1307,9 @@ class OwnerRuntime:
         execution = self.current
         if execution is not None and execution.input_changed.is_set():
             execution.input_changed.clear()
+            if manager.db is not None:
+                session.claude_session_id, session.fork_needs_replay, session.fork_metadata = await manager.db.session_input_history(
+                    session.id, execution.request.request_id)
             self.changed()
         idle_prefix_ready = self._offer_idle_publication()
         for key, resource in tuple(session._run.retirements.items()):
@@ -1556,6 +1559,13 @@ class OwnerRuntime:
             prompt = render(knowledge) + "\n\n" + prompt
         prompt = _augment_prompt_with_attachments(prompt, list(prepared.paths))
         copied: list[MessageContent] = []
+        if manager.db is not None:
+            try:
+                session.claude_session_id, session.fork_needs_replay, session.fork_metadata = await manager.db.session_input_history(
+                    session.id, request.request_id)
+            except ValueError as error:
+                await self._failed(execution, error, "replay_installation_unknown")
+                return
         if session.fork_needs_replay and manager.db is not None:
             cutoff = session.fork_after_seq if session.fork_after_seq is not None else -1
             copied = [MessageContent(**row) for row in await manager.db.load_messages(session.id, max_seq=cutoff)]
@@ -1674,6 +1684,15 @@ class OwnerRuntime:
                 self.owner.wake()
 
             backend.bind_input_recorder(record_input)
+            generation = self.owner.manager._dispatch_generation
+
+            async def record_history(native_id: str | None, may_have_run: bool) -> None:
+                await database.record_input_history(session.id, execution.request.request_id, attempt.attempt_id,
+                    generation, backend.profile.backend, native_id, may_have_run)
+                execution.input_changed.set()
+                self.owner.wake()
+
+            backend.bind_input_history_recorder(record_history if session.fork_needs_replay else None)
             backend.bind_questions(self.owner.wake)
         observation = session._request_observations.get(execution.request.request_id)
         if observation is not None:
@@ -1906,6 +1925,11 @@ class OwnerRuntime:
             turn.continuation_id = attempt.conversation_id
         if attempt.result is not None and attempt.result.cost is not None:
             settlement.cost = (settlement.cost or 0) + attempt.result.cost
+        if session.fork_needs_replay and manager.db is not None:
+            # A retry needs the committed installation fact too. Its generic
+            # continuation cannot stand in for the original replay input.
+            session.claude_session_id, session.fork_needs_replay, session.fork_metadata = await manager.db.session_input_history(
+                session.id, execution.request.request_id)
         decision = await manager._after_attempt(session, turn, attempt)
         if decision.retry:
             self._capture_recording(execution)

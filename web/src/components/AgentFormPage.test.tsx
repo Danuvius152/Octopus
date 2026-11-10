@@ -10,6 +10,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { AgentFormPage } from "./AgentFormPage";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { connectorInstallations } from "../lib/connectorInstallations";
+import { deferred } from "../test-support/deferred";
 import {
   useSessionStore, type Agent, type BackendKind, type SessionInfo,
 } from "../stores/sessionStore";
@@ -64,7 +65,7 @@ function mount(
 }
 
 beforeEach(() => {
-  fetchMock = vi.fn(async () => new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } }));
+  fetchMock = vi.fn(async (url: unknown) => emptyRead(url));
   vi.stubGlobal("fetch", fetchMock);
   vi.stubGlobal("confirm", vi.fn(() => true));
 });
@@ -76,12 +77,162 @@ afterEach(() => {
 });
 
 describe("AgentFormPage", () => {
+  it("keeps a reopened Agent's connector selection when the first opening's GET arrives late", async () => {
+    const read = deferred<Response>();
+    let reads = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.endsWith("/ag1/connectors")) {
+        if (++reads === 1) return read.promise;
+        return json({ installation_ids: [] });
+      }
+      return emptyRead(url);
+    });
+    mount("ag1", [agent(), agent({ id: "ag2", name: "Vera" })]);
+    act(() => useSessionStore.setState({ connectorInstallations: [{
+      id: "github", kind: "github", label: "GitHub account", auth_type: "oauth", scopes: [],
+      external_account_id: "1", enable_by_default: false, needs_reconnect: false,
+      token_expires_at: null, last_refresh_error_code: null, created_at: "2026-11-10",
+    }] }));
+    await waitFor(() => expect(reads).toBe(1));
+    act(() => useSessionStore.getState().openAgentForm("ag2"));
+    act(() => useSessionStore.getState().openAgentForm("ag1"));
+    await waitFor(() => expect(reads).toBe(2));
+    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).not.toBeChecked();
+    await act(async () => read.resolve(json({ installation_ids: ["github"] })));
+    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).not.toBeChecked();
+  });
+
+  it("locks only a pending connector and confines its failed rollback to its original opening", async () => {
+    const write = deferred<Response>();
+    const writes: string[] = [];
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") {
+        writes.push(url);
+        if (writes.length === 1) return write.promise;
+        return new Response(null, { status: 204 });
+      }
+      return url.endsWith("/connectors") ? json({ installation_ids: ["first"] }) : emptyRead(url);
+    });
+    mount("ag1");
+    act(() => useSessionStore.setState({ connectorInstallations: ["first", "second"].map((id) => ({
+      id, kind: "github", label: id, auth_type: "oauth", scopes: [], external_account_id: id,
+      enable_by_default: false, needs_reconnect: false, token_expires_at: null,
+      last_refresh_error_code: null, created_at: "2026-11-10",
+    })) }));
+    const first = screen.getByRole("checkbox", { name: /first/ });
+    const second = screen.getByRole("checkbox", { name: /second/ });
+    await waitFor(() => expect(first).toBeChecked());
+    fireEvent.click(first);
+    expect(first).toBeDisabled();
+    expect(second).toBeEnabled();
+    fireEvent.click(first);
+    fireEvent.click(second);
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(second).toBeChecked();
+    act(() => {
+      useSessionStore.getState().showChat();
+      useSessionStore.getState().openAgentForm("ag1");
+    });
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: /first/ })).toBeChecked());
+    await act(async () => write.resolve(new Response(null, { status: 503 })));
+    // A new edit still belongs to the reopened draft.
+    fireEvent.click(screen.getByRole("checkbox", { name: /first/ }));
+    expect(screen.getByRole("checkbox", { name: /first/ })).not.toBeChecked();
+    expect(writes).toHaveLength(3);
+    await act(async () => {});
+  });
+
+  it.each(["switch", "reopen", "account"] as const)(
+    "a retired save cannot close, report errors in or unlock a new %s draft",
+    async (transition) => {
+      const existing = agent();
+      const other = agent({ id: "ag2", name: "Vera" });
+      const saves: (ReturnType<typeof deferred<Response>> & { body: unknown })[] = [];
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === "PATCH") {
+          const save = { ...deferred<Response>(), body: JSON.parse(init.body as string) };
+          saves.push(save);
+          return save.promise;
+        }
+        return emptyRead(url);
+      });
+      mount("ag1", [existing, other]);
+      fireEvent.change(screen.getByLabelText("One-line role"), { target: { value: "Old draft" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+      act(() => {
+        if (transition === "account") {
+          useSessionStore.getState().setToken("other-account");
+          useSessionStore.getState().setToken("tok");
+          useSessionStore.getState().setAgents([existing, other]);
+        } else if (transition === "switch") useSessionStore.getState().openAgentForm("ag2");
+        else useSessionStore.getState().showChat();
+        useSessionStore.getState().openAgentForm("ag1");
+      });
+      expect(screen.getByRole("button", { name: "Save Agent" })).toBeEnabled();
+      fireEvent.change(screen.getByLabelText("One-line role"), { target: { value: "New draft" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+      expect(saves.map((save) => save.body)).toEqual([{ description: "Old draft" }, { description: "New draft" }]);
+      await act(async () => saves[0].resolve(transition === "reopen"
+        ? json({ detail: "Retired save failed" }, 503)
+        : json({ ...existing, description: "Old draft" })));
+      expect(useSessionStore.getState().mainView).toBe("agent-form");
+      expect(screen.getByLabelText("One-line role")).toHaveValue("New draft");
+      expect(screen.queryByText("Retired save failed")).toBeNull();
+      expect(screen.getByRole("button", { name: "Save Agent" })).toBeDisabled();
+      if (transition === "switch") expect(useSessionStore.getState().agents[0].description).toBe("Old draft");
+      if (transition === "account") expect(useSessionStore.getState().agents[0].description).toBe("");
+      await act(async () => saves[1].resolve(json({ ...existing, description: "New draft" })));
+      expect(useSessionStore.getState().mainView).toBe("chat");
+    },
+  );
+
+  it("keeps a connector edit made before its initial GET completes", async () => {
+    const read = deferred<Response>();
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") return new Response(null, { status: 204 });
+      if (url.endsWith("/ag1/connectors")) return read.promise;
+      return emptyRead(url);
+    });
+    mount("ag1");
+    act(() => useSessionStore.setState({ connectorInstallations: [{
+      id: "github", kind: "github", label: "GitHub account", auth_type: "oauth", scopes: [],
+      external_account_id: "1", enable_by_default: false, needs_reconnect: false,
+      token_expires_at: null, last_refresh_error_code: null, created_at: "2026-11-10",
+    }] }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /GitHub account/ }));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: /GitHub account/ })).toBeEnabled());
+    await act(async () => read.resolve(json({ installation_ids: [] })));
+    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).toBeChecked();
+  });
+
+  it.each(["before", "after"])("a failed connector edit restores the initial selection read %s rejection", async (order) => {
+    const read = deferred<Response>();
+    const write = deferred<Response>();
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") return write.promise;
+      if (url.endsWith("/ag1/connectors")) return read.promise;
+      return emptyRead(url);
+    });
+    mount("ag1");
+    act(() => useSessionStore.setState({ connectorInstallations: [{
+      id: "github", kind: "github", label: "GitHub account", auth_type: "oauth", scopes: [],
+      external_account_id: "1", enable_by_default: false, needs_reconnect: false,
+      token_expires_at: null, last_refresh_error_code: null, created_at: "2026-11-10",
+    }] }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /GitHub account/ }));
+    if (order === "before") await act(async () => read.resolve(json({ installation_ids: ["github"] })));
+    await act(async () => write.resolve(new Response(null, { status: 503 })));
+    if (order === "after") await act(async () => read.resolve(json({ installation_ids: ["github"] })));
+    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).toBeEnabled();
+  });
+
   it.each(["update", "archive"])("a late form receipt preserves the newer WS %s", async (event) => {
     const existing = agent({ name: "Original" });
     let finish!: (response: Response) => void;
-    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
       if (init?.method === "PATCH") return new Promise<Response>((resolve) => { finish = resolve; });
-      return json([]);
+      return emptyRead(url);
     });
     mount(existing.id, [existing]);
     fireEvent.change(screen.getByLabelText("One-line role"), { target: { value: "Draft" } });
@@ -144,7 +295,7 @@ describe("AgentFormPage", () => {
         patches += 1;
         return new Response(null, { status: patches === 1 ? 500 : 204 });
       }
-      return json([]);
+      return emptyRead(url);
     });
     mount("ag1");
     await act(async () => { await connectorInstallations.refresh(); });
@@ -170,7 +321,7 @@ describe("AgentFormPage", () => {
         reasoning_efforts: ["low", "high", "max"],
         service_tiers: ["default", "fast"], default_service_tier: "default",
       });
-      return init?.method === "POST" ? json(agent({ name: "Reasoner", backend }), 201) : json([]);
+      return init?.method === "POST" ? json(agent({ name: "Reasoner", backend }), 201) : emptyRead(url);
     });
     mount(null, [], "form", backend);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Reasoner" } });
@@ -192,10 +343,10 @@ describe("AgentFormPage", () => {
   });
 
   it("creates an agent with the install's configured Codex default", async () => {
-    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) =>
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) =>
       init?.method === "POST"
         ? json(agent({ id: "ag2", name: "Codex default", backend: "codex", is_system: false }), 201)
-        : json([])
+        : emptyRead(url)
     );
     mount(null, [agent({ backend: "codex" })], "form", "codex");
     expect(screen.getByRole("radio", { name: /Codex/ }).getAttribute("aria-checked")).toBe("true");
@@ -223,13 +374,13 @@ describe("AgentFormPage", () => {
   });
 
   it("POSTs a new agent and returns to chat", async () => {
-    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) =>
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) =>
       init?.method === "POST"
         ? new Response(JSON.stringify(agent({ id: "ag2", name: "sre-ops", is_system: false })), {
             status: 201,
             headers: { "Content-Type": "application/json" },
           })
-        : new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+        : emptyRead(url)
     );
     mount(null);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "sre-ops" } });
@@ -241,13 +392,13 @@ describe("AgentFormPage", () => {
 
   it("seeds the form when editing and PATCHes on save", async () => {
     const existing = agent({ id: "ag9", name: "Vera", is_system: false, system_prompt: "review code" });
-    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) =>
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) =>
       init?.method === "PATCH"
         ? new Response(JSON.stringify({ ...existing, description: "reviewer" }), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           })
-        : new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+        : emptyRead(url)
     );
     mount("ag9", [existing], "form", "codex");
     expect(screen.getByRole("radio", { name: /Claude/ }).getAttribute("aria-checked")).toBe("true");
@@ -417,7 +568,7 @@ describe("AgentFormPage", () => {
     fetchMock.mockImplementation(async (url: unknown) =>
       String(url).includes("include_archived=true")
         ? json([agent(), retired])
-        : json([])
+        : emptyRead(url)
     );
     const { container } = mount(null, [
       agent(),
@@ -455,7 +606,7 @@ describe("AgentFormPage", () => {
     fetchMock.mockImplementation(async (url: unknown) =>
       String(url).endsWith("/ag2/pin")
         ? json({ ...vera, pinned: true, pin_order: 2 })
-        : json([])
+        : emptyRead(url)
     );
     mount(null, [agent(), vera], "all");
 
@@ -493,7 +644,7 @@ describe("AgentFormPage", () => {
     fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) =>
       String(url).endsWith("/api/agents/ag2/sessions") && init?.method === "POST"
         ? json(session({ id: "fresh", agent_id: "ag2" }), 201)
-        : json([])
+        : emptyRead(url)
     );
     mount(null, [agent(), vera], "all");
     fireEvent.click(screen.getAllByRole("button", { name: "Chat" })[1]);
@@ -519,7 +670,7 @@ describe("AgentFormPage", () => {
       if (String(url).includes("/unarchive"))
         return json({ ...retired, archived: false, pinned: true, pin_order: 2 });
       if (String(url).includes("include_archived=true")) return json([agent(), retired]);
-      return json([]);
+      return emptyRead(url);
     });
     const { container } = mount(null, [agent()], "all");
     await waitFor(() => expect(screen.getByText("Retired")).toBeTruthy());
@@ -545,7 +696,7 @@ describe("AgentFormPage", () => {
       if (String(url).includes("/unarchive"))
         return json({ detail: "An agent named 'Scout' already exists" }, 400);
       if (String(url).includes("include_archived=true")) return json([retired]);
-      return json([]);
+      return emptyRead(url);
     });
     mount(null, [agent()], "all");
     await waitFor(() => expect(screen.getByText("Scout")).toBeTruthy());
@@ -559,7 +710,7 @@ describe("AgentFormPage", () => {
     fetchMock.mockImplementation(async (url: unknown) => {
       if (String(url).includes("/unarchive")) return new Promise<Response>((resolve) => { finish = resolve; });
       if (String(url).includes("include_archived=true")) return json([retired]);
-      return json([]);
+      return emptyRead(url);
     });
     mount(null, [agent()], "all");
     fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
@@ -599,8 +750,12 @@ function mockCodexEdit(existing: Agent) {
       const current = useSessionStore.getState().agents.find((a) => a.id === existing.id);
       return json({ ...current, ...JSON.parse(String(init.body)) });
     }
-    return json([]);
+    return emptyRead(url);
   });
+}
+
+function emptyRead(url: unknown): Response {
+  return json(/\/api\/agents\/[^/]+\/connectors$/.test(String(url)) ? { installation_ids: [] } : []);
 }
 
 function json(body: unknown, status = 200): Response {

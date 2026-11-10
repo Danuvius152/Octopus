@@ -1764,6 +1764,7 @@ async def test_stale_resume_recovery_only_fires_once_per_turn(manager, monkeypat
         agent["id"], "Stale twice", None, backend="claude-code"
     )
     session.claude_session_id = "dead-1"
+    await manager.db.update_session_field(session.id, claude_session_id="dead-1")
     stale = lambda: _SeqBackend(  # noqa: E731 - table of identical attempts
         events=[], preparation_error="No conversation found with session ID: dead-1",
     )

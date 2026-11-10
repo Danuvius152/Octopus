@@ -53,6 +53,23 @@ effort，并保留工具调用、入队范围和提交者未改文件的断言�
 回退登录或先发额外付费探针。报告保留隔离 DB、认证宿主、文件访问和源绑定的
 实际限制；新 cwd/空 memory 不证明盲测，资料变化后须按当前版本评阅。
 
+扩展评测夹具以公布普通内置工具时，须配套其 REST 路由、隔离管理器、回调和
+资源退休；只挂载 MCP namespace 不证明工具可用。进入付费样本前，用无模型
+dry-run 验证实际入口和异步返回。预算覆盖 native、one-shot 和 exec 的实际
+模型入口；凭据核对使用当前解析的选定绑定，不能以环境默认 home 代替身份。
+
+## Private source snapshots
+
+真实 Library 评测先冻结当前可读范围的原始字节、路径、revision 和导航身份，
+再使用隔离副本。已移动文档的 ID 不能仅从当前路径重建；需要保留已知身份时，
+仅在全新隔离 ledger 的首次索引前种入，核对 ledger/config 的 vault 绑定，
+file identity 取副本本身。不复制生产授权、旧 cursor 或执行历史。
+
+真实问题、金标、资料与报告留私有产物，不写入公共 fixture 或公开查询词。
+预期文档可以只是相关来源子集；其他候选分别标记相关、低相关或未判定，不能
+把不在金标中的背景来源一律计为错误。保留集不选参；内部召回或字节反事实
+仅用于诊断，不能替代候选经实际聊天、答案和引用评阅后的质量与成本证据。
+
 ## Frozen Wiki reference
 
 `tests/wiki_baseline.py` and `tests/fixtures/wiki-baseline-questions.json` own the
@@ -97,13 +114,26 @@ and shared runtime instructions; dedicated-query cases retain their additional
 context as a separate condition. Check actual native developer messages and
 tool-return guide digests when claiming a runtime guide became effective.
 
+Keep final JSON-RPC/SSE response bodies as raw bytes, separately from the decoded
+CallToolResult SDK projection and delivered source-body UTF-8 bytes. A reserialized
+intermediate result does not prove final delivery or model token consumption.
+
 `tests/wiki_query_evidence.py` records actual returned ranges and raw usage.
 Full-text evidence requires gap-free `[0,end)` coverage of the same revision;
 preserve CRLF, CR, mixed newlines and codepoint coordinates when reading evidence
-snapshots. Execution success leaves the raw semantic status `not_reviewed`.
-Record manual answer/citation review separately, bound to the raw report hash.
+snapshots. Count only content in the final successful response; requested ranges,
+snippets and intermediate shim values do not establish reading coverage.
+Execution success leaves the raw semantic status `not_reviewed`. Record manual
+answer/citation review separately, bound to the raw report hash and the original
+terminal's final-answer reference; progress text is not a final answer.
 Reconcile unique native response usage with CLI totals; cached input and
 reasoning output are subsets, and missing totals, native tier or USD stay unknown.
+
+For asynchronous answers, associate the question's producer handoff and return
+request before selecting the final terminal and latency endpoint. The first
+terminal need not complete that answer. If the registered budget cannot cover
+the return, record it as incomplete and retire the original work; a launch
+acknowledgement is not a completed answer or full-task latency observation.
 
 On failure, the query probe cancels its original request and waits for its
 resource retirement. Fixture drain additionally waits for that request's

@@ -17,7 +17,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 function mockServer(post: () => Promise<Response>, archived = false) {
   const fetcher = vi.fn(async (url: RequestInfo | URL) => {
-    const path = String(url);
+    const path = new URL(String(url), window.location.origin).pathname;
     if (path.includes("/archive")) return post();
     if (path.endsWith("/api/agents")) return Response.json([agent]);
     if (path.endsWith("/api/sessions")) return Response.json([session]);
@@ -45,7 +45,7 @@ it.each([404, 409, 503])("keeps the live conversation and selection after HTTP %
   expect(state.sessions).toEqual([session]);
   expect(state.archivedSessions).toEqual([]);
   expect(state.activeSessionId).toBe("s1");
-  expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/api/sessions/s1"))).toBe(false);
+  expect(fetcher.mock.calls.some(([url]) => new URL(String(url), window.location.origin).pathname.endsWith("/api/sessions/s1"))).toBe(false);
 });
 
 it("confirms a lost POST response and preserves the still-live conversation", async () => {
@@ -56,7 +56,7 @@ it("confirms a lost POST response and preserves the still-live conversation", as
   expect(state.sessions).toEqual([session]);
   expect(state.archivedSessions).toEqual([]);
   expect(state.activeSessionId).toBe("s1");
-  expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith("/api/sessions/s1"))).toHaveLength(1);
+  expect(fetcher.mock.calls.filter(([url]) => new URL(String(url), window.location.origin).pathname.endsWith("/api/sessions/s1"))).toHaveLength(1);
 });
 
 it("adopts an authoritative archived detail after the POST response is lost", async () => {

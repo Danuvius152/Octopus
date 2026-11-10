@@ -57,6 +57,7 @@ class PreparedInstallation:
     user_id: str | None
     secret_key: str = field(repr=False)
     definition_identity: object | None = field(repr=False)
+    target_installation_id: str | None = None
 
 
 def _serialize_token_set(ts: OAuthTokenSet) -> str:
@@ -245,8 +246,8 @@ class ConnectorManager:
     async def client_config(self, kind: str, public_base: str) -> dict[str, Any]:
         """Non-secret view of a kind's OAuth client config for the UI: whether
         it's configured, the client_id, the source, and the redirect URI to
-        register with the provider. `public_base` is derived from the caller's
-        request so a browser-only user behind a tunnel gets the right URI."""
+        register with the provider. The router resolves `public_base` from
+        explicit configuration or the browser-facing request."""
         if await resolve_connector(self.db, kind) is None:
             raise ConnectorError(f"unknown connector kind: {kind}")
         row = await self.db.get_connector_oauth_client(kind)
@@ -327,7 +328,7 @@ class ConnectorManager:
 
     async def prepare_install(
         self, *, connector: ConnectorBase, token_set: OAuthTokenSet, requested_label: str | None = None,
-        user_id: str | None = None,
+        user_id: str | None = None, target_installation_id: str | None = None,
     ) -> PreparedInstallation:
         definition = connector.definition_identity if isinstance(connector, CustomConnector) else None
         if isinstance(connector, CustomConnector) and definition is None:
@@ -338,7 +339,19 @@ class ConnectorManager:
         )
         label = requested_label or identity_label
         secret_key = await UserManager(self.db).data_key_for(user_id)
-        return PreparedInstallation(connector.kind, token_set, external_id, label, user_id, secret_key, definition)
+        return PreparedInstallation(connector.kind, token_set, external_id, label, user_id, secret_key, definition,
+                                    target_installation_id)
+
+    async def require_reconnect_target(
+        self, connector: ConnectorBase, installation_id: str, user_id: str | None,
+    ) -> None:
+        """Check the original login target; binding checks again in its transaction."""
+        await self.require_available_owner(user_id)
+        async with self._definition_lock:
+            self._require_definition(connector)
+            row = await self.db.get_connector_installation(installation_id, user_id)
+            if row is None or row["user_id"] != user_id or row["kind"] != connector.kind:
+                raise ConnectorError("connector installation not found")
 
     async def require_available_owner(self, user_id: str | None) -> None:
         """Captured login ownership does not authorize a later remote call."""
@@ -361,14 +374,11 @@ class ConnectorManager:
         blob = encrypt(_serialize_token_set(token_set), prepared.secret_key)
         token_expires_at = _expires_iso(token_set.expires_at_epoch)
 
-        existing = (
-            await self.db.get_connector_installation_by_account(
-                kind, external_id, user_id
-            )
-            if external_id
-            else None
-        )
-        iid = existing["id"] if existing is not None else uuid.uuid4().hex[:12]
+        existing_id = prepared.target_installation_id
+        if existing_id is None and external_id:
+            existing = await self.db.get_connector_installation_by_account(kind, external_id, user_id)
+            existing_id = existing["id"] if existing is not None else None
+        iid = existing_id if existing_id is not None else uuid.uuid4().hex[:12]
         async with self._lock(iid), self._definition_lock:
             # No remote I/O, and no wait for an installation lock, holds the
             # definition owner. Deletion and this commit share its ordering.
@@ -382,7 +392,7 @@ class ConnectorManager:
                     external_account_id=external_id or None, scopes=list(token_set.scopes),
                     token_expires_at=token_expires_at, user_id=user_id,
                     require_custom_definition=prepared.definition_identity is not None,
-                    expected_existing_id=existing["id"] if existing is not None else None,
+                    expected_existing_id=existing_id,
                 )
             except ValueError as exc:
                 raise ConnectorError(str(exc)) from exc

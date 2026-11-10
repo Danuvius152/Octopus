@@ -25,6 +25,46 @@ test("saved details render separately from the main transcript and leave its hig
   expect(useSessionStore.getState().lastAppliedSeq.s).toBe(10);
 });
 
+test("a collected preview expands its original full message without fetching unrelated bodies", async () => {
+  const first = page("Child preview…");
+  const fetch = vi.fn().mockResolvedValueOnce(respond({ ...first, messages: first.messages.map((message) => ({
+    ...message, body_state: "preview", detail_ref: "/api/sessions/s/messages/2" })) }))
+    .mockResolvedValueOnce(respond({ role: "assistant", type: "text", seq: 2, content: "Complete collected child body",
+      tool_input: { native_item: { type: "agentMessage", text: "Complete collected child body" },
+        request_context: { source: "human", content: "Complete collected child body" } } }));
+  vi.stubGlobal("fetch", fetch);
+  render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
+  expect(await screen.findByText("Child preview…")).toBeVisible();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0][0]).toContain("view=browser");
+  fireEvent.click(screen.getByRole("button", { name: "View full message" }));
+  expect(await screen.findByText("Complete collected child body")).toBeVisible();
+  expect(screen.getAllByText(/Complete collected child body/)).toHaveLength(1);
+  expect(fetch.mock.calls[1][0]).toBe("/api/sessions/s/messages/2");
+  expect(useSessionStore.getState().messages).toEqual({});
+});
+
+test("an unavailable native association expands original identity and content without changing live state", async () => {
+  const first = page("Unavailable original association");
+  const identity = { request_id: "r", attempt_id: "a", native: {
+    thread_id: "Original native helper identity", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn" } };
+  const fetcher = vi.fn().mockResolvedValueOnce(respond({ ...first,
+    child: { ...first.child, native_thread_id: identity.native.thread_id },
+    messages: [{ role: "system", type: "notice", seq: 2, content: "Unavailable original association",
+      body_state: "preview", identity_unavailable: true, detail_ref: "/api/sessions/s/messages/2" }] }))
+    .mockResolvedValueOnce(respond({ role: "assistant", type: "text", seq: 2,
+      content: "Complete original child content", runtime_metadata: identity }));
+  vi.stubGlobal("fetch", fetcher);
+  const live = useSessionStore.getState().subagents;
+  render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
+  fireEvent.click(await screen.findByRole("button", { name: "View full message" }));
+  expect(await screen.findByText(/Complete original child content/)).toBeVisible();
+  expect(screen.getByText(/Original native helper identity/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Submit" })).not.toBeInTheDocument();
+  expect(useSessionStore.getState().messages).toEqual({});
+  expect(useSessionStore.getState().subagents).toBe(live);
+});
+
 test.each(["refresh", "reconnect", "target", "reopen"])("%s invalidates a late page even on the same service", async (change) => {
   let resolveOld!: (response: Response) => void;
   const fetch = vi.fn().mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveOld = resolve; }))

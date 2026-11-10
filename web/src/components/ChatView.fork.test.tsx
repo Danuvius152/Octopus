@@ -64,6 +64,19 @@ function mount() {
   </VirtuosoMockContext.Provider>);
 }
 
+it("keeps a pending question visible when its transcript row is outside the loaded window", async () => {
+  mockSessionFetch(async () => Response.json([]));
+  const question = { question_id: "outside-window", request_id: "original", attempt_id: "attempt", questions: [{ question: "Still waiting for your decision?" }] };
+  useSessionStore.setState({ messages: { parent: [{ role: "assistant", type: "text", seq: 200, content: "Latest window" }] },
+    pendingQuestions: { parent: [question] } });
+  mount();
+  await waitFor(() => expect(screen.getByText("Still waiting for your decision?")).toBeVisible());
+  expect(screen.getAllByRole("button", { name: "Submit" })).toHaveLength(1);
+  act(() => useSessionStore.getState().addMessage(parent.id, { role: "assistant", type: "question_request", seq: 201,
+    tool_use_id: question.question_id, tool_input: { questions: question.questions } }));
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "Submit" })).toHaveLength(1));
+});
+
 async function launch(mode: string) {
   fireEvent.change(screen.getByRole("textbox"), { target: { value: mode === "rewind" ? "/rewind" : mode === "archive" ? "/archive" : "/fork" } });
   fireEvent.click(document.querySelector<HTMLButtonElement>(".btn-send")!);

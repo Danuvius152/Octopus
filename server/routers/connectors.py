@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
 from ..auth import verify_token
+from ..config import settings
 from ..connector_manager import ConnectorError, ConnectorManager
 from ..connectors.errors import ConnectorTokenError
 from ..connectors.oauth import ConnectorLoginError, ConnectorLoginManager
@@ -85,9 +86,13 @@ def _to_info(row: dict) -> ConnectorInstallationInfo:
 
 
 def _public_base(request: Request) -> str:
-    """The browser-facing base URL, derived from the request so a remote /
-    tunneled user (no server env access) gets a redirect URI that matches what
-    they registered with the provider. Honors proxy forwarding headers."""
+    """Explicit public base first, otherwise the browser-facing request base.
+
+    Preserve the existing forwarding-header behavior for remote/tunnel users
+    who have no server configuration access.
+    """
+    if settings.public_base_url:
+        return settings.public_base_url
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host")
     return f"{proto}://{host}" if host else str(request.base_url).rstrip("/")
@@ -232,6 +237,8 @@ async def oauth_start(
     if connector is None:
         raise HTTPException(status_code=404, detail=f"unknown connector: {req.kind}")
     try:
+        if req.installation_id is not None:
+            await mgr.require_reconnect_target(connector, req.installation_id, user_id)
         creds = await mgr.resolve_authorization_creds(connector)
     except ConnectorError as error:
         raise _http_error(error)
@@ -252,6 +259,7 @@ async def oauth_start(
         redirect_uri=redirect_uri,
         requested_label=req.label,
         user_id=user_id,
+        target_installation_id=req.installation_id,
     )
     return ConnectorOAuthStartResponse(login_id=pl.login_id, authorize_url=pl.authorize_url)
 
@@ -286,6 +294,8 @@ async def oauth_callback(
             _login_mgr.mark_error(pl.login_id, "OAuth client not configured")
             return _callback_page("Connection failed", "OAuth client not configured.")
         await _require_manager().require_available_owner(pl.user_id)
+        if pl.target_installation_id is not None:
+            await _require_manager().require_reconnect_target(connector, pl.target_installation_id, pl.user_id)
         if pl.status.value != "processing":
             return _callback_page("Connection cancelled", pl.message or "Local connection cancelled")
         token_set = await connector.oauth.exchange_code(

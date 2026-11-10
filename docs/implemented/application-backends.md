@@ -35,10 +35,14 @@ wrong, so it goes in the build prompt in those words, and the readiness check
 ## 3. Three directories, three owners
 
 ```
-<applications_dir>/<slug>/          code    — the agent's output, rewritten by a rebuild
-<applications_dir>/<slug>.data/     data    — the app's own state, never touched by a rebuild
-<applications_dir>/<slug>.runtime/  runtime — installed dependencies, ours to delete
+<applications_dir>/<slug>--<app_id>/          code    — the agent's output, rewritten by a rebuild
+<applications_dir>/<slug>--<app_id>.data/     data    — the app's own state, never touched by a rebuild
+<applications_dir>/<slug>--<app_id>.runtime/  runtime — installed dependencies, ours to delete
 ```
+
+These are newly allocated paths under the
+[application identity contract](applications.md#2-stored-identity-and-directories).
+For existing applications, use the stored code address and its actual siblings.
 
 The split exists because the three have different lifetimes and different
 owners. The code directory belongs to the building agent and is the only one it
@@ -49,12 +53,13 @@ subdirectory is inside what a rebuild may clobber.
 
 The runtime directory is separate from data for a reason worth stating: a
 `.venv` or `node_modules` is **derived**, not user state. Keeping it out of the
-data directory means "reinstall from scratch" is `rm -rf <slug>.runtime` with no
-risk to anything the user cares about, and means a backup of the data directory
-doesn't carry a few hundred megabytes of packages.
+data directory means "reinstall from scratch" is
+`rm -rf <slug>--<app_id>.runtime` with no risk to anything the user cares about,
+and means a backup of the data directory doesn't carry a few hundred megabytes
+of packages.
 
-Neither `.data` nor `.runtime` is ever served statically — only `<slug>/` is
-reachable through `/apps/{id}/…`, exactly as today.
+Neither `.data` nor `.runtime` is ever served statically — only the code directory
+is reachable through `/apps/{id}/…`, exactly as today.
 
 ## 4. What the scripts are given
 
@@ -274,7 +279,7 @@ is not exposed on the network, and the tunnel exposes Octopus, not the app.
 ## 8. Logs, because a dead backend with no output is useless
 
 Every `install.sh` and `start.sh` invocation appends to the same
-`<slug>.runtime/logs/backend.log`, alongside supervisor lifecycle messages.
+`<slug>--<app_id>.runtime/logs/backend.log`, alongside supervisor lifecycle messages.
 There is no automatic rotation, capacity limit or capacity-based deletion.
 The supervisor preserves decoded output text, including whitespace and newline
 boundaries, independently of the display tail. UTF-8 decoding is incremental;

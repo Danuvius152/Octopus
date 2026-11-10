@@ -81,7 +81,7 @@ export function observeSession(sessionId: string, purpose: "complete" | "detail"
   const current = () => active;
   const done = (async () => {
     try {
-      const res = await fetch(`${API}/api/sessions/${sessionId}${purpose === "metadata" ? "/info" : ""}`, {
+      const res = await fetch(`${API}/api/sessions/${sessionId}${purpose === "metadata" ? "/info" : "?view=browser"}`, {
         headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
       });
       if (purpose === "metadata") {

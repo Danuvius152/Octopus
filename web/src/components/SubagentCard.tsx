@@ -154,6 +154,9 @@ export function SubagentCard({
           {run.summary}
         </p>
       )}
+      {run.display_truncated && <p className="text-xs text-muted-foreground">
+        Live helper preview truncated. Only collected items have saved details.
+      </p>}
 
       {open && (
         <div className="subagent-detail mt-2 space-y-2 border-t border-gray-300 pt-2">

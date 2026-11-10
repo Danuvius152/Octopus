@@ -36,7 +36,7 @@ async def _make_installation(
     *,
     kind: str = "github",
     label: str = "octocat",
-    external_account_id: str | None = "octocat:1",
+    external_account_id: str | None = "1",
     secret: str = "tok-abc",
     scopes: list[str] | None = None,
     enable_by_default: bool = False,
@@ -68,7 +68,7 @@ async def test_save_and_load_installation(db):
     assert r["kind"] == "github"
     assert r["label"] == "octocat"
     assert r["auth_type"] == "oauth"
-    assert r["external_account_id"] == "octocat:1"
+    assert r["external_account_id"] == "1"
     assert r["scopes"] == ["repo", "read:org"]
     assert r["enable_by_default"] is False
     assert r["needs_reconnect"] is False
@@ -81,6 +81,14 @@ async def test_save_and_load_installation(db):
 async def test_get_installation_none_for_unknown(db):
     assert await db.get_connector_installation("nope") is None
     assert await db.get_connector_secret("nope") is None
+
+
+@pytest.mark.parametrize("external_id", [None, "octocat:1", "0", "01", "-1", "+1", "1.0", "١", "1\x00tail"])
+async def test_current_github_identity_constraint_refuses_noncanonical_keys(db, external_id):
+    with pytest.raises(sqlite3.IntegrityError, match="connector_github_numeric_identity"):
+        await _make_installation(db, external_account_id=external_id)
+    assert await db.get_connector_installation("i-1") is None
+    assert await db.get_connector_secret("i-1") is None
 
 
 @pytest.mark.asyncio
@@ -126,8 +134,8 @@ async def test_oauth_authorization_atomically_resolves_identity_and_its_secret(d
 @pytest.mark.asyncio
 async def test_null_account_not_deduped(db):
     """Mid-install rows (identity unknown) share a NULL account without colliding."""
-    await _make_installation(db, "i-1", external_account_id=None)
-    await _make_installation(db, "i-2", external_account_id=None)
+    await _make_installation(db, "i-1", kind="custom-test", external_account_id=None)
+    await _make_installation(db, "i-2", kind="custom-test", external_account_id=None)
     assert len(await db.load_connector_installations()) == 2
 
 
@@ -137,7 +145,7 @@ async def test_update_installation_metadata_and_secret(db):
     await db.update_connector_installation(
         "i-1",
         label="renamed",
-        external_account_id="octocat:1",
+        external_account_id="1",
         scopes=["repo", "gist"],
         enable_by_default=True,
         needs_reconnect=True,
@@ -203,7 +211,7 @@ async def test_agent_connector_enable_disable(db):
 async def test_enabled_connectors_for_agent_join(db):
     await _make_agent(db, "a-1", "Researcher")
     await _make_installation(db, "i-1", kind="github", label="octocat",
-                             external_account_id="octocat:1")
+                             external_account_id="1")
     await _make_installation(db, "i-2", kind="gmail", label="me@x.com",
                              external_account_id="me@x.com")
     await db.set_agent_connector("a-1", "i-1", True)

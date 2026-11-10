@@ -48,6 +48,21 @@ working directory; full-copy `/fork` leaves the parent open and copies the tree.
 
 The retained prefix must satisfy the replay message contract before insertion;
 damaged message metadata refuses creation without archiving the parent.
+SQLite owns the copied-input projection, including original delivery and native
+input observations. Inside the original reservation, rewind materializes this
+projection, captures the parent's configuration bindings and resolves inherited
+Agent settings. Harness checks that exact retained snapshot, replay wrapper and
+known first-turn instructions against the selected backend's input boundary.
+The selected credential contributes its stored launch representation without
+refresh, login or a provider probe; expiry does not turn this size check into
+authentication. Actual input retains current credential authorization checks.
+
+This check precedes child insertion, file revert, ready publication and parent
+archive. A known capacity failure returns `replay_capacity_exceeded`, releases
+the reservation and leaves the parent and files usable. The copying transaction
+installs the same materialized snapshot without re-reading later evidence.
+Chained copies retain the original provenance. Copied observations remain
+history, never executable submissions or recovery permission.
 Database insertion and message copying commit with no native resume identity.
 Replay metadata is saved before optional file revert and publication of the
 ready child. An interrupted initialization retains its row for recovery; rewind
@@ -57,16 +72,52 @@ attachment ownership remain enforced throughout.
 
 ### 5.3.2 History replay and first-turn state
 
-The first input carries the retained transcript and the user's new instruction.
-After the native backend supplies its own session/thread identity, later turns
-resume that identity. Replay has a heavier first-input cost and does not promise
-the original native prefix cache. It avoids relying on externally synthesized
-native transcripts, which failed the original Claude experiments.
+Before wrapping an input, the Owner reads the committed continuation identity,
+replay flag and metadata together. The first input includes the copied transcript
+and its input observations, new instruction, Wiki and attachment augmentation.
+The original user text stays in product history. Codex measures the actual
+`turn/start` UTF-8 JSON frame with its real identities and effective controls;
+controller and instruction-injection RPCs have separate budgets. Earlier checks
+can reject known oversize input, but unknown identities/defaults cannot certify
+feasibility. Configuration is resolved again for each new input and the bound
+RPC encodes and sends the same bytes. Oversize new input is refused with advice
+to shorten it; the child and pending replay remain. History is not silently
+shortened, summarized or removed to fit. Claude retains stream-JSON and its
+ordinary spill-file representation; preparation creates no spill file and
+does not apply the Codex frame ceiling to Claude's stdin prompt.
 
-`fork_after_seq` persists the copy/replay cutoff. Ephemeral replay and prefill
-metadata clear after the first result; durable `full_copy` and revert evidence
-survive. UI messages and native context are distinct stores: copying one does
-not prove that the other has been prepared.
+For a backend with a single-frame ceiling, rewind preparation includes at least
+4096 encoded bytes for new input beyond the retained prefix, wrapper and known
+envelope. The editable prefill is not the user's future input. Each independent
+RPC is checked separately. A ready child proves the copy completed and the
+known plan with this reserve passed; unresolved native defaults, including
+cwd-dependent configuration layers, remain conditional. Minimum-width unknown
+fields can rule out a known oversize plan, but cannot certify that resolving
+them will leave all 4096 bytes. Ready does not guarantee arbitrary future text,
+Wiki/attachment augmentation, changed settings or renewed credentials will fit.
+Real preparation and sending therefore retain the complete payload check.
+
+Replay is consumed only after the original Harness observes its exact sent
+representation in resumable native history. Codex matches saved session, bound
+start turn and complete user text. Claude matches session, original opening UUID
+and complete saved user representation; a steer UUID cannot substitute. With a
+spill this representation is the pointer to the retained file, not proof that
+the model read its full contents. ACK, init, a context sample or a result alone
+does not establish installation. This avoids relying on synthesized native
+transcripts, which failed the original Claude experiments, and does not promise
+the parent's native prefix cache.
+
+The original-input transaction records the observation and continuation identity,
+clears `fork_needs_replay` and retires ephemeral replay/prefill metadata together.
+`fork_after_seq`, durable `full_copy`/`duplicated_from`, revert evidence and the
+original business outcome survive. A failed or stopped turn can have installed
+history; consumption does not wait for a successful result or Owner notification.
+Definitely unsent input retains replay. Possibly sent input without installation
+proof blocks later wrapping and automatic continuation, including internal retry
+and restart; inspect its original receipt and effects. An already installed
+original retains the ordinary continuation rules. There is no separate permanent
+replay ledger. UI history and native context remain distinct stores: copying one
+does not establish the other.
 
 ### 5.4 In-progress turns and races
 

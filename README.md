@@ -296,6 +296,10 @@ octopus handoff                # Import a local Claude Code session
 octopus pull <session-id>      # Export an Octopus session as local JSONL
 ```
 
+Pull reads the complete captured history and verifies it before replacing a
+local transcript. Supported formats and failure boundaries are described in the
+[transcript export contract](docs/implemented/harness-layer.md#complete-typed-transcript-export-and-local-pull).
+
 ## Tech Stack
 
 **Backend**: Python 3.12 · FastAPI · `claude` + `codex` CLI subprocesses ·

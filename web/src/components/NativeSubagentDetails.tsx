@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { NativeDetailPage } from "../api";
 import { accountFetch } from "../lib/accountFetch";
 import { useSessionStore } from "../stores/sessionStore";
+import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
+import { displayToolInput } from "../lib/messagePresentation";
 
 /** A separate read view: it never merges detail pages into chat or usage. */
 export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: string; anchorSeq?: number }) {
@@ -34,6 +36,7 @@ export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: str
     setBusy(true); setError("");
     try {
       const query = new URLSearchParams();
+      query.set("view", "browser");
       if (afterSeq !== undefined) query.set("after_seq", String(afterSeq));
       const response = await accountFetch(`/api/sessions/${encodeURIComponent(sessionId)}/native-details/${anchorSeq}?${query}`, {
         headers: { Authorization: `Bearer ${context.token}` },
@@ -67,12 +70,16 @@ export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: str
     {error && <p role="alert" className="text-destructive">{error} Refresh to try again.</p>}
     {page?.availability === "not_collected" && <p>Helper history was not collected. Viewing it cannot recover missing content.</p>}
     {page && <p>Observed helper state: {page.child.status}{page.child.stop_reason ? ` (${page.child.stop_reason})` : ""}</p>}
-    {page?.messages.map((message) => <div key={message.seq} className="rounded border border-gray-300 p-2">
-      <p className="font-mono text-[10px] text-gray-600">{message.type}{message.tool_name ? ` · ${message.tool_name}` : ""}{message.is_error ? " · failed" : ""}</p>
-      {message.tool_input && <pre className="whitespace-pre-wrap break-words">{JSON.stringify(message.tool_input, null, 2)}</pre>}
-      {message.content !== null && message.content !== undefined && <pre className="whitespace-pre-wrap break-words">{
-        typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2)
-      }</pre>}
+    {page?.messages.map((message) => <div key={`${sessionId}:${anchorSeq}:${refresh}:${message.seq}`} className="rounded border border-gray-300 p-2">
+      <MessageDetails sessionId={sessionId} message={message}>{(shown) => shown !== message &&
+        "identity_unavailable" in message && message.identity_unavailable === true
+        ? <SavedMessageRecord message={shown} label="Full saved helper record" /> : <>
+        <p className="font-mono text-[10px] text-gray-600">{shown.type}{shown.tool_name ? ` · ${shown.tool_name}` : ""}{shown.is_error ? " · failed" : ""}</p>
+        {shown.tool_input && <pre className="whitespace-pre-wrap break-words">{JSON.stringify(displayToolInput(shown.tool_input, shown.content), null, 2)}</pre>}
+        {shown.content !== null && shown.content !== undefined && <pre className="whitespace-pre-wrap break-words">{
+          typeof shown.content === "string" ? shown.content : JSON.stringify(shown.content, null, 2)
+        }</pre>}
+      </>}</MessageDetails>
     </div>)}
     {page?.has_more && page.next_after_seq !== null && <button type="button" disabled={busy}
       onClick={() => void load(page.next_after_seq!, page)}>More saved items</button>}

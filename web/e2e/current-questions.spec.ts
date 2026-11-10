@@ -112,14 +112,28 @@ test("current questions submit complete answers and keep answered and cancelled 
         { question_index: 1, selected: [{ option_index: 0, label: "Train" }], text: null },
       ],
     });
+    const browserResponse = await request.get(`${api}/sessions/${session.id}?view=browser`, { headers });
+    expect(browserResponse.ok()).toBeTruthy();
+    const browserDetail = await browserResponse.json();
+    const browserAnswer = browserDetail.messages.find((message: { type: string }) => message.type === "question_answer");
+    expect(browserAnswer.content).toBe(answerText);
+    expect(browserAnswer.tool_input.question_resolution).not.toHaveProperty("answers");
+    const answerIdentity = { ...savedAnswer.tool_input.question_resolution };
+    delete answerIdentity.answers;
+    expect(browserAnswer.tool_input.question_resolution).toEqual(answerIdentity);
     expect(received.find((frame) => frame.type === "question_answer" && frame.question_id === question.question_id)?.tool_input)
-      .toEqual(savedAnswer.tool_input);
+      .toEqual(browserAnswer.tool_input);
     const savedClose = detail.messages.find((message: { type: string }) => message.type === "question_closed");
     expect(savedClose.tool_input.question_resolution).toMatchObject({
       version: 1, question_id: cancelled.question_id, disposition: "closed", source: { kind: "account" },
     });
+    const browserClose = browserDetail.messages.find((message: { type: string }) => message.type === "question_closed");
+    const closeIdentity = { ...savedClose.tool_input.question_resolution };
+    delete closeIdentity.answers;
+    expect(browserClose.content).toBe(closedText);
+    expect(browserClose.tool_input.question_resolution).toEqual(closeIdentity);
     expect(received.find((frame) => frame.type === "question_closed" && frame.question_id === cancelled.question_id)?.tool_input)
-      .toEqual(savedClose.tool_input);
+      .toEqual(browserClose.tool_input);
   } finally {
     const deleted = await request.delete(`${api}/sessions/${session.id}`, { headers });
     expect(deleted.ok()).toBeTruthy();

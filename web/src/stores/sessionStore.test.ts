@@ -2,6 +2,23 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { useSessionStore } from "./sessionStore";
 
 describe("sessionStore", () => {
+  it("bounds both legacy and native streaming buffers while awaiting the saved message", () => {
+    useSessionStore.setState({ streamingText: {}, streamingItems: {} });
+    const store = useSessionStore.getState();
+    const chunk = '中文\\"\n'.repeat(30_000);
+    for (let i = 0; i < 10; i++) store.appendStreamingText("legacy", chunk);
+    const metadata = { request_id: "request", attempt_id: "attempt", native: {
+      thread_id: "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn", item_id: "item" } };
+    for (let i = 0; i < 100; i++) store.appendStreamingText("native", chunk, {
+      ...metadata, native: { ...metadata.native, item_id: `item-${i}` } });
+    const state = useSessionStore.getState();
+    expect(new TextEncoder().encode(JSON.stringify(state.streamingText.legacy)).length).toBeLessThanOrEqual(64 * 1024);
+    expect(new TextEncoder().encode(JSON.stringify(state.streamingItems.native)).length).toBeLessThanOrEqual(256 * 1024);
+    expect(Object.keys(state.streamingItems.native).length).toBeLessThanOrEqual(32);
+    store.addMessage("legacy", { role: "assistant", type: "text", seq: 1, content: "Full saved replacement" });
+    expect(useSessionStore.getState().streamingText.legacy).toBeUndefined();
+    expect(useSessionStore.getState().messages.legacy.at(-1)?.content).toBe("Full saved replacement");
+  });
   beforeEach(() => {
     // Reset store between tests
     useSessionStore.setState({

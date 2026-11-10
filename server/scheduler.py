@@ -14,7 +14,7 @@ from apscheduler.triggers.date import DateTrigger
 
 from .knowledge import RequestingWorkClosedError, decode_context
 from .models import SessionStatus
-from .schedule_ai import cron_trigger
+from .schedule_ai import ScheduleParseError, cron_trigger
 from .schedule_targets import ScheduleTargetError, resolve_schedule_target
 
 if TYPE_CHECKING:
@@ -356,11 +356,14 @@ class ScheduleRunner:
         )
 
     async def create(self, schedule_id: str, **definition: Any) -> None:
-        await self._change(schedule_id, lambda: self._db.save_schedule(schedule_id=schedule_id, **definition))
+        await self._change(schedule_id, lambda: self._db.save_schedule(
+            schedule_id=schedule_id, require_future=True, **definition,
+        ))
 
-    async def update(self, existing: dict, updates: dict, *, request: AdmittedRequest | None = None) -> None:
+    async def update(self, existing: dict, updates: dict, *, request: AdmittedRequest | None = None,
+                     require_future: bool = False) -> None:
         await self._change(existing["id"], lambda: self._db.update_schedule(
-            existing["id"], expected=existing, request=request, **updates,
+            existing["id"], expected=existing, request=request, require_future=require_future, **updates,
         ))
 
     async def delete(self, schedule_id: str) -> None:
@@ -395,7 +398,7 @@ class ScheduleRunner:
         def retired(original: asyncio.Task[None]) -> None:
             if original.cancelled():
                 logger.error("Owned schedule control cancelled schedule=%s", schedule_id)
-            elif (error := original.exception()) is not None and not isinstance(error, (ScheduleChangedError, RequestingWorkClosedError)):
+            elif (error := original.exception()) is not None and not isinstance(error, (ScheduleChangedError, RequestingWorkClosedError, ScheduleParseError)):
                 logger.error("Schedule control failed schedule=%s", schedule_id, exc_info=error)
             self._control_tasks.discard(original)
 
@@ -489,7 +492,7 @@ class ScheduleRunner:
             for task in controls_done:
                 if task.cancelled():
                     raise RuntimeError(f"scheduler control was cancelled: {task.get_name()}")
-                if isinstance(error := task.exception(), Exception) and not isinstance(error, (ScheduleChangedError, RequestingWorkClosedError)):
+                if isinstance(error := task.exception(), Exception) and not isinstance(error, (ScheduleChangedError, RequestingWorkClosedError, ScheduleParseError)):
                     errors.append(error)
         if self._scheduler.running:
             self._scheduler.shutdown(wait=False)

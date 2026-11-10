@@ -63,10 +63,12 @@ class ContextMixin(SessionManagerBase):
     async def _save_context(self, session: Session, state: ContextState | None) -> None:
         if state == session.context_state:
             return
+        owner = self._require_session_writer(session)
         assert self.db is not None
         await self.db.update_session_field(session.id, context_state=state.model_dump_json() if state else None)
         session.context_state = state
-        self._session_owner(session).runtime.context_changed()
+        if owner is not None:
+            owner.runtime.context_changed()
 
     async def _read_context_owned(self, session: Session) -> ContextState | None:
         assert self.db is not None

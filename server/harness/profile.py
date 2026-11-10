@@ -16,7 +16,7 @@ servers, composed system prompt) into a `TurnContext`; the profile's
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -185,7 +185,7 @@ class TranscriptCodec(Protocol):
     def write_file(
         self,
         path: str,
-        messages: list[Any],
+        messages: Iterable[Any],
         session_id: str | None,
         working_dir: str | None,
     ) -> None: ...

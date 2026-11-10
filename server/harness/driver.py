@@ -52,6 +52,18 @@ class RunDriver(ABC):
     def build_argv(self, context: TurnContext) -> tuple[list[str], dict[str, Any]]:
         return self.profile.build_turn_argv(context)
 
+    def validate_replay(self, context: TurnContext) -> None:
+        """Check known input costs without I/O; argv/env are checked by Harness.
+
+        Stream-JSON has no Codex frame budget. Its existing runtime spill and
+        actual launch/write checks remain responsible for materialization.
+        """
+        return None
+
+    def installed_input_history(self) -> str | None:
+        """Return the exact resumable identity only with saved opening-input proof."""
+        return None
+
     def continue_configuration(self, previous: RunDriver) -> None:
         """Carry native-resolved defaults across an Owner-authorized recovery.
 

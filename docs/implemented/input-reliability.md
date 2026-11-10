@@ -70,6 +70,15 @@ the ordinary queue under its original identity and order; unknown inputs stay
 out of automatic dispatch. Details and target qualification follow
 [the native input contract](#codex-native-input-evidence).
 
+First-input [history replay](session-rewind.md#532-history-replay-and-first-turn-state)
+has a separate installation fact. The original input recorder commits matching
+resumable identity, delivery and replay consumption in one transaction, preserving
+its business outcome and durable fork evidence. Native acceptance alone does not
+establish that fact. The Owner re-reads continuation/replay/metadata before prompt
+construction and recovery classification, so a lost notification cannot wrap
+history again. Possibly sent but unconfirmed replay prevents automatic next input
+or internal continuation, including restart; definitely unsent replay is retained.
+
 On restart, unclaimed inputs become withdrawn and claimed inputs become
 unknown. Missing legacy payloads and completed legacy rows without an exact
 terminal remain review-only. Historical refusal receipts stay read-only.
@@ -146,6 +155,11 @@ Owner 串行修改活动状态；慢准备、spawn、stdin、reader 和退休由
 正常结算等待必要前缀与原资源退出；Stop 或 start 等待失败可先唯一选定业务状态，
 在有限采集后定稿原引用与 terminal。关闭准入、原生终态及迟到采集规则归
 [Harness](harness-layer.md#execution-and-resources)与[Codex 完成合同](codex-backend.md#root-completion-and-selected-answer)。
+
+归档 reservation 关闭新工作接纳，已接纳的消息和 compact 仍由捕获的同一原 Owner
+完成有限收尾，保存适用的 context、原生效果证据和原请求终态。提交后的内部通知
+沿原 writer 引用完成，不重新申请接纳或创建替代 Owner；归档本身不撤销这一资格。
+写入校验、配置适用性和存储失败边界见[上下文绑定](model-reasoning.md#上下文样本与配置绑定)。
 
 单轮结算由原 Owner 的 `OwnerRuntime.settle(execution)` 使用原 Execution、
 settlement 和发布上下文完成。Manager 不再回取 `runtime.current/frames` 解释
@@ -477,7 +491,7 @@ Pending items, admission/status, dispatch, outcomes and completion readers carry
 the operation kind. App answers, managed
 work and notifications consume message completions under their existing scope.
 Compact completes its own original receipt; ordinary answer publication and fork
-first-business-turn cleanup consume only message operations. It creates no final
+replay installation apply only to message operations. It creates no final
 answer, assistant summary or replay instruction.
 An explicit malformed/unknown operation is rejected rather than decoded as text.
 
@@ -619,3 +633,22 @@ Stop 后仅允许细化原来已可能发送的输入的接受/拒绝证明，�
 不单独显示成功提示；独立的执行或送达未知仍保留检查入口，没有自动恢复执行按钮。
 接受证明不提升为模型消费保证。回队后已作为普通请求执行的
 输入不因旧 steer 证据留下错误通知。资格、顺序和容量见[steer 合同](inline-steering.md)。
+
+## 实际输入来源与成本边界
+
+输入分析沿原请求身份、生产路径、阶段和通道归属：已保存的可信原约束、当前
+子任务、附件／fork 历史与异步返回材料分别解释。同文的不同请求仍有各自身份；
+子工作需要的祖先约束不能用消费者不可读的宿主引用替代，返回材料也不增加授权。
+
+逐层限制与派发消息各保留全文：前者属于跨层执行及返回合同，后者是独立保存的
+消息正文。限制列表的位置不表示本次任务身份；返回回合也不能把上一轮末项当作
+当前材料中的重复。精简须证明具体限制与本次正文同源，并保持保存、回放及两种
+后端消费者的可读性。只有字节差异而没有这些关系及质量证据时，保留原展开。
+
+Codex 的稳定 controller 参数、历史 checkpoint、动态 turn policy 与实际
+`turn/start` 是不同阶段。resume 参数重复不证明模型历史重复消费；当前来源清空
+及 human／unattended 策略由本次上下文解释。成本分别记录各实际 UTF-8 RPC 帧，
+不将多个 RPC 相加为一帧，也不把接受、成功或历史安装证据当作语义质量结论。
+工具成本取最终 CallToolResult 与 JSON-RPC／SSE 交付边界，并分别标明包络；
+中间 shim 返回全文不证明最终交付或阅读。方法与复测条件见
+[可选输入测量](../testing.md#optional-resource-experiments)。

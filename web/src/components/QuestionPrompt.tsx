@@ -6,6 +6,7 @@ import { useSessionStore } from "../stores/sessionStore";
 import { beginQuestionTransmission, finishQuestionTransmission, questionDraftKey, saveQuestionDraft, type AnswerPayload } from "../lib/questionDrafts";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { useMessageDetail } from "./MessageDetails";
 
 export type { AnswerPayload } from "../lib/questionDrafts";
 
@@ -19,6 +20,17 @@ interface Props {
 
 export function QuestionPrompt({ question, sessionId, onSubmit, onSnooze, agentLabel = "Agent" }: Props) {
   const [error, setError] = useState("");
+  const detail = useMessageDetail(sessionId, question.detail_ref, question.message_seq ?? undefined);
+  const saved = detail.body;
+  const savedItems = saved?.tool_input?.questions;
+  const complete = saved?.type === "question_request" && saved.tool_use_id === question.question_id &&
+    saved.tool_input?.request_id === (question.request_id ?? null) &&
+    saved.tool_input?.attempt_id === (question.attempt_id ?? null) && Array.isArray(savedItems) &&
+    savedItems.every((item) => item && typeof item === "object" && typeof item.question === "string" &&
+      (item.options == null || Array.isArray(item.options) && item.options.every((option: unknown) =>
+        option && typeof option === "object" && "label" in option && typeof option.label === "string")));
+  const needsFull = question.body_state === "preview" && !complete;
+  const questions: PendingQuestion["questions"] = complete ? savedItems : question.questions;
   // For each sub-question, hold either selected option labels or a free-text
   // "Other" answer. `selected` is an array even for single-select so the
   // submit serializer is uniform.
@@ -59,9 +71,9 @@ export function QuestionPrompt({ question, sessionId, onSubmit, onSnooze, agentL
     };
   }, []);
   const draft = useSessionStore((state) => state.questionDrafts[key]);
-  const answers = draft?.answers ?? question.questions.map(() => ({ selected: [] }));
+  const answers = draft?.answers ?? questions.map(() => ({ selected: [] }));
   const setAnswers = (update: (previous: AnswerPayload[]) => AnswerPayload[]) => {
-    saveQuestionDraft({ ...draft, sessionId, accountGeneration, question, answers: update(answers) });
+    saveQuestionDraft({ ...draft, sessionId, accountGeneration, question: { ...question, questions }, answers: update(answers) });
   };
 
   const setSelected = (i: number, labels: string[]) => {
@@ -86,13 +98,16 @@ export function QuestionPrompt({ question, sessionId, onSubmit, onSnooze, agentL
     setSelected(i, exists ? cur.filter((l) => l !== label) : [...cur, label]);
   };
 
-  const canSubmit = answers.every((a) => {
+  const canSubmit = !needsFull && questions.length > 0 && answers.every((a) => {
     if (a.text && a.text.trim()) return true;
     return (a.selected?.length || 0) > 0;
   });
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
+    const pending = useSessionStore.getState().pendingQuestions[sessionId]?.find((current) =>
+      current.question_id === question.question_id && current.request_id === question.request_id && current.attempt_id === question.attempt_id);
+    if (!pending) { setError("This question is no longer pending."); return; }
     let id: string;
     try { id = newSubmissionId(); }
     catch (failure) { setError(String(failure)); return; }
@@ -131,7 +146,13 @@ export function QuestionPrompt({ question, sessionId, onSubmit, onSnooze, agentL
           : "Optional question · automatic expiry is unknown"}
       </p>}
       <div className="question-body px-3 py-3 space-y-5">
-        {question.questions.map((q, i) => {
+        {needsFull && <div className="space-y-2">
+          <p>Question preview · load the complete question and options before answering.</p>
+          {detail.busy && <p role="status">Loading full question…</p>}
+          {(detail.error || saved && !complete) && <p role="alert">{detail.error || "The saved question does not match this pending question."}</p>}
+          <button type="button" className="underline" disabled={detail.busy} onClick={() => void detail.load()}>Load full question</button>
+        </div>}
+        {!needsFull && questions.map((q, i) => {
           const multi = !!q.multiSelect;
           const selected = answers[i]?.selected || [];
           const inputName = `q-${question.question_id}-${i}`;

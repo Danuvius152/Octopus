@@ -1,0 +1,470 @@
+{
+  "async_question": {
+    "event": {
+      "body_state": "preview",
+      "content": "Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original as…",
+      "detail_ref": "/api/sessions/sample-session/messages/0",
+      "identity_unavailable": false,
+      "runtime_metadata": {
+        "attempt_id": "attempt",
+        "native": {
+          "item_id": "event",
+          "parent_thread_id": null,
+          "phase": "final_answer",
+          "root_thread_id": "native-root",
+          "root_turn_id": "turn",
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "receipt": null,
+        "request_id": "request",
+        "tool_call_id": null
+      },
+      "seq": 0,
+      "session_id": "sample-session",
+      "tool_input": {
+        "async_questions_preview": true,
+        "preview": "Structured content omitted from preview. Open the full saved message."
+      },
+      "type": "assistant_text"
+    },
+    "message": {
+      "attachments": [],
+      "body_state": "preview",
+      "content": "Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original asynchronous question Original as…",
+      "cost": null,
+      "created_at": "2026-11-10T00:00:00Z",
+      "detail_ref": "/api/sessions/sample-session/messages/0",
+      "identity_unavailable": false,
+      "is_error": null,
+      "role": "assistant",
+      "runtime_metadata": {
+        "attempt_id": "attempt",
+        "native": {
+          "item_id": "event",
+          "parent_thread_id": null,
+          "phase": "final_answer",
+          "root_thread_id": "native-root",
+          "root_turn_id": "turn",
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "receipt": null,
+        "request_id": "request",
+        "tool_call_id": null
+      },
+      "seq": 0,
+      "session_id": null,
+      "tool_input": {
+        "async_questions_preview": true,
+        "preview": "Structured content omitted from preview. Open the full saved message."
+      },
+      "tool_name": null,
+      "tool_use_id": null,
+      "type": "text"
+    },
+    "prefix": []
+  },
+  "missing_final": {
+    "event": {
+      "body_state": "preview",
+      "content": {
+        "code": null,
+        "compact": null,
+        "final_answer": {
+          "message_seqs": [
+            0
+          ],
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "kind": "outcome",
+        "message": "Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic C…",
+        "native_status": null,
+        "operation": "message",
+        "provider_code": null,
+        "recording_integrity": "incomplete",
+        "recording_issues": {
+          "native_final_missing": 1
+        },
+        "recording_locations": [],
+        "recovery": {
+          "transient": 2
+        },
+        "request_id": "request",
+        "status": "success"
+      },
+      "detail_ref": "/api/sessions/sample-session/messages/1",
+      "identity_unavailable": false,
+      "runtime_metadata": {
+        "attempt_id": "attempt",
+        "native": {
+          "item_id": "event",
+          "parent_thread_id": null,
+          "phase": "final_answer",
+          "root_thread_id": "native-root",
+          "root_turn_id": "turn",
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "receipt": null,
+        "request_id": "request",
+        "tool_call_id": null
+      },
+      "seq": 1,
+      "session_id": "sample-session",
+      "tool_input": {
+        "attempt_context": {
+          "attempt_id": "attempt",
+          "request_id": "request"
+        },
+        "preview": "Structured content omitted from preview. Open the full saved message."
+      },
+      "type": "result"
+    },
+    "message": {
+      "attachments": [],
+      "body_state": "preview",
+      "content": {
+        "code": null,
+        "compact": null,
+        "final_answer": {
+          "message_seqs": [
+            0
+          ],
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "kind": "outcome",
+        "message": "Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic Completion diagnostic C…",
+        "native_status": null,
+        "operation": "message",
+        "provider_code": null,
+        "recording_integrity": "incomplete",
+        "recording_issues": {
+          "native_final_missing": 1
+        },
+        "recording_locations": [],
+        "recovery": {
+          "transient": 2
+        },
+        "request_id": "request",
+        "status": "success"
+      },
+      "cost": null,
+      "created_at": "2026-11-10T00:00:00Z",
+      "detail_ref": "/api/sessions/sample-session/messages/1",
+      "identity_unavailable": false,
+      "is_error": null,
+      "role": "system",
+      "runtime_metadata": {
+        "attempt_id": "attempt",
+        "native": {
+          "item_id": "event",
+          "parent_thread_id": null,
+          "phase": "final_answer",
+          "root_thread_id": "native-root",
+          "root_turn_id": "turn",
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "receipt": null,
+        "request_id": "request",
+        "tool_call_id": null
+      },
+      "seq": 1,
+      "session_id": null,
+      "tool_input": {
+        "attempt_context": {
+          "attempt_id": "attempt",
+          "request_id": "request"
+        },
+        "preview": "Structured content omitted from preview. Open the full saved message."
+      },
+      "tool_name": null,
+      "tool_use_id": null,
+      "type": "result"
+    },
+    "prefix": [
+      {
+        "attachments": [],
+        "content": "Saved final candidate",
+        "cost": null,
+        "created_at": "2026-11-10T00:00:00Z",
+        "is_error": null,
+        "role": "assistant",
+        "runtime_metadata": {
+          "attempt_id": "attempt",
+          "native": {
+            "item_id": "saved-final",
+            "parent_thread_id": null,
+            "phase": "final_answer",
+            "root_thread_id": "native-root",
+            "root_turn_id": "turn",
+            "thread_id": "native-root",
+            "turn_id": "turn"
+          },
+          "receipt": null,
+          "request_id": "request",
+          "tool_call_id": null
+        },
+        "seq": 0,
+        "session_id": null,
+        "tool_input": null,
+        "tool_name": null,
+        "tool_use_id": null,
+        "type": "text"
+      }
+    ]
+  },
+  "recovery": {
+    "event": {
+      "body_state": "preview",
+      "content": {
+        "attempt": 1,
+        "code": "transient_error",
+        "delay": 0.5,
+        "kind": "recovery",
+        "maximum": 2,
+        "message": "Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery de…",
+        "phase": "retrying",
+        "request_id": "request"
+      },
+      "detail_ref": "/api/sessions/sample-session/messages/0",
+      "identity_unavailable": false,
+      "runtime_metadata": {
+        "attempt_id": "attempt",
+        "native": {
+          "item_id": "event",
+          "parent_thread_id": null,
+          "phase": "final_answer",
+          "root_thread_id": "native-root",
+          "root_turn_id": "turn",
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "receipt": null,
+        "request_id": "request",
+        "tool_call_id": null
+      },
+      "seq": 0,
+      "session_id": "sample-session",
+      "tool_input": {
+        "attempt_context": {
+          "attempt_id": "attempt",
+          "request_id": "request"
+        },
+        "preview": "Structured content omitted from preview. Open the full saved message."
+      },
+      "type": "recovery"
+    },
+    "message": {
+      "attachments": [],
+      "body_state": "preview",
+      "content": {
+        "attempt": 1,
+        "code": "transient_error",
+        "delay": 0.5,
+        "kind": "recovery",
+        "maximum": 2,
+        "message": "Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery detail Recovery de…",
+        "phase": "retrying",
+        "request_id": "request"
+      },
+      "cost": null,
+      "created_at": "2026-11-10T00:00:00Z",
+      "detail_ref": "/api/sessions/sample-session/messages/0",
+      "identity_unavailable": false,
+      "is_error": null,
+      "role": "system",
+      "runtime_metadata": {
+        "attempt_id": "attempt",
+        "native": {
+          "item_id": "event",
+          "parent_thread_id": null,
+          "phase": "final_answer",
+          "root_thread_id": "native-root",
+          "root_turn_id": "turn",
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "receipt": null,
+        "request_id": "request",
+        "tool_call_id": null
+      },
+      "seq": 0,
+      "session_id": null,
+      "tool_input": {
+        "attempt_context": {
+          "attempt_id": "attempt",
+          "request_id": "request"
+        },
+        "preview": "Structured content omitted from preview. Open the full saved message."
+      },
+      "tool_name": null,
+      "tool_use_id": null,
+      "type": "recovery"
+    },
+    "prefix": []
+  },
+  "unavailable_question": {
+    "event": {
+      "detail_ref": "/api/sessions/sample-session/messages/0",
+      "identity_unavailable": true,
+      "message": "Some event data could not fit this browser view. Read the saved message or refresh session state; unsaved live data is unavailable.",
+      "seq": 0,
+      "session_id": "sample-session",
+      "type": "browser_unavailable"
+    },
+    "full": {
+      "attachments": [],
+      "content": null,
+      "cost": null,
+      "created_at": "2026-11-10T00:00:00Z",
+      "is_error": null,
+      "role": "assistant",
+      "runtime_metadata": {
+        "attempt_id": "attempt",
+        "native": {
+          "item_id": "event",
+          "parent_thread_id": null,
+          "phase": "final_answer",
+          "root_thread_id": "native-root",
+          "root_turn_id": "turn",
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "receipt": null,
+        "request_id": "request",
+        "tool_call_id": null
+      },
+      "seq": 0,
+      "session_id": null,
+      "tool_input": {
+        "attempt_id": "attempt",
+        "questions": [
+          {
+            "header": "Original unavailable topic",
+            "options": [
+              {
+                "description": "Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description Original option description ",
+                "label": "Original unavailable option"
+              }
+            ],
+            "question": "Original unavailable question"
+          }
+        ],
+        "request_id": "request"
+      },
+      "tool_name": null,
+      "tool_use_id": "original-question",
+      "type": "question_request"
+    },
+    "message": {
+      "attachments": [],
+      "body_state": "preview",
+      "content": "This message's identity exceeds browser capacity. Open the full saved message to inspect it.",
+      "cost": null,
+      "created_at": null,
+      "detail_ref": "/api/sessions/sample-session/messages/0",
+      "identity_unavailable": true,
+      "is_error": null,
+      "role": "assistant",
+      "runtime_metadata": null,
+      "seq": 0,
+      "session_id": null,
+      "tool_input": null,
+      "tool_name": null,
+      "tool_use_id": null,
+      "type": "notice"
+    },
+    "prefix": []
+  },
+  "unavailable_small_question": {
+    "event": {
+      "detail_ref": "/api/sessions/sample-session/messages/0",
+      "identity_unavailable": true,
+      "message": "Some event data could not fit this browser view. Read the saved message or refresh session state; unsaved live data is unavailable.",
+      "seq": 0,
+      "session_id": "sample-session",
+      "type": "browser_unavailable"
+    },
+    "full": {
+      "attachments": [],
+      "content": null,
+      "cost": null,
+      "created_at": "2026-11-10T00:00:00Z",
+      "is_error": null,
+      "role": "assistant",
+      "runtime_metadata": {
+        "attempt_id": "attempt",
+        "native": {
+          "item_id": "event",
+          "parent_thread_id": null,
+          "phase": "final_answer",
+          "root_thread_id": "small-thread",
+          "root_turn_id": "turn",
+          "thread_id": "small-thread",
+          "turn_id": "turn"
+        },
+        "receipt": null,
+        "request_id": "request",
+        "tool_call_id": null
+      },
+      "seq": 0,
+      "session_id": null,
+      "tool_input": {
+        "attempt_id": "attempt",
+        "native_question": {
+          "attempt_id": "attempt",
+          "blocking": true,
+          "connection_generation": "connection",
+          "item_id": "event",
+          "question_id": "original-question",
+          "question_ids": [
+            "original-option"
+          ],
+          "request_id": "request",
+          "server_request_id": "native-request",
+          "thread_id": "native-root",
+          "turn_id": "turn"
+        },
+        "questions": [
+          {
+            "header": "Original unavailable topic",
+            "options": [
+              {
+                "description": "Original short description",
+                "label": "Original unavailable option"
+              }
+            ],
+            "question": "Original unavailable question"
+          }
+        ],
+        "request_id": "request"
+      },
+      "tool_name": null,
+      "tool_use_id": "original-question",
+      "type": "question_request"
+    },
+    "message": {
+      "attachments": [],
+      "body_state": "preview",
+      "content": "This message's identity exceeds browser capacity. Open the full saved message to inspect it.",
+      "cost": null,
+      "created_at": null,
+      "detail_ref": "/api/sessions/sample-session/messages/0",
+      "identity_unavailable": true,
+      "is_error": null,
+      "role": "assistant",
+      "runtime_metadata": null,
+      "seq": 0,
+      "session_id": null,
+      "tool_input": null,
+      "tool_name": null,
+      "tool_use_id": null,
+      "type": "notice"
+    },
+    "prefix": []
+  }
+}

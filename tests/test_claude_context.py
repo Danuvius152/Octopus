@@ -5,8 +5,9 @@ import json
 
 import pytest
 
-from server.routers.sessions import get_session
+from server.routers.sessions import get_session, get_submission_status
 from server.sessions import SessionManager
+from server.sessions.client_submissions import submit_client_message
 from tests.claude_runtime import MODEL, SID, inject, inputs
 from tests.claude_runtime import claude_runtime as claude_runtime
 from tests.session_runtime import wait_dispatch_idle
@@ -40,6 +41,24 @@ async def hold_next(manager, session, root, count):
     receipt = await manager.start_message(session.id, "Next original input")
     records = await inputs(root, count)
     return receipt, records[-1]["input"]["uuid"]
+
+
+async def test_archive_preserves_original_claude_message_tail_context(claude_runtime, tmp_path):
+    manager, _, session, _, _ = claude_runtime
+    (tmp_path / "claude-plan.json").write_text(json.dumps({"hold": True}))
+    accepted = await submit_client_message(manager, session.id, "Original tail", [], "archive-tail", wiki_mode=None)
+    current = (await inputs(tmp_path, 1))[0]["input"]["uuid"]
+    owner = manager._session_owners[id(session)]
+    (tmp_path / "claude-eof.json").write_text(json.dumps([assistant(current), terminal(current)]))
+
+    await asyncio.wait_for(manager.archive_session(session.id, replace=False), 5)
+    assert not owner.failed
+    result = await get_submission_status(manager, session.id, "archive-tail", user_id=session.user_id)
+    assert result["request_id"] == accepted["request_id"]
+    assert result["outcome"]["status"] == "interrupted"
+    detail = await get_session(manager, session.id, user_id=session.user_id)
+    assert detail.archived and detail.context_state.sample.used_tokens == 250
+    assert detail.context_state.sample.source.request_id == accepted["request_id"]
 
 
 async def test_claude_last_root_input_and_exact_window_survive_restart(claude_runtime):

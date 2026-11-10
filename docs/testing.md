@@ -345,6 +345,15 @@ not send model input. Repeating measurements requires explicit resource stop
 conditions. Small boundary/correctness regressions remain in the hermetic suite;
 this does not add a permanent benchmark platform or resume paused Wiki evals.
 
+实际输入成本与质量基线也属于明确委托的可选测量，不加入日常、提交或发布
+门禁。固定源码、CLI／依赖、有效模型配置、来源、调用预算、样本数及历史／缓存
+条件；受控 native peer 的传输与消费证据和 live 模型语义评阅分别保留，未做 live
+的案例不据字节结果宣称质量不退化。记录各实际帧和最终工具响应，原始证据先
+计量再脱敏；输出使用新目录，既有报告、帧、审计和 manifest 不得覆盖。耗时专项
+与边缘测量不因每次实施或审查而重跑；同版证据复用，只有相关变化或具体失败
+才补测受影响部分。质量评阅、未知用量及原资源收尾沿用
+[评测方法](wiki-evaluation.md#model-evidence-and-retirement)。
+
 ## Math-rendering compatibility
 
 [`MarkdownMath.test.tsx`](../web/src/components/MarkdownMath.test.tsx) exercises

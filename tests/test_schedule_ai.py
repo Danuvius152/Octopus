@@ -15,7 +15,6 @@ from server.schedule_ai import (
     extract_json,
     format_interval,
     local_timezone,
-    normalize_timezone,
     parse_interval_token,
     parse_rigid,
     parse_schedule_text,
@@ -60,12 +59,6 @@ def test_recurrence_label_for_fallbacks():
     assert recurrence_label_for({"interval_seconds": 2700, "cron": None}) == "Every 45m"
     assert recurrence_label_for({"cron": "0 9 * * *"}).startswith("Cron")
     assert recurrence_label_for({}) == "—"
-
-
-def test_normalize_timezone():
-    assert normalize_timezone("America/Los_Angeles") == "America/Los_Angeles"
-    assert normalize_timezone("Not/AZone") == "UTC"
-    assert normalize_timezone(None) == "UTC"
 
 
 # --- rigid fast path -------------------------------------------------------- #
@@ -345,8 +338,7 @@ def test_local_timezone_ignores_a_bogus_tz_env(monkeypatch):
 
 
 def test_resolve_timezone_rejects_an_unknown_name():
-    """Unlike the AI path, an explicitly-passed zone is never silently
-    swapped for UTC — that would move every fire without saying so."""
+    """An unrecognised zone is never silently swapped for UTC."""
     with pytest.raises(ScheduleParseError) as e:
         resolve_timezone("PST")
     assert "IANA" in str(e.value)

@@ -56,7 +56,7 @@ async def fork_source(native_runtime, tmp_path, monkeypatch):
 
 
 async def test_rewind_at_steer_uses_product_seq_and_keeps_native_sources(native_runtime, tmp_path):
-    manager, database, parent, mode, starts, _ = native_runtime
+    manager, database, parent, mode, _, _ = native_runtime
     first = await active_root(native_runtime, tmp_path)
     inject(tmp_path, child_start(), item("child", "child-turn", "answer", "Child first round"), child_end(),
            child_start(turn="followup"), item("child", "followup", "partial", "Child followup partial"))
@@ -76,8 +76,10 @@ async def test_rewind_at_steer_uses_product_seq_and_keeps_native_sources(native_
     await wait_dispatch_idle(manager, parent.id)
     original = await database.load_messages(parent.id)
     target = next(row["seq"] for row in original if row["content"] == "Change direction here")
+    before_fork = wire_frames(tmp_path)
     branch = await manager.fork_session(parent.id, target, user_id=parent.user_id)
-    assert len(starts) == 1 and branch.claude_session_id is None and branch.fork_needs_replay
+    assert wire_frames(tmp_path) == before_fork
+    assert branch.claude_session_id is None and branch.fork_needs_replay
     copied = await database.load_messages(branch.id)
     assert [{**row, "tool_input": {key: value for key, value in (row["tool_input"] or {}).items() if key != "copied_input"} or None}
             for row in copied] == [row for row in original if row["seq"] < target]

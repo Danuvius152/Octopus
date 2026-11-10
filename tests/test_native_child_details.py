@@ -77,6 +77,35 @@ async def test_spawn_reference_binds_its_original_child_round_and_survives_retir
     assert (await database.read_session_result(session.id, receipt["request_id"])).outcome.status == "success"
 
 
+async def test_large_live_helper_hint_never_promises_an_unsaved_full_body(native_runtime, detail_client, tmp_path):
+    from tests.websocket_client import connection, receipt_frame
+
+    manager, database, session, _, _, _ = native_runtime
+    bearer = await get_user_manager().issue_token(session.user_id)
+    prompt = "x" * (600 * 1024)
+    async with connection(manager, bearer) as browser:
+        await start_output(native_runtime)
+        inject(tmp_path, {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "turn-1", "item": {
+            "id": "large-spawn", "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "completed",
+            "senderThreadId": ROOT, "receiverThreadIds": ["child"], "agentsStates": {}, "prompt": prompt}}})
+        shown = await receipt_frame(browser[1], "subagent")
+        assert shown["display_truncated"] and len(shown["prompt"]) < len(prompt)
+        assert "detail_ref" not in shown
+        await until(lambda: bool(session._subagents))
+        anchor = next(row["seq"] for row in await database.load_messages(session.id) if row["type"] == "native_subagent")
+        full_card = (await detail_client.get(f"/api/sessions/{session.id}/messages/{anchor}")).json()
+        assert "prompt" not in full_card["tool_input"] and "summary" not in full_card["tool_input"]
+        details = (await detail_client.get(f"/api/sessions/{session.id}/native-details/{anchor}?view=browser")).json()
+        assert details["availability"] == "not_collected" and details["messages"] == []
+        snapshot = (await detail_client.get(f"/api/sessions/{session.id}?view=browser")).json()
+        assert snapshot["subagents"][0]["display_truncated"]
+        assert len(snapshot["subagents"][0]["prompt"]) < len(prompt)
+        complete = (await detail_client.get(f"/api/sessions/{session.id}")).json()
+        assert complete["subagents"][0]["prompt"] == prompt
+        inject(tmp_path, terminal())
+        await wait_dispatch_idle(manager, session.id)
+
+
 async def test_detail_pages_keep_tool_call_and_result_and_reject_other_work_cursors(native_runtime, detail_client, tmp_path):
     manager, database, session, _, starts, _ = native_runtime
     await start_output(native_runtime)

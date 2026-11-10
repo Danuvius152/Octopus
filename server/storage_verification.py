@@ -7,6 +7,7 @@ database, repairs projections, interprets an earlier format or reads secrets.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -38,13 +39,7 @@ def _reader(path: Path) -> Iterator[sqlite3.Connection]:
 
 def verify_main(db: sqlite3.Connection) -> int:
     """Require the complete current layout without the startup upgrade path."""
-    from pydantic import ValidationError
-
-    from .context_models import ContextState
     from .db.schema import _SCHEMA, CURRENT_VERSION
-    from .delegations import _PersistedRound
-    from .session_operations import decode_payload
-    from .submission_models import NativeInputEvidence
 
     version = db.execute("PRAGMA user_version").fetchone()[0]
     if version != CURRENT_VERSION:
@@ -57,6 +52,22 @@ def verify_main(db: sqlite3.Connection) -> int:
         expected = {(kind, name): definition(kind, sql) for kind, name, sql in reference.execute(catalog)}
     if actual != expected:
         raise RuntimeError("Primary database does not have the complete current structure")
+    _verify_main_facts(db)
+    for (identity,) in db.execute("SELECT external_account_id FROM connector_installations WHERE kind='github'"):
+        if not isinstance(identity, str) or re.fullmatch(r"[1-9][0-9]*", identity) is None:
+            raise RuntimeError("Primary database contains an invalid current GitHub identity")
+    return version
+
+
+def _verify_main_facts(db: sqlite3.Connection) -> None:
+    """Check retained facts shared by current inspection and finite publication."""
+    from pydantic import ValidationError
+
+    from .context_models import ContextState
+    from .delegations import _PersistedRound
+    from .session_operations import decode_payload
+    from .submission_models import NativeInputEvidence
+
     invalid = db.execute("""SELECT 1 FROM schedules WHERE wiki_mode NOT IN ('auto','read','maintain')
         UNION ALL SELECT 1 FROM client_submissions
         WHERE execution_state NOT IN ('pending','running','done','withdrawn','unknown')
@@ -92,7 +103,6 @@ def verify_main(db: sqlite3.Connection) -> int:
                     raise ValueError("A possibly executed compaction cannot be withdrawn")
     except (ValueError, TypeError):
         raise RuntimeError("Primary database contains invalid current native input evidence") from None
-    return version
 
 
 def verify_wiki(db: sqlite3.Connection, registration: dict) -> int:
@@ -147,14 +157,20 @@ def verify_wiki(db: sqlite3.Connection, registration: dict) -> int:
 
 def verify_storage(config: Settings) -> dict:
     """Inspect all configured ledgers, including real committed WAL contents."""
-    from .service_installation import _registered_vaults
-    from .wiki.protocols import read_registration
-
     main_path = persistent_database_file(config.db_path)
     if main_path is None:
         raise RuntimeError("Publication requires the retained primary database")
     with _reader(main_path) as db:
         main_version = verify_main(db)
+    return {"passed": True, "read_only": True, "main_integrity": "ok",
+            "main_format_version": main_version, "registered_wiki_ledgers": _verify_registered_wikis(config)}
+
+
+def _verify_registered_wikis(config: Settings) -> list[dict]:
+    """One complete registration/ledger check across publication phases."""
+    from .service_installation import _registered_vaults
+    from .wiki.protocols import read_registration
+
     registered = list(_registered_vaults(config))
     states = [Path(config.wiki_dir)]
     users = Path(config.users_root)
@@ -170,5 +186,4 @@ def verify_storage(config: Settings) -> dict:
         with _reader(state / "index.sqlite3") as db:
             version = verify_wiki(db, registration)
         ledgers.append({"schema_version": version, "protocols_complete": True})
-    return {"passed": True, "read_only": True, "main_integrity": "ok",
-            "main_format_version": main_version, "registered_wiki_ledgers": ledgers}
+    return ledgers

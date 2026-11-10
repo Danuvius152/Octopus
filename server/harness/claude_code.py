@@ -21,6 +21,7 @@ import os
 import re
 import uuid
 from collections import deque
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -288,6 +289,8 @@ class ClaudeDriver(RunDriver):
         self._identity: tuple[str, str] | None = None
         self._input_ids: set[str] = set()
         self._opening_id: str | None = None
+        self._history_opening: tuple[str, str, str] | None = None
+        self._history_working_dir = ""
         self._context_seq = 0
         self._sample: ContextObservation | None = None
         self._last_message_id: str | None = None
@@ -308,6 +311,7 @@ class ClaudeDriver(RunDriver):
         self._identity = None
         self._input_ids.clear()
         self._opening_id = None
+        self._history_opening = None
         self._context_seq = 0
         self._sample = None
         self._last_message_id = None
@@ -323,6 +327,19 @@ class ClaudeDriver(RunDriver):
 
     async def begin_input(self, io: HarnessRun, resume_id: str | None) -> None:
         self._session_id = resume_id
+
+    def installed_input_history(self) -> str | None:
+        from .input_history import claude_input_installed
+        if self._session_id and self._history_opening is not None:
+            input_id, text, working_dir = self._history_opening
+            path = _claude_project_dir(working_dir) / f"{self._session_id}.jsonl"
+            if claude_input_installed(path, self._session_id, input_id, text):
+                return self._session_id
+        return None
+
+    async def prepare(self, io: HarnessRun, context: TurnContext, argv: list[str], kwargs: dict[str, Any]) -> None:
+        await super().prepare(io, context, argv, kwargs)
+        self._history_working_dir = context.working_dir
 
     async def start_input(self, io: HarnessRun, context: TurnContext) -> None:
         await io.send_input(context.prompt)
@@ -428,6 +445,7 @@ class ClaudeDriver(RunDriver):
         if self._opening_id is None:
             self._identity = identity
             self._opening_id = input_id
+            self._history_opening = (input_id, text, self._history_working_dir)
         self._input_ids.add(input_id)
         line = json.dumps({
             "type": "user", "uuid": input_id, "parent_tool_use_id": None,
@@ -1002,7 +1020,7 @@ class _JsonlTranscriptCodec:
     def write_file(
         self,
         path: str,
-        messages: list[Any],
+        messages: Iterable[Any],
         session_id: str | None,
         working_dir: str | None,
     ) -> None:

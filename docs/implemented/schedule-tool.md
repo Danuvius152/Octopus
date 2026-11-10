@@ -11,11 +11,13 @@ call turning "summarize my unreads every morning at 9" into a cron.
 The agent path deliberately does not do that. The caller is already a
 model: it can write `0 9 * * 1-5` itself, and asking it to means one tool
 call instead of a tool call plus a second CLI process, a second parse and a
-second way to fail. `build_explicit_schedule` is therefore the same
-validation `validate_parsed` applies to the AI's JSON — minimum interval,
-five cron fields that APScheduler accepts, a one-time run that is actually
-in the future — applied to arguments, with messages written for whoever
-passed the bad value:
+second way to fail. Both paths supply candidates to `build_explicit_schedule`:
+the AI adapter `validate_parsed` checks the declared kind and passes all
+recurrence fields through, including conflicting ones. The shared validator
+checks the prompt, exactly one recurrence, minimum interval, five cron fields,
+timezone and one-time future rule. Shared creation also validates internal
+candidates; no model output is an already-admitted definition. Errors explain
+what the caller should pass:
 
 ```
 Pass exactly one of `cron`, `interval_seconds` or `run_at` (got: cron, interval_seconds).
@@ -33,11 +35,71 @@ quietly move every clock-time schedule. So an omitted zone means the
 IANA name is an error rather than a silent fallback to UTC — substituting a
 different time without saying so is worse than refusing.
 
+**One-time admission.** A new `run_at` must be strictly later than the server's
+current time plus five seconds. An offset-bearing datetime keeps its offset;
+a naive datetime uses the schedule's zone. Browser `now` only helps the model
+interpret the request: validation uses the server clock after parsing. A model
+call that crosses the requested time returns 422 and creates no schedule.
+
+The definition transaction repeats the same rule after acquiring the writer and
+after its SQL and cursor cleanup. The last check, immediately before issuing
+COMMIT, is the admission decision; expiration during those waits rolls back
+without registering a trigger or announcing a saved definition. Time spent
+waiting for COMMIT confirmation or trigger registration does not turn an
+admitted write into a reversible refusal. Registration uncertainty retains its
+[separate result](#6-the-list-moves-while-you-watch).
+
 **Labels.** `describe_cron` puts the common shapes into words — "Weekdays at
 09:00", "Every 15 minutes", "Every Fri at 17:00" — because the label is what
 the sidebar and the Schedules page show, and "0 9 * * 1-5" printed twice
 tells the user nothing. Shapes it would paraphrase badly (named weekdays,
 month fields, steps in odd places) fall back to printing the expression.
+
+### Cron calendar dialect
+
+The five fields are minute, hour, day of month (DOM), month and day of week
+(DOW). DOW accepts three-letter names, lists, positive steps, Sunday as 0 or 7,
+and ranges that wrap around the seven-day week. A standalone DOW `?` is a
+wildcard alias; `?` is not accepted in the other fields. Minute, hour, DOM and
+month keep the existing APScheduler `CronTrigger` vocabulary.
+
+Ordinary numeric ranges whose written start is no greater than their end expand
+in 0…7 and apply the step before Sunday aliases merge. Wrapping ranges and ranges
+containing names instead use the seven-day ring, visiting Sunday once:
+
+| DOW | Matching weekdays |
+| --- | --- |
+| `0-7`, `1-7` | Every day |
+| `0-7/2` | Sun, Tue, Thu, Sat |
+| `6-1/2` | Sat, Mon |
+| `7-1/2`, `7-0` | Sun |
+| `fri-mon/2` | Fri, Sun |
+
+DOM/DOW composition follows the original leading-star flags from the
+[Vixie parser](https://github.com/vixie/cron/blob/master/entry.c) and
+[matcher](https://github.com/vixie/cron/blob/master/cron.c). If either field
+starts with `*`, both day sets must match; otherwise either may match. The DOW
+`?` alias counts as a wildcard. Thus `*/2,1` retains a star flag while `1,*/2`
+does not, even though their expanded sets agree. For example, `0 9 1 * mon`
+runs on the first of each month and every Monday, while `0 9 */2 * mon` runs
+only on Mondays with an odd day of month. These explicit extensions and the
+retained APScheduler field vocabulary do not imply every crontab dialect is
+supported.
+
+The shared `cron_trigger()` returns one `BaseTrigger`: a `CronTrigger` for the
+intersection or an [OrTrigger](https://apscheduler.readthedocs.io/en/3.x/modules/triggers/combining.html)
+with separate DOM/DOW branches for the union. Both branches share minute, hour,
+month and timezone; an impossible date in one branch does not hide the other.
+The Runner registers one business job, so branch overlap produces one fire per
+instant. Timezone and DST follow the existing `CronTrigger` behavior, including
+distinct UTC instants in a repeated local hour.
+
+**Calendar compatibility.** The range and day-combination corrections change
+future dates for affected stored expressions as well as new ones. Stored cron
+text retains its original stars and list order across reloads. The Schedules
+list and API `next_run_at` read the registered trigger's corrected next date;
+they do not use a separate preview calculation. Previously missed periodic
+dates are not backfilled. This does not change overdue one-shot recovery.
 
 ## 3. Four tools
 
@@ -85,7 +147,11 @@ schedule moved from `interval_seconds=600` to `0 9 * * *` keeps its
 interval and fires on whichever the runner reads first. `schedule_updates`
 revalidates the whole recurrence and writes all four columns (including the
 recomputed label); a bare `timezone` re-reads the existing cron in the new
-zone. The same PATCH contract is available to authenticated callers. The
+zone. An explicitly supplied `run_at` is a new candidate, even when equal to
+the stored value, and must pass the five-second rule through write admission.
+A timezone-only reread, prompt edit or enable/disable keeps an existing overdue
+once value valid; startup catch-up is also a read of existing intent, not a new
+creation. The same PATCH contract is available to authenticated callers. The
 Schedules page currently exposes enable/disable, deletion and Wiki-mode
 controls; a general prompt/recurrence editor remains a
 [management proposal](../plans/schedule-management.md).

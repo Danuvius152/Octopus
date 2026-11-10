@@ -1,8 +1,12 @@
 """Context observations through the real Owner, SQLite and native process seam."""
 
 import asyncio
+import json
 import sqlite3
+import subprocess
+import sys
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 
@@ -10,8 +14,9 @@ from server.agent_manager import AgentManager
 from server.database import Database
 from server.models import AgentUpdate
 from server.routers import agents as agent_routes
-from server.routers.sessions import get_session
+from server.routers.sessions import get_session, get_submission_status
 from server.sessions import SessionManager
+from server.sessions.client_submissions import submit_client_message
 from server.sessions.presentation import session_info
 from server.sessions.runtime_types import SessionOwnerUnavailable
 from tests import native_app_server as native_tests
@@ -48,6 +53,50 @@ def compact_item(identifier, *, completed=False):
     }}
 
 
+@pytest.mark.parametrize("operation", ["context", "resume", "configuration"])
+@pytest.mark.parametrize("writer", ["other-task", "other-session"])
+async def test_context_commit_rejects_wrong_writer_before_changing_facts(native_runtime, tmp_path, operation, writer):
+    manager, database, session, _, _, _ = native_runtime
+    await start_output(native_runtime)
+    inject(tmp_path, usage())
+    state = await context_when(manager, session, lambda value: value.validity == "valid")
+    original = manager._session_owners[id(session)]
+    if writer == "other-session":
+        other = await manager.create_session(session.agent_id, "Other writer", str(tmp_path), backend="codex")
+        await manager.update_session_configuration(other.id, {"name": "Other owner"}, session.user_id)
+        manager._session_owners[id(session)] = manager._session_owners[id(other)]
+    fields = ("context_state", "claude_session_id", "model")
+    stored = next(row for row in await database.load_sessions() if row["id"] == session.id)
+    before = (session.context_state, session.claude_session_id, session.model)
+    try:
+        error = RuntimeError if writer == "other-task" else SessionOwnerUnavailable
+        with pytest.raises(error):
+            if operation == "context":
+                await manager._save_context(session, state.model_copy(update={"revision": state.revision + 1}))
+            elif operation == "resume":
+                await manager._remember_resume_id(session, "wrong-writer-native-id")
+            else:
+                await manager._save_session_configuration(session.id, {"model": "wrong-writer-model"}, session.user_id)
+        assert (session.context_state, session.claude_session_id, session.model) == before
+        after = next(row for row in await database.load_sessions() if row["id"] == session.id)
+        assert {field: after[field] for field in fields} == {field: stored[field] for field in fields}
+    finally:
+        manager._session_owners[id(session)] = original
+
+
+@pytest.mark.parametrize("fields", [{"model": "ownerless-model"}, {"name": "Ownerless unchanged context"}])
+async def test_configuration_alignment_without_owner_does_not_install_one(native_runtime, fields):
+    manager, _, session, _, starts, _ = native_runtime
+    assert not manager._session_owners
+    await manager._save_session_configuration(session.id, fields, session.user_id)
+    detail = await get_session(manager, session.id, user_id=session.user_id)
+    if "model" in fields:
+        assert detail.context_state.validity == "stale" and detail.model == fields["model"]
+    else:
+        assert detail.context_state is None and detail.name == fields["name"]
+    assert not manager._session_owners and not starts
+
+
 async def test_root_current_context_survives_detail_and_restart(native_runtime, tmp_path):
     manager, database, session, _, _, events = native_runtime
     receipt = await start_output(native_runtime)
@@ -72,6 +121,65 @@ async def test_root_current_context_survives_detail_and_restart(native_runtime, 
         assert restored.context_state == state
     finally:
         await restarted.close_session_owners()
+
+
+async def test_archive_preserves_original_message_tail_context(native_runtime, tmp_path):
+    manager, _, session, mode, _, _ = native_runtime
+    mode[0] = "control_stop_tail"
+    accepted = await submit_client_message(manager, session.id, "Original tail", [], "archive-tail", wiki_mode=None)
+    await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
+    owner = manager._session_owners[id(session)]
+    (tmp_path / "native-stop-tail.json").write_text(json.dumps([usage(321), terminal("interrupted")]))
+
+    await asyncio.wait_for(manager.archive_session(session.id, replace=False), 5)
+    assert not owner.failed
+    result = await get_submission_status(manager, session.id, "archive-tail", user_id=session.user_id)
+    assert result["request_id"] == accepted["request_id"]
+    assert result["outcome"]["status"] == "interrupted"
+    detail = await get_session(manager, session.id, user_id=session.user_id)
+    assert detail.archived and detail.context_state.sample.used_tokens == 321
+    assert detail.context_state.sample.source.request_id == accepted["request_id"]
+    assert all(current is owner for current in manager._session_owners.values())
+    refused = await submit_client_message(manager, session.id, "New work", [], "after-archive", wiki_mode=None)
+    assert not refused["accepted"]
+
+
+def test_context_write_failure_keeps_storage_fail_stop(tmp_path):
+    program = """
+import asyncio
+import sqlite3
+import sys
+from pathlib import Path
+from server.database import Database
+from server.sessions import SessionManager
+from tests.accounts import create_account
+
+async def main():
+    database = Database(sys.argv[1])
+    await database.initialize()
+    await create_account(database)
+    manager = SessionManager()
+    await manager.initialize(database)
+    agent = await database.get_system_agent()
+    session = await manager.create_session(agent["id"], "Original configuration", backend="codex")
+    execute = database.conn.execute
+    async def fail_context_write(sql, parameters=()):
+        if sql.startswith("UPDATE sessions SET") and "context_state" in sql:
+            raise sqlite3.OperationalError("Original context write failed")
+        return await execute(sql, parameters)
+    database.conn.execute = fail_context_write
+    await manager.update_session_configuration(session.id, {"model": "uncommitted-model"}, session.user_id)
+    Path(sys.argv[2]).touch()
+
+asyncio.run(main())
+"""
+    path, marker = tmp_path / "failed-context.db", tmp_path / "success-published"
+    result = subprocess.run([sys.executable, "-c", program, str(path), str(marker)],
+                            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 70, result.stderr
+    assert not marker.exists()
+    with closing(sqlite3.connect(path)) as database:
+        assert database.execute("SELECT model, context_state FROM sessions").fetchall() == [(None, None)]
 
 
 async def test_default_roundtrip_invalidates_and_late_attempt_cannot_restore(native_runtime, tmp_path):

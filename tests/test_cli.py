@@ -168,14 +168,13 @@ class TestDoPull:
     def test_generates_uuid_when_no_claude_session_id(self, monkeypatch, capsys, tmp_path):
         """do_pull should generate a UUID and write JSONL when claude_session_id is missing."""
 
-        # Mock urlopen to return a session without claude_session_id
+        # The typed export captures the codec inputs without a native ID.
         response_data = json.dumps({
-            "id": "oct-123",
-            "name": "Test",
-            "working_dir": "/proj",
-            "status": "idle",
-            "created_at": "2026-01-01T00:00:00Z",
-            "messages": [{"role": "user", "content": "hello", "type": "user"}],
+            "snapshot": {"session_id": "oct-123", "user_id": "owner", "through_id": 1,
+                         "expected_count": 1, "max_seq": 0, "backend": "claude-code",
+                         "claude_session_id": None, "working_dir": "/proj"},
+            "messages": [{"role": "user", "content": "hello", "type": "text", "seq": 0}],
+            "has_more": False, "next_after_seq": None,
         }).encode("utf-8")
 
         class FakeResponse:
@@ -188,7 +187,7 @@ class TestDoPull:
             def __exit__(self, *a):
                 pass
 
-        monkeypatch.setattr("urllib.request.urlopen", lambda req: FakeResponse())
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, **kwargs: FakeResponse())
 
         parser = build_parser()
         args = parser.parse_args(["pull", "oct-123", "--project-dir", str(tmp_path)])

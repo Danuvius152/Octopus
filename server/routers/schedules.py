@@ -113,7 +113,7 @@ def revise_schedule(existing: dict, req: UpdateScheduleRequest, edit: AdmittedRe
 
 async def create_schedule_for_agent(
     agent_id: str,
-    name: str,
+    name: str | None,
     prompt: str,
     *,
     interval_seconds: int | None = None,
@@ -134,6 +134,15 @@ async def create_schedule_for_agent(
     session the command was issued from) makes each fire append into that
     conversation instead of a throwaway session."""
     await validate_schedule_target(agent_id, origin_session_id)
+    try:
+        parsed = build_explicit_schedule(
+            prompt=prompt, name=name, interval_seconds=interval_seconds,
+            cron=cron, run_at=run_at, tz=tz,
+        )
+    except ScheduleParseError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    name, prompt = parsed.name, parsed.prompt
+    interval_seconds, cron, run_at, tz = parsed.interval_seconds, parsed.cron, parsed.run_at, parsed.timezone
     schedule_id = uuid.uuid4().hex[:12]
     agent = await _get_db().get_agent(agent_id)
     if agent is None:
@@ -149,9 +158,7 @@ async def create_schedule_for_agent(
         raise HTTPException(403, "Schedule knowledge belongs to another account")
     wiki_mode = knowledge_context.mode
     now = datetime.now(UTC).isoformat()
-    label = recurrence_label or recurrence_label_for(
-        {"interval_seconds": interval_seconds, "cron": cron, "run_at": run_at}
-    )
+    label = recurrence_label or parsed.recurrence_label
     row = {
         "id": schedule_id,
         "agent_id": agent_id,
@@ -186,6 +193,8 @@ async def create_schedule_for_agent(
             knowledge_context=encode(knowledge_context),
             request=requesting,
         )
+    except ScheduleParseError as exc:
+        raise HTTPException(422, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return row
@@ -202,7 +211,10 @@ async def apply_schedule_edit(existing: dict, req: UpdateScheduleRequest,
         return existing
     await validate_schedule_enabling(existing, updates)
     try:
-        await _get_runner().update(existing, updates, request=edit)
+        await _get_runner().update(existing, updates, request=edit,
+                                   require_future=req.run_at is not None)
+    except ScheduleParseError as exc:
+        raise HTTPException(422, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     existing = {**existing, **updates}
@@ -423,27 +435,14 @@ async def create_session_schedule(
     edit, human = schedule_edit(request, session_manager, req.prompt, user_id=user_id,
                             selected=req.wiki_mode, session_id=session_id)
     context = derive(edit, req.prompt, selected=req.wiki_mode).execution
-    try:
-        parsed = build_explicit_schedule(
-            prompt=req.prompt,
-            name=req.name,
-            cron=req.cron,
-            interval_seconds=req.interval_seconds,
-            run_at=req.run_at,
-            tz=req.timezone,
-        )
-    except ScheduleParseError as e:
-        raise HTTPException(422, str(e))
-
     row = await create_schedule_for_agent(
         agent_id,
-        parsed.name,
-        parsed.prompt,
-        interval_seconds=parsed.interval_seconds,
-        cron=parsed.cron,
-        tz=parsed.timezone,
-        recurrence_label=parsed.recurrence_label,
-        run_at=parsed.run_at,
+        req.name,
+        req.prompt,
+        interval_seconds=req.interval_seconds,
+        cron=req.cron,
+        tz=req.timezone,
+        run_at=req.run_at,
         origin_session_id=session_id if req.in_session else None,
         knowledge_context=context,
         requesting=edit,

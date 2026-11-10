@@ -51,6 +51,42 @@ it("previews a closed question draft without sending or overwriting the composer
   expect(screen.getByRole("button", { name: "Discard answer draft" })).toBeVisible();
 });
 
+it("recovers the full question and edited answer after an expanded question closes", async () => {
+  useSessionStore.setState({ token: "original-question-account" });
+  handleWsMessage({ ...requested, questions: [], body_state: "preview", message_seq: 1,
+    detail_ref: `/api/sessions/${sid}/messages/1` });
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ role: "assistant", type: "question_request", seq: 1,
+    tool_use_id: "q1", tool_input: { request_id: "r1", attempt_id: "a1", questions: [question] } })));
+  renderChat();
+  fireEvent.click(await screen.findByRole("button", { name: "Load full question" }));
+  fireEvent.change(await screen.findByPlaceholderText("Or type your own answer…"), { target: { value: "My original unsent answer" } });
+  act(() => handleWsMessage(closed));
+  fireEvent.click(await screen.findByRole("button", { name: "Continue as new message" }));
+  const composer = screen.getByRole("textbox");
+  expect((composer as HTMLTextAreaElement).value).toContain("Proceed?");
+  expect((composer as HTMLTextAreaElement).value).toContain("My original unsent answer");
+});
+
+it("shows the complete historical question including its original header and option descriptions", async () => {
+  useSessionStore.setState({ token: "historical-question-reader" });
+  handleWsMessage({ ...requested, questions: [], body_state: "preview", message_seq: 1,
+    detail_ref: `/api/sessions/${sid}/messages/1` });
+  handleWsMessage(closed);
+  vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => Response.json(
+    new URL(String(url), window.location.origin).pathname.endsWith("/messages/1")
+      ? { role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: {
+        request_id: "r1", attempt_id: "a1", questions: [{ header: "Original topic", question: "A compact original question?",
+          options: [{ label: "Exact original option", description: "Original option description ".repeat(2_000) }] }],
+      } } : { items: [], next_cursor: null })));
+  renderChat();
+  fireEvent.click(await screen.findByRole("button", { name: "View full message" }));
+  await waitFor(() => expect(screen.getByText(/A compact original question/)).toBeVisible());
+  expect(screen.getByText(/Original topic/)).toBeVisible();
+  expect(screen.getByText(/Exact original option/)).toBeVisible();
+  expect(screen.getByText(/Original option description/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Submit" })).not.toBeInTheDocument();
+});
+
 it.each(["discard", "another-session"])("allows ordinary explicit input after a question preview becomes %s", async (action) => {
   const sendMessage = vi.fn<Parameters<typeof ChatView>[0]["sendMessage"]>(async () => ({ accepted: true }));
   handleWsMessage(requested);
@@ -197,6 +233,20 @@ it("projects owner snooze across an older snapshot without resetting the origina
   }));
   await waitFor(() => expect(screen.getByText("Automatic expiry paused · waiting for your answer")).toBeVisible());
   expect(useSessionStore.getState().pendingQuestions[sid][0]).toMatchObject({ deadline: null, snoozed: true });
+});
+
+it("shows a large question's compact pause event while its full body is still unloaded", async () => {
+  handleWsMessage({ ...requested, questions: [], body_state: "preview", message_seq: 1,
+    detail_ref: `/api/sessions/${sid}/messages/1`, interaction_policy: "human", wait_mode: "optional", snoozed: false,
+    deadline: new Date(Date.now() + 30_000).toISOString() });
+  renderChat();
+  await waitFor(() => expect(screen.getByText(/Automatic unanswered response in/)).toBeVisible());
+  act(() => handleWsMessage({ type: "question_snoozed", session_id: sid, seq: 2, question_id: "q1",
+    request_id: "r1", attempt_id: "a1", deadline: null, snoozed: true }));
+  await waitFor(() => expect(screen.getByText("Automatic expiry paused · waiting for your answer")).toBeVisible());
+  expect(screen.queryByText(/Automatic unanswered response in/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Load full question" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
 });
 
 it("shows the original human blocking policy from live events and a refreshed snapshot", async () => {

@@ -760,6 +760,7 @@ class TurnsMixin(SessionManagerBase):
         """Persist the engine-side conversation id this session resumes from."""
         if session.claude_session_id == resume_id:
             return
+        owner = self._require_session_writer(session)
         if self.db:
             from dataclasses import replace
 
@@ -772,7 +773,8 @@ class TurnsMixin(SessionManagerBase):
                     context_state=state.model_dump_json() if state else None)
                 if state != session.context_state:
                     session.context_state = state
-                    self._session_owner(session).runtime.context_changed()
+                    if owner is not None:
+                        owner.runtime.context_changed()
         session.claude_session_id = resume_id
 
     async def _note_question_request(
@@ -808,11 +810,6 @@ class TurnsMixin(SessionManagerBase):
         if event.session_id:
             attempt.conversation_id = event.session_id
             await self._remember_resume_id(session, event.session_id)
-        # First fork turn produced a result: drop the ephemeral fork state so
-        # turn 2+ behaves like a normal resumed session (session-rewind.md
-        # §5.3.2/§5.6.5).
-        if session._run.request is None or session._run.request.operation == "message":
-            await self._clear_fork_first_turn_state(session)
 
     @staticmethod
     def _capture_error_text(attempt: _Attempt, event: HarnessEvent) -> None:
@@ -1277,6 +1274,11 @@ class TurnsMixin(SessionManagerBase):
               and not attempt.watchdog.get("waiting_questions")
               and ended_at - attempt.watchdog["last"] >= settings.turn_idle_timeout_seconds):
             attempt.watchdog["tripped"] = ("idle", settings.turn_idle_timeout_seconds)
+        if (session.fork_needs_replay and getattr(attempt.backend, "input_may_have_run", True)
+                and (attempt.failed or attempt.timeout is not None)):
+            return auth or _Decision.stop({"code": "replay_installation_unknown", "message":
+                "History replay installation is unknown; inspect this original input and existing effects "
+                "before continuing. Automatic recovery was stopped."})
         decision = await self._timeout_decision(session, turn, attempt)
         if decision is not None:
             return decision

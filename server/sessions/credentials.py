@@ -26,6 +26,40 @@ from .base import (
 
 class CredentialsMixin(SessionManagerBase):
 
+    async def read_credential_for_validation(self, cred_id: str | None, *, backend: str,
+                                             user_id: str | None) -> HarnessCredential | None:
+        """Read the selected launch representation without refresh or auth I/O.
+
+        This snapshot grants no execution authority. Normal input preparation
+        still resolves current credentials and checks authorization at send.
+        """
+        if not cred_id:
+            return None
+        assert self.db is not None
+        await validate_credential_binding(self.db, cred_id, backend, user_id)
+        if get_harness(backend).profile.credential_style == "home_dir":
+            return await self.resolve_credential_by_id(cred_id, backend=backend, user_id=user_id, require_auth=False)
+        key = await UserManager(self.db).data_key_for(user_id)
+        row = await self.db.get_credential(cred_id, user_id)
+        if row is None or row["user_id"] != user_id or row["backend"] != backend:
+            raise CredentialBindingError("Credential not found")
+        # Expiration/reconnect state governs execution, not this byte estimate.
+        # Decode the saved representation without refreshing or requiring that
+        # it could authenticate a request now; actual input resolves it anew.
+        try:
+            secret = decrypt(row["secret_encrypted"], key)
+            auth_type = "api_key"
+            if row["auth_type"] == "oauth" and secret.startswith("{"):
+                bundle = json.loads(secret)
+                access_token = bundle.get("access_token") if isinstance(bundle, dict) else None
+                if not isinstance(access_token, str):
+                    raise ValueError("Missing stored access token")
+                secret = access_token
+                auth_type = "oauth"
+        except ValueError as error:
+            raise CredentialBindingError("Credential launch data could not be read. Reconnect it before rewinding.") from error
+        return HarnessCredential(backend=backend, auth_type=auth_type, secret=secret, use=CredentialUse.from_row(row))
+
     async def _resolve_credential(
         self, session: Session, agent: dict[str, Any] | None, harness
     ) -> HarnessCredential | None:

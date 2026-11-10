@@ -221,7 +221,7 @@ export function ForkDialog({
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_URL}/api/sessions/${sessionId}`, {
+        const res = await fetch(`${API_URL}/api/sessions/${sessionId}?view=browser`, {
           headers,
         });
         if (!res.ok) return;

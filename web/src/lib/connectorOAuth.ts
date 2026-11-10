@@ -59,12 +59,12 @@ export class ConnectorOAuthOperation {
     else this.update({ kind: "error", message: cancelledMessage || result.message || "Sign-in failed; inspect your connections before trying again." });
   }
 
-  async start(kind: string) {
+  async start(kind: string, installationId?: string) {
     this.update({ kind: "starting" });
     let loginKnown = false;
     try {
       // Do not abort this await when the view retires: it may yield the only ID.
-      const started = await startConnectorOAuth(this.account.token, kind);
+      const started = await startConnectorOAuth(this.account.token, kind, { installation_id: installationId });
       loginKnown = true;
       if (!this.stopping.signal.aborted) {
         window.open(started.authorize_url, "_blank", "noopener,noreferrer");

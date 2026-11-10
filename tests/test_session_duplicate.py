@@ -766,8 +766,8 @@ def test_is_fork_copy_dir(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_full_copy_marker_survives_first_turn_cleanup(manager, tmp_path, monkeypatch):
-    # `fork_metadata` is cleared once the fork's first turn produces a result,
+async def test_full_copy_marker_survives_input_history_installation(manager, tmp_path, monkeypatch):
+    # `fork_metadata` is cleared when native input history is installed,
     # but the durable `full_copy` identity MUST persist so the UI keeps treating
     # it as a copy-dir fork rather than a rewind (Vera review).
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -776,9 +776,7 @@ async def test_full_copy_marker_survives_first_turn_cleanup(manager, tmp_path, m
     fork = await manager.duplicate_session(parent.id)
     # Sanity: replay flag + full_copy both set right after duplicate.
     assert fork.fork_needs_replay in (True, False)
-    fork.fork_needs_replay = True  # force the cleanup to run its full path
-
-    await manager._clear_fork_first_turn_state(fork)
+    await _record_fork_installation(manager.db, fork)
 
     assert fork.fork_needs_replay is False
     meta = json.loads(fork.fork_metadata)
@@ -800,7 +798,7 @@ async def test_full_copy_marker_survives_first_turn_cleanup(manager, tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_rewind_metadata_fully_cleared_on_first_turn(manager, tmp_path, monkeypatch):
+async def test_rewind_metadata_fully_cleared_on_input_installation(manager, tmp_path, monkeypatch):
     # A /rewind fork has no durable keys → its fork_metadata clears to None
     # (so the composer doesn't re-prefill the rewound message).
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -808,8 +806,17 @@ async def test_rewind_metadata_fully_cleared_on_first_turn(manager, tmp_path, mo
     parent = await _seed_parent(manager, repo, n_user=3)
     fork = await manager.fork_session(parent.id, 2)  # rewind to seq 2
     assert json.loads(fork.fork_metadata).get("prefilled_prompt") is not None
-    fork.fork_needs_replay = True
-
-    await manager._clear_fork_first_turn_state(fork)
+    await _record_fork_installation(manager.db, fork)
 
     assert fork.fork_metadata is None
+
+
+async def _record_fork_installation(db, fork):
+    # Exercise persistence with an explicitly supplied native-storage observation.
+    # The actual protocol proof is tested independently in test_fork_replay_input.
+    await db.update_session_field(fork.id, fork_needs_replay=True)
+    await db.admit_client_submission(fork.id, "first", "digest", "input",
+        payload={"content": "First input", "attachment_ids": [], "order": 1}, receipt={"accepted": True})
+    await db.claim_client_submission(fork.id, "input", "input", "generation")
+    await db.record_input_history(fork.id, "input", "attempt", "generation", "claude-code", "native", True)
+    fork.claude_session_id, fork.fork_needs_replay, fork.fork_metadata = await db.session_input_history(fork.id, "input")

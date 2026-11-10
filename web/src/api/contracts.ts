@@ -716,6 +716,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/messages/{seq}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Message Detail */
+        get: operations["message_detail_api_sessions__session_id__messages__seq__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/message-export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export Messages
+         * @description Full typed records for a restoring codec; separate from UI and audit.
+         */
+        get: operations["export_messages_api_sessions__session_id__message_export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/transcript-export": {
         parameters: {
             query?: never;
@@ -3556,6 +3593,307 @@ export interface components {
             /** File */
             file: string;
         };
+        /**
+         * BrowserMessageContent
+         * @description A disposable browser representation of an original committed row.
+         */
+        BrowserMessageContent: {
+            role: components["schemas"]["MessageRole"];
+            /** Type */
+            type: string;
+            /** Content */
+            content?: unknown;
+            /** Tool Name */
+            tool_name?: string | null;
+            /** Tool Input */
+            tool_input?: {
+                [key: string]: unknown;
+            } | null;
+            /** Tool Use Id */
+            tool_use_id?: string | null;
+            runtime_metadata?: components["schemas"]["RuntimeMetadata"] | null;
+            /** Is Error */
+            is_error?: boolean | null;
+            /** Session Id */
+            session_id?: string | null;
+            /** Cost */
+            cost?: number | null;
+            /**
+             * Attachments
+             * @default []
+             */
+            attachments: components["schemas"]["AttachmentMetadata"][];
+            /** Seq */
+            seq?: number | null;
+            /** Created At */
+            created_at?: string | null;
+            /**
+             * Body State
+             * @enum {string}
+             */
+            body_state: "inline" | "preview";
+            /** Detail Ref */
+            detail_ref?: string | null;
+            /**
+             * Identity Unavailable
+             * @default false
+             */
+            identity_unavailable: boolean;
+        };
+        /** BrowserMessagePage */
+        BrowserMessagePage: {
+            /**
+             * Messages
+             * @default []
+             */
+            messages: components["schemas"]["BrowserMessageContent"][];
+            /** Oldest Loaded Seq */
+            oldest_loaded_seq?: number | null;
+            /**
+             * Has More Messages
+             * @default false
+             */
+            has_more_messages: boolean;
+        };
+        /** BrowserNativeDetailPage */
+        BrowserNativeDetailPage: {
+            /** Anchor Seq */
+            anchor_seq: number;
+            child: components["schemas"]["BrowserSubagentRun"];
+            /**
+             * Availability
+             * @enum {string}
+             */
+            availability: "available" | "not_collected";
+            /**
+             * Messages
+             * @default []
+             */
+            messages: components["schemas"]["BrowserMessageContent"][];
+            /** Next After Seq */
+            next_after_seq?: number | null;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
+        };
+        /** BrowserPendingQuestionInfo */
+        BrowserPendingQuestionInfo: {
+            /** Question Id */
+            question_id: string;
+            /** Questions */
+            questions: {
+                [key: string]: unknown;
+            }[];
+            /** Message Seq */
+            message_seq?: number | null;
+            /** Deadline */
+            deadline?: string | null;
+            /** Request Id */
+            request_id?: string | null;
+            /** Attempt Id */
+            attempt_id?: string | null;
+            /** Interaction Policy */
+            interaction_policy?: ("human" | "unattended") | null;
+            /** Wait Mode */
+            wait_mode?: ("blocking" | "optional" | "mcp") | null;
+            /** Snoozed */
+            snoozed?: boolean | null;
+            /**
+             * Body State
+             * @enum {string}
+             */
+            body_state: "inline" | "preview";
+            /** Detail Ref */
+            detail_ref?: string | null;
+        };
+        /** BrowserSessionDetail */
+        BrowserSessionDetail: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Working Dir */
+            working_dir: string;
+            status: components["schemas"]["SessionStatus"];
+            /** Created At */
+            created_at: string;
+            /**
+             * Message Count
+             * @default 0
+             */
+            message_count: number;
+            /**
+             * Transcript Integrity
+             * @default ok
+             * @enum {string}
+             */
+            transcript_integrity: "ok" | "duplicate_seq";
+            /** Claude Session Id */
+            claude_session_id?: string | null;
+            /** Credential Id */
+            credential_id?: string | null;
+            /** Agent Id */
+            agent_id?: string | null;
+            /**
+             * Origin
+             * @default user
+             */
+            origin: string;
+            /** @default claude-code */
+            backend: components["schemas"]["BackendKind"];
+            /** Model */
+            model?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
+            /** Service Tier */
+            service_tier?: ("default" | "fast") | null;
+            /** Parent Session Id */
+            parent_session_id?: string | null;
+            /** Delegation Request */
+            delegation_request?: string | null;
+            /** App Id */
+            app_id?: string | null;
+            /**
+             * Can Steer
+             * @default false
+             */
+            can_steer: boolean;
+            /**
+             * Can Observe Context
+             * @default false
+             */
+            can_observe_context: boolean;
+            /**
+             * Can Compact
+             * @default false
+             */
+            can_compact: boolean;
+            /** Compact Unavailable Reason */
+            compact_unavailable_reason?: string | null;
+            /**
+             * Can Fork
+             * @default false
+             */
+            can_fork: boolean;
+            /** Forked From Session Id */
+            forked_from_session_id?: string | null;
+            /** Fork After Seq */
+            fork_after_seq?: number | null;
+            /** Fork Prefilled Prompt */
+            fork_prefilled_prompt?: string | null;
+            fork_revert_record?: components["schemas"]["ForkRevertRecord"] | null;
+            /**
+             * Fork Is Full Copy
+             * @default false
+             */
+            fork_is_full_copy: boolean;
+            /**
+             * Archived
+             * @default false
+             */
+            archived: boolean;
+            context_state?: components["schemas"]["ContextState"] | null;
+            /** Context Generation */
+            context_generation?: string | null;
+            /**
+             * Context Pending
+             * @default false
+             */
+            context_pending: boolean;
+            /**
+             * Messages
+             * @default []
+             */
+            messages: components["schemas"]["BrowserMessageContent"][];
+            /** Active Attempt */
+            active_attempt?: {
+                [key: string]: string;
+            } | null;
+            /** Oldest Loaded Seq */
+            oldest_loaded_seq?: number | null;
+            /**
+             * Has More Messages
+             * @default false
+             */
+            has_more_messages: boolean;
+            dispatch_state?: components["schemas"]["DispatchState"] | null;
+            /**
+             * Pending Questions
+             * @default []
+             */
+            pending_questions: components["schemas"]["BrowserPendingQuestionInfo"][];
+            /**
+             * Subagents
+             * @default []
+             */
+            subagents: components["schemas"]["BrowserSubagentRun"][];
+            /**
+             * Next Message Seq
+             * @default 0
+             */
+            next_message_seq: number;
+        };
+        /** BrowserSubagentRun */
+        BrowserSubagentRun: {
+            /** Task Id */
+            task_id: string;
+            /** Tool Use Id */
+            tool_use_id?: string | null;
+            /** Tool Call Id */
+            tool_call_id?: string | null;
+            /** Card Id */
+            card_id?: string | null;
+            /** Native Thread Id */
+            native_thread_id?: string | null;
+            /** Native Turn Id */
+            native_turn_id?: string | null;
+            /** Parent Thread Id */
+            parent_thread_id?: string | null;
+            runtime_metadata?: components["schemas"]["RuntimeMetadata"] | null;
+            /**
+             * Status
+             * @default running
+             * @enum {string}
+             */
+            status: "running" | "completed" | "failed" | "cancelled" | "interrupted" | "unknown";
+            /** Stop Reason */
+            stop_reason?: string | null;
+            /**
+             * Name
+             * @default
+             */
+            name: string;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /**
+             * Prompt
+             * @default
+             */
+            prompt: string;
+            /**
+             * Summary
+             * @default
+             */
+            summary: string;
+            /** Tokens */
+            tokens?: number | null;
+            /** Tool Uses */
+            tool_uses?: number | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+            /**
+             * Steps
+             * @default []
+             */
+            steps: string[];
+            /** Display Truncated */
+            display_truncated: boolean;
+        };
         /** CancelDelegationRequest */
         CancelDelegationRequest: {
             /** Reason */
@@ -3874,6 +4212,8 @@ export interface components {
             kind: string;
             /** Label */
             label?: string | null;
+            /** Installation Id */
+            installation_id?: string | null;
         };
         /** ConnectorOAuthStartResponse */
         ConnectorOAuthStartResponse: {
@@ -4790,6 +5130,40 @@ export interface components {
             /** Created At */
             created_at?: string | null;
         };
+        /**
+         * MessageExportPage
+         * @description Complete typed records in ascending sequence within fixed membership.
+         */
+        MessageExportPage: {
+            snapshot: components["schemas"]["MessageExportSnapshot"];
+            /** Messages */
+            messages: components["schemas"]["MessageContent"][];
+            /** Next After Seq */
+            next_after_seq: number | null;
+            /** Has More */
+            has_more: boolean;
+        };
+        /**
+         * MessageExportSnapshot
+         * @description First-read membership and codec inputs, never an authorization grant.
+         */
+        MessageExportSnapshot: {
+            /** Session Id */
+            session_id: string;
+            /** User Id */
+            user_id: string | null;
+            /** Through Id */
+            through_id: number;
+            /** Expected Count */
+            expected_count: number;
+            /** Max Seq */
+            max_seq: number | null;
+            backend: components["schemas"]["BackendKind"];
+            /** Claude Session Id */
+            claude_session_id: string | null;
+            /** Working Dir */
+            working_dir: string | null;
+        };
         /** MessageOperation */
         MessageOperation: {
             /**
@@ -5133,6 +5507,8 @@ export interface components {
             questions: {
                 [key: string]: unknown;
             }[];
+            /** Message Seq */
+            message_seq?: number | null;
             /** Deadline */
             deadline?: string | null;
             /** Request Id */
@@ -7491,6 +7867,7 @@ export interface operations {
     get_session_api_sessions__session_id__get: {
         parameters: {
             query?: {
+                view?: "full" | "browser";
                 token?: string | null;
             };
             header?: never;
@@ -7507,7 +7884,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SessionDetail"];
+                    "application/json": components["schemas"]["SessionDetail"] | components["schemas"]["BrowserSessionDetail"];
                 };
             };
             /** @description Validation Error */
@@ -7901,6 +8278,76 @@ export interface operations {
             };
         };
     };
+    message_detail_api_sessions__session_id__messages__seq__get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                seq: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageContent"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_messages_api_sessions__session_id__message_export_get: {
+        parameters: {
+            query?: {
+                snapshot?: string | null;
+                after_seq?: number | null;
+                limit?: number;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageExportPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     export_transcript_api_sessions__session_id__transcript_export_get: {
         parameters: {
             query?: {
@@ -7938,6 +8385,7 @@ export interface operations {
         parameters: {
             query?: {
                 after_seq?: number | null;
+                view?: "full" | "browser";
                 limit?: number;
                 token?: string | null;
             };
@@ -7956,7 +8404,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["NativeDetailPage"];
+                    "application/json": components["schemas"]["NativeDetailPage"] | components["schemas"]["BrowserNativeDetailPage"];
                 };
             };
             /** @description Validation Error */
@@ -7975,6 +8423,7 @@ export interface operations {
             query: {
                 /** @description Return messages with seq < this */
                 before_seq: number;
+                view?: "full" | "browser";
                 limit?: number;
                 token?: string | null;
             };
@@ -7992,7 +8441,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MessagePage"];
+                    "application/json": components["schemas"]["MessagePage"] | components["schemas"]["BrowserMessagePage"];
                 };
             };
             /** @description Validation Error */

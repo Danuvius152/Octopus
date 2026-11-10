@@ -32,6 +32,7 @@ from pydantic import ValidationError
 
 from ..aio import complete_cleanup
 from ..config import settings
+from ..diagnostics import safe_diagnostic
 from ..harness import get_harness, has_backend, model_settings
 from ..knowledge import (
     OwnedTaskContext,
@@ -386,11 +387,19 @@ class ResearchManager:
         except asyncio.CancelledError:
             raise
         except ResearchSynthesisError as exc:
-            evidence = os.path.join(_research_dir(session.user_id), job_id, "synthesis-failure.json")
-            with open(evidence, "w", encoding="utf-8") as handle:
-                json.dump({"error": str(exc), **asdict(exc.partial), "evidence": exc.partial.evidence.model_dump()},
-                          handle, ensure_ascii=False, indent=2)
-            await self._finalize_failed(job_id, session_id, "failed", str(exc))
+            evidence = os.path.join(paths_for(session.user_id).research, job_id, "synthesis-failure.json")
+            try:
+                payload = json.dumps({"error": str(exc), **asdict(exc.partial), "evidence": exc.partial.evidence.model_dump()},
+                                     ensure_ascii=False, indent=2)
+            except Exception as material_error:
+                logger.exception("research %s: could not serialize synthesis failure material", job_id)
+                material_failure = safe_diagnostic(f"{type(material_error).__name__}: {material_error}")
+            else:
+                material_failure = self._write_material(evidence, payload)
+            failure_reason = str(exc)
+            if material_failure is not None:
+                failure_reason += f"\nSynthesis diagnostic material unavailable: {material_failure}"
+            await self._finalize_failed(job_id, session_id, "failed", failure_reason)
         except TimeoutError:
             if report is not None or self._closing:
                 raise
@@ -665,7 +674,7 @@ class ResearchManager:
 
     def _write_report(self, job_id: str, report: str, user_id: str | None) -> str | None:
         path = os.path.join(paths_for(user_id).research, f"{job_id}.md")
-        return path if self._write_material(path, report) else None
+        return path if self._write_material(path, report) is None else None
 
     def _write_evidence(self, job_id: str, session_id: str, evidence: ResearchEvidence, user_id: str | None) -> bool:
         path = os.path.join(paths_for(user_id).research, job_id, "evidence.json")
@@ -674,10 +683,11 @@ class ResearchManager:
         if len(payload.encode("utf-8")) > MAX_EVIDENCE_BYTES:
             logger.error("research %s: evidence exceeds its size limit", job_id)
             return False
-        return self._write_material(path, payload)
+        return self._write_material(path, payload) is None
 
     @staticmethod
-    def _write_material(path: str, text: str) -> bool:
+    def _write_material(path: str, text: str) -> str | None:
+        """Return a safe failure reason, or None after the file and directory sync."""
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as fh:
@@ -689,10 +699,10 @@ class ResearchManager:
                 os.fsync(directory)
             finally:
                 os.close(directory)
-            return True
-        except Exception:
+            return None
+        except Exception as exc:
             logger.exception("research: could not write material %s", path)
-            return False
+            return safe_diagnostic(f"{type(exc).__name__}: {exc}")
 
     async def public_job(self, row: dict[str, Any]) -> dict[str, Any]:
         """Read an original job's bounded material; never infer a new outcome.

@@ -76,6 +76,14 @@ developer-item injection retain independent uncertainty evidence. Prompt text an
 large inputs travel in the business RPC; attachment ownership and original
 recovery payloads stay with the existing submission.
 
+The pure `turn/start` parameter constructor is shared by early payload checking
+and real dispatch. Its final UTF-8 JSON frame includes the real RPC/input/thread
+identities, effective model and effort, and complete augmented prompt. The
+connection assigns the RPC ID, encodes once, checks that frame's byte budget and
+writes those bytes. Separate controller/injection RPCs do not add to that frame.
+Early unknown fields use minimum JSON widths only to reject already oversized
+input; actual identities and native defaults require the final complete check.
+
 Only the start response or a matching native user-message client ID can bind the
 accepted root. Notifications preceding proof are buffered within finite bounds.
 Conflicting/missing identities, unsupported complete items and unexpected root
@@ -95,6 +103,11 @@ late proof and manual recovery rules belong to
 [the input contract](input-reliability.md#codex-native-input-evidence);
 [current storage](current-storage-format.md#publication-boundary) owns the format
 and finite publication handoff. Acceptance does not prove model consumption.
+For [first-input replay](session-rewind.md#532-history-replay-and-first-turn-state),
+it also does not prove recoverable history was saved. The adapter separately
+checks the returned native history path for the exact saved session/start-turn
+and sent user text. Missing, incomplete or incompatible storage retains replay
+uncertainty; a later failed native result cannot erase affirmative installation.
 
 This path supports human steering of its bound active root and evidence-qualified
 continuation. Hosts are not reused. Ineligible later input queues for
@@ -481,6 +494,22 @@ envelope. Oversized input fails explicitly and retains the original draft.
 Unbound native observations have a separate 8 MiB UTF-8 / 256-frame correlation
 budget; non-BMP text is not counted as expanded ASCII escapes. No path truncates
 the input to fit either budget.
+
+Rewind's pure preflight shares the actual `thread/start` and `turn/start`
+parameter builders and frame encoder. It checks the controller, instruction
+injection and first-input frames independently. Explicit product controls are
+known; unresolved native model/effort use minimum-width fields and cannot
+establish the cwd's defaults or certify remaining space. The session's
+[rewind contract](session-rewind.md#532-history-replay-and-first-turn-state)
+owns the reserve and conditional ready guarantee. The bound send encodes again
+with resolved controls and real identities.
+
+Correlation IDs use `octopus:` plus 32 hexadecimal UUID characters, bounding
+their encoded width even after paginated `model/list` calls. Preflight also
+allows 32 characters for the product request and 36 for the native thread UUID.
+The latter is version-bound to the
+[0.167.0 ThreadId representation](https://raw.githubusercontent.com/openai/codex/rust-v0.167.0/codex-rs/protocol/src/thread_id.rs);
+actual runtime identity checks remain authoritative.
 
 Sessions may share an owned credential home. Request-specific MCP configuration
 travels through the invocation's argv/environment and RPC, without rewriting

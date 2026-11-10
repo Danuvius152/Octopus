@@ -241,7 +241,7 @@ it.each([1, 2])("a browser confirmation preserves a concurrent authoritative del
 it("loads existing research when selecting after WS connects, then accepts progress and cancel", async () => {
   vi.stubGlobal("WebSocket", Socket);
   const fetcher = vi.fn(async (url: RequestInfo | URL) => {
-    const path = String(url);
+    const path = new URL(String(url), window.location.origin).pathname;
     if (path.endsWith("/research")) return Response.json([job]);
     if (path.endsWith("/api/sessions/s1")) return Response.json({ ...session, messages: [], dispatch_state: dispatch() });
     if (path.includes("/api/sessions") && !path.includes("/api/sessions/s1")) return Response.json([session]);
@@ -310,7 +310,7 @@ it("reloads research on WS reconnect after establishing the detail's service gen
   useSessionStore.setState({ activeSessionId: "s1" });
   vi.stubGlobal("WebSocket", Socket);
   vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
-    const path = String(url);
+    const path = new URL(String(url), window.location.origin).pathname;
     if (path.endsWith("/api/sessions/s1")) return Response.json({ ...session, messages: [], dispatch_state: dispatch() });
     if (path.includes("/api/sessions") && !path.includes("/api/sessions/s1")) return Response.json([session]);
     if (path.endsWith("/research")) return Response.json([job]);

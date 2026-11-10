@@ -33,6 +33,19 @@ import type {
 // Provenance for immutable per-job updates, including WS and API receipts.
 // Snapshot rows stay unmarked. Weak references retain no second task state.
 const researchUpdates = new WeakMap<ResearchJob, symbol>();
+
+const streamingBytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
+function streamingPreview(value: string, budget: number): string {
+  if (streamingBytes(value) <= budget) return value;
+  let low = 0, high = Math.min(value.length, budget);
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (streamingBytes(value.slice(0, middle) + "…") <= budget) low = middle;
+    else high = middle - 1;
+  }
+  if (low && /[\uD800-\uDBFF]/.test(value[low - 1])) low--;
+  return value.slice(0, low) + "…";
+}
 const bgUpdates = new WeakMap<BgTask, symbol>();
 const subagentUpdates = new WeakMap<SubagentRun, symbol>();
 const delegationUpdates = new WeakMap<Delegation, symbol>();
@@ -45,7 +58,7 @@ const bgDeliveryUpdates = new WeakMap<BgTask, symbol>();
 // from FastAPI's openapi.json via `bun run generate:contracts`.
 export type SessionStatus = ApiSessionStatus;
 export type SessionInfo = ApiSessionInfo;
-export type SubagentRun = ApiSubagentRun;
+export type SubagentRun = ApiSubagentRun & { display_truncated?: boolean };
 export type SubagentDefinition = ApiSubagentDefinition;
 export type Agent = ApiAgentRead;
 export type Application = ApiApplicationRead;
@@ -62,6 +75,9 @@ export type SessionAuxiliaryKind = "background" | "research";
 // `content: unknown` because tool_result can carry arbitrary JSON). Leave
 // hand-rolled.
 export interface Message {
+  body_state?: "inline" | "preview";
+  detail_ref?: string | null;
+  identity_unavailable?: boolean;
   role: "user" | "assistant" | "system" | "tool";
   type: string;
   content?: string;
@@ -120,6 +136,9 @@ export interface QuestionItem {
 }
 
 export interface PendingQuestion {
+  message_seq?: number | null;
+  body_state?: "inline" | "preview";
+  detail_ref?: string | null;
   question_id: string;
   questions: QuestionItem[];
   deadline?: string | null;
@@ -242,6 +261,8 @@ interface SessionStore {
   activeApplicationId: string | null;
   // Which agent the agent form is editing; null = the new-agent draft.
   editingAgentId: string | null;
+  // Identifies a single opening, including reopening the same Agent in one batch.
+  agentFormGeneration: number;
   // Which tab the Agents / Applications page is on (sidebar-pins.md §6):
   // "all" lists every agent or application, "form" creates or edits one.
   // Store state rather than the page's own, so whoever opens the page (the
@@ -686,6 +707,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   mainView: "chat",
   activeApplicationId: null,
   editingAgentId: null,
+  agentFormGeneration: 0,
   pageTab: "form",
   setPageTab: (pageTab) => set({ pageTab }),
   openApplication: (id) =>
@@ -706,13 +728,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       sidebarOpen: false,
     }),
   openAgentForm: (agentId = null) =>
-    set({
+    set((s) => ({
       mainView: "agent-form",
       editingAgentId: agentId,
+      agentFormGeneration: s.agentFormGeneration + 1,
       pageTab: "form",
       activeApplicationId: null,
       sidebarOpen: false,
-    }),
+    })),
   unseenFailedApplications: [],
   noteApplicationFailed: (id) =>
     set((s) =>
@@ -879,14 +902,16 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   appendStreamingText: (sessionId, chunk, metadata) =>
     set((s) => {
       const key = nativeItemKey(metadata);
-      if (key && metadata) return { streamingItems: { ...s.streamingItems, [sessionId]: {
-        ...s.streamingItems[sessionId], [key]: { runtime_metadata: metadata,
-          content: (s.streamingItems[sessionId]?.[key]?.content || "") + chunk },
-      } } };
+      if (key && metadata) {
+        const items = { ...s.streamingItems[sessionId], [key]: { runtime_metadata: metadata,
+          content: streamingPreview((s.streamingItems[sessionId]?.[key]?.content || "") + chunk, 16 * 1024) } };
+        while (Object.keys(items).length > 32 || streamingBytes(items) > 256 * 1024) delete items[Object.keys(items)[0]];
+        return { streamingItems: { ...s.streamingItems, [sessionId]: items } };
+      }
       return {
       streamingText: {
         ...s.streamingText,
-        [sessionId]: (s.streamingText[sessionId] || "") + chunk,
+        [sessionId]: streamingPreview((s.streamingText[sessionId] || "") + chunk, 64 * 1024),
       },
       };
     }),

@@ -12,8 +12,8 @@ survives conversation replacement without copying secrets into a session.
 
 Gmail and GitHub are built-in kinds. Browser-defined custom OAuth kinds use the
 generic connector and MCP module. OAuth client configuration is DB-first with
-environment fallback. The browser request determines the redirect origin unless
-an explicit public-base override applies. Typed MCP tools avoid proxying arbitrary
+environment fallback. OAuth uses the [public base rules](#public-oauth-base)
+below for its redirect URI. Typed MCP tools avoid proxying arbitrary
 CLI traffic. The server stores credentials; model prompts carry capabilities and
 tool namespaces, not provider tokens.
 
@@ -24,6 +24,35 @@ transactions protect different responsibilities: external refresh/binding versus
 atomic installation-and-secret writes. See the
 [account and MCP contract](multi-tenancy.md).
 
+## Public OAuth base
+
+The router uses a nonempty `OCTOPUS_PUBLIC_BASE_URL` before any request-derived
+address. Without it, the existing request rule remains: forwarded proto before
+request scheme, and forwarded host before Host, otherwise the request base URL.
+This preserves remote and tunneled access without substituting localhost or
+changing which forwarding headers the deployment trusts.
+
+Settings alone normalizes the explicit URL: surrounding whitespace is removed,
+empty or whitespace-only values mean unconfigured, and every other value must
+parse as an absolute HTTP(S) URL without credentials, query or fragment. The
+parser's canonical string is used, with trailing slashes removed after parsing.
+Thus `/` or `///` is an invalid configuration, not an absent override. Legal
+ports, IPv6 hosts and base-path prefixes remain supported; accepting a prefix
+does not configure proxy routing. Client ID and secret contents retain their
+independent existing rules and are not trimmed by URL normalization.
+
+Setup GET/PUT and OAuth start share the same resolver and callback suffix.
+Start passes the final redirect URI to the authorize encoder and captures it in
+the original pending login. Callback sends that captured value to token exchange;
+a later configuration change or different callback host/headers cannot replace
+it. Invalid explicit configuration fails Settings validation rather than silently
+choosing a request host. No additional resolver, localhost fallback or persistent
+login state is maintained. Operator instructions belong to
+[Connector setup](../connectors-setup.md).
+
+The browser's [configuration draft lifetime](frontend-list-reconciliation.md#connector-配置表单实例)
+owns setup reads and save tails independently of OAuth login observation.
+
 ## OAuth and lifecycle
 
 Pending OAuth login is bounded and in memory. The fifteen-minute TTL bounds
@@ -32,7 +61,33 @@ their own deadlines. Cancellation and local binding coordinate on the same login
 owner. Local binding atomically associates the external identity, installation
 and secret. An external grant alone does not prove local installation succeeded.
 
-Reconnect retains the installation identity and enabled-agent relationships.
+Reconnect carries the selected installation ID from its rendered card through
+OAuth start, pending login and prepared authorization. That target is transient
+intent; the login's result installation ID is set only after successful local
+binding. Start and callback check the current account, exact owner/kind, target
+existence and captured definition. Binding checks them again after provider I/O.
+An unavailable target is refused without falling back to a new installation.
+
+Explicit Reconnect and ordinary Connect that resolves an existing external
+identity share the same checked update. Under the original installation lock,
+then definition lock and DB transaction, it updates that ID's metadata and
+secret atomically, clears replaced reconnect errors, and preserves created time,
+default enablement and Agent links. The expected provider identity must match
+the stored representation exactly. Custom NULL identities use the explicit
+target with a NULL-safe comparison; they are never merged by kind or label.
+Connect without a target retains external-identity deduplication and can create
+independent same-kind Custom installations.
+
+The original login binding lock orders cancellation against the whole local
+binding, including its wait behind an existing refresh. Cancellation before
+binding does not apply the replacement authorization; once binding wins,
+cancellation observes its actual result. Installation deletion shares the
+installation lock, while definition deletion is rechecked under its own lock
+and inside the transaction. A refused or rolled-back binding leaves no
+replacement installation or partial secret update. A delayed resource rejection
+still uses the [original grant comparison](#token-failures-and-delayed-rejection),
+so it cannot mark a replacement authorization invalid.
+
 Archive, delete, ownership and refresh outcomes are checked at their current
 boundaries. The old second-pass audit's proposed provider revocation, host-login
 policy and other mechanisms must not be inferred from this contract; remaining
@@ -68,6 +123,29 @@ without promising to revoke the provider grant. Browser binding and revocation p
 current guarantees. Complete long-result access, sensitive-write authorization,
 health checks and per-tool policy have their own
 [capability plan](../plans/connector-capabilities.md).
+
+## GitHub identity
+
+GitHub identity is the positive numeric `id` returned by the actual `/user`
+response, stored as canonical ASCII decimal text. Missing, boolean, noninteger
+or nonpositive IDs are refused before local binding. `login` supplies only the
+display label; it is never part of the installation's identity key.
+
+Within an Octopus account, ordinary Connect after a GitHub rename resolves the
+same installation and explicit Reconnect accepts the same numeric ID. Both
+update the label and grant while preserving the installation ID, created time,
+default enablement and Agent links. Explicit Reconnect with a different provider
+ID is refused without replacing the original authorization; ordinary Connect
+may create that distinct identity. Provider identity does not merge installations
+belonging to different Octopus accounts.
+
+Current main-format constraints and publication verification require this one
+representation. All interpretable historical `login:id` keys must cross the
+[finite offline handoff](current-storage-format.md#github-identity-and-finite-publication-handoff)
+before opening the new writer, including rows never actively reconnected.
+Conflicting or unknown source identities block publication for an explicit
+decision. Startup, ordinary reads, Connect and account import neither guess an
+old-key suffix nor rewrite legacy rows online.
 
 ## Browser OAuth operations
 
@@ -297,7 +375,11 @@ response, at the save lock and during COMMIT, sharing, shutdown and real save
 failures. The previous waiter-owned path lost a received rotation when its caller
 left; regressions now reopen SQLite and require the saved original grant.
 `tests/test_connector_custom_lifecycle.py` and the router tests cover deletion,
-rollback, binding order, same-slug replacement and stale client writers.
+rollback, binding order, same-slug replacement and stale client writers. Explicit
+NULL-identity reconnect also goes through enabled-Agent scope and the actual
+Custom MCP resource call, including a delayed rejection of the replaced token.
+Rendered same-kind installation cards verify which target the start request
+carries; ordinary Connect omits it.
 `tests/test_connector_definition_http.py` uses two loopback providers with different
 endpoints and secrets, through the real HTTP exchange/refresh implementation:
 stale callbacks send nothing, in-flight old requests use only old credentials,

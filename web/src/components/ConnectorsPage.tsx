@@ -22,6 +22,11 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 
 type View = "catalog" | "setup" | "custom";
+type FormInstance = {
+  accountGeneration: number;
+  clientIdEdited: boolean;
+  saving: boolean;
+};
 
 const REDIRECT_PATH = "/api/connectors/oauth/callback";
 
@@ -53,6 +58,7 @@ export function ConnectorsPage({
 
   // Setup-a-built-in form.
   const [setupKind, setSetupKind] = useState("");
+  const formInstance = useRef<FormInstance | null>(null);
   const [setupRedirect, setSetupRedirect] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
@@ -80,6 +86,10 @@ export function ConnectorsPage({
   const refreshCatalog = () => fetchCatalog(token).then(setCatalog).catch(() => {});
 
   useEffect(() => {
+    if (formInstance.current && !currentForm(formInstance.current)) {
+      resetDialog();
+      setOpen(false);
+    }
     if (!token) return;
     refreshCatalog();
     void connectorInstallations.refresh();
@@ -87,14 +97,34 @@ export function ConnectorsPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, accountGeneration]);
 
-  useEffect(() => () => { operation.current?.retire(); }, []);
+  useEffect(() => () => {
+    formInstance.current = null;
+    operation.current?.retire();
+  }, []);
+
+  const currentForm = (instance: FormInstance) => formInstance.current === instance
+    && useSessionStore.getState().accountGeneration === instance.accountGeneration;
+
+  const beginForm = (): FormInstance => {
+    const instance = { accountGeneration, clientIdEdited: false, saving: false };
+    formInstance.current = instance;
+    setBusy(false);
+    setFormError(null);
+    return instance;
+  };
+
+  const backToCatalog = () => {
+    formInstance.current = null;
+    setBusy(false);
+    setFormError(null);
+    setView("catalog");
+  };
 
   const resetDialog = () => {
+    backToCatalog();
     operation.current?.retire();
     operation.current = null;
-    setView("catalog");
     setFlow({ kind: "idle" });
-    setFormError(null);
     setInstallationError(null);
     setClientId("");
     setClientSecret("");
@@ -103,55 +133,61 @@ export function ConnectorsPage({
 
   // --- OAuth install (popup + poll) ---------------------------------------
 
-  const connect = (kind: string) => {
+  const connect = (kind: string, installationId?: string) => {
     operation.current?.retire();
     const login = new ConnectorOAuthOperation(setFlow, () => {
       setFlow({ kind: "idle" });
       setOpen(false);
     });
     operation.current = login;
-    void login.start(kind);
+    void login.start(kind, installationId);
   };
 
   // --- configure a built-in connector's OAuth client ----------------------
 
   const openSetup = async (kind: string) => {
+    const instance = beginForm();
     setSetupKind(kind);
     setClientId("");
     setClientSecret("");
-    setFormError(null);
     setSetupRedirect(browserRedirect);
     setView("setup");
     try {
       const cfg = await getOAuthClient(token, kind);
+      if (!currentForm(instance)) return;
       setSetupRedirect(cfg.redirect_uri || browserRedirect);
-      if (cfg.client_id) setClientId(cfg.client_id);
+      if (!instance.clientIdEdited && cfg.client_id) setClientId(cfg.client_id);
     } catch {
       // keep the browser-derived redirect
     }
   };
 
-  const saveSetup = async () => {
+  const saveForm = async (write: () => Promise<unknown>) => {
+    const instance = formInstance.current;
+    if (!instance || !currentForm(instance) || instance.saving) return;
+    instance.saving = true;
     setBusy(true);
     setFormError(null);
     try {
-      await setOAuthClient(token, setupKind, clientId.trim(), clientSecret.trim());
+      await write();
       await refreshCatalog();
-      resetDialog();
+      if (currentForm(instance)) resetDialog();
     } catch (e) {
-      setFormError((e as Error).message);
+      if (currentForm(instance)) setFormError((e as Error).message);
     } finally {
-      setBusy(false);
+      instance.saving = false;
+      if (currentForm(instance)) setBusy(false);
     }
   };
 
+  const saveSetup = () =>
+    saveForm(() => setOAuthClient(token, setupKind, clientId.trim(), clientSecret.trim()));
+
   // --- add a custom connector ---------------------------------------------
 
-  const saveCustom = async () => {
-    setBusy(true);
-    setFormError(null);
-    try {
-      await createCustomConnector(token, {
+  const saveCustom = () =>
+    saveForm(() =>
+      createCustomConnector(token, {
         kind: custom.kind.trim(),
         display_name: custom.display_name.trim() || custom.kind.trim(),
         authorize_url: custom.authorize_url.trim(),
@@ -161,15 +197,8 @@ export function ConnectorsPage({
         api_base: custom.api_base.trim(),
         client_id: custom.client_id.trim(),
         client_secret: custom.client_secret.trim(),
-      });
-      await refreshCatalog();
-      resetDialog();
-    } catch (e) {
-      setFormError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+      }),
+    );
 
   const removeCustom = async (kind: string) => {
     const original = useSessionStore.getState();
@@ -302,7 +331,7 @@ export function ConnectorsPage({
                       onClick={() => {
                         resetDialog();
                         setOpen(true);
-                        connect(inst.kind);
+                        connect(inst.kind, inst.id);
                       }}
                     >
                       Reconnect →
@@ -439,8 +468,8 @@ export function ConnectorsPage({
                 size="sm"
                 className="btn-connector-add-custom self-start"
                 onClick={() => {
+                  beginForm();
                   setCustom({ ...blankCustom });
-                  setFormError(null);
                   setView("custom");
                 }}
               >
@@ -482,7 +511,10 @@ export function ConnectorsPage({
                   <Input
                     id="setup-client-id"
                     value={clientId}
-                    onChange={(e) => setClientId(e.target.value)}
+                    onChange={(e) => {
+                      if (formInstance.current) formInstance.current.clientIdEdited = true;
+                      setClientId(e.target.value);
+                    }}
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -497,7 +529,7 @@ export function ConnectorsPage({
                 {formError && <p className="text-sm text-destructive">{formError}</p>}
               </div>
               <div className="flex items-center justify-between gap-2">
-                <Button variant="ghost" size="sm" onClick={() => setView("catalog")}>
+                <Button variant="ghost" size="sm" onClick={backToCatalog}>
                   <IconArrowLeft size={14} /> Back
                 </Button>
                 <Button
@@ -609,7 +641,7 @@ export function ConnectorsPage({
                 {formError && <p className="text-sm text-destructive">{formError}</p>}
               </div>
               <div className="flex items-center justify-between gap-2">
-                <Button variant="ghost" size="sm" onClick={() => setView("catalog")}>
+                <Button variant="ghost" size="sm" onClick={backToCatalog}>
                   <IconArrowLeft size={14} /> Back
                 </Button>
                 <Button

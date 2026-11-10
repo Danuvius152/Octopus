@@ -94,15 +94,18 @@ async def test_child_admission_and_parent_seal_have_one_order(notification_runti
 
         monkeypatch.setattr(runtime.delegations, "_commit_admission", delayed)
     else:
-        original = runtime.manager.db.compare_and_set_delegation_state
+        original = runtime.manager.start_message
 
-        async def delayed(*args, **kwargs):
-            if kwargs.get("parent_expected_state") is not None:
+        async def delayed(session_id, content, **kwargs):
+            session = runtime.manager.get_session(session_id)
+            if session is not None and session.parent_session_id == outer.delegation_id:
+                # Responsibility is registered and the caller checked. A CAS
+                # barrier alone cannot keep the caller's run lease alive.
                 entered.set()
                 await release.wait()
-            return await original(*args, **kwargs)
+            return await original(session_id, content, **kwargs)
 
-        monkeypatch.setattr(runtime.manager.db, "compare_and_set_delegation_state", delayed)
+        monkeypatch.setattr(runtime.manager, "start_message", delayed)
     child = asyncio.create_task(runtime.delegations.start_delegation(parent_session_id=outer.delegation_id,
         agent_name="Race leaf", request="Competing owned reply", scope=caller))
     try:
@@ -121,6 +124,10 @@ async def test_child_admission_and_parent_seal_have_one_order(notification_runti
             assert not await runtime.manager.db.session_has_inputs(refused[0]["id"])
             assert not outer._child_work_ids
         else:
+            async with asyncio.timeout(2):
+                while outer._candidate_request_id is None:
+                    await asyncio.sleep(.005)
+            assert outer.state == "running" and len(outer._child_work_ids) == 1
             release.set()
             leaf = await child
             await runtime.manager.await_session_execution(outer.delegation_id)

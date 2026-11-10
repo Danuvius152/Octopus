@@ -72,7 +72,7 @@ export function normalizeMessage(message: MessageInput): Message {
     };
     return { ...message, content: recovery.message, recovery };
   }
-  return { ...message, content: text(message.content) };
+  return { ...message, content: text(message.content) ?? (message.content == null ? undefined : JSON.stringify(message.content, null, 2)) };
 }
 
 /** Read-only presentation of the recorded conclusion; native status never reclassifies it. */

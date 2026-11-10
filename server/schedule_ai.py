@@ -26,6 +26,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from apscheduler.triggers.base import BaseTrigger
+from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 
 from .harness import HarnessCredential, HarnessOneshotError, OneShotContext
@@ -139,8 +141,7 @@ def local_timezone() -> str:
 def resolve_timezone(tz: str | None) -> str:
     """Validate an explicitly-given IANA zone, or fall back to the host's.
 
-    Unlike `normalize_timezone` (which absorbs whatever the AI emitted), a
-    name passed deliberately and not recognised is an error: silently
+    A name passed deliberately and not recognised is an error: silently
     substituting UTC would move every fire without saying so.
     """
     if not tz or not tz.strip():
@@ -189,7 +190,7 @@ def _crontab_dow_field(field: str) -> str:
         value = int(token)
         if not 0 <= value <= 7:
             raise ValueError(f"day-of-week out of range: {token}")
-        return value % 7  # crontab allows 7 for Sunday
+        return value  # Keep 7 distinct until a numeric range's step is applied.
 
     days: set[int] = set()
     for part in field.split(","):
@@ -204,22 +205,25 @@ def _crontab_dow_field(field: str) -> str:
         elif "-" in part.strip().lstrip("-"):
             lo_raw, _, hi_raw = part.partition("-")
             lo, hi = one(lo_raw), one(hi_raw)
-            span = (
-                list(range(lo, hi + 1))
-                if lo <= hi
-                # A wrapping range (fri-mon) is legal crontab.
-                else list(range(lo, 7)) + list(range(0, hi + 1))
-            )
+            if lo_raw.strip().isdigit() and hi_raw.strip().isdigit() and lo <= hi:
+                # Ordinary numeric ranges use the written 0..7 domain. In
+                # particular 0-7/2 selects 0,2,4,6 before Sunday aliases merge.
+                span = list(range(lo, hi + 1))
+            else:
+                # Named and wrapping ranges use the seven-day ring, with no
+                # second Sunday; 7-0 therefore selects just that one day.
+                lo, hi = lo % 7, hi % 7
+                span = list(range(lo, hi + 1)) if lo <= hi else list(range(lo, 7)) + list(range(hi + 1))
         else:
             span = [one(part)]
-        days.update(day for i, day in enumerate(span) if i % step == 0)
+        days.update(day % 7 for i, day in enumerate(span) if i % step == 0)
     if not days:
         raise ValueError("day-of-week matched no days")
     return ",".join(_APS_DOW[d] for d in sorted(days))
 
 
-def cron_trigger(expr: str, tz: str | None = None) -> CronTrigger:
-    """Build the trigger for a standard 5-field crontab expression.
+def cron_trigger(expr: str, tz: str | None = None) -> BaseTrigger:
+    """Build the trigger for the supported five-field cron dialect.
 
     The one place a cron string becomes a schedule, so the day-of-week
     translation above cannot be forgotten by one caller — the validator, the
@@ -229,14 +233,18 @@ def cron_trigger(expr: str, tz: str | None = None) -> CronTrigger:
     if len(fields) != 5:
         raise ValueError("a crontab expression has five fields")
     minute, hour, day, month, dow = fields
-    return CronTrigger(
-        minute=minute,
-        hour=hour,
-        day=day,
-        month=month,
-        day_of_week=_crontab_dow_field(dow),
-        timezone=ZoneInfo(tz) if tz else None,
-    )
+    # Vixie records the leading star before parsing lists/steps. A complete
+    # set of days cannot recover this flag (1,*/2 differs from */2,1).
+    day_star = day.startswith("*")
+    dow_star = dow.startswith("*") or dow == "?"  # Existing DOW-only wildcard alias.
+    weekday = _crontab_dow_field(dow)
+    common = dict(minute=minute, hour=hour, month=month, timezone=ZoneInfo(tz) if tz else None)
+    if day_star or dow_star:
+        return CronTrigger(day=day, day_of_week=weekday, **common)
+    return OrTrigger([
+        CronTrigger(day=day, day_of_week="*", **common),
+        CronTrigger(day="*", day_of_week=weekday, **common),
+    ])
 
 
 def _dow_list(field: str) -> list[int] | None:
@@ -379,8 +387,30 @@ def build_explicit_schedule(
             recurrence_label=describe_cron(expr) or f"Cron {expr}",
         )
 
+    when = validate_run_at(str(run_at), tz=zone, now=now, require_future=require_future)
+    return ParsedSchedule(
+        name=label,
+        prompt=prompt,
+        interval_seconds=None,
+        cron=None,
+        timezone=zone,
+        recurrence_label=f"Once on {when:%Y-%m-%d} at {when:%H:%M}",
+        run_at=when.isoformat(),
+    )
+
+
+def validate_run_at(
+    run_at: str, *, tz: str | None, now: datetime | None = None,
+    require_future: bool = True,
+) -> datetime:
+    """Normalize a once candidate; new definitions need server time + 5s.
+
+    Candidate parsing and the final definition write use this same rule.
+    Reading an existing value explicitly opts out of the future requirement.
+    """
+    zone = resolve_timezone(tz)
     try:
-        when = datetime.fromisoformat(str(run_at).strip())
+        when = datetime.fromisoformat(run_at.strip())
     except ValueError:
         raise ScheduleParseError(
             "`run_at` must be an ISO datetime like '2026-09-22T15:00' "
@@ -392,22 +422,12 @@ def build_explicit_schedule(
         reference = now or datetime.now(UTC)
         if reference.tzinfo is None:
             reference = reference.replace(tzinfo=ZoneInfo(zone))
-        # A one-time schedule in the past never fires — it is deleted on the
-        # next boot as a missed run. Say so now rather than accept it.
         if when <= reference + timedelta(seconds=5):
             raise ScheduleParseError(
-                f"`run_at` is in the past ({when.isoformat()}); a one-time "
-                "schedule has to be in the future."
+                f"`run_at` is in the past or too close ({when.isoformat()}); "
+                "a one-time schedule has to be more than 5 seconds in the future."
             )
-    return ParsedSchedule(
-        name=label,
-        prompt=prompt,
-        interval_seconds=None,
-        cron=None,
-        timezone=zone,
-        recurrence_label=f"Once on {when:%Y-%m-%d} at {when:%H:%M}",
-        run_at=when.isoformat(),
-    )
+    return when
 
 
 # --------------------------------------------------------------------------- #
@@ -458,17 +478,6 @@ def parse_rigid(text: str) -> ParsedSchedule | None:
 # --------------------------------------------------------------------------- #
 # AI path
 # --------------------------------------------------------------------------- #
-
-
-def normalize_timezone(tz: str | None) -> str:
-    """Validate an IANA tz name; fall back to UTC."""
-    if not tz:
-        return "UTC"
-    try:
-        ZoneInfo(tz)
-        return tz
-    except (ZoneInfoNotFoundError, ValueError, KeyError):
-        return "UTC"
 
 
 def build_parse_prompt(text: str, now_iso: str, tz: str) -> str:
@@ -542,64 +551,24 @@ def validate_parsed(obj: dict, *, default_tz: str, original_text: str) -> Parsed
         raise ScheduleParseError("Couldn't work out the timing. Try e.g. \"every day at 9am\".")
     kind = rec.get("kind")
 
-    if kind == "interval":
-        seconds = _coerce_int(rec.get("interval_seconds"))
-        if seconds is None or seconds < MIN_INTERVAL_SECONDS:
-            raise ScheduleParseError("Minimum interval is 1m (60s).")
-        return ParsedSchedule(
-            name=name,
-            prompt=prompt,
-            interval_seconds=seconds,
-            cron=None,
-            timezone=None,
-            recurrence_label=label or f"Every {format_interval(seconds)}",
-        )
+    field = {"interval": "interval_seconds", "once": "run_at_iso", "cron": "cron"}.get(kind) if isinstance(kind, str) else None
+    if field is None or rec.get(field) in (None, ""):
+        raise ScheduleParseError("Couldn't work out the timing. Try e.g. \"every day at 9am\".")
 
-    if kind == "once":
-        run_at_str = str(rec.get("run_at_iso") or "").strip()
-        if not run_at_str:
-            raise ScheduleParseError(
-                "Couldn't work out the one-time date/time. Try rephrasing."
-            )
-        tz = normalize_timezone(default_tz)
-        try:
-            dt = datetime.fromisoformat(run_at_str)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=ZoneInfo(tz))
-            run_at = dt.isoformat()
-        except (ValueError, ZoneInfoNotFoundError):
-            raise ScheduleParseError(
-                "Couldn't work out the one-time date/time. Try rephrasing."
-            )
-        return ParsedSchedule(
-            name=name,
-            prompt=prompt,
-            interval_seconds=None,
-            cron=None,
-            timezone=tz,
-            recurrence_label=label or f"Once at {run_at_str}",
-            run_at=run_at,
-        )
-
-    if kind == "cron":
-        cron = str(rec.get("cron") or "").strip()
-        if len(cron.split()) != 5:
-            raise ScheduleParseError("Couldn't work out the timing. Try rephrasing.")
-        tz = normalize_timezone(default_tz)
-        try:
-            cron_trigger(cron, tz)
-        except (ValueError, ZoneInfoNotFoundError):
-            raise ScheduleParseError("Couldn't work out the timing. Try rephrasing.")
-        return ParsedSchedule(
-            name=name,
-            prompt=prompt,
-            interval_seconds=None,
-            cron=cron,
-            timezone=tz,
-            recurrence_label=label or f"Cron {cron}",
-        )
-
-    raise ScheduleParseError("Couldn't work out the timing. Try e.g. \"every day at 9am\".")
+    # The model supplies a candidate, not an already-valid definition. Pass
+    # all recurrence fields so an extra conflicting field is rejected too.
+    parsed = build_explicit_schedule(
+        prompt=prompt, name=name, cron=rec.get("cron"),
+        interval_seconds=rec.get("interval_seconds"), run_at=rec.get("run_at_iso"),
+        tz=default_tz,
+    )
+    if label:
+        parsed.recurrence_label = label
+    elif kind == "once":
+        parsed.recurrence_label = f"Once at {str(rec['run_at_iso']).strip()}"
+    elif kind == "cron":
+        parsed.recurrence_label = f"Cron {parsed.cron}"
+    return parsed
 
 
 # Map a harness one-shot failure code to a user-facing schedule message.
@@ -646,7 +615,7 @@ async def parse_schedule_text(
             "Natural-language scheduling isn't available for this agent's harness. "
             'Use the explicit form, e.g. "/schedule 30m check the build".'
         )
-    tz = normalize_timezone(timezone)
+    tz = resolve_timezone(timezone)
     now = now_iso or datetime.now(ZoneInfo(tz)).isoformat(timespec="minutes")
     prompt = build_parse_prompt(text, now, tz)
     ctx = OneShotContext(

@@ -102,7 +102,7 @@ it("keeps the sidebar order when selecting sessions and receiving their details"
   const rows = ["first", "middle", "last"].map((id) => ({ id, name: id, archived: false, agent_id: "agent" } as SessionInfo));
   useSessionStore.setState({ sessions: rows, dispatchGeneration: "service" });
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-    const selected = rows.find((row) => url.endsWith(`/api/sessions/${row.id}`));
+    const selected = rows.find((row) => new URL(url).pathname === `/api/sessions/${row.id}`);
     return json(selected ? { ...selected, message_count: 3, messages: [], dispatch_state: dispatch("service") } : []);
   }));
 
@@ -193,7 +193,7 @@ it.each([false, true])("fills reconnect history and task results with one confir
   const first = deferred<Response>(), confirmation = deferred<Response>();
   let detailReads = 0;
   vi.stubGlobal("fetch", vi.fn((url: string) => {
-    if (url.endsWith("/s")) return ++detailReads === 1 ? first.promise : confirmation.promise;
+    if (new URL(url).pathname === "/api/sessions/s") return ++detailReads === 1 ? first.promise : confirmation.promise;
     if (url.endsWith("bg-tasks")) return Promise.resolve(json([{ id: "bg", status: "completed", stdout: "Saved output" }]));
     return Promise.resolve(json([]));
   }));
@@ -502,8 +502,8 @@ it("keeps legal previous-session history without taking selection during A to B 
   const a = deferred<Response>(), b = deferred<Response>(), again = deferred<Response>();
   let aReads = 0;
   vi.stubGlobal("fetch", vi.fn((url: string) => {
-    if (url.endsWith("/a")) return ++aReads === 1 ? a.promise : again.promise;
-    if (url.endsWith("/b")) return b.promise;
+    if (new URL(url).pathname === "/api/sessions/a") return ++aReads === 1 ? a.promise : again.promise;
+    if (new URL(url).pathname === "/api/sessions/b") return b.promise;
     return Promise.resolve(json([]));
   }));
   const first = selectSession("a"), second = selectSession("b"), third = selectSession("a");

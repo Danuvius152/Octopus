@@ -120,6 +120,21 @@ class Harness:
         argv, kwargs = profile.new_driver(profile).build_argv(ctx)
         validate_launch(argv, kwargs.get("env"))
 
+    def validate_replay(self, config: RunConfig, prompt: str, working_dir: str,
+                        credential: HarnessCredential | None = None) -> None:
+        """Validate a known replay plus caller-supplied input reserve, without I/O.
+
+        Unknown native defaults remain conditional; real preparation resolves
+        them and the bound send checks its actual identities and bytes again.
+        """
+        profile = self.runtime_profile(config)
+        ctx = assemble_turn(profile, config, prompt, working_dir, credential=credential,
+                            run_lease_id="0" * 32, work_id=config.work_id)
+        driver = profile.new_driver(profile)
+        argv, kwargs = driver.build_argv(ctx)
+        validate_launch(argv, kwargs.get("env"))
+        driver.validate_replay(ctx)
+
     def is_auth_error(self, text: str, *, code: str | None = None) -> bool:
         """Whether `text` (a failed turn's combined error output + stderr)
         looks like this backend's auth-credential rejection — a 401 / expired

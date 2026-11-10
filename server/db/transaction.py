@@ -76,6 +76,10 @@ class Transaction:
         cursor = await self.execute(sql, parameters)
         return await cursor.fetchone()
 
+    async def execute_many(self, sql: str, parameters: Iterable[Iterable[Any]]) -> None:
+        raw = await self._wait(self._connection.executemany(sql, parameters))
+        self._cursors.append(TransactionCursor(self, raw))
+
     async def fetch_all(self, sql: str, parameters: Iterable[Any] = ()):
         cursor = await self.execute(sql, parameters)
         return await cursor.fetchall()

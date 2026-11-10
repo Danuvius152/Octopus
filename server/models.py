@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import settings
 from .context_models import ContextState
@@ -275,15 +276,29 @@ class MessageContent(BaseModel):
     created_at: str | None = None
 
 
+class BrowserMessageContent(MessageContent):
+    """A disposable browser representation of an original committed row."""
+
+    body_state: Literal["inline", "preview"]
+    detail_ref: str | None = None
+    identity_unavailable: bool = False
+
+
 class PendingQuestionInfo(BaseModel):
     question_id: str
     questions: list[dict[str, Any]]
+    message_seq: int | None = None
     deadline: str | None = None
     request_id: str | None = None
     attempt_id: str | None = None
     interaction_policy: Literal["human", "unattended"] | None = None
     wait_mode: Literal["blocking", "optional", "mcp"] | None = None
     snoozed: bool | None = None
+
+
+class BrowserPendingQuestionInfo(PendingQuestionInfo):
+    body_state: Literal["inline", "preview"]
+    detail_ref: str | None = None
 
 
 class DispatchQueueItem(BaseModel):
@@ -334,6 +349,11 @@ class SubagentRun(BaseModel):
     steps: list[str] = []
 
 
+class BrowserSubagentRun(SubagentRun):
+    # Derived browser display only; live prompt/summary are not saved bodies.
+    display_truncated: bool
+
+
 class MessagePage(BaseModel):
     """A page of older transcript, oldest-first (polish-2026-09.md §4 B2).
 
@@ -342,9 +362,33 @@ class MessagePage(BaseModel):
     client never has to guess from a short page.
     """
 
-    messages: list[MessageContent] = []
+    messages: Sequence[MessageContent] = []
     oldest_loaded_seq: int | None = None
     has_more_messages: bool = False
+
+
+class MessageExportSnapshot(BaseModel):
+    """First-read membership and codec inputs, never an authorization grant."""
+
+    model_config = ConfigDict(extra="forbid")
+    session_id: str
+    user_id: str | None
+    through_id: int = Field(ge=0, strict=True)
+    expected_count: int = Field(ge=0, strict=True)
+    max_seq: int | None = Field(ge=0, strict=True)
+    backend: BackendKind
+    claude_session_id: str | None
+    working_dir: str | None
+
+
+class MessageExportPage(BaseModel):
+    """Complete typed records in ascending sequence within fixed membership."""
+
+    model_config = ConfigDict(extra="forbid")
+    snapshot: MessageExportSnapshot
+    messages: list[MessageContent]
+    next_after_seq: int | None = Field(ge=0, strict=True)
+    has_more: bool = Field(strict=True)
 
 
 class NativeDetailPage(BaseModel):
@@ -353,7 +397,7 @@ class NativeDetailPage(BaseModel):
     anchor_seq: int
     child: SubagentRun
     availability: Literal["available", "not_collected"]
-    messages: list[MessageContent] = []
+    messages: Sequence[MessageContent] = []
     next_after_seq: int | None = None
     has_more: bool = False
 
@@ -362,7 +406,7 @@ class SessionDetail(SessionInfo):
     context_state: ContextState | None = None
     context_generation: str | None = None
     context_pending: bool = False
-    messages: list[MessageContent] = []
+    messages: Sequence[MessageContent] = []
     active_attempt: dict[str, str] | None = None
     # The transcript is windowed to the most recent MESSAGE_WINDOW messages:
     # 46,000 rows live in this database and the largest single session holds
@@ -371,14 +415,29 @@ class SessionDetail(SessionInfo):
     oldest_loaded_seq: int | None = None
     has_more_messages: bool = False
     dispatch_state: DispatchState | None = None
-    pending_questions: list[PendingQuestionInfo] = []
+    pending_questions: Sequence[PendingQuestionInfo] = []
     # Sub-agents still on screen for this session (native-subagents.md §4).
-    subagents: list[SubagentRun] = []
+    subagents: Sequence[SubagentRun] = []
     # High-water mark of the exact returned rows, independent of the sequence
     # allocator and its unconfirmed reservations. Frontends set their dedup
     # baseline so any subsequently-broadcast event with seq <=
     # next_message_seq-1 is treated as already applied.
     next_message_seq: int = 0
+
+
+class BrowserSessionDetail(SessionDetail):
+    messages: list[BrowserMessageContent] = []
+    pending_questions: list[BrowserPendingQuestionInfo] = []
+    subagents: list[BrowserSubagentRun] = []
+
+
+class BrowserMessagePage(MessagePage):
+    messages: list[BrowserMessageContent] = []
+
+
+class BrowserNativeDetailPage(NativeDetailPage):
+    messages: list[BrowserMessageContent] = []
+    child: BrowserSubagentRun
 
 
 # Schedules
@@ -837,6 +896,7 @@ class ConnectorInstallationInfo(BaseModel):
 class ConnectorOAuthStartRequest(BaseModel):
     kind: str
     label: str | None = None
+    installation_id: str | None = Field(default=None, min_length=1)
 
 
 class ConnectorOAuthStartResponse(BaseModel):

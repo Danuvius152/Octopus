@@ -41,8 +41,11 @@ async def custom_runtime(tmp_path, monkeypatch):
         await db.close()
 
 
-async def begin(client, kind="linear", headers=None):
-    response = await client.post("/api/connectors/oauth/start", json={"kind": kind}, headers=headers)
+async def begin(client, kind="linear", headers=None, *, installation_id=None):
+    body = {"kind": kind}
+    if installation_id is not None:
+        body["installation_id"] = installation_id
+    response = await client.post("/api/connectors/oauth/start", json=body, headers=headers)
     assert response.status_code == 201, response.text
     login_id = response.json()["login_id"]
     login = connectors._login_mgr.get(login_id)
@@ -55,6 +58,268 @@ async def install(client, kind="linear", headers=None):
     receipt = await client.get(f"/api/connectors/oauth/status/{login_id}", headers=headers)
     assert receipt.json()["status"] == "success"
     return login_id, receipt.json()["installation_id"]
+
+
+async def test_reconnect_custom_updates_selected_installation_and_enabled_agent(custom_runtime):
+    client, manager, accounts = custom_runtime
+    await _create_custom(client)
+    _, selected = await install(client)
+    _, other = await install(client)
+    assert selected != other
+    owner = accounts[0][0]["id"]
+    agent = await manager.db.get_system_agent(owner)
+    await manager.set_agent_connector(agent["id"], selected, True, owner)
+    assert (await client.patch(f"/api/connectors/{selected}", json={"enable_by_default": True})).status_code == 200
+    original_grant = (await client.get(f"/api/connectors/{selected}/token")).json()
+    rejected = await client.post(f"/api/connectors/{selected}/mark-needs-reconnect",
+                                 json={"grant_stamp": original_grant["grant_stamp"]})
+    assert rejected.json()["disposition"] == "applied"
+    before = {row["id"]: row for row in (await client.get("/api/connectors")).json()}
+
+    login_id, params = await begin(client, installation_id=selected)
+    params["code"] = "replacement"
+    assert "Connected" in (await client.get("/api/connectors/oauth/callback", params=params)).text
+    receipt = (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()
+    assert receipt["status"] == "success" and receipt["installation_id"] == selected
+    after = {row["id"]: row for row in (await client.get("/api/connectors")).json()}
+    assert after.keys() == before.keys()
+    assert after[other] == before[other]
+    assert after[selected]["created_at"] == before[selected]["created_at"]
+    assert after[selected]["enable_by_default"] is True
+    assert after[selected]["needs_reconnect"] is False and after[selected]["last_refresh_error_code"] is None
+    enabled = await manager.enabled_installations_for_agent(agent["id"])
+    assert [installation.id for installation in enabled] == [selected]
+    grant = await client.get(f"/api/connectors/{enabled[0].id}/token")
+    assert grant.status_code == 200 and grant.json()["access_token"] == "access-replacement"
+    assert (await client.get(f"/api/connectors/{other}/token")).json()["access_token"] == "access-original"
+
+
+@pytest.mark.parametrize("target", ["other_owner", "other_kind", "missing"])
+async def test_reconnect_start_refuses_wrong_target(custom_runtime, target):
+    client, manager, accounts = custom_runtime
+    await _create_custom(client)
+    if target == "other_owner":
+        _, iid = await install(client, headers=accounts[1][1])
+    elif target == "other_kind":
+        await _create_custom(client, "other-kind")
+        _, iid = await install(client, "other-kind")
+    else:
+        iid = "missing-installation"
+    before = await manager.db.load_connector_installations()
+    response = await client.post("/api/connectors/oauth/start", json={"kind": "linear", "installation_id": iid})
+    assert response.status_code == 404
+    assert await manager.db.load_connector_installations() == before
+
+
+@pytest.mark.parametrize("phase", ["before_exchange", "during_exchange"])
+@pytest.mark.parametrize("removed", ["installation", "definition"])
+async def test_reconnect_cannot_recreate_deleted_target(custom_runtime, monkeypatch, phase, removed):
+    client, manager, _ = custom_runtime
+    await _create_custom(client)
+    _, iid = await install(client)
+    _, other = await install(client)
+    login_id, params = await begin(client, installation_id=iid)
+    entered, release = asyncio.Event(), asyncio.Event()
+    exchanges = []
+
+    async def exchange(self, **kwargs):
+        exchanges.append(kwargs["code"])
+        entered.set()
+        await release.wait()
+        return OAuthTokenSet("replacement", "refresh", time.time() + 3600)
+
+    async def remove():
+        if removed == "installation":
+            assert (await client.delete(f"/api/connectors/{iid}")).status_code == 204
+        else:
+            assert (await client.delete("/api/connectors/custom/linear")).status_code == 204
+            await _create_custom(client)
+
+    monkeypatch.setattr(GenericOAuthProvider, "exchange_code", exchange)
+    callback = None
+    try:
+        if phase == "before_exchange":
+            await remove()
+            release.set()
+        callback = asyncio.create_task(client.get("/api/connectors/oauth/callback", params=params))
+        if phase == "during_exchange":
+            await asyncio.wait_for(entered.wait(), 2)
+            await remove()
+            release.set()
+        page = await asyncio.wait_for(callback, 3)
+        assert "Connection failed" in page.text
+        status = (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()
+        assert status["status"] == "error" and status["installation_id"] is None
+        assert [row["id"] for row in (await client.get("/api/connectors")).json()] == (
+            [other] if removed == "installation" else [])
+        assert await manager.db.get_connector_secret(iid) is None
+        assert len(exchanges) == (1 if phase == "during_exchange" else 0)
+    finally:
+        release.set()
+        if callback is not None:
+            await asyncio.gather(callback, return_exceptions=True)
+
+
+async def test_reconnect_secret_failure_rolls_back_metadata_and_keeps_agent_grant(custom_runtime):
+    client, manager, accounts = custom_runtime
+    await _create_custom(client)
+    _, iid = await install(client)
+    owner = accounts[0][0]["id"]
+    agent = await manager.db.get_system_agent(owner)
+    await manager.set_agent_connector(agent["id"], iid, True, owner)
+    before = (await client.get("/api/connectors")).json()
+    secret = await manager.db.get_connector_secret(iid)
+    login_id, params = await begin(client, installation_id=iid)
+    params["code"] = "replacement"
+    await manager.db.conn.execute(
+        "CREATE TRIGGER refuse_reconnect_secret BEFORE UPDATE ON connector_installation_secrets "
+        "BEGIN SELECT RAISE(ABORT, 'secret write rejected'); END")
+    await manager.db.conn.commit()
+    page = await client.get("/api/connectors/oauth/callback", params=params)
+    assert "Connection failed" in page.text
+    assert (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()["status"] == "error"
+    assert (await client.get("/api/connectors")).json() == before
+    assert await manager.db.get_connector_secret(iid) == secret
+    assert [item.id for item in await manager.enabled_installations_for_agent(agent["id"])] == [iid]
+    assert (await client.get(f"/api/connectors/{iid}/token")).json()["access_token"] == "access-original"
+
+
+async def test_cancel_reconnect_during_exchange_keeps_original_installation(custom_runtime, monkeypatch):
+    client, manager, _ = custom_runtime
+    await _create_custom(client)
+    _, iid = await install(client)
+    login_id, params = await begin(client, installation_id=iid)
+    before = (await client.get("/api/connectors")).json()
+    secret = await manager.db.get_connector_secret(iid)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def exchange(self, **kwargs):
+        entered.set()
+        await release.wait()
+        return OAuthTokenSet("discarded-replacement", None, time.time() + 3600)
+
+    monkeypatch.setattr(GenericOAuthProvider, "exchange_code", exchange)
+    callback = asyncio.create_task(client.get("/api/connectors/oauth/callback", params=params))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        cancelled = await client.post("/api/connectors/oauth/cancel", json={"login_id": login_id})
+        assert cancelled.json()["status"] == "cancelled" and cancelled.json()["installation_id"] is None
+        release.set()
+        assert "Connection cancelled" in (await asyncio.wait_for(callback, 3)).text
+        assert (await client.get("/api/connectors")).json() == before
+        assert await manager.db.get_connector_secret(iid) == secret
+        assert (await client.get(f"/api/connectors/{iid}/token")).json()["access_token"] == "access-original"
+    finally:
+        release.set()
+        await asyncio.gather(callback, return_exceptions=True)
+
+
+async def test_reconnect_waits_for_original_refresh_and_cancel_observes_committed_target(custom_runtime, monkeypatch):
+    client, manager, _ = custom_runtime
+    await _create_custom(client)
+
+    async def exchange(self, **kwargs):
+        return OAuthTokenSet(kwargs["code"], "original-refresh", time.time() + (1 if kwargs["code"] == "original" else 3600))
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def refresh(self, **kwargs):
+        entered.set()
+        await release.wait()
+        return OAuthTokenSet("rotated-original", "rotated-refresh", time.time() + 3600)
+
+    monkeypatch.setattr(GenericOAuthProvider, "exchange_code", exchange)
+    monkeypatch.setattr(GenericOAuthProvider, "refresh", refresh)
+    _, iid = await install(client)
+    login_id, params = await begin(client, installation_id=iid)
+    params["code"] = "replacement"
+    refreshing = asyncio.create_task(client.get(f"/api/connectors/{iid}/token"))
+    callback = cancel = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        callback = asyncio.create_task(client.get("/api/connectors/oauth/callback", params=params))
+        login = connectors._login_mgr.get(login_id)
+        # The original binding has claimed cancellation ownership and is
+        # waiting behind the actual refresh's installation lock.
+        async with asyncio.timeout(2):
+            while not login.binding_lock.locked():
+                await asyncio.sleep(0)
+        cancel = asyncio.create_task(client.post("/api/connectors/oauth/cancel", json={"login_id": login_id}))
+        release.set()
+        rotated, page, cancelled = await asyncio.wait_for(asyncio.gather(refreshing, callback, cancel), 3)
+        assert rotated.json()["access_token"] == "rotated-original"
+        assert "Connected" in page.text
+        assert cancelled.json()["status"] == "success" and cancelled.json()["installation_id"] == iid
+        assert (await client.get(f"/api/connectors/{iid}/token")).json()["access_token"] == "replacement"
+        assert [row["id"] for row in (await client.get("/api/connectors")).json()] == [iid]
+    finally:
+        release.set()
+        await asyncio.gather(refreshing, *([callback] if callback else []), *([cancel] if cancel else []), return_exceptions=True)
+
+
+async def test_enabled_custom_mcp_uses_replacement_grant_and_old_401_is_obsolete(custom_runtime, monkeypatch):
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    from server.config import settings
+    from server.harness.assembly import _http_entries
+    from server.mcp_identity import mint
+    from tests.callback_api import start_callback_api
+
+    client, manager, accounts = custom_runtime
+    await _create_custom(client)
+    _, iid = await install(client)
+    owner = accounts[0][0]["id"]
+    agent = await manager.db.get_system_agent(owner)
+    await manager.set_agent_connector(agent["id"], iid, True, owner)
+    entered, release = asyncio.Event(), asyncio.Event()
+    sent = []
+    send = httpx.AsyncHTTPTransport.handle_async_request
+
+    async def upstream(transport, request):
+        if request.url.host == "provider.test":
+            sent.append((str(request.url), request.headers["Authorization"]))
+            if request.headers["Authorization"] == "Bearer access-original":
+                entered.set()
+                await release.wait()
+                return httpx.Response(401, json={"error": "old token rejected"}, request=request)
+            return httpx.Response(200, json={"authorization": "replacement"}, request=request)
+        return await send(transport, request)
+
+    monkeypatch.delenv("OCTOPUS_CONNECTOR_API_BASE", raising=False)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", upstream)
+    api = await start_callback_api(connectors.router, readiness_token=mint("readiness", user_id=owner))
+    monkeypatch.setattr(settings, "port", api.port)
+    try:
+        enabled = await manager.enabled_installations_for_agent(agent["id"])
+        entry, = _http_entries([], [(await manager.get(item.kind), item) for item in enabled], "agent-request", owner)
+        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {entry.credential}"}, timeout=10) as http_client:
+            async with streamable_http_client(f"http://127.0.0.1:{api.port}/mcp/custom/mcp", http_client=http_client) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    old = asyncio.create_task(session.call_tool("request", {"method": "GET", "path": "/items"}))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 3)
+                        login_id, params = await begin(client, installation_id=iid)
+                        params["code"] = "replacement"
+                        assert "Connected" in (await client.get("/api/connectors/oauth/callback", params=params)).text
+                        assert (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()["installation_id"] == iid
+                        release.set()
+                        rejected = await asyncio.wait_for(old, 3)
+                        assert "authorization has since changed; its current sign-in was left unchanged" in rejected.content[0].text
+                        result = await session.call_tool("request", {"method": "GET", "path": "/items"})
+                        assert '"authorization": "replacement"' in result.content[0].text
+                        row, = (await client.get("/api/connectors")).json()
+                        assert row["id"] == iid and not row["needs_reconnect"] and row["last_refresh_error_code"] is None
+                        assert sent == [("https://provider.test/api/items", "Bearer access-original"),
+                                        ("https://provider.test/api/items", "Bearer access-replacement")]
+                    finally:
+                        release.set()
+                        await asyncio.gather(old, return_exceptions=True)
+    finally:
+        release.set()
+        await api.stop()
 
 
 async def test_delete_cleans_every_account_and_keeps_historical_success(custom_runtime):

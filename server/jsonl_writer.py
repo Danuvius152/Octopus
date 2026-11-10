@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid as uuid_mod
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -79,11 +80,11 @@ def _message_to_jsonl_line(
 
 def write_jsonl_file(
     path: Path,
-    messages: list[MessageContent],
+    messages: Iterable[MessageContent],
     session_id: str,
     cwd: str,
 ) -> None:
-    """Write a list of MessageContent objects to a Claude Code JSONL file."""
+    """Consume messages once, retaining the parent chain across input pages."""
     path.parent.mkdir(parents=True, exist_ok=True)
     parent_uuid: str | None = None
     with path.open("w", encoding="utf-8") as f:

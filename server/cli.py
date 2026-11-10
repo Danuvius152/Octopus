@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -156,67 +160,115 @@ def do_handoff(args: argparse.Namespace) -> None:
 
 
 def do_pull(args: argparse.Namespace) -> None:
-    """Execute the pull subcommand — fetch a session from Octopus and write as JSONL."""
+    """Read fixed members completely before publishing a local native transcript."""
     from .harness import get_harness
-    from .models import MessageContent
+    from .models import MessageContent, MessageExportPage
 
     server = args.server.rstrip("/")
     token = args.token
     session_id = args.session_id
 
-    # Fetch session from server
-    url = f"{server}/api/sessions/{session_id}"
-    req = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        method="GET",
-    )
+    url = f"{server}/api/sessions/{urllib.parse.quote(session_id, safe='')}/message-export"
+    temporary: Path | None = None
+    replaced = False
+
+    def fetch(query: dict[str, str | int] | None = None) -> MessageExportPage:
+        request = urllib.request.Request(
+            url + ("?" + urllib.parse.urlencode(query) if query else ""),
+            headers={"Authorization": f"Bearer {token}"}, method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return MessageExportPage.model_validate(json.loads(response.read()))
 
     try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        print(f"Error: HTTP {e.code} — {body}", file=sys.stderr)
+        first = fetch()
+        snapshot = first.snapshot
+        if snapshot.session_id != session_id or (snapshot.expected_count == 0) != (snapshot.max_seq is None):
+            raise ValueError("Invalid message export identity or membership")
+        harness = get_harness(snapshot.backend)
+        codec = harness.transcript_codec
+        if codec is None:
+            raise ValueError(f"pull isn't supported for the {snapshot.backend.value} harness — it has no on-disk transcript format.")
+        claude_session_id = snapshot.claude_session_id
+        if not claude_session_id:
+            import uuid
+            claude_session_id = str(uuid.uuid4())
+            print(f"Note: No claude_session_id on server — generated {claude_session_id}")
+        if claude_session_id in {".", ".."} or "/" in claude_session_id or "\\" in claude_session_id:
+            raise ValueError("Unsafe native session filename")
+        working_dir = args.cwd or snapshot.working_dir or str(Path.cwd())
+        project_dir = Path(args.project_dir) if args.project_dir else get_project_dir(working_dir)
+        out_path = project_dir / f"{claude_session_id}.jsonl"
+        count = 0
+        verified = False
+
+        def messages() -> Iterator[MessageContent]:
+            nonlocal count, verified
+            page = first
+            last_seq: int | None = None
+            while True:
+                if page.snapshot != snapshot:
+                    raise ValueError("Message export snapshot changed between pages")
+                before = count
+                for message in page.messages:
+                    seq = message.seq
+                    if (seq is None or seq < 0 or last_seq is not None and seq <= last_seq
+                            or snapshot.max_seq is None or seq > snapshot.max_seq):
+                        raise ValueError("Invalid or duplicate message export sequence")
+                    count += 1
+                    if count > snapshot.expected_count:
+                        raise ValueError("Message export exceeds its captured membership")
+                    last_seq = seq
+                    yield message
+                if not page.has_more:
+                    if (page.next_after_seq is not None or count != snapshot.expected_count
+                            or last_seq != snapshot.max_seq):
+                        raise ValueError("Incomplete message export membership")
+                    verified = True
+                    return
+                if (count == before or page.next_after_seq != last_seq
+                        or last_seq is None or count >= snapshot.expected_count):
+                    raise ValueError("Message export cursor did not advance")
+                page = fetch({"snapshot": snapshot.model_dump_json(), "after_seq": last_seq})
+
+        project_dir.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix=f".{claude_session_id}.", suffix=".tmp", dir=project_dir)
+        temporary = Path(name)
+        try:
+            stream = os.fdopen(descriptor, "wb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with stream:
+            codec.write_file(str(temporary), messages(), claude_session_id, working_dir)
+            if not verified:
+                raise ValueError("Transcript codec did not consume the complete export")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, out_path)
+        replaced = True
+        directory = os.open(project_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception as error:
+        detail = (f"HTTP {error.code} — {error.read().decode('utf-8', errors='replace')}"
+                  if isinstance(error, urllib.error.HTTPError) else str(error))
+        if replaced:
+            detail = f"Export replaced the target, but directory synchronization is unconfirmed; the new file may already be active. {detail}"
+        print(f"Error: {detail}", file=sys.stderr)
         sys.exit(1)
-    except urllib.error.URLError as e:
-        print(f"Error: Could not connect to {server} — {e.reason}", file=sys.stderr)
-        sys.exit(1)
+    finally:
+        if temporary is not None and not replaced:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as error:
+                print(f"Error: Could not remove temporary export {temporary}: {error}", file=sys.stderr)
 
-    # Only harnesses with a transcript codec can be written to disk (Claude
-    # Code JSONL). A Codex session has no on-disk transcript format → say so.
-    backend = data.get("backend") or "claude-code"
-    harness = get_harness(backend)
-    if not harness.can_export:
-        print(
-            f"Error: pull isn't supported for the {backend} harness — it has no "
-            "on-disk transcript format.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    claude_session_id = data.get("claude_session_id")
-    if not claude_session_id:
-        import uuid
-        claude_session_id = str(uuid.uuid4())
-        print(f"Note: No claude_session_id on server — generated {claude_session_id}")
-
-    working_dir = args.cwd or data.get("working_dir") or str(Path.cwd())
-    messages = [MessageContent(**msg) for msg in data.get("messages", [])]
-
-    if not messages:
+    if count == 0:
         print("Warning: Session has no messages.", file=sys.stderr)
-
-    # Determine output path
-    project_dir = Path(args.project_dir) if args.project_dir else get_project_dir(working_dir)
-    out_path = project_dir / f"{claude_session_id}.jsonl"
-
-    harness.transcript_codec.write_file(
-        str(out_path), messages, claude_session_id, working_dir
-    )
-
-    msg_count = len(messages)
-    print(f"Pulled session with {msg_count} messages → {out_path}")
+    print(f"Pulled session with {count} messages → {out_path}")
     print(f"\nResume with:\n  claude --resume {claude_session_id}")
 
 

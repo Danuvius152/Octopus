@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,27 +16,71 @@ from .evidence import EvidenceBounds, ResearchEvidence, VoteEvidence
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 
-def _extract_json(text: str) -> Any:
-    """Pull the first JSON array or object out of a model reply, tolerating
-    ```json fences and surrounding prose. Returns the parsed value or None."""
-    if not text:
-        return None
-    candidates: list[str] = []
-    m = _FENCE_RE.search(text)
-    if m:
-        candidates.append(m.group(1).strip())
-    candidates.append(text.strip())
-    # Also try the widest [...] / {...} span.
-    for open_c, close_c in (("[", "]"), ("{", "}")):
-        i, j = text.find(open_c), text.rfind(close_c)
-        if 0 <= i < j:
-            candidates.append(text[i : j + 1])
-    for c in candidates:
+def _outer_json(text: str) -> Iterator[tuple[int, int]]:
+    """Locate outer containers, including those eligible for fence priority."""
+    stack: list[str] = []
+    start = 0
+    quoted = escaped = False
+    for index, char in enumerate(text):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            if not stack:
+                start = index
+            stack.append("]" if char == "[" else "}")
+        elif stack and char == stack[-1]:
+            stack.pop()
+            if not stack:
+                yield start, index + 1
+
+
+def _extract_json[T](
+    text: str,
+    *,
+    expected: type[list[Any]] | type[dict[str, Any]],
+    parse: Callable[[Any], T | None],
+) -> T | None:
+    """Select one schema-valid value, preferring naked JSON, then full fences.
+
+    Schema parsing must be pure: discarded or ambiguous candidates cannot
+    change evidence bounds. None alone denotes an unusable candidate.
+    """
+    def decode(candidate: str) -> T | None:
         try:
-            return json.loads(c)
-        except (json.JSONDecodeError, TypeError):
-            continue
-    return None
+            value = json.loads(candidate)
+        except (ValueError, RecursionError):
+            # Decoder syntax, integer-size and nesting refusals make this
+            # candidate unusable; schema parsing remains outside this boundary.
+            return None
+        return parse(value) if isinstance(value, expected) else None
+
+    try:
+        whole = json.loads(text.strip())
+    except (ValueError, RecursionError):
+        pass
+    else:
+        # A complete value owns its whole tree even when its schema is wrong.
+        return parse(whole) if isinstance(whole, expected) else None
+
+    candidates = {(start, end): value for start, end in _outer_json(text)
+                  if (value := decode(text[start:end])) is not None}
+    fenced = []
+    for match in _FENCE_RE.finditer(text):
+        body = match.group(1)
+        start = match.start(1) + len(body) - len(body.lstrip())
+        end = match.end(1) - len(body) + len(body.rstrip())
+        if (start, end) in candidates:
+            fenced.append(candidates[start, end])
+    if fenced:
+        return fenced[0] if len(fenced) == 1 else None
+    return next(iter(candidates.values())) if len(candidates) == 1 else None
 
 
 @dataclass
@@ -61,9 +106,8 @@ def scope_prompt(question: str, max_angles: int) -> str:
 def parse_angles(text: str, *, question: str, max_angles: int) -> list[str]:
     """Parse the scope reply into a list of angle strings; fall back to the
     raw question if the model didn't return usable JSON."""
-    val = _extract_json(text)
-    angles: list[str] = []
-    if isinstance(val, list):
+    def angles_from(val: list[Any]) -> list[str] | None:
+        angles: list[str] = []
         for item in val:
             if isinstance(item, str) and item.strip():
                 angles.append(item.strip())
@@ -71,8 +115,12 @@ def parse_angles(text: str, *, question: str, max_angles: int) -> list[str]:
                 s = item.get("angle") or item.get("query") or item.get("q")
                 if isinstance(s, str) and s.strip():
                     angles.append(s.strip())
-    angles = angles[:max_angles]
-    return angles or [question]
+        return angles or None
+
+    angles = _extract_json(text, expected=list, parse=angles_from)
+    if angles is None:
+        return [question]
+    return angles[:max_angles] or [question]
 
 
 # ------------------------------------------------------------------ search
@@ -90,25 +138,25 @@ def search_prompt(angle: str, question: str, max_findings: int) -> str:
 
 
 def parse_search(text: str, *, angle: str, max_findings: int) -> tuple[list[Finding], bool] | None:
-    val = _extract_json(text)
-    if not isinstance(val, list):
-        return None
-    out: list[Finding] = []
-    for item in val:
-        if not isinstance(item, dict):
-            continue
-        claim = item.get("claim")
-        url = item.get("url") or item.get("source") or ""
-        if isinstance(claim, str) and claim.strip():
-            out.append(
-                Finding(
-                    claim=claim.strip(),
-                    url=(url.strip() if isinstance(url, str) else ""),
-                    angle=angle,
+    def findings_from(val: list[Any]) -> tuple[list[Finding], bool] | None:
+        out: list[Finding] = []
+        for item in val:
+            if not isinstance(item, dict):
+                continue
+            claim = item.get("claim")
+            url = item.get("url") or item.get("source") or ""
+            if isinstance(claim, str) and claim.strip():
+                out.append(
+                    Finding(
+                        claim=claim.strip(),
+                        url=(url.strip() if isinstance(url, str) else ""),
+                        angle=angle,
+                    )
                 )
-            )
-    # Only an actual empty array means a successful search without material.
-    return (out[:max_findings], len(out) > max_findings) if out or not val else None
+        # Only an actual empty array means a successful search without material.
+        return (out[:max_findings], len(out) > max_findings) if out or not val else None
+
+    return _extract_json(text, expected=list, parse=findings_from)
 
 
 # ------------------------------------------------------------------ dedup + rank
@@ -159,13 +207,17 @@ def verify_prompt(claim: str, url: str, question: str) -> str:
 
 
 def parse_vote(text: str, error: str | None, bounds: EvidenceBounds) -> VoteEvidence:
-    val = _extract_json(text)
-    refuted = val.get("refuted") if isinstance(val, dict) else None
-    if isinstance(refuted, str):
-        refuted = {"true": True, "yes": True, "1": True,
-                   "false": False, "no": False, "0": False}.get(refuted.strip().lower())
-    if error or not isinstance(refuted, bool) or not isinstance(val, dict):
+    def verdict_from(val: dict[str, Any]) -> dict[str, Any] | None:
+        refuted = val.get("refuted")
+        if isinstance(refuted, str):
+            refuted = {"true": True, "yes": True, "1": True,
+                       "false": False, "no": False, "0": False}.get(refuted.strip().lower())
+        return {**val, "refuted": refuted} if isinstance(refuted, bool) else None
+
+    val = None if error else _extract_json(text, expected=dict, parse=verdict_from)
+    if val is None:
         return VoteEvidence(status="failed", note=bounds.text(error or "Invalid verification output", 256))
+    refuted = val["refuted"]
     urls = val.get("sources")
     sources = [url.strip() for url in urls if isinstance(url, str) and url.startswith(("https://", "http://"))] if isinstance(urls, list) else []
     if len(sources) > 3:

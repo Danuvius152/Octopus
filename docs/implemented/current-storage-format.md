@@ -2,7 +2,7 @@
 
 > **Status:** implemented — 现行完整格式、发布期存量核验与有限转换；验证和生产部署分别取证。
 
-The main database uses format **8**, and Wiki uses format **17**. Each database
+The main database uses format **9**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -52,6 +52,59 @@ receipt、正文、来源、当前任务或未决效果。实际清理另受当�
 删除物理列或接口要同步真实生产者、消费者与测试，不按同名字段全局删除，
 不把旧 rejected/unknown 改成可执行或已成功事实。
 
+## GitHub identity and finite publication handoff
+
+Format 9 requires every GitHub installation's `external_account_id` to be the
+provider's positive numeric ID in canonical ASCII decimal text. Login is a
+display label. The current table CHECK and complete verifier reject NULL,
+`login:id` and other noncanonical keys; other connector kinds retain their
+existing identity rules. Per-account/kind uniqueness is unchanged, including
+the existing shared uniqueness scope for NULL and empty account IDs. This
+changes no collection root or Wiki format. Online behavior belongs to the
+[Connector contract](connectors.md#github-identity).
+
+The finite private publication helper admits only complete current format 9
+or the explicitly known format-8 source. Source admission checks the frozen
+complete catalog and every table's full `table_xinfo`, integrity, foreign keys
+and retained typed facts. A normalized declaration alone does not prove physical
+column order. Both read-only preflight and the write transaction use the same
+admission check. Every retained application's canonical code/data/runtime
+family and required aliases are checked across all accounts, including archived
+applications and unscoped rows; conflicts do not authorize moving resources.
+
+Before quiescing the old service, read-only inspection enumerates all GitHub
+installations, including disabled accounts and NULL owners. Only recognized
+`login:positive-ID` keys can map to current IDs. Unrecognized keys, unaddressable
+installation identities or owners, and duplicate target IDs within the existing
+account scope block publication with the affected installation/account/key
+details. Different accounts may retain the same provider ID. The helper neither
+chooses a token or owner nor merges or deletes conflicting installations.
+It performs no conversion during preflight or missing-history recovery.
+
+The existing publisher alone converts after the original writer retires, starts
+are masked and offline installation ownership is held. Inside `BEGIN IMMEDIATE`
+it repeats source/fact/resource checks, creates the new installation table,
+copies by explicit column names while applying the ID mapping, drops the old
+table, renames the new one and recreates indexes. It never renames the old parent
+first. FK enforcement is disabled only on this private offline connection before
+the transaction to prevent cascading removal during reconstruction. Independent
+column-by-column installation, secret-ciphertext and Agent-link comparisons,
+foreign-key checks and the complete current verifier must pass before COMMIT.
+Only the intended GitHub keys change; metadata, constraints and marker 9 commit
+together. IDs, labels, created times, enablement, other kinds and grants remain.
+
+Confirmed rollback retains format 8. Unconfirmed COMMIT keeps business closed;
+a fresh attempt under the same publication plan inspects actual committed facts.
+Complete format 9 is verified without replaying the mapping or resetting later
+writes; complete known format 8 can convert only within the original offline
+boundary. Strict current main/Wiki verification precedes switching and starting
+the candidate and runs again afterward. Startup, ordinary reads, Connect and
+account import provide no old-key conversion. The finite helper and exclusive
+fixtures remain until authorized publication, acceptance and forward-recovery
+responsibilities finish, then retire without a permanent old-format route.
+Implementation and isolated validation do not establish production conversion;
+operator steps belong to [local publication](../local-wsl.md#自动发布).
+
 ## Complete record projections
 
 Format 8 adds nullable `sessions.context_state` JSON and
@@ -74,16 +127,11 @@ history reads preserve those facts, including failed/interrupted + applied;
 account transfer still excludes them with chats. No new format version or
 conversion is required for this JSON addition.
 
-Publication from verified format 7 uses a finite handoff after the original
-writer retires and starts remain masked. The handoff accepts only the complete
-verified source declarations and physical layouts, preserves every original
-column and relationship, and adds both columns and marker 8 in one transaction.
-New fields begin as NULL and 0; no historical sample is fabricated. A fresh
-complete format-8 inspection reconciles uncertain COMMIT and never resets facts
-already written in format 8. Unknown layouts fail closed. Startup does not run
-the conversion, and old code cannot reopen the new format. The deployment's
-frozen handoff and its exclusive tests retire only after forward recovery and
-publication acceptance are complete; they are not a general migration chain.
+The completed format-7→8 publication handoff added both fields and marker 8 in
+one transaction, preserving original facts and initializing only NULL and 0.
+It fabricated no historical context sample. That finite converter and its
+exclusive fixtures have retired; they are not a route for opening format 7
+with current code or a step in a permanent migration chain.
 
 Complete-record SELECTs for agents, applications, background tasks, research
 jobs, connector installations, custom connectors and credentials use explicit
@@ -310,12 +358,15 @@ this sequence:
 
 1. Inspect installation resources read-only before consuming the original
    process's single permit. A failed preflight leaves that service running.
-2. Mask starts, switch the prepared release pointer and wait for the original
-   process and unit to retire naturally.
-3. Keep starts masked while checking the retained data, applying this release's
-   finite conversion if needed, and verifying the candidate's current contract.
-4. Install/unmask and start the candidate only after all resources pass. Verify
-   actual readiness, current domain reads/writes and recovery, assets and the
+2. Confirm natural drain and the original process's handoff permit, mask starts
+   and wait for the original process and unit to retire.
+3. Acquire offline installation ownership and keep starts masked while checking
+   retained data, applying this release's finite conversion if needed, and
+   strictly verifying the candidate's current contract. Do not advance the
+   release pointer before these checks pass.
+4. Switch the prepared release pointer under the offline lock only after all
+   resources pass, then release the lock, install/unmask and start the candidate.
+   Verify actual readiness, current domain reads/writes and recovery, assets and the
    installation binding through the existing release acceptance.
 5. Retire the finite conversion and its exclusive fixtures after acceptance and
    all recovery duties finish. Preserve decision rationale and regression evidence.

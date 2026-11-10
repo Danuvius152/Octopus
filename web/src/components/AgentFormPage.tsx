@@ -76,6 +76,17 @@ export function AgentFormPage({
 }: {
   onToggleSidebar: () => void;
 }) {
+  const account = useSessionStore((s) => s.accountGeneration);
+  const opening = useSessionStore((s) => s.agentFormGeneration);
+  const agentId = useSessionStore((s) => s.editingAgentId);
+  return <AgentFormInstance key={JSON.stringify([account, opening, agentId])} onToggleSidebar={onToggleSidebar} />;
+}
+
+function AgentFormInstance({
+  onToggleSidebar,
+}: {
+  onToggleSidebar: () => void;
+}) {
   const token = useSessionStore((s) => s.token);
   const agents = useSessionStore((s) => s.agents);
   const upsertAgent = useSessionStore((s) => s.upsertAgent);
@@ -94,72 +105,69 @@ export function AgentFormPage({
   const sessions = useSessionStore((s) => s.sessions);
 
   const editing = agents.find((a) => a.id === editingAgentId) ?? null;
+  const [opening] = useState(() => {
+    const { accountGeneration, agentFormGeneration, editingAgentId } = useSessionStore.getState();
+    return { accountGeneration, agentFormGeneration, editingAgentId };
+  });
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const isCurrent = useCallback(() => {
+    const current = useSessionStore.getState();
+    return mounted.current && current.accountGeneration === opening.accountGeneration
+      && current.agentFormGeneration === opening.agentFormGeneration
+      && current.editingAgentId === opening.editingAgentId && current.mainView === "agent-form";
+  }, [opening]);
 
+  const [initialDraft] = useState<AgentDraft>(() => ({
+    name: editing?.name ?? "",
+    description: editing?.description ?? "",
+    avatar: editing?.avatar ?? "",
+    systemPrompt: editing?.system_prompt ?? "",
+    backend: editing?.backend ?? defaultBackend,
+    credentialId: editing?.credential_id ?? "",
+    model: editing?.model ?? "",
+    reasoningEffort: editing?.reasoning_effort ?? "",
+    serviceTier: editing?.service_tier ?? "default",
+    toolAllow: editing?.tool_allow ?? "",
+    toolDeny: editing?.tool_deny ?? "",
+    subagents: editing?.subagents ?? [],
+  }));
   const [archived, setArchived] = useState<Agent[]>([]);
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [avatar, setAvatar] = useState("");
-  const [systemPrompt, setSystemPrompt] = useState("");
-  const [backend, setBackend] = useState<string>(defaultBackend);
+  const [name, setName] = useState(initialDraft.name);
+  const [description, setDescription] = useState(initialDraft.description);
+  const [avatar, setAvatar] = useState(initialDraft.avatar);
+  const [systemPrompt, setSystemPrompt] = useState(initialDraft.systemPrompt);
+  const [backend, setBackend] = useState(initialDraft.backend);
   const backendChosen = useRef(false);
-  const [credentialId, setCredentialId] = useState("");
-  const [model, setModel] = useState("");
-  const [reasoningEffort, setReasoningEffort] = useState("");
-  const [serviceTier, setServiceTier] = useState("default");
+  const [credentialId, setCredentialId] = useState(initialDraft.credentialId);
+  const [model, setModel] = useState(initialDraft.model);
+  const [reasoningEffort, setReasoningEffort] = useState(initialDraft.reasoningEffort);
+  const [serviceTier, setServiceTier] = useState(initialDraft.serviceTier);
   const { catalog, error: catalogError } = useModelSettings(backend, credentialId, tab === "form");
-  const [toolAllow, setToolAllow] = useState("");
-  const [toolDeny, setToolDeny] = useState("");
+  const [toolAllow, setToolAllow] = useState(initialDraft.toolAllow);
+  const [toolDeny, setToolDeny] = useState(initialDraft.toolDeny);
   const toolPolicy = backendToolPolicies[backend];
   const [enabledConnectors, setEnabledConnectors] = useState<string[]>([]);
+  // Pending/successful writes override the opening read; rejection restores
+  // the previous override, or the read's value when this was the first edit.
+  const [connectorEdits, setConnectorEdits] = useState<Record<string, boolean>>({});
+  const pendingConnectors = useRef(new Set<string>());
+  const [connectorPending, setConnectorPending] = useState<string[]>([]);
   // Sub-agents this agent brings with it (native-subagents.md §6). Empty is
   // the normal case: the CLI's own built-ins are always available.
-  const [subagents, setSubagents] = useState<SubagentDefinition[]>([]);
+  const [subagents, setSubagents] = useState(initialDraft.subagents);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const initialFields = useRef<ReturnType<typeof agentFields> | null>(null);
+  // External updates do not turn untouched fields into draft changes.
+  const initialFields = useRef(agentFields(initialDraft));
 
   const headers = {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-
-  // Seed the form from whichever agent we're editing (or blank for a draft).
-  // Keyed on the id so switching agents from the sidebar refills it.
-  useEffect(() => {
-    const draft: AgentDraft = {
-      name: editing?.name ?? "",
-      description: editing?.description ?? "",
-      avatar: editing?.avatar ?? "",
-      systemPrompt: editing?.system_prompt ?? "",
-      backend: editing?.backend ?? useSessionStore.getState().defaultBackend,
-      credentialId: editing?.credential_id ?? "",
-      model: editing?.model ?? "",
-      reasoningEffort: editing?.reasoning_effort ?? "",
-      serviceTier: editing?.service_tier ?? "default",
-      toolAllow: editing?.tool_allow ?? "",
-      toolDeny: editing?.tool_deny ?? "",
-      subagents: editing?.subagents ?? [],
-    };
-    // Keep the opening values: store updates from another client must not turn
-    // untouched draft fields into changes. Null speed displays as Normal but
-    // remains untouched unless the user changes it or the engine.
-    initialFields.current = agentFields(draft);
-    setName(draft.name);
-    setDescription(draft.description);
-    setAvatar(draft.avatar);
-    setSystemPrompt(draft.systemPrompt);
-    backendChosen.current = false;
-    setBackend(draft.backend);
-    setCredentialId(draft.credentialId);
-    setModel(draft.model);
-    setReasoningEffort(draft.reasoningEffort);
-    setServiceTier(draft.serviceTier);
-    setToolAllow(draft.toolAllow);
-    setToolDeny(draft.toolDeny);
-    setSubagents(draft.subagents);
-    setError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingAgentId]);
 
   // The install preference may finish loading after the form opens. Apply it
   // to a new draft, preserving a backend the user has already chosen.
@@ -173,9 +181,13 @@ export function AgentFormPage({
       return;
     }
     fetchAgentConnectors(token, editing.id)
-      .then(setEnabledConnectors)
-      .catch(() => setEnabledConnectors([]));
-  }, [token, editing]);
+      .then((ids) => {
+        if (isCurrent()) setEnabledConnectors(ids);
+      })
+      .catch(() => {});
+    // Other clients' Agent updates do not restart this opening's initial read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, editingAgentId, isCurrent]);
 
   const loadArchived = useCallback(async () => {
     try {
@@ -184,18 +196,18 @@ export function AgentFormPage({
       });
       if (!res.ok) return;
       const all = (await res.json()) as Agent[];
-      setArchived(all.filter((a) => a.archived));
+      if (isCurrent()) setArchived(all.filter((a) => a.archived));
     } catch {
       // empty tab; the create flow is unaffected
     }
-  }, [token]);
+  }, [token, isCurrent]);
 
   useEffect(() => {
     loadArchived();
   }, [loadArchived]);
 
   const save = async () => {
-    if (!name.trim() || busy) return;
+    if (!isCurrent() || !name.trim() || busy) return;
     for (const [field, value, supported] of [
       ["tool_allow", toolAllow, toolPolicy?.allow],
       ["tool_deny", toolDeny, toolPolicy?.deny],
@@ -236,17 +248,17 @@ export function AgentFormPage({
       if (!agentRequestIsCurrent(request, useSessionStore.getState())) return;
       upsertAgent(saved, request);
       const current = useSessionStore.getState();
-      if (!agentRequestIsCurrent(request, current) || current.editingAgentId !== editingAgentId || current.mainView !== "agent-form") return;
+      if (!agentRequestIsCurrent(request, current) || !isCurrent() || current.pageTab !== "form") return;
       if (!current.agents.some((row) => row.id === saved.id)) throw new Error("This agent was archived while saving. Your draft has been kept.");
       // Select what you just made: the sidebar unfolds it, a new session
       // lands under it, and the account menu's "Agent settings" edits it.
       setActiveAgentId(saved.id);
       showChat();
     } catch (e) {
-      if (agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to save agent");
+      if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to save agent");
     } finally {
       useSessionStore.getState().endAgentRequest(request);
-      setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   };
 
@@ -262,7 +274,7 @@ export function AgentFormPage({
       if (!agentRequestIsCurrent(request, useSessionStore.getState())) return false;
       if (!res.ok) {
         const detail = await res.json().catch(() => null);
-        setError(detail?.detail || "Failed to archive agent");
+        if (isCurrent()) setError(detail?.detail || "Failed to archive agent");
         return false;
       }
       removeAgent(agent.id, request);
@@ -273,7 +285,7 @@ export function AgentFormPage({
   };
 
   const archive = async () => {
-    if (editing && (await archiveAgent(editing))) showChat();
+    if (editing && (await archiveAgent(editing)) && isCurrent()) showChat();
   };
 
   // Restoring stays on the All tab: the agent reappears under "In sidebar"
@@ -284,13 +296,13 @@ export function AgentFormPage({
       const res = await fetch(`${API}/${agent.id}/unarchive`, { method: "POST", headers });
       if (!res.ok) {
         const detail = await res.json().catch(() => null);
-        if (agentRequestIsCurrent(request, useSessionStore.getState())) setError(detail?.detail || "Failed to restore agent");
+        if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) setError(detail?.detail || "Failed to restore agent");
         return;
       }
       const restored = await res.json() as Agent;
       if (!agentRequestIsCurrent(request, useSessionStore.getState())) return;
       upsertAgent(restored, request);
-      if (useSessionStore.getState().agents.some((row) => row.id === agent.id)) {
+      if (isCurrent() && useSessionStore.getState().agents.some((row) => row.id === agent.id)) {
         setArchived((cur) => cur.filter((a) => a.id !== agent.id));
       }
     });
@@ -302,7 +314,7 @@ export function AgentFormPage({
       try {
         upsertAgent((await setAgentPinned(token, agent.id, pinned)) as Agent, request);
       } catch (e) {
-        if (agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to update the sidebar");
+        if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to update the sidebar");
         await refreshAgents(request).catch(() => {});
       }
     });
@@ -313,21 +325,28 @@ export function AgentFormPage({
     try {
       await openAgentChat(agent.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to open a session");
+      if (isCurrent()) setError(e instanceof Error ? e.message : "Failed to open a session");
     }
   };
 
   const toggleConnector = async (installationId: string, enabled: boolean) => {
-    if (!editing) return;
-    setEnabledConnectors((cur) =>
-      enabled ? [...cur, installationId] : cur.filter((i) => i !== installationId)
-    );
+    if (!editing || !isCurrent() || pendingConnectors.current.has(installationId)) return;
+    pendingConnectors.current.add(installationId);
+    setConnectorPending([...pendingConnectors.current]);
+    const previous = connectorEdits[installationId];
+    setConnectorEdits((current) => ({ ...current, [installationId]: enabled }));
     try {
       await toggleAgentConnector(token, editing.id, installationId, enabled);
     } catch {
-      setEnabledConnectors((cur) =>
-        enabled ? cur.filter((i) => i !== installationId) : [...cur, installationId]
-      );
+      if (isCurrent()) setConnectorEdits((current) => {
+        const restored = { ...current };
+        if (previous === undefined) delete restored[installationId];
+        else restored[installationId] = previous;
+        return restored;
+      });
+    } finally {
+      pendingConnectors.current.delete(installationId);
+      if (isCurrent()) setConnectorPending([...pendingConnectors.current]);
     }
   };
 
@@ -564,7 +583,7 @@ export function AgentFormPage({
                   </Label>
                   <div className="agent-connectors card divide-y divide-gray-300">
                     {installations.map((inst) => {
-                      const on = enabledConnectors.includes(inst.id);
+                      const on = connectorEdits[inst.id] ?? enabledConnectors.includes(inst.id);
                       return (
                         <label
                           key={inst.id}
@@ -576,7 +595,7 @@ export function AgentFormPage({
                             type="checkbox"
                             className="size-4 accent-[hsl(var(--primary-600))]"
                             checked={on}
-                            disabled={!editing}
+                            disabled={!editing || connectorPending.includes(inst.id)}
                             onChange={(e) =>
                               toggleConnector(inst.id, e.target.checked)
                             }

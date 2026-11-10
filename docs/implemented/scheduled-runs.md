@@ -24,8 +24,9 @@ that conversation visible under the existing archive policy.
 ### Definition controls and shutdown
 
 The Runner owns each create, update and deletion before its first database
-wait. The owned task commits the definition with the existing permission and
-expected-definition checks, then reconciles the trigger under the registration
+wait. The owned task commits the definition with permission, expected-definition and
+[new once admission](schedule-tool.md#2-the-recurrence-is-stated-not-parsed)
+checks, then reconciles the trigger under the registration
 lock. Reconciliation rereads the current definition, so an overtaken edit cannot
 restore a later deletion or re-enable a disabled schedule. Deletion commits
 before removing its trigger. Cancelling the HTTP/MCP waiter does not cancel this
@@ -42,9 +43,11 @@ controls before destroying APScheduler, then joins the original captured callbac
 owners within the same absolute deadline. An unconfirmed control timeout preserves
 the scheduler and task references for another join; it does not allow storage
 teardown underneath them. Callback failure and retirement evidence remain separate.
-An expected-definition conflict or closure of the original requesting work is a
-typed, rolled-back domain refusal: the caller keeps its original 409, and the
-finished control does not become a cleanup failure. Unexpected write failures,
+An expected-definition conflict, closure of the original requesting work or an
+expired new once candidate is a typed, rolled-back domain refusal. The caller
+keeps the original 409 for conflict/closure or 422 for invalid timing; the finished
+control is neither an unexpected control error nor a cleanup failure. Existing
+overdue definitions retain their catch-up behavior. Unexpected write failures,
 registration failures and unfinished controls still fail shutdown.
 
 Archive keeps origin repointing inside its original lifecycle operation. Triggers
@@ -56,6 +59,24 @@ Regressions in `test_schedules.py`, `test_scheduler.py`,
 `test_knowledge_schedules.py` and `test_session_manager.py` cover cancelled waiters
 after actual writes, competing definitions, HTTP/MCP registration failures,
 shutdown timeout/rejoin and archive followed by a real successor fire.
+
+### Captured fire definitions
+
+A timer holds the schedule ID. Each callback first reads the current durable
+definition and checks its enabled state and target. A pause or deletion visible
+to that lookup prevents a new launch. A periodic fire then retains its captured
+prompt and knowledge contract: later editing, pausing or deleting the definition
+does not revoke that in-flight execution. Pause removes future triggers while
+retaining the definition; delete removes both. Neither control retires an
+already-running request or its resources.
+
+Reading the snapshot is not durable input admission. In particular, a one-shot's
+target/input admission transaction still compares its captured definition with
+the current row before consuming it. An edit, pause or deletion before that
+transaction can refuse admission. Once accepted, its original input, completion
+and resource retirement have their own identities. The
+[one-shot recovery boundary](#2-a-schedule-never-has-two-runs-outstanding) remains
+unchanged; periodic history is not backfilled by calendar corrections.
 
 ## 2. A schedule never has two runs outstanding
 

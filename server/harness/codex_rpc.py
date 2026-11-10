@@ -11,6 +11,9 @@ from typing import Any
 # Reserve native identity metadata inside HarnessRun's 4 MiB JSONL budget.
 FRAME_LIMIT_BYTES = 4 * 1024 * 1024 - 4096
 RPC_TIMEOUT = 20.0
+# Fixed-width correlation IDs also bound pure first-input capacity estimates,
+# independently of how many model/list pages precede the business input.
+RPC_ID_PLACEHOLDER = "octopus:" + "0" * 32
 
 
 class NativeProtocolError(RuntimeError):
@@ -30,7 +33,8 @@ class NativeRpcError(NativeProtocolError):
 def encode_frame(identifier: str, method: str, params: dict[str, Any]) -> bytes:
     data = (json.dumps({"id": identifier, "method": method, "params": params}, ensure_ascii=False) + "\n").encode()
     if len(data) > FRAME_LIMIT_BYTES:
-        raise ValueError(f"Codex JSONL {method} uses {len(data)} bytes; limit is {FRAME_LIMIT_BYTES} bytes")
+        advice = ". Shorten the new input before retrying." if method == "turn/start" else ""
+        raise ValueError(f"Codex JSONL {method} uses {len(data)} bytes; limit is {FRAME_LIMIT_BYTES} bytes{advice}")
     return data
 
 
@@ -51,15 +55,13 @@ class RpcRequest:
 class RpcConnection:
     def __init__(self) -> None:
         self.generation = uuid.uuid4().hex
-        self._serial = 0
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._closed = False
 
     def request(self, method: str, params: dict[str, Any]) -> RpcRequest:
         if self._closed:
             raise NativeProtocolError("Native connection is closed")
-        self._serial += 1
-        identifier = f"octopus:{self._serial}"
+        identifier = f"octopus:{uuid.uuid4().hex}"
         data = encode_frame(identifier, method, params)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[identifier] = future

@@ -119,6 +119,15 @@ async def test_fetch_external_identity(monkeypatch):
     ext_id, label = await gh.GitHubConnector().fetch_external_identity(
         OAuthTokenSet("gho_x", None, 0.0)
     )
-    assert ext_id == "octocat:583231"  # stable numeric id, not just login
+    assert ext_id == "583231"
     assert label == "octocat"
     assert cap["headers"]["Authorization"] == "Bearer gho_x"
+
+
+@pytest.mark.parametrize("numeric_id", [None, True, False, 0, -1, 1.5, "123", "123:456"])
+async def test_invalid_provider_identity_is_refused_before_binding(monkeypatch, numeric_id):
+    from server.oauth_providers import OAuthTokenSet
+
+    monkeypatch.setattr(gh.httpx, "AsyncClient", _fake_client({"login": "octocat", "id": numeric_id}))
+    with pytest.raises(ValueError, match="GitHub account ID"):
+        await gh.GitHubConnector().fetch_external_identity(OAuthTokenSet("synthetic", None, 0.0))

@@ -74,12 +74,12 @@ export async function fetchInstallations(
 export async function startConnectorOAuth(
   token: string,
   kind: string,
-  label?: string
+  options: { label?: string; installation_id?: string } = {},
 ): Promise<ConnectorOAuthStartResponse> {
   return oauthJson("/api/connectors/oauth/start", {
     method: "POST",
     headers: authHeaders(token),
-    body: JSON.stringify({ kind, label: label ?? null }),
+    body: JSON.stringify({ kind, label: options.label ?? null, installation_id: options.installation_id }),
   });
 }
 

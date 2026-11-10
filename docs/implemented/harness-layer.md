@@ -119,6 +119,16 @@ The shared run checks authority immediately before spawn and business writes,
 and owns readers, backpressure, process groups and retirement. Moving wire
 operations into drivers does not add a second resource owner or settlement path.
 
+For pending [fork replay](session-rewind.md#532-history-replay-and-first-turn-state),
+the original run records possible delivery before business I/O and asks its
+driver for saved opening-input evidence at result, EOF and retirement boundaries.
+The original recorder commits the native continuation and replay consumption
+with input delivery facts; no business outcome is selected there. A definitely
+unsent retirement preserves replay. Missing saved-history proof after possible
+delivery stays uncertain. Claude supplies its own session/opening-UUID/storage
+observation and keeps stream-JSON, held processes and spill handling; it does not
+enable the Codex `native_input_evidence` state machine for this purpose.
+
 `can_observe_context` and `can_compact` are independent profile declarations.
 Ordinary Codex and Claude declare both; exec leaves and one-shot calls do not gain
 compact capability from a backend name. `HarnessRun.start_compact` requires exact
@@ -310,6 +320,16 @@ authorization before spawn. A legal Agent default save does not certify every
 older session's inherited combination; repair and timing follow the model
 settings contract above.
 
+Rewind uses `Harness.validate_replay` to assemble its retained transcript,
+known first-turn configuration and caller-supplied new-input reserve through
+the same rendering boundary. It checks the selected credential's argv/env
+representation and delegates input capacity to the actual driver, without
+registering an execution, refreshing authentication, starting a CLI or writing
+spill files. Native defaults not yet resolved for the cwd remain unknown;
+real execution still resolves them and checks current authority and actual
+bytes. The session saga owns the snapshot, refusal timing and conditional
+[ready guarantee](session-rewind.md#532-history-replay-and-first-turn-state).
+
 退休责任覆盖启动时捕获的整个进程组；直接 child 退出或管道 EOF 不证明重定向
 输出的后代 writer 已停止。未确认退出仍保留原 backend owner 和配额；请求、
 assignment 或 executing 登记结束不放行 Wiki 重试。正常退出与忽略 SIGTERM 的
@@ -383,6 +403,47 @@ profile signatures using `ForkArtifact`, `ForkHooks` and credential types.
 Adapters reject unsupported native artifacts explicitly. The original session
 saga still owns reservation, saved identity and compensation ordering; moving it
 into another manager would not reduce a caller's responsibility.
+
+### Complete typed transcript export and local pull
+
+`GET /api/sessions/{id}/message-export` supplies complete `MessageContent`
+records to a restoring codec. It is separate from browser message windows and
+the raw `transcript-export` audit stream, which preserves storage rows, including
+duplicate sequences. Each export page checks the current account/session binding
+in the same short SQLite transaction as its read, for live and archived sessions.
+Missing and foreign sessions both return 404.
+
+The first transaction captures the backend, native resume ID and working directory,
+the maximum committed `messages.id` (`through_id`), `expected_count`, `max_seq`
+and the oldest page. Later requests echo this `snapshot` as JSON and advance
+`after_seq`; the echo is reading context, never authorization. Rows always satisfy
+`id <= through_id` and arrive in ascending seq order. `next_after_seq` refers to
+the last returned record, including seq zero, rather than the extra row used to
+detect another page. A page defaults to 200 records and accepts at most 500.
+New appends and reserved low sequences committed later are outside the captured
+membership. No transaction or persistent export task spans HTTP requests; this
+is a fixed-member read, not a full byte snapshot across those requests.
+
+`octopus pull` uses this endpoint and the captured backend's existing codec,
+refusing a backend without one before creating output. The first resume ID and
+working directory remain its codec inputs across pages; `--cwd` and
+`--project-dir` retain their overrides, and a missing resume ID generates one
+local UUID for the whole export. The native ID must be a safe single filename.
+One iterator feeds one codec invocation, retaining its UUID/parent chain across
+page boundaries. Strict sequence order, snapshot identity, cursor progress,
+final source count and highest seq are checked before publication; legal gaps
+and empty sessions are supported. Initial duplicates refuse export, and deleted
+unread members or damaged pages cannot publish a partial file. The success count
+is the confirmed source count: the codec may omit events its native format does
+not represent.
+
+The CLI owns a temporary file and descriptor in the destination directory.
+Download, parsing, complete iterator consumption, codec output, flush, file fsync
+and close all finish before atomic replacement, followed by directory fsync.
+Earlier failures preserve the existing target and remove this attempt's temporary
+file; a cleanup refusal identifies the remaining temporary path. A failure after
+replacement reports that the new file may already be active and does not claim
+rollback. Success is printed only after the required synchronization completes.
 
 ## Source and verification
 

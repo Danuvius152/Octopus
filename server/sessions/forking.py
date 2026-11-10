@@ -15,6 +15,7 @@ import shutil
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,10 +24,12 @@ from .. import fork_helpers
 from ..aio import complete_cleanup
 from ..attachments import AttachmentError
 from ..attachments import get_path as get_attachment_path
+from ..credential_bindings import CredentialBindingError
 from ..harness import BackendForkNotSupported, HarnessRun, get_harness
 from ..harness.fork import ForkCheckpoint, ForkHooks, read_fork_checkpoint
 from ..models import MessageContent
 from .base import (
+    ActiveRun,
     ForkError,
     Session,
     SessionManagerBase,
@@ -190,32 +193,6 @@ class ForkingMixin(SessionManagerBase):
                     fork_id,
                 )
 
-    async def _clear_fork_first_turn_state(self, session: Session) -> None:
-        """Drop the ephemeral fork state once the fork's first turn produces a
-        `result` (session-rewind.md §5.3.2/§5.6.5): clear
-        `fork_needs_replay` (so turn 2+ isn't wrapped) and the ephemeral
-        `fork_metadata` keys (so the chat input doesn't re-prefill), while
-        PRESERVING durable keys like `full_copy` (Vera review). `fork_revert_record`
-        is a separate column and NEVER touched. No-op on non-fork / cleared."""
-        if not session.fork_needs_replay and session.fork_metadata is None:
-            return
-        session.fork_needs_replay = False
-        surviving: str | None = None
-        if session.fork_metadata:
-            try:
-                meta = json.loads(session.fork_metadata)
-            except (json.JSONDecodeError, TypeError):
-                meta = {}
-            durable = {
-                k: meta[k] for k in self._DURABLE_FORK_META_KEYS if k in meta
-            }
-            surviving = json.dumps(durable) if durable else None
-        session.fork_metadata = surviving
-        if self.db:
-            await self.db.update_session_field(
-                session.id, fork_needs_replay=False, fork_metadata=surviving
-            )
-
     async def fork_session(
         self, parent_id: str, rewind_to_msg_seq: int, *,
         revert_files: bool = False, label: str | None = None,
@@ -248,7 +225,7 @@ class ForkingMixin(SessionManagerBase):
         `seq=rewind_to_msg_seq` and re-spawning as a new branch
         (session-rewind.md §5.1). Returns the new fork Session. The saga is
         ordered (NOT a single transaction — SQLite rollback can't undo FS/git):
-        validate → lock+`_forking` → classify → DB-only insert → stamp replay
+        validate → lock+`_forking` → snapshot+capacity → DB-only insert → stamp replay
         metadata → optional safe-revert. Rewind replays product messages;
         native history copying belongs to the separate full-copy operation."""
 
@@ -303,9 +280,36 @@ class ForkingMixin(SessionManagerBase):
 
         fork_id = uuid.uuid4().hex[:12]
         try:
-            # 4. Classify side effects over the rewound turn onward (seq >= M).
+            assert self.db is not None  # The reservation retains its database binding.
+            snapshot = await self.db.snapshot_fork_messages(parent_id, fork_after_seq)
+            copied = [MessageContent(**row) for row in snapshot.messages]
             summary = await fork_helpers.classify_side_effects(self.db, parent_id, M)
-
+            metadata = {
+                "prefilled_prompt": prefilled_prompt,
+                "side_effect_summary": summary,
+                "fork_label": label,
+                "first_turn_note": fork_helpers.render_first_turn_note(
+                    parent_label=source.name, n=M, summary=summary, reverted=False),
+            }
+            candidate = replace(source, id=fork_id, claude_session_id=None,
+                                fork_metadata=json.dumps(metadata), _run=ActiveRun())
+            async with self.db.configuration_lock:
+                agent = await self._load_agent(candidate)
+            connectors = await self._load_connectors(agent)
+            config = self._run_config(candidate, agent, connectors)
+            try:
+                credential = await self.read_credential_for_validation(
+                    config.credential_id, backend=source.backend, user_id=source.user_id)
+            except CredentialBindingError as error:
+                raise ForkError(str(error), reason="fork_credential_unavailable", status_code=400) from error
+            try:
+                harness.validate_replay(config, fork_helpers.wrap_for_fork_replay("x" * 4096, copied),
+                                        source.working_dir, credential)
+            except ValueError as error:
+                raise ForkError(
+                    f"Rewind history cannot fit with 4096 bytes of new-input reserve: {error}",
+                    reason="replay_capacity_exceeded", status_code=400,
+                ) from error
             # 5. DB-only transaction: insert fork row + copied messages.
             assert self.db is not None  # Fork reservation and compensation retain the binding.
             now = datetime.now(UTC).isoformat()
@@ -313,41 +317,37 @@ class ForkingMixin(SessionManagerBase):
             # parent's exact name so it slots into the sidebar as the original
             # session (the parent is archived below). An explicit `label` still
             # wins when the caller wants a distinct name.
-            fork_name = label or parent.name
-            copied = [m for m in messages if m["seq"] <= fork_after_seq]
-            # Stored JSON is not yet a valid replay message. Refuse a damaged
-            # prefix before creating a child or archiving its parent.
-            for message in copied:
-                MessageContent(**message)
+            fork_name = label or source.name
             await self.db.create_fork_session(
                 fork_id=fork_id,
                 name=fork_name,
-                working_dir=parent.working_dir,
+                working_dir=source.working_dir,
                 created_at=now,
                 parent_id=parent_id,
-                backend=parent.backend,
+                backend=source.backend,
                 model=source.model,
                 reasoning_effort=source.reasoning_effort,
                 service_tier=source.service_tier,
-                user_id=parent.user_id,
-                agent_id=parent.agent_id,
+                user_id=source.user_id,
+                agent_id=source.agent_id,
                 credential_id=source.credential_id,
                 resume_id=None,
                 fork_after_seq=fork_after_seq,
+                message_snapshot=snapshot,
             )
             fork = Session(
                 id=fork_id,
                 name=fork_name,
-                working_dir=parent.working_dir,
+                working_dir=source.working_dir,
                 created_at=now,
                 credential_id=source.credential_id,
                 model=source.model,
                 reasoning_effort=source.reasoning_effort,
                 service_tier=source.service_tier,
-                agent_id=parent.agent_id,
+                agent_id=source.agent_id,
                 origin="fork",
-                backend=parent.backend,
-                user_id=parent.user_id,
+                backend=source.backend,
+                user_id=source.user_id,
                 forked_from_session_id=parent_id,
                 fork_after_seq=fork_after_seq,
                 fork_status="initializing",
@@ -356,16 +356,7 @@ class ForkingMixin(SessionManagerBase):
             fork.restore_message_state(len(copied), M, 0)
 
             # Stamp replay metadata before promoting the candidate to ready.
-            note = fork_helpers.render_first_turn_note(
-                parent_label=parent.name, n=M, summary=summary, reverted=False
-            )
-            metadata = {
-                "prefilled_prompt": prefilled_prompt,
-                "side_effect_summary": summary,
-                "fork_label": label,
-                "first_turn_note": note,
-            }
-            fork.fork_metadata = json.dumps(metadata)
+            fork.fork_metadata = candidate.fork_metadata
             fork.fork_needs_replay = True
             await self.db.update_session_field(
                 fork_id, fork_metadata=fork.fork_metadata, fork_needs_replay=True
@@ -380,7 +371,7 @@ class ForkingMixin(SessionManagerBase):
             # 8. Safe-revert as a SEPARATE post-create step (durable record).
             if revert_files:
                 record = await fork_helpers.safe_revert_files(
-                    parent.working_dir,
+                    source.working_dir,
                     summary["agent_touched_paths"],
                     target.get("git_head"),
                     target.get("git_status_clean"),
@@ -393,7 +384,7 @@ class ForkingMixin(SessionManagerBase):
                 # Re-render the first-turn note with the real revert outcome.
                 reverted = record["ran"] and record["status"] == "completed"
                 metadata["first_turn_note"] = fork_helpers.render_first_turn_note(
-                    parent_label=parent.name, n=M, summary=summary, reverted=reverted
+                    parent_label=source.name, n=M, summary=summary, reverted=reverted
                 )
                 fork.fork_metadata = json.dumps(metadata)
                 await self.db.update_session_field(

@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from ..knowledge import require_open
+from ..schedule_ai import validate_run_at
 from .base import DatabaseBase
 from .transaction import Transaction
 
@@ -27,10 +28,20 @@ class ScheduleChangedError(ValueError):
 class SchedulesMixin(DatabaseBase):
 
     @asynccontextmanager
-    async def _definition_write(self, request: AdmittedRequest | None) -> AsyncIterator[None]:
-        """The admission must stay open through the definition's SQL write."""
+    async def _definition_write(
+        self, tx: Transaction, request: AdmittedRequest | None, *,
+        run_at: str | None = None, timezone: str | None = None,
+    ) -> AsyncIterator[None]:
+        """Keep requesting authority and new once timing valid at admission."""
         require_open(request)
+        if run_at is not None:
+            validate_run_at(run_at, tz=timezone)
         yield
+        if run_at is not None:
+            # Cursor cleanup can wait too. The final domain decision is made
+            # after it, immediately before the transaction issues COMMIT.
+            await tx.finish()
+            validate_run_at(run_at, tz=timezone)
         require_open(request)
 
     async def save_schedule(
@@ -50,13 +61,16 @@ class SchedulesMixin(DatabaseBase):
         wiki_mode: str | None = None,
         knowledge_context: str | None = None,
         request: AdmittedRequest | None = None,
+        require_future: bool = False,
     ) -> None:
         """Persist a schedule. Recurrence is one of `interval_seconds`, `cron`
         (with `timezone`), or `run_at` (ISO datetime, fires once then auto-deletes).
         `origin_session_id`, when set, is the session the `/schedule` command was
         typed in — fires append into it instead of a throwaway session."""
         async with self.transaction(write=True) as tx:
-            async with self._definition_write(request):
+            async with self._definition_write(
+                tx, request, run_at=run_at if require_future else None, timezone=timezone,
+            ):
                 await tx.execute(
                     "INSERT INTO schedules (id, agent_id, origin_session_id, name, prompt, "
                     "interval_seconds, cron, timezone, recurrence_label, enabled, "
@@ -175,7 +189,8 @@ class SchedulesMixin(DatabaseBase):
             return [r for r in await self._load_schedules(tx) if r["id"] in affected]
 
     async def update_schedule(self, schedule_id: str, *, expected: dict | None = None,
-                              request: AdmittedRequest | None = None, **fields: Any) -> None:
+                              request: AdmittedRequest | None = None,
+                              require_future: bool = False, **fields: Any) -> None:
         async with self.transaction(write=True) as tx:
             allowed = {
                 "name",
@@ -205,7 +220,10 @@ class SchedulesMixin(DatabaseBase):
             compare = {key: expected.get(key) for key in sorted(definition)} if expected is not None else {}
             where = " AND ".join(f"{key} IS ?" for key in compare)
             values.extend(compare.values())
-            async with self._definition_write(request):
+            async with self._definition_write(
+                tx, request, run_at=updates.get("run_at") if require_future else None,
+                timezone=updates.get("timezone"),
+            ):
                 cursor = await tx.execute(
                     f"UPDATE schedules SET {set_clause} WHERE id = ?" + (f" AND {where}" if where else ""),
                     values,

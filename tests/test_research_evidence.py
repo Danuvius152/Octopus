@@ -142,10 +142,179 @@ async def test_synthesis_failure_preserves_the_summary_in_the_original_failure_a
     job = await research.start(parent.id, "Failed synthesis")
     await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 3)
     row = await database.get_research_job(job["id"])
-    assert row["status"] == "failed" and "synthesis refused" in row["error"]
+    assert row["status"] == "failed" and row["error"] == "Report synthesis failed: synthesis refused"
     partial = json.loads((paths_for(parent.user_id).research / job["id"] / "synthesis-failure.json").read_text())
     assert partial["evidence"]["searches"][0]["reason"] == "controlled provider refusal"
     assert not any(event["type"] == "research_completed" for event in events)
+
+
+@pytest.mark.parametrize("stage", ["serialize", "mkdir", "open", "write", "flush", "file_fsync", "directory_open", "directory_fsync"])
+async def test_synthesis_diagnostic_failure_does_not_block_original_outcome(evidence_runtime, monkeypatch, caplog, stage):
+    import builtins
+    import os
+    import stat
+
+    from server.research import orchestrator
+    from server.workspace import paths_for
+
+    manager, database, parent, research, events = evidence_runtime
+    root = paths_for(parent.user_id).research
+    original_open, original_makedirs = builtins.open, os.makedirs
+    original_fsync, original_os_open = os.fsync, os.open
+    original_encode = json.JSONEncoder.iterencode
+    synthesis_failed = diagnostic_opened = False
+
+    def refuse(*args, **kwargs):
+        raise OSError(f"diagnostic {stage} refused; token=synthetic-material-secret\x00")
+
+    async def reason(*args, prompt, **kwargs):
+        nonlocal synthesis_failed
+        if "Decompose" in prompt:
+            return LeafResult(text='["safety"]')
+        synthesis_failed = True
+        return LeafResult(text="", error="original synthesis refusal")
+
+    def encode(encoder, payload, *args, **kwargs):
+        if stage == "serialize" and isinstance(payload, dict) and "evidence" in payload and "error" in payload:
+            raise TypeError("diagnostic serialize refused; token=synthetic-material-secret\x00")
+        return original_encode(encoder, payload, *args, **kwargs)
+
+    def makedirs(path, *args, **kwargs):
+        if stage == "mkdir" and synthesis_failed and Path(path).is_relative_to(root):
+            refuse()
+        return original_makedirs(path, *args, **kwargs)
+
+    def refused(path, mode="r", *args, **kwargs):
+        nonlocal diagnostic_opened
+        if str(path).endswith("synthesis-failure.json") and "w" in mode:
+            if stage == "open":
+                refuse()
+            handle = original_open(path, mode, *args, **kwargs)
+            diagnostic_opened = True
+            if stage in {"write", "flush"}:
+                monkeypatch.setattr(handle, stage, refuse)
+            return handle
+        return original_open(path, mode, *args, **kwargs)
+
+    def fsync(fd):
+        selected = "directory_fsync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file_fsync"
+        if diagnostic_opened and stage == selected:
+            refuse()
+        return original_fsync(fd)
+
+    def directory_open(path, flags, *args, **kwargs):
+        if diagnostic_opened and stage == "directory_open" and flags & os.O_DIRECTORY:
+            refuse()
+        return original_os_open(path, flags, *args, **kwargs)
+
+    committed = []
+
+    async def observe(event):
+        if event["type"] == "research_failed":
+            committed.append(await database.get_research_job(event["research_id"]))
+
+    manager.on_broadcast("synthesis-failure-commit", observe)
+    monkeypatch.setattr(orchestrator, "run_reason_leaf", reason)
+    monkeypatch.setattr(builtins, "open", refused)
+    monkeypatch.setattr(json.JSONEncoder, "iterencode", encode)
+    monkeypatch.setattr(os, "makedirs", makedirs)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "open", directory_open)
+    job = await research.start(parent.id, "Keep the original synthesis failure")
+    await asyncio.wait_for(research.wait_for_idle(), 3)
+    row = await database.get_research_job(job["id"])
+    assert row["status"] == "failed" and "original synthesis refusal" in row["error"]
+    assert "Synthesis diagnostic material unavailable:" in row["error"]
+    assert f"diagnostic {stage} refused" in row["error"]
+    assert "token=[redacted]" in row["error"] and "synthetic-material-secret" not in row["error"]
+    assert "\x00" not in row["error"]
+    assert row["completed_at"] and row["report_path"] is None
+    assert row["injection_status"] == "pending" and row["delivery_receipt"] is None
+    assert committed == [row]
+    card = await research.public_job(row)
+    assert card["status"] == "failed" and card["error"] == row["error"]
+    assert card["evidence_state"] == "unavailable"
+    failed = [event for event in events if event["type"] == "research_failed"]
+    assert len(failed) == 1 and failed[0]["error"] == row["error"]
+    assert not any(event["type"] == "research_completed" for event in events)
+    assert manager.dispatch_snapshot(parent.id)["items"] == []
+    assert not research.drain_blockers()
+    assert f"diagnostic {stage} refused" in caplog.text
+
+
+@pytest.mark.parametrize("winner", ["failed", "cancelled"])
+@pytest.mark.parametrize("material_available", [False, True])
+async def test_synthesis_failure_and_cancel_share_one_committed_outcome(evidence_runtime, monkeypatch, winner, material_available):
+    import builtins
+
+    from server.research import orchestrator
+
+    _, database, parent, research, events = evidence_runtime
+    synthesizing, release_synthesis, entered, release_commit, material_attempted = (asyncio.Event() for _ in range(5))
+    original_open, execute = builtins.open, database.conn._execute
+
+    async def reason(*args, prompt, **kwargs):
+        if "Decompose" in prompt:
+            return LeafResult(text='["safety"]')
+        synthesizing.set()
+        await release_synthesis.wait()
+        return LeafResult(text="", error="original synthesis refusal")
+
+    def open_material(path, mode="r", *args, **kwargs):
+        if str(path).endswith("synthesis-failure.json") and "w" in mode:
+            material_attempted.set()
+            if not material_available:
+                raise OSError("diagnostic material refused during cancellation race")
+        return original_open(path, mode, *args, **kwargs)
+
+    async def gated_execute(function, *args, **kwargs):
+        result = await execute(function, *args, **kwargs)
+        if (args and isinstance(args[0], str) and args[0].startswith("UPDATE research_jobs SET status=")
+                and args[1][0] == winner and not entered.is_set()):
+            entered.set()
+            await release_commit.wait()
+        return result
+
+    monkeypatch.setattr(orchestrator, "run_reason_leaf", reason)
+    monkeypatch.setattr(builtins, "open", open_material)
+    monkeypatch.setattr(database.conn, "_execute", gated_execute)
+    job = await research.start(parent.id, "Cancel versus original synthesis failure")
+    cancelling = None
+    try:
+        await asyncio.wait_for(synthesizing.wait(), 3)
+        if winner == "failed":
+            release_synthesis.set()
+            await asyncio.wait_for(entered.wait(), 3)
+            cancelling = asyncio.create_task(research.cancel(job["id"]))
+        else:
+            cancelling = asyncio.create_task(research.cancel(job["id"]))
+            await asyncio.wait_for(entered.wait(), 3)
+            release_synthesis.set()
+            await asyncio.wait_for(material_attempted.wait(), 3)
+        release_commit.set()
+        response = await asyncio.wait_for(cancelling, 3)
+        await asyncio.wait_for(research.wait_for_idle(), 3)
+        row = await database.get_research_job(job["id"])
+        assert response == row and row["status"] == winner and row["completed_at"]
+        assert material_attempted.is_set()
+        if winner == "cancelled":
+            assert row["error"] == "cancelled by user"
+        else:
+            assert row["error"].startswith("Report synthesis failed: original synthesis refusal")
+            if material_available:
+                assert row["error"] == "Report synthesis failed: original synthesis refusal"
+            else:
+                assert "Synthesis diagnostic material unavailable: OSError: diagnostic material refused during cancellation race" in row["error"]
+        terminal = [event for event in events if event["type"] in {"research_failed", "research_completed"}]
+        assert len(terminal) == 1 and terminal[0]["status"] == winner
+        assert row["report_path"] is None and row["delivery_receipt"] is None
+        assert (await research.public_job(row))["status"] == winner
+        assert not research.drain_blockers()
+    finally:
+        release_synthesis.set()
+        release_commit.set()
+        if cancelling is not None:
+            await asyncio.gather(cancelling, return_exceptions=True)
 
 
 @pytest.mark.parametrize("damage", ["none", "missing", "invalid", "version", "unversioned", "missing_reason", "missing_conditions", "missing_sources", "empty_object", "oversized", "foreign", "symlink"])

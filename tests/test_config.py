@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 
 def test_settings_defaults():
     """The declared defaults are what we think they are.
@@ -54,10 +56,51 @@ def test_settings_from_env(monkeypatch):
 
 
 def test_default_backend_rejects_an_unknown_harness():
-    import pytest
     from pydantic import ValidationError
 
     from server.config import Settings
 
     with pytest.raises(ValidationError, match="default_backend"):
         Settings(_env_file=None, default_backend="unavailable")
+
+
+@pytest.mark.parametrize(("configured", "expected"), [
+    (None, None),
+    ("", None),
+    (" \t\n ", None),
+    ("https://public.test/", "https://public.test"),
+    ("  HTTPS://PUBLIC.test:443///  ", "https://public.test"),
+    ("http://public.test:80", "http://public.test"),
+    ("https://public.test:8443/octopus///", "https://public.test:8443/octopus"),
+    ("http://[::1]:9000/octopus/", "http://[::1]:9000/octopus"),
+])
+def test_public_base_configuration_is_normalized_independently_of_client_credentials(configured, expected):
+    from server.config import Settings
+
+    settings = Settings(_env_file=None, public_base_url=configured,
+                        github_oauth_client_id=" cid ", github_oauth_client_secret=" secret ")
+    assert settings.public_base_url == expected
+    assert settings.github_oauth_client_id == " cid "
+    assert settings.github_oauth_client_secret == " secret "
+
+
+@pytest.mark.parametrize("configured", [
+    "/", "///", "not-a-url", "//public.test", "ftp://public.test", "https://",
+    "https://user:password@public.test", "https://user@public.test",
+    "https://public.test?next=elsewhere", "https://public.test?",
+    "https://public.test/#part", "https://public.test/#", "https://public.test:99999",
+])
+def test_public_base_refuses_nonempty_configuration_that_cannot_form_a_callback(configured):
+    from pydantic import ValidationError
+
+    from server.config import Settings
+
+    with pytest.raises(ValidationError, match="public_base_url"):
+        Settings(_env_file=None, public_base_url=configured)
+
+
+def test_public_base_environment_uses_the_same_url_normalization(monkeypatch):
+    from server.config import Settings
+
+    monkeypatch.setenv("OCTOPUS_PUBLIC_BASE_URL", " HTTPS://PUBLIC.test:443/octopus/// ")
+    assert Settings(_env_file=None).public_base_url == "https://public.test/octopus"

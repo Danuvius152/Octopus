@@ -1,5 +1,7 @@
 """Public Wiki operations retain their binding and recheck live callers."""
 
+import asyncio
+
 import pytest
 
 from server.wiki.jobs import worker
@@ -105,18 +107,47 @@ async def test_publication_cannot_switch_generation_after_capturing_store(client
     assert registry.config(jobs.user_id)["curator_agent_id"] == "replacement-curator"
 
 
-async def test_repeated_cancel_operation_cannot_cancel_a_readmitted_attempt(client, tmp_path):
+async def test_repeated_cancel_operation_cannot_cancel_a_readmitted_attempt(client, tmp_path, monkeypatch):
+    from server.wiki.jobs import WikiJobs
+
     _, config, jobs = await prepare(client, tmp_path)
     job = jobs.maintain("original", "", "Review", ["Library/journal.md"], None, [], "human")
     body = {"operation_id": "cancel-once", "expected_vault_id": config["vault_id"]}
     url = f"/api/wiki/jobs/{job['id']}"
-    cancelled = await client.post(url + "/cancel", headers=client.headers, json=body)
-    assert cancelled.status_code == 200, cancelled.text
-    retry = await client.post(url + "/retry", headers=client.headers, json={})
-    assert retry.status_code == 200, retry.text
-    repeated = await client.post(url + "/cancel", headers=client.headers, json=body)
-    assert repeated.status_code == 200, repeated.text
-    assert jobs.get(job["id"])["status"] == "queued"
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    finish = WikiJobs._finish_cancelled
+
+    async def finish_after_release(self, *args, **kwargs):
+        entered.set()
+        try:
+            await release.wait()
+            return await finish(self, *args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(WikiJobs, "_finish_cancelled", finish_after_release)
+    try:
+        cancelled = await client.post(url + "/cancel", headers=client.headers, json=body)
+        assert cancelled.status_code == 200, cancelled.text
+        await asyncio.wait_for(entered.wait(), 5)
+        assert cancelled.json()["settlement_phase"] == "pending"
+        blocked = await client.post(url + "/retry", headers=client.headers, json={})
+        assert blocked.status_code == 409
+        assert "Confirm the original cancellation" in blocked.json()["detail"]
+        release.set()
+        verified = await client.post(url + "/verify", headers=client.headers, json={
+            "expected_attempt": job["attempt"], "expected_vault_id": config["vault_id"],
+        })
+        assert verified.status_code == 200, verified.text
+        assert verified.json()["settlement_phase"] == "confirmed"
+        retry = await client.post(url + "/retry", headers=client.headers, json={})
+        assert retry.status_code == 200, retry.text
+        repeated = await client.post(url + "/cancel", headers=client.headers, json=body)
+        assert repeated.status_code == 200, repeated.text
+        assert jobs.get(job["id"])["status"] == "queued"
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), 5)
 
 
 async def test_selection_rechecks_authority_after_observation_preparation(client, tmp_path, monkeypatch):

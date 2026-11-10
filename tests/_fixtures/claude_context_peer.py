@@ -6,6 +6,7 @@ It records actual stdin and argv, and accepts ordered externally written frames.
 
 import json
 import os
+import re
 import runpy
 import select
 import sys
@@ -62,6 +63,19 @@ while True:
             continue
         identity = {"session_id": sid, "parent_tool_use_id": None,
                     "user_message_uuid": current["uuid"], "user_message_uuids": [current["uuid"]]}
+        if plan.get("save_input_history"):
+            directory = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
+            directory.mkdir(parents=True, exist_ok=True)
+            with (directory / f"{sid}.jsonl").open("a") as handle:
+                handle.write(json.dumps({"type": "user", "uuid": current["uuid"], "sessionId": sid,
+                    "isSidechain": False, "message": current["message"]}) + "\n")
+        if plan.get("hold_after_history"):
+            continue
+        if plan.get("failure"):
+            send({**identity, "type": "result", "subtype": "success", "is_error": True,
+                  "terminal_reason": "api_error", "api_error_status": 400,
+                  "result": "API Error: 400 synthetic replay installation probe failure"})
+            continue
         if current["message"]["content"] == "/compact":
             mode = plan.get("compact_mode")
             if mode != "no_start":

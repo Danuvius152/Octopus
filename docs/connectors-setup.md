@@ -21,9 +21,19 @@ operator, so you register your own.)
 4. Enable it per agent in **Agent settings → Connectors**. That agent gets the
    connector's tools on its next turn.
 
+When an installation shows **needs reconnect**, use **Reconnect** on that
+installation's card. Successful authorization updates the selected connection
+and keeps its Agent enablement. Other same-kind Custom installations are
+unchanged; **Connect** starts a separate Custom installation. If the selected
+installation or its custom definition was deleted during login, that login is
+refused. Inspect the current connections before starting again.
+
 The **Set up** dialog shows the exact **Redirect URI** to register with the
-provider — derived from the URL you're hitting (so behind a tunnel it's your
-public host, not localhost). Copy it from there.
+provider. A nonempty `OCTOPUS_PUBLIC_BASE_URL` takes precedence even when you
+open Octopus through an internal address. Otherwise the URI follows your request,
+including the deployment's existing forwarded host/proto behavior for tunnels.
+Copy the displayed URI; the login retains it through authorization and token
+exchange even if the callback arrives through another address.
 
 ## GitHub
 
@@ -31,7 +41,7 @@ Provider-console steps and token/review policies in the GitHub and Gmail
 sections are inherited observations whose original date was not recorded.
 They were not revalidated during the 2026-11-02 documentation reorganization.
 Check the provider's current console and policy before using them; the
-request-derived redirect URI and per-agent enablement above describe Octopus.
+redirect URI selection and per-agent enablement above describe Octopus.
 
 In the Set up dialog, follow the steps (link goes to GitHub Developer settings):
 
@@ -62,8 +72,9 @@ Octopus requests scope `gmail.modify` (read, label, draft, send). In the recorde
 setup, Google's "Testing" status caused refresh-token expiry after about 7 days;
 publishing and verification affected that policy. Treat those as historical
 observations, not a current expiry or review guarantee. If Octopus shows
-**needs reconnect**, reconnect to re-authorize; transient refresh failures and
-their classification remain in the [account hardening plan](plans/multi-tenancy-gaps.md).
+**needs reconnect**, reconnect to re-authorize. Transient refresh failures do
+not by themselves invalidate the grant; see
+[token failure classification](implemented/connectors.md#token-failures-and-delayed-rejection).
 
 ## Custom connectors (any OAuth2 API)
 
@@ -90,6 +101,15 @@ OCTOPUS_GMAIL_OAUTH_CLIENT_ID=...      OCTOPUS_GMAIL_OAUTH_CLIENT_SECRET=...
 # Only needed if the request-derived redirect URI is ever wrong for your setup:
 OCTOPUS_PUBLIC_BASE_URL=https://your-stable-host
 ```
+
+The public base accepts an absolute HTTP(S) URL, including a port, IPv6 host or
+existing proxy path prefix. Settings trims surrounding whitespace, canonicalizes
+the URL and removes trailing slashes; an empty or whitespace-only value leaves
+request-derived behavior active. Credentials, query, fragment and malformed
+nonempty values such as `/` are configuration errors. A prefix must match your
+actual proxy routing. Use the URI shown by Set up after configuring the base;
+the complete selection and login-capture rules are in the
+[public OAuth base contract](implemented/connectors.md#public-oauth-base).
 
 OAuth client configuration is installation-wide: its client secret is encrypted
 with the installation master key. An account's installation access/refresh

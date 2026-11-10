@@ -391,6 +391,9 @@ class OwnerQuestions:
             # the established Owner failure/cleanup boundary contain it.
             raise RuntimeError("Question recording failed") from error
         manager._tag_persisted(event, seq, message)
+        if kind == "request":
+            pending.message_seq = seq
+            event["message_seq"] = seq
         self._notice_order += 1
         notice = QuestionNotification(event, self._notice_order, pending.backend or session._run.backend)
         if kind == "request":

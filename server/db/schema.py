@@ -9,7 +9,7 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 8
+CURRENT_VERSION = 9
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -207,7 +207,7 @@ CREATE TABLE connector_installation_secrets (
         ON DELETE CASCADE
 );
 
-CREATE TABLE connector_installations (
+CREATE TABLE "connector_installations" (
     -- Who owns this row (multi-tenancy.md §5). NULL means the install:
     -- true of every row before accounts, of none after.
     user_id TEXT,
@@ -215,13 +215,21 @@ CREATE TABLE connector_installations (
     kind TEXT NOT NULL,                    -- 'gmail' | 'github' | …
     label TEXT NOT NULL,                   -- 'archeryue7@gmail.com'
     auth_type TEXT NOT NULL,               -- 'oauth' | 'api_key'
-    external_account_id TEXT,              -- email / github "login:id" / workspace id
+    external_account_id TEXT,              -- email / GitHub numeric ID / workspace id
     scopes TEXT,                           -- JSON list of granted OAuth scopes
     enable_by_default INTEGER NOT NULL DEFAULT 0,  -- auto-enable on newly-created agents
     needs_reconnect INTEGER NOT NULL DEFAULT 0,
     token_expires_at TEXT,                 -- ISO8601, null = non-expiring
     last_refresh_error_code TEXT,          -- mirrors backend_credentials
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    CONSTRAINT connector_github_numeric_identity CHECK (
+        kind != 'github' OR (
+            external_account_id IS NOT NULL
+            AND external_account_id GLOB '[1-9]*'
+            AND external_account_id NOT GLOB '*[^0-9]*'
+            AND instr(external_account_id, char(0)) = 0
+        )
+    )
 );
 
 CREATE TABLE connector_oauth_clients (

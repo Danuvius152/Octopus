@@ -1,7 +1,7 @@
 """Tests for agent-built applications (docs/implemented/applications.md).
 
 Covers:
-  * Path helpers — slug allocation + de-duplication, entrypoint validation,
+  * Path helpers — identity-based allocation, entrypoint validation,
     and the traversal guard the static route depends on.
   * `ApplicationManager` — create wires a build session (origin='application',
     working_dir = the app dir) and fires the brief; request completion
@@ -245,14 +245,13 @@ def test_slugify_is_filesystem_safe():
     assert len(slugify("x" * 200)) <= 48
 
 
-def test_allocate_app_dir_dedupes(apps_root):
-    first = allocate_app_dir("Notes")
+def test_allocate_app_dir_uses_the_complete_application_identity(apps_root):
+    first = allocate_app_dir("Notes", "original-identity")
     os.makedirs(first)
-    second = allocate_app_dir("Notes")
-    assert os.path.basename(first) == "notes"
-    assert os.path.basename(second) == "notes-2"
-    os.makedirs(second)
-    assert os.path.basename(allocate_app_dir("notes")) == "notes-3"
+    second = allocate_app_dir("Notes", "replacement-identity")
+    assert os.path.basename(first) == "notes--original-identity"
+    assert os.path.basename(second) == "notes--replacement-identity"
+    assert allocate_app_dir("Notes", "original-identity") == first
 
 
 def test_is_safe_relative_path():
@@ -313,7 +312,7 @@ async def test_create_makes_dir_row_and_build_session(am, db, mgr, sent):
     assert row["icon"] == "✅"
     assert row["entrypoint"] == "index.html"
     assert os.path.isdir(row["app_dir"])
-    assert os.path.basename(row["app_dir"]) == "todo-app"
+    assert os.path.basename(row["app_dir"]) == "todo-app--" + row["id"]
 
     session = mgr.get_session(row["session_id"])
     assert session is not None
@@ -909,6 +908,25 @@ async def test_delete_can_keep_the_files(am, db, sent):
     assert os.path.isdir(row["app_dir"])
 
 
+async def test_same_name_creation_does_not_inherit_kept_data_or_runtime(am, db, sent):
+    import shutil
+
+    original = await _create_app(am, db)
+    for suffix in (".data", ".runtime"):
+        directory = Path(original["app_dir"] + suffix)
+        directory.mkdir()
+        (directory / "original.txt").write_text("retained" + suffix)
+    await am.delete_application(original["id"], keep_files=True)
+    shutil.rmtree(original["app_dir"])
+    replacement = await _create_app(am, db, agent=await db.get_agent(original["agent_id"]))
+    assert replacement["app_dir"] != original["app_dir"]
+    for suffix in (".data", ".runtime"):
+        assert not Path(replacement["app_dir"] + suffix).exists()
+    await am.delete_application(replacement["id"])
+    for suffix in (".data", ".runtime"):
+        assert Path(original["app_dir"] + suffix, "original.txt").read_text() == "retained" + suffix
+
+
 async def test_delete_retirement_failure_keeps_files_record_and_closed_admission(
     am, db, mgr, sent, monkeypatch,
 ):
@@ -1053,6 +1071,188 @@ async def test_partial_file_failure_retries_only_files_and_restart_keeps_admissi
         await restarted.close_session_owners()
 
 
+@pytest.mark.parametrize("restart", [False, True])
+async def test_partial_deletion_does_not_reuse_or_remove_replacement_resources(
+    am, db, mgr, sent, models, monkeypatch, restart,
+):
+    from server import applications
+
+    original = await _create_app(am, db)
+    await am.set_archived(original["id"], True)
+    original_data = Path(original["app_dir"] + ".data")
+    original_data.mkdir()
+    (original_data / "original.txt").write_text("original data")
+    remove = applications.shutil.rmtree
+
+    def refuse_data(path):
+        if path == str(original_data):
+            raise PermissionError("original data is locked")
+        return remove(path)
+
+    monkeypatch.setattr(applications.shutil, "rmtree", refuse_data)
+    with pytest.raises(ApplicationError, match="locked"):
+        await am.delete_application(original["id"])
+    assert not Path(original["app_dir"]).exists()
+
+    current = am
+    restarted = None
+    if restart:
+        am.shutdown()
+        await mgr.close_session_owners()
+        restarted = SessionManager()
+        await restarted.initialize(db, previous_writers_retired=True)
+        current = ApplicationManager()
+        current.bind(restarted, db)
+        async def start(session_id, prompt, **kwargs):
+            return await models.start_message(restarted, session_id, prompt, **kwargs)
+
+        monkeypatch.setattr(restarted, "start_message", start)
+    try:
+        replacement = await _create_app(current, db, agent=await db.get_agent(original["agent_id"]))
+        assert replacement["app_dir"] != original["app_dir"]
+        for suffix in ("", ".data", ".runtime"):
+            directory = Path(replacement["app_dir"] + suffix)
+            directory.mkdir(exist_ok=True)
+            (directory / "replacement.txt").write_text("replacement" + suffix)
+        monkeypatch.setattr(applications.shutil, "rmtree", remove)
+        await current.delete_application(original["id"])
+        with pytest.raises(ApplicationError, match="not found"):
+            await current.get_application(original["id"])
+        for suffix in ("", ".data", ".runtime"):
+            assert Path(replacement["app_dir"] + suffix, "replacement.txt").read_text() == "replacement" + suffix
+    finally:
+        if restarted is not None:
+            current.shutdown()
+            await restarted.close_session_owners()
+
+
+@pytest.mark.parametrize("relation", ["shared", "data", "runtime", "nested", "alias"])
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("keep_files", [False, True])
+async def test_delete_refuses_overlapping_retained_application_resources(
+    am, db, sent, relation, archived, keep_files,
+):
+    row = await _create_app(am, db)
+    code = Path(row["app_dir"])
+    (code / "original.txt").write_text("original code")
+    if relation == "shared":
+        other_code = code
+    elif relation in {"data", "runtime"}:
+        other_code = Path(str(code) + "." + relation)
+        other_code.mkdir()
+    elif relation == "nested":
+        other_code = code / "nested"
+        other_code.mkdir()
+    else:
+        other_code = code.parent / "legacy-alias"
+        other_code.symlink_to(code, target_is_directory=True)
+    (other_code / "other.txt").write_text("other code")
+    await db.save_application(app_id="legacy-other", name="Legacy other", app_dir=str(other_code),
+                              created_at="time", updated_at="time", user_id=row["user_id"])
+    if archived:
+        await am.set_archived("legacy-other", True)
+
+    with pytest.raises(ApplicationError, match="legacy-other") as refused:
+        await am.delete_application(row["id"], keep_files=keep_files)
+    assert row["id"] in str(refused.value)
+    assert str(code) in str(refused.value)
+    retained = await am.get_application(row["id"])
+    assert retained["deletion"]["phase"] == "retiring"
+    assert (code / "original.txt").read_text() == "original code"
+    assert (other_code / "other.txt").read_text() == "other code"
+    assert (await am.get_application("legacy-other"))["app_dir"] == str(other_code)
+
+
+@pytest.mark.parametrize("phase", ["retiring", "files"])
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("chained", [False, True])
+async def test_parent_alias_ownership_blocks_deleting_another_apps_required_link(
+    am, db, sent, phase, archived, chained,
+):
+    row = await _create_app(am, db)
+    code = Path(row["app_dir"])
+    target = code.parent / "other-resources"
+    target.mkdir()
+    alias = code / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    stored_parent = alias
+    if chained:
+        stored_parent = code.parent / "outer-alias"
+        stored_parent.symlink_to(alias, target_is_directory=True)
+    other_code = stored_parent / "other-app"
+    for suffix in ("", ".data", ".runtime"):
+        resource = Path(str(other_code) + suffix)
+        resource.mkdir()
+        (resource / "original.txt").write_text("other app" + suffix)
+    await db.save_application(app_id="parent-alias-owner", name="Other", app_dir=str(other_code),
+                              created_at="time", updated_at="time", user_id=row["user_id"])
+    if archived:
+        await am.set_archived("parent-alias-owner", True)
+    await db.set_application_deletion(row["id"], {"phase": phase, "keep_files": False, "error": None})
+
+    with pytest.raises(ApplicationError, match="parent-alias-owner") as refused:
+        await am.delete_application(row["id"])
+    assert row["id"] in str(refused.value) and str(alias) in str(refused.value)
+    assert (await am.get_application(row["id"]))["deletion"]["phase"] == phase
+    assert (await am.get_application("parent-alias-owner"))["app_dir"] == str(other_code)
+    for suffix in ("", ".data", ".runtime"):
+        assert Path(str(other_code) + suffix, "original.txt").read_text() == "other app" + suffix
+
+
+async def test_parent_alias_ownership_allows_independent_apps_sharing_a_parent_link(am, db, sent):
+    row = await _create_app(am, db)
+    code = Path(row["app_dir"])
+    alias = code.parent / "shared-parent"
+    alias.symlink_to(code.parent, target_is_directory=True)
+    stored_code = str(alias / code.name)
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE applications SET app_dir=? WHERE id=?", (stored_code, row["id"]))
+    other_code = alias / "other-app"
+    other_code.mkdir()
+    (other_code / "original.txt").write_text("other app")
+    await db.save_application(app_id="parent-alias-owner", name="Other", app_dir=str(other_code),
+                              created_at="time", updated_at="time", user_id=row["user_id"])
+
+    assert (await am.get_application(row["id"]))["app_dir"] == stored_code
+    assert (await am.get_application("parent-alias-owner"))["app_dir"] == str(other_code)
+    await am.delete_application(row["id"])
+    assert (other_code / "original.txt").read_text() == "other app"
+    assert alias.is_symlink()
+    assert not code.exists()
+
+
+@pytest.mark.parametrize("occupancy", ["archived-row", "deleting-row", "data", "runtime", "dangling-link"])
+async def test_creation_refuses_resources_retained_without_a_code_directory(
+    am, db, sent, monkeypatch, occupancy,
+):
+    from types import SimpleNamespace
+
+    from server import applications
+    from server.workspace import paths_for
+
+    agent = await _make_agent(db)
+    candidate = paths_for(agent["user_id"]).applications / "notes--0123456789ab"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    if occupancy.endswith("row"):
+        await db.save_application(app_id="legacy-owner", name="Previous notes", app_dir=str(candidate),
+                                  created_at="time", updated_at="time", user_id=agent["user_id"])
+        if occupancy == "archived-row":
+            await am.set_archived("legacy-owner", True)
+        else:
+            await db.set_application_deletion("legacy-owner", {"phase": "files", "keep_files": False, "error": "locked"})
+    elif occupancy == "dangling-link":
+        candidate.symlink_to(candidate.parent / "missing")
+    else:
+        Path(str(candidate) + "." + occupancy).mkdir()
+    monkeypatch.setattr(applications.uuid, "uuid4", lambda: SimpleNamespace(hex="0123456789abcdef"))
+
+    with pytest.raises(ApplicationError, match="resource"):
+        await am.create_application(name="Notes", description="Independent notes", agent_id=agent["id"])
+    assert not candidate.is_dir()
+    assert sent == []
+    assert len(await am.list_applications(include_archived=True, user_id=agent["user_id"])) == int(occupancy.endswith("row"))
+
+
 async def test_delete_joins_background_process_handle_that_arrives_late(am, db, mgr, sent, monkeypatch):
     from server import bg_tasks
 
@@ -1150,7 +1350,7 @@ async def test_delete_refuses_to_touch_a_dir_outside_the_root(
 
     with pytest.raises(ApplicationError, match="outside"):
         await am.delete_application(row["id"])
-    assert (await db.get_application(row["id"]))["deletion"]["phase"] == "files"
+    assert (await db.get_application(row["id"]))["deletion"]["phase"] == "retiring"
     assert (outside / "keepme.txt").exists()
 
 
@@ -1176,7 +1376,7 @@ async def test_owned_application_cannot_delete_another_managed_roots_files(
 
     with pytest.raises(ApplicationError, match="outside"):
         await am.delete_application(row["id"], user_id=row["user_id"])
-    assert (await db.get_application(row["id"]))["deletion"]["phase"] == "files"
+    assert (await db.get_application(row["id"]))["deletion"]["phase"] == "retiring"
     assert (outside / "keep.txt").read_text() == "other resources"
 
 

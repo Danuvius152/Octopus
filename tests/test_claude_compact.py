@@ -82,9 +82,9 @@ async def test_native_local_failure_is_not_hidden_by_success_wrapper(claude_runt
     await manager.stop_all_held_processes()
     await manager.close_session_owners()
     with closing(sqlite3.connect(tmp_path / "product.db")) as source, closing(sqlite3.connect(tmp_path / "backup.db")) as target:
-        assert verify_main(source) == 8
+        assert verify_main(source) == 9
         source.backup(target)
-        assert verify_main(target) == 8
+        assert verify_main(target) == 9
     restored_db = Database(str(tmp_path / "backup.db"))
     await restored_db.initialize()
     restored = SessionManager()
@@ -187,6 +187,34 @@ async def test_stop_retains_original_native_effect_through_eof(claude_runtime, t
     assert state.validity == "stale" and state.activity is None
     with pytest.raises(ProcessLookupError):
         os.killpg((await inputs(tmp_path, 2))[1]["pid"], 0)
+
+
+@pytest.mark.parametrize("effect", [False, True])
+async def test_archive_preserves_original_claude_compact_effect(claude_runtime, tmp_path, effect):
+    manager, _, session, _, _ = claude_runtime
+    await (await manager.start_message(session.id, "Native history exists")).wait()
+    await wait_dispatch_idle(manager, session.id)
+    (tmp_path / "claude-plan.json").write_text(json.dumps({"compact_mode": "hold"}))
+    accepted = await submit_input(manager, session.id, compact_request("archive-compact"), user_id=session.user_id)
+    await inputs(tmp_path, 2)
+    async with asyncio.timeout(3):
+        while (await get_session(manager, session.id, user_id=session.user_id)).context_state.activity != "compacting":
+            await asyncio.sleep(0)
+    owner = manager._session_owners[id(session)]
+    if effect:
+        (tmp_path / "claude-eof.json").write_text(json.dumps([{
+            "type": "system", "subtype": "compact_boundary", "session_id": SID,
+            "uuid": "archive-boundary", "compact_metadata": {"trigger": "manual", "pre_tokens": 90000},
+        }]))
+
+    await asyncio.wait_for(manager.archive_session(session.id, replace=False), 5)
+    assert not owner.failed
+    result = await get_submission_status(manager, session.id, "archive-compact", user_id=session.user_id)
+    assert result["request_id"] == accepted["request_id"]
+    assert result["outcome"]["status"] == "interrupted"
+    assert result["outcome"]["compact"]["effect"] == ("applied" if effect else "unknown")
+    state = (await get_session(manager, session.id, user_id=session.user_id)).context_state
+    assert state.validity == "stale" and state.activity is None
 
 
 @pytest.mark.parametrize("closure", ["terminal", "eof"])

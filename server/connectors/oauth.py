@@ -116,6 +116,7 @@ class PendingLogin:
     # of ours, so the account is remembered here, by the authenticated `start`
     # call, and read back when the callback persists the installation.
     user_id: str | None = None
+    target_installation_id: str | None = None
     status: ConnectorLoginState = ConnectorLoginState.pending
     installation_id: str | None = None
     message: str | None = None
@@ -162,6 +163,7 @@ class ConnectorLoginManager:
         redirect_uri: str,
         requested_label: str | None = None,
         user_id: str | None = None,
+        target_installation_id: str | None = None,
     ) -> PendingLogin:
         self._gc()
         provider = connector.oauth
@@ -184,6 +186,7 @@ class ConnectorLoginManager:
             verifier=verifier,
             requested_label=requested_label,
             user_id=user_id,
+            target_installation_id=target_installation_id,
             created_at=self._now(),
         )
         self._pending[login_id] = pl
@@ -245,6 +248,7 @@ class ConnectorLoginManager:
             raise ConnectorLoginError(f"Connection is {pl.status.value}")
         prepared = await manager.prepare_install(
             connector=pl.connector, token_set=token_set, requested_label=pl.requested_label, user_id=pl.user_id,
+            target_installation_id=pl.target_installation_id,
         )
         return await complete_cleanup(self._bind_install(pl, manager, prepared))
 

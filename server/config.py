@@ -1,7 +1,7 @@
 import os
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -130,9 +130,9 @@ class Settings(BaseSettings):
     research_max_concurrent_jobs: int = 2
     research_job_timeout_seconds: int = 1200
 
-    # Connectors (connectors.md §7). The public base URL is what connector
-    # OAuth redirect URIs are built against; behind a tunnel it must be set
-    # to the stable public host. Unset → computed as http://127.0.0.1:{port}.
+    # Connector OAuth uses this explicit base when configured; otherwise the
+    # router derives it from the browser request, including existing forwarding
+    # headers. Never substitute an installation-local host for a remote caller.
     # Per-kind client credentials gate availability in the catalog: a kind is
     # only installable once both its id and secret are present.
     public_base_url: str | None = None
@@ -141,18 +141,24 @@ class Settings(BaseSettings):
     github_oauth_client_id: str | None = None
     github_oauth_client_secret: str | None = None
 
-    @field_validator("public_base_url", "gmail_oauth_client_id", "gmail_oauth_client_secret",
+    @field_validator("gmail_oauth_client_id", "gmail_oauth_client_secret",
                      "github_oauth_client_id", "github_oauth_client_secret", mode="before")
     @classmethod
     def empty_optional_configuration(cls, value: object) -> object:
         return None if value == "" else value
 
-    model_config = {"env_prefix": "OCTOPUS_", "env_file": startup_env_file()}
+    @field_validator("public_base_url")
+    @classmethod
+    def normalize_public_base_url(cls, value: str | None) -> str | None:
+        if value is None or not (value := value.strip()):
+            return None
+        base = AnyHttpUrl(value)
+        if (base.username is not None or base.password is not None
+                or base.query is not None or base.fragment is not None):
+            raise ValueError("public_base_url must not contain credentials, a query or a fragment")
+        return str(base).rstrip("/")
 
-    @property
-    def resolved_public_base_url(self) -> str:
-        """Base URL for OAuth redirect URIs — explicit config or localhost."""
-        return self.public_base_url or f"http://127.0.0.1:{self.port}"
+    model_config = {"env_prefix": "OCTOPUS_", "env_file": startup_env_file()}
 
 
 settings = Settings()

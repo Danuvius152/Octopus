@@ -45,6 +45,7 @@ content and applications. It does not use a fixed instance-specific file list.
 | Account files | Preserve private agent memory and the same account's `agents/shared-memory/`, ordinary workspace files, attachments, research materials, application code/configuration and `.data`; reinstall rebuildable `.runtime` dependencies |
 | Wiki | Preserve registered vault content, sources/proofs, content history, business identities and the durable facts needed for query and maintenance, including a registered external vault within the supported home layout |
 | API configuration | Preserve account-stored endpoints/keys and saved credential associations |
+| Connector installations | Preserve the account's installation IDs, metadata, current encrypted grants and Agent enablement links, together with referenced custom definitions and OAuth client configuration. Reconnect updates those existing records; it adds no collection root. |
 | Chats and native continuity | Exclude old sessions/messages, input receipts and native input evidence, native transcripts/resume state, BG/delegation execution history and their return diagnostics, and extra external/fork work trees collected solely for old conversations; ordinary files already inside the account's included roots remain included |
 | Schedules and execution | Exclude recurring/one-shot definitions, enablement, pending triggers and live process/PID/socket/lease state; no post-import schedule activation step |
 | Login state | Exclude model CLI subscription tokens, refresh tokens and authentication caches wherever stored; target credentials require reauthorization. Octopus account password/key material remains included; sign in again on the target |
@@ -54,6 +55,20 @@ content and applications. It does not use a fixed instance-specific file list.
 Knowledge history and source/effect evidence are not executable work and must
 not be discarded as a cache. Exclusion from an archive does not delete or
 reconfigure source chats, tasks, logins or files.
+
+Pending Connector OAuth logins, including their original Reconnect target, are
+process-local and are neither transferred nor resumed. Restoring completed
+installation records preserves the saved relationships and grant; it does not
+replay a callback or establish current provider access. See the
+[Connector lifecycle](implemented/connectors.md#oauth-and-lifecycle).
+
+Current archives contain complete main format 9 and Wiki format 17. GitHub
+installations preserve their canonical numeric identity, display label, original
+installation ID, encrypted grant and Agent links through export/import. The
+importer rejects an older main marker before creating the target; it does not
+convert `login:id` keys or restore pending OAuth work. A historical installation
+must first complete its authorized source-side publication handoff under the
+[storage contract](implemented/current-storage-format.md#github-identity-and-finite-publication-handoff).
 
 Research reports, versioned `{job_id}/evidence.json` summaries and
 `synthesis-failure.json` materials follow the existing recursive account-tree
@@ -181,6 +196,15 @@ home, with an optional home-prefix change on import. It rejects required roots
 or symlink targets outside the supported set instead of silently omitting them.
 An empty target means the selected Octopus data locations do not exist; unrelated
 files elsewhere in the target home are permitted.
+
+Each retained application's stored `app_dir` determines its actual code and
+`.data` siblings. Collection preserves their content and the required leaf or
+parent symlink entries, then restores the stored access path under the target
+home prefix. It does not relocate legacy applications or derive data from the
+code alias's final target. Runtime entries and their resolved targets are
+excluded. If a runtime exclusion overlaps any application's required code/data
+or removes a required alias entry, export reports the application identities
+and paths and refuses to publish a partial archive.
 
 Locate the active source configuration using [local configuration](local-wsl.md#配置和数据).
 Do not infer its database or provider paths from the development checkout, and

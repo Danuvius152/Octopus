@@ -131,9 +131,12 @@ class GitHubConnector(ConnectorBase):
             )
         resp.raise_for_status()
         data = resp.json()
+        numeric_id = data.get("id")
+        if type(numeric_id) is not int or numeric_id <= 0:
+            raise ValueError("GitHub account ID must be a positive integer")
         login = data["login"]
         # login can be renamed; the numeric id is the stable account key.
-        return f"{login}:{data['id']}", login
+        return str(numeric_id), login
 
 
 register(GitHubConnector())

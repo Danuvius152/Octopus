@@ -1,21 +1,30 @@
 from dataclasses import asdict
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
+from pydantic import ValidationError
 
 from ..auth import verify_token
+from ..browser_messages import native_view, page_view, session_view
 from ..config import settings
 from ..credential_bindings import CredentialBindingError, validate_credential_binding
 from ..db.native_details import NativeDetailError
+from ..db.sessions import MessageExportError
 from ..deps import ScopeUser, SessionMgr
 from ..harness import BackendForkNotSupported
 from ..models import (
+    BrowserMessagePage,
+    BrowserNativeDetailPage,
+    BrowserSessionDetail,
     CreateSessionRequest,
     DispatchState,
     DuplicateSessionRequest,
     ForkSessionRequest,
     ImportSessionRequest,
     MessageContent,
+    MessageExportPage,
+    MessageExportSnapshot,
     MessagePage,
     NativeDetailPage,
     PendingQuestionInfo,
@@ -371,11 +380,12 @@ async def get_session_info(
     return match
 
 
-@router.get("/{session_id}", response_model=SessionDetail)
+@router.get("/{session_id}", response_model=SessionDetail | BrowserSessionDetail)
 async def get_session(
     session_manager: SessionMgr,
     session_id: str,
     user_id: ScopeUser = None,
+    view: Literal["full", "browser"] = Query("full"),
     _: str = Depends(verify_token),
 ):
     # Live session: read straight from the in-memory state (includes
@@ -396,7 +406,7 @@ async def get_session(
             messages = []
         oldest = messages[0].seq if messages else None
         context_state, context_pending = await session_manager.context_snapshot(s)
-        return SessionDetail(
+        detail = SessionDetail(
             **session_info(s, message_count, transcript_integrity="duplicate_seq" if duplicates else "ok").model_dump(),
             context_state=context_state,
             context_generation=session_manager._dispatch_generation,
@@ -408,6 +418,7 @@ async def get_session(
             pending_questions=[
                 PendingQuestionInfo(
                     question_id=q.question_id, questions=q.questions, deadline=q.deadline,
+                    message_seq=q.message_seq,
                     request_id=q.request_id, attempt_id=q.attempt_id,
                     interaction_policy=q.interaction_policy, wait_mode=q.wait_mode, snoozed=q.snoozed,
                 )
@@ -422,12 +433,50 @@ async def get_session(
             # describe these exact rows, never the in-memory allocator.
             next_message_seq=max((m.seq for m in messages if m.seq is not None), default=-1) + 1,
         )
+        return session_view(detail) if view == "browser" else detail
 
     # Archived session: not in memory; read history straight from DB.
     archived_detail = await session_manager.load_archived_session_detail(session_id, user_id)
     if archived_detail is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    return archived_detail
+    return session_view(archived_detail) if view == "browser" else archived_detail
+
+
+@router.get("/{session_id}/messages/{seq}", response_model=MessageContent)
+async def message_detail(
+    session_manager: SessionMgr, session_id: str, seq: int, user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+):
+    assert session_manager.db is not None
+    if seq < 0:
+        raise HTTPException(404, "Message not found", headers={"Cache-Control": "private, no-store"})
+    try:
+        message = await session_manager.db.read_message_detail(session_id, user_id, seq)
+    except MessageExportError as error:
+        code = str(error)
+        raise HTTPException(404 if code == "not_found" else 409, {"code": code}, headers={"Cache-Control": "private, no-store"}) from error
+    return Response(message.model_dump_json(), media_type="application/json", headers={"Cache-Control": "private, no-store"})
+
+
+@router.get("/{session_id}/message-export", response_model=MessageExportPage)
+async def export_messages(
+    session_manager: SessionMgr, session_id: str, user_id: ScopeUser = None,
+    snapshot: str | None = Query(None), after_seq: int | None = Query(None, ge=0),
+    limit: int = Query(MESSAGE_WINDOW, ge=1, le=500), _: str = Depends(verify_token),
+):
+    """Full typed records for a restoring codec; separate from UI and audit."""
+    assert session_manager.db is not None
+    try:
+        captured = MessageExportSnapshot.model_validate_json(snapshot) if snapshot is not None else None
+    except ValidationError as error:
+        raise HTTPException(422, "Invalid message export snapshot") from error
+    try:
+        return await session_manager.db.read_message_export(
+            session_id, user_id, snapshot=captured, after_seq=after_seq, limit=limit,
+        )
+    except MessageExportError as error:
+        code = str(error)
+        raise HTTPException(404 if code == "not_found" else 409, {"code": code}) from error
 
 
 @router.get("/{session_id}/transcript-export")
@@ -446,27 +495,30 @@ async def export_transcript(
     )
 
 
-@router.get("/{session_id}/native-details/{anchor_seq}", response_model=NativeDetailPage)
+@router.get("/{session_id}/native-details/{anchor_seq}", response_model=NativeDetailPage | BrowserNativeDetailPage)
 async def native_child_details(
     session_manager: SessionMgr, session_id: str, anchor_seq: int,
     user_id: ScopeUser = None, after_seq: int | None = Query(None, ge=0),
+    view: Literal["full", "browser"] = Query("full"),
     limit: int = Query(50, ge=1, le=100), _: str = Depends(verify_token),
 ):
     """Read only saved items; the original host and its lease are untouched."""
     assert session_manager.db is not None
     try:
-        return await session_manager.db.read_native_details(session_id, user_id, anchor_seq, after_seq=after_seq, limit=limit)
+        page = await session_manager.db.read_native_details(session_id, user_id, anchor_seq, after_seq=after_seq, limit=limit)
+        return native_view(session_id, page) if view == "browser" else page
     except NativeDetailError as error:
         code = str(error)
         raise HTTPException(404 if code == "not_found" else 409, {"code": code}) from error
 
 
-@router.get("/{session_id}/messages", response_model=MessagePage)
+@router.get("/{session_id}/messages", response_model=MessagePage | BrowserMessagePage)
 async def older_messages(
     session_manager: SessionMgr,
     session_id: str,
     user_id: ScopeUser = None,
     before_seq: int = Query(..., ge=0, description="Return messages with seq < this"),
+    view: Literal["full", "browser"] = Query("full"),
     limit: int = Query(MESSAGE_WINDOW, ge=1, le=500),
     _: str = Depends(verify_token),
 ):
@@ -499,11 +551,12 @@ async def older_messages(
     )
     messages = [MessageContent(**m) for m in raw]
     oldest = messages[0].seq if messages else None
-    return MessagePage(
+    page = MessagePage(
         messages=messages,
         oldest_loaded_seq=oldest,
         has_more_messages=await session_manager.db.has_messages_before(session_id, oldest),
     )
+    return page_view(session_id, page) if view == "browser" else page
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -1,6 +1,7 @@
 """Original product questions and wire responses through the owned native host."""
 
 import asyncio
+import json
 
 import pytest
 
@@ -35,6 +36,40 @@ async def test_native_resolved_closes_the_original_form_with_its_own_reason(nati
     assert result["reason"] == "native_resolved"
     inject(tmp_path, terminal())
     await wait_dispatch_idle(manager, session.id)
+
+
+async def test_large_optional_question_snooze_reaches_the_original_browser(native_runtime, tmp_path):
+    from server.deps import get_user_manager
+    from tests.websocket_client import connection, frame, receipt_frame
+
+    manager, _, session, _, _, events = native_runtime
+    bearer = await get_user_manager().issue_token(session.user_id)
+    async with connection(manager, bearer) as browser:
+        await start_output(native_runtime)
+        request = question_request("large-optional")
+        request["params"]["isBlocking"] = False
+        request["params"]["questions"][0]["question"] = "q" * (300 * 1024)
+        inject(tmp_path, request)
+        original = await receipt_frame(browser[1], "question_request")
+        assert original["body_state"] == "preview" and original["questions"] == []
+        await browser[0].put({"type": "websocket.receive", "text": json.dumps({
+            "type": "snooze_question", "session_id": session.id, "client_command_id": "large-snooze",
+            "question_id": original["question_id"], "request_id": original["request_id"], "attempt_id": original["attempt_id"],
+        })})
+        seen = {}
+        while not {"question_snoozed", "command_receipt"} <= seen.keys():
+            shown = await frame(browser[1])
+            assert shown["type"] != "browser_unavailable"
+            seen[shown["type"]] = shown
+        paused = seen["question_snoozed"]
+        assert seen["command_receipt"]["accepted"]
+        assert paused["snoozed"] and paused["deadline"] is None and "questions" not in paused
+        assert paused["question_id"] == original["question_id"] and paused["request_id"] == original["request_id"]
+        assert paused["attempt_id"] == original["attempt_id"] and paused["seq"] > original["seq"]
+        full = next(event for event in events if event["type"] == "question_snoozed")
+        assert full["questions"] == request["params"]["questions"]
+        inject(tmp_path, terminal())
+        await wait_dispatch_idle(manager, session.id)
 
 native_runtime = native_tests.native_runtime
 
@@ -314,13 +349,21 @@ async def test_output_overflow_retires_before_presentation_and_never_reports_suc
 
 async def test_reused_server_id_on_new_connection_cannot_reopen_old_product_question(native_runtime, tmp_path):
     manager, _, session, mode, _, _ = native_runtime
-    mode[0] = "control_question"
+    mode[0] = "control_output"
+    request = question_request("reused-server-request")
+    request["params"]["questions"][0]["id"] = "choice"
     await submit_client_message(manager, session.id, "First", [], "first", wiki_mode=None)
+    await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
+    inject(tmp_path, request)
     await until(lambda: manager.get_pending_questions(session.id))
     old = manager.get_pending_questions(session.id)[0]
     await manager.interrupt(session.id)
     await wait_dispatch_idle(manager, session.id)
+    (tmp_path / "native-injections.jsonl").unlink()
     await submit_client_message(manager, session.id, "Second", [], "second", wiki_mode=None)
+    await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
+    request["params"]["turnId"] = session._run.backend.active_turn.turn_id
+    inject(tmp_path, request)
     await until(lambda: manager.get_pending_questions(session.id))
     current = manager.get_pending_questions(session.id)[0]
     assert current.question_id != old.question_id

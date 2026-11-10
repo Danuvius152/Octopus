@@ -33,7 +33,7 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
   };
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     let body: unknown = [];
-    if (url.endsWith(`/api/sessions/${sid}`)) {
+    if (new URL(url).pathname === `/api/sessions/${sid}`) {
       body = {
         id: sid, status: "idle", messages: [{ role: "system", type: "result", seq: 2, content: outcome }],
         next_message_seq: 3, dispatch_state: dispatch, active_attempt: null, pending_questions: [question], subagents: [],

@@ -29,7 +29,7 @@ it("requires an explicit operation for active and queued inputs", () => {
 
 it("loads dispatch pause on selection and keeps a newer live snapshot", async () => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(
-    !url.endsWith("/api/sessions/selected") ? [] : {
+    !new URL(url, window.location.origin).pathname.endsWith("/api/sessions/selected") ? [] : {
       id: "selected", messages: [], dispatch_state: snapshot(), active_attempt: null,
     }
   ))));
@@ -51,7 +51,7 @@ it("accepts a restarted service and rejects a delayed retired service across ses
 
 it("ignores an older-instance HTTP response that finishes after a fresh websocket", async () => {
   let finish!: (response: Response) => void;
-  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/api/sessions/selected")
+  vi.stubGlobal("fetch", vi.fn((url: string) => new URL(url, window.location.origin).pathname.endsWith("/api/sessions/selected")
     ? new Promise<Response>((resolve) => { finish = resolve; }) : Promise.resolve(new Response("[]"))));
   const loading = selectSession("selected");
   handleWsMessage({ type: "dispatch_state", session_id: "selected", dispatch_state: { ...snapshot("service-b", 0, false), items: [] } });

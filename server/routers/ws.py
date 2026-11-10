@@ -5,6 +5,7 @@ import uuid
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from .. import deps
+from ..browser_messages import event_view, unavailable_event
 from ..deps import SessionMgr
 from ..sessions.runtime_types import QuotaExceeded
 from ..ws_delivery import SocketDelivery
@@ -45,7 +46,12 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
             return
         # The deletion owner captures the trusted account audience before
         # removal. Its minimal receipt cannot look up the deleted row again.
-        delivery.offer(msg, session_scoped=msg.get("type") != "session_deleted")
+        try:
+            projected = event_view(msg)
+        except Exception:
+            logger.exception("Browser event projection failed type=%s", msg.get("type"))
+            projected = unavailable_event(msg)
+        delivery.offer(projected, session_scoped=msg.get("type") != "session_deleted")
 
     session_manager.on_broadcast(conn_id, broadcast, user_id, required=False)
     delivery.start()

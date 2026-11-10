@@ -424,7 +424,7 @@ async def test_changed_connector_selection_queues_new_human_input(native_runtime
 
     await database.save_connector_installation(installation_id="steering-github", kind="github", label="Fixture account",
         auth_type="oauth", secret_encrypted=encrypt("offline-only-token", "auth"), created_at="2026-11-01T00:00:00Z",
-        user_id=session.user_id)
+        external_account_id="91001", user_id=session.user_id)
     await database.replace_agent_connectors(session.agent_id, ["steering-github"] if was_enabled else [], session.user_id)
     await active_root(native_runtime, tmp_path)
     await database.replace_agent_connectors(session.agent_id, [] if was_enabled else ["steering-github"], session.user_id)

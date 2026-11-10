@@ -100,6 +100,14 @@ verdict 则是 failed。
 共用同一终态入口。先赢的是业务提交，后来的回报只能承认原结果。写盘与 SQLite
 不是一个原子事务：可能有文件而没有 completed，不能反向由文件存在推导任务成功。
 
+`3aa3e8d` 的合成失败分支还暴露了另一个错误前提：诊断材料一定能保存。
+它在终态事务前直接建目录、打开文件并序列化；任一步失败，已经确定的原合成失败
+就无法落库，原 task 带异常退出而 job 仍为 running。辅助材料的可用性因此错误地
+成了业务失败结算的前提。当前由材料边界处理序列化和文件写入、同步故障，原 job
+仍走同一终态事务；原合成错误与经掩码的材料失败原因一同提供给用户，完整异常栈
+留在日志。数据库提交、registry 和实际资源退役异常继续沿原责任处理，不能一起
+降级为诊断不可用或从 drain 中清掉。
+
 回归入口：[执行回归](../../tests/test_review_execution_regressions.py)的
 `test_f16_failed_synthesis_is_failed_and_retains_gathered_evidence`；
 [manager 测试](../../tests/test_research_manager.py)的

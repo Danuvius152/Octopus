@@ -22,6 +22,22 @@ reasoning call synthesizes the report. Only a strict majority of explicit positi
 verification counts as verified. Non-refutation without support remains unverified;
 no valid verdict is a verification failure, retained as such.
 
+Leaf JSON selection follows the consumer's expected shape: scope angles and
+search findings are arrays; verification verdicts are objects. A complete naked
+JSON value owns its whole tree. Otherwise, a unique schema-valid complete fence
+takes priority over surrounding prose; without one, selection considers complete
+outer containers while respecting strings, escapes and nesting. Wrong-shaped,
+malformed or unusable outer values never promote their children into results.
+Multiple independent usable candidates at the selected priority are ambiguous,
+even when identical. Unusable candidates do not compete with usable ones.
+Decoder refusals due to syntax, integer size or nesting make a candidate unusable.
+Selection itself does not shorten evidence or change omission flags; bounds are
+applied only to the uniquely selected verdict. Unusable or ambiguous angles fall
+back to the original question. Only an actual empty search array means successful
+absence of material; unusable searches and verdicts remain failures. A leaf error
+takes precedence over any partial JSON, and parsing tolerance supplies neither
+positive verification nor missing sources.
+
 The pipeline constructs one bounded evidence summary, consumed by synthesis,
 the deterministic evidence section at the start of the saved report, and the
 ResearchCard. Each angle records findings, a successful empty result, or a
@@ -85,10 +101,17 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
 
 - Starts a research job for `(session_id, question)`, returns a `research_id`
   immediately, runs the pipeline as a tracked `asyncio.Task`.
-- A failed or empty final synthesis ends the job as `failed`, preserving the
-  reason, retained findings and the same evidence summary in the account-owned job directory as
-  `synthesis-failure.json`. It emits no successful completion or report
-  injection; a placeholder is not a completed report.
+- A failed or empty final synthesis ends the job as `failed` with its original
+  reason. The manager attempts to retain findings and the same evidence summary
+  in the account-owned job directory as `synthesis-failure.json`. Auxiliary
+  serialization, directory creation, write or sync failures do not prevent that
+  known outcome from settling: the committed `error` keeps the synthesis reason
+  and appends a bounded, credential-masked material failure reason, visible in
+  snapshots, failure events and the card. The diagnostic traceback remains in
+  logs. The original guarded terminal transaction commits before notification;
+  database and actual retirement failures retain their existing fatal or owned
+  failure boundaries. It emits no successful completion or report injection;
+  a placeholder is not a completed report.
 - Owns a **hard overall timeout** and an **idle/heartbeat** — the gap that let
   the CLI Workflow hang forever simply cannot happen here because we control
   the loop and never block on an unbounded external stream.
@@ -226,7 +249,7 @@ run and its result evidence separately from the retirement error.
 The research tool and `/research` command admit the same account/session-owned
 job. Progress and the report card are projections of that job. Within the account
 research root, the report is `{job_id}.md`, the versioned summary is
-`{job_id}/evidence.json`, and synthesis failure retains the summary in
+`{job_id}/evidence.json`, and synthesis failure attempts to retain the summary in
 `{job_id}/synthesis-failure.json`; the original
 caller receives a separate follow-up with stable delivery identity.
 

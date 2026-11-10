@@ -67,6 +67,7 @@ class _ScriptedRun(FakeRunBase):
 async def test_mixed_recovery_keeps_independent_budgets_and_prompt_modes(recovery_host, monkeypatch):
     manager, session = recovery_host
     session.claude_session_id = "missing-thread"
+    await manager.db.update_session_field(session.id, claude_session_id="missing-thread")
     runs = [
         _ScriptedRun(preparation_error="No conversation found with session ID: missing-thread"),
         _ScriptedRun(preparation_error="API Error: 529 Overloaded"),
@@ -129,6 +130,7 @@ async def test_preparation_retries_keep_spilled_input_and_rebuilt_history(recove
 
     manager, session = recovery_host
     session.claude_session_id = "missing-thread"
+    await manager.db.update_session_field(session.id, claude_session_id="missing-thread")
     prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
     runs = [
         _ScriptedRun(preparation_error="API Error: 529 Overloaded"),
@@ -157,6 +159,7 @@ async def test_terminal_recovery_is_captured_before_recording_await(recovery_hos
     manager, session = recovery_host
     expected = {"transient": 2, "idle": 1, "stale_session": 1, "premature_exit": 0}
     session.claude_session_id = "missing-thread"
+    await manager.db.update_session_field(session.id, claude_session_id="missing-thread")
     runs = iter([
         _ScriptedRun(preparation_error="No conversation found with session ID: missing-thread"),
         _ScriptedRun(preparation_error="API Error: 529 Overloaded"),

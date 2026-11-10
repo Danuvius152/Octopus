@@ -57,12 +57,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def turn_start_params(prompt: str, thread_id: str, request_id: str,
+                      model: str | None, effort: str | None) -> dict[str, Any]:
+    """The actual business input; controller/injection frames have separate budgets."""
+    return {"threadId": thread_id, "input": [{"type": "text", "text": prompt}],
+        "clientUserMessageId": request_id, "collaborationMode": {"mode": "default", "settings": {
+            "model": model, "reasoning_effort": effort, "developer_instructions": None}}}
+
 _METRICS_CLOSE_GRACE = 1.0
 _METRICS_PENDING_COUNT = 256
 _METRICS_PENDING_BYTES = 1024 * 1024
 _REQUIRED_FEATURES = {"features.fast_mode": True, "features.wake_on_agent_messages": False, "features.goals": False,
                 "features.sleep_tool": False, "features.unbounded_connection_retries": False, "features.multi_agent": True,
                 "features.multi_agent_v2.enabled": True, "features.multi_agent_v2.wait_agent_enabled": True}
+
+
+def thread_start_params(context: TurnContext, model: str | None, effort: str | None,
+                        tier: str) -> dict[str, Any]:
+    overrides: dict[str, Any] = {**_REQUIRED_FEATURES, "service_tier": tier}
+    if effort:
+        overrides["model_reasoning_effort"] = effort
+    params: dict[str, Any] = {"cwd": context.working_dir, "model": model,
+        "approvalPolicy": "never", "sandbox": "danger-full-access", "config": overrides,
+        "developerInstructions": controller_message(context.system_prompt)}
+    if context.resume_id:
+        params.update(threadId=context.resume_id, excludeTurns=True)
+    return params
 
 
 def ordinary_binary() -> str:
@@ -262,6 +283,18 @@ class AppServerDriver(RunDriver):
         # Only committed root evidence releases compact's startup wait. The
         # original RPC acknowledgment remains a separate durable fact.
         self._compact_root_proven = asyncio.Event()
+        self._input_history_path: str | None = None
+        self._input_history_prompt: str | None = None
+
+    def installed_input_history(self) -> str | None:
+        from .input_history import codex_input_installed
+        evidence = self._input
+        if (evidence is not None and evidence.kind == "start" and evidence.thread_id and evidence.turn_id
+                and self._input_history_path is not None and self._input_history_prompt is not None
+                and codex_input_installed(self._input_history_path, evidence.thread_id,
+                                          evidence.turn_id, self._input_history_prompt)):
+            return evidence.thread_id
+        return None
 
     def continue_configuration(self, previous: RunDriver) -> None:
         if not isinstance(previous, AppServerDriver):
@@ -555,11 +588,32 @@ class AppServerDriver(RunDriver):
         # Static saves and actual preparation check the known text payloads.
         # _request checks each complete envelope again before any write.
         _encode_frame("validation", "thread/start", {"developerInstructions": controller_message(context.system_prompt)})
-        _encode_frame("validation", "turn/start", {"input": [{"type": "text", "text": context.prompt}]})
+        if context.operation == "message":
+            # Unknown identities/defaults contribute only their minimum JSON
+            # width here. This can reject known oversize input, never certify
+            # feasibility; the real bound RPC must still encode its own bytes.
+            _encode_frame("", "turn/start", turn_start_params(context.prompt, context.resume_id or "",
+                self._input.input_id if self._input is not None else "", context.model or "", context.reasoning_effort or ""))
         if context.turn_instructions:
             _encode_frame("validation", "thread/inject_items", {"items": [{"type": "message", "role": "developer",
                 "content": [{"type": "input_text", "text": turn_message(context.turn_instructions)}]}]})
         return super().build_argv(context)
+
+    def validate_replay(self, context: TurnContext) -> None:
+        # Codex 0.167.0 ThreadId serializes a UUID (36 ASCII bytes); original
+        # product requests use uuid4().hex (32). RPC IDs have a fixed width.
+        # Absent product model/effort remain unknown, rather than pretending
+        # a home catalog resolves config/read's cwd-dependent layers.
+        _encode_frame(codex_rpc.RPC_ID_PLACEHOLDER, "turn/start", turn_start_params(
+            context.prompt, "00000000-0000-0000-0000-000000000000", "0" * 32,
+            context.model or "", context.reasoning_effort or ""))
+        _encode_frame(codex_rpc.RPC_ID_PLACEHOLDER, "thread/start", thread_start_params(
+            context, context.model or "", context.reasoning_effort, context.service_tier or "default"))
+        if context.turn_instructions:
+            _encode_frame(codex_rpc.RPC_ID_PLACEHOLDER, "thread/inject_items", {
+                "threadId": "00000000-0000-0000-0000-000000000000", "items": [{
+                    "type": "message", "role": "developer", "content": [{
+                        "type": "input_text", "text": turn_message(context.turn_instructions)}]}]})
 
     async def begin_input(self, io: HarnessRun, resume_id: str | None) -> None:
         self._io = io
@@ -679,14 +733,7 @@ class AppServerDriver(RunDriver):
             # A thread preparation refusal must not let the next attempt
             # resolve a different native default for this logical request.
             self._controls = model, effort, tier
-            overrides: dict[str, Any] = {**_REQUIRED_FEATURES, "service_tier": tier}
-            if effort:
-                overrides["model_reasoning_effort"] = effort
-            params: dict[str, Any] = {"cwd": context.working_dir, "model": model,
-                "approvalPolicy": "never", "sandbox": "danger-full-access", "config": overrides,
-                "developerInstructions": controller}
-            if context.resume_id:
-                params.update(threadId=context.resume_id, excludeTurns=True)
+            params = thread_start_params(context, model, effort, tier)
             prepared = await self._request("thread/resume" if context.resume_id else "thread/start", params)
             thread = prepared["thread"]
             thread_id = thread["id"]
@@ -705,6 +752,8 @@ class AppServerDriver(RunDriver):
             if prepared.get("serviceTier") != ("priority" if tier == "fast" else tier):
                 raise NativeProtocolError("Codex effective service tier differs from the request")
             await self._record(thread_id=thread_id)
+            self._input_history_path = thread.get("path")
+            self._input_history_prompt = context.prompt
             observer = self._metrics_observer(thread_id, path=thread.get("path"))
             if observer is not None:
                 try:
@@ -739,11 +788,8 @@ class AppServerDriver(RunDriver):
         if context.operation == "compact":
             await self._request("thread/compact/start", {"threadId": thread_id}, business=True)
             return
-        await self._request("turn/start", {"threadId": thread_id,
-            "input": [{"type": "text", "text": context.prompt}], "clientUserMessageId": request_id,
-            "collaborationMode": {"mode": "default", "settings": {
-                "model": model, "reasoning_effort": effort, "developer_instructions": None,
-            }}}, business=True)
+        await self._request("turn/start", turn_start_params(
+            context.prompt, thread_id, request_id, model, effort), business=True)
 
     def _bind(self, turn_id: Any, source: str) -> ParseOutput:
         assert self._input is not None

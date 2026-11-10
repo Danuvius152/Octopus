@@ -45,7 +45,7 @@ def test_owned_storage_recovery_can_be_interrupted_again_without_replaying_effec
                               "states": {"staged": "withdrawn", "started": "unknown", "unknown": "unknown",
                                          "exact": "done", "successor": "withdrawn"}}
     with sqlite3.connect(config.db_path) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (8,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (9,)
     reader.close()
     run("wiki", 72)
     assert note.read_bytes() == applied

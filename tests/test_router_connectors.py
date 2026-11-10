@@ -96,6 +96,74 @@ async def _start(client, kind="fakekind", **body):
     )
 
 
+@pytest.mark.parametrize("reconnect", [False, True])
+async def test_github_rename_keeps_original_installation_and_agent_authorization(client, monkeypatch, reconnect):
+    import httpx
+
+    from server.connectors.github import GitHubConnector
+
+    register(GitHubConnector())
+    await _configure(client, "github")
+    identities = {"before": (91001, "before"), "renamed": (91001, "renamed"), "other": (91002, "other")}
+
+    def provider(request):
+        if request.url == "https://github.com/login/oauth/access_token":
+            from urllib.parse import parse_qs
+
+            code = parse_qs(request.content.decode())["code"][0]
+            return httpx.Response(200, json={"access_token": "access-" + code, "scope": "repo"})
+        assert request.url == "https://api.github.com/user"
+        code = request.headers["Authorization"].removeprefix("Bearer access-")
+        numeric_id, login = identities[code]
+        return httpx.Response(200, json={"id": numeric_id, "login": login})
+
+    actual_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: actual_client(
+        **kwargs, transport=httpx.MockTransport(provider)))
+
+    async def authorize(code, installation_id=None):
+        body = {} if installation_id is None else {"installation_id": installation_id}
+        response = await _start(client, "github", **body)
+        assert response.status_code == 201, response.text
+        login_id = response.json()["login_id"]
+        pending = connectors_mod._login_mgr.get(login_id)
+        page = await client.get("/api/connectors/oauth/callback", params={
+            "code": code, "state": f"{login_id}:{pending.state}",
+        })
+        receipt = (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()
+        return page, receipt
+
+    page, first = await authorize("before")
+    assert "Connected" in page.text and first["status"] == "success"
+    selected = first["installation_id"]
+    manager = connectors_mod._require_manager()
+    original = await manager.db.get_connector_installation(selected)
+    owner = original["user_id"]
+    agent = await manager.db.get_system_agent(owner)
+    await manager.set_agent_connector(agent["id"], selected, True, owner)
+    assert (await client.patch(f"/api/connectors/{selected}", json={"enable_by_default": True})).status_code == 200
+
+    page, renamed = await authorize("renamed", selected if reconnect else None)
+    assert "Connected" in page.text and renamed["status"] == "success"
+    assert renamed["installation_id"] == selected
+    rows = (await client.get("/api/connectors")).json()
+    assert len(rows) == 1 and rows[0]["id"] == selected and rows[0]["label"] == "renamed"
+    assert rows[0]["created_at"] == original["created_at"] and rows[0]["enable_by_default"] is True
+    assert rows[0]["external_account_id"] == "91001"
+    enabled = await manager.enabled_installations_for_agent(agent["id"])
+    assert [row.id for row in enabled] == [selected]
+    assert (await client.get(f"/api/connectors/{enabled[0].id}/token")).json()["access_token"] == "access-renamed"
+
+    page, refused = await authorize("other", selected)
+    assert "Connection failed" in page.text and refused["status"] == "error"
+    assert refused["installation_id"] is None
+    assert (await client.get(f"/api/connectors/{selected}/token")).json()["access_token"] == "access-renamed"
+    page, other = await authorize("other")
+    assert "Connected" in page.text and other["status"] == "success"
+    assert other["installation_id"] != selected
+    assert {row["id"] for row in (await client.get("/api/connectors")).json()} == {selected, other["installation_id"]}
+
+
 async def _create_custom(client, kind="linear", **overrides):
     response = await client.post("/api/connectors/custom", json={
         "kind": kind, "display_name": kind.title(), "authorize_url": "https://provider.test/authorize",
@@ -104,6 +172,75 @@ async def _create_custom(client, kind="linear", **overrides):
         **overrides,
     })
     assert response.status_code == 201, response.text
+
+
+@pytest.mark.parametrize(("public_base", "request_base", "forwarded", "expected_base"), [
+    ("https://public.test", "http://internal.test:8000", {}, "https://public.test"),
+    (None, "https://remote.test", {}, "https://remote.test"),
+    ("", "https://remote.test", {}, "https://remote.test"),
+    (" \t ", "https://remote.test", {}, "https://remote.test"),
+    ("https://public.test///", "http://internal.test:8000", {}, "https://public.test"),
+    (" HTTPS://PUBLIC.test:443/ ", "http://internal.test:8000", {}, "https://public.test"),
+    ("https://public.test:8443/octopus/", "http://internal.test:8000", {}, "https://public.test:8443/octopus"),
+    ("http://[::1]:9000/octopus/", "http://internal.test:8000", {}, "http://[::1]:9000/octopus"),
+    (None, "http://internal.test:8000",
+     {"X-Forwarded-Host": "proxy.test:8443", "X-Forwarded-Proto": "https"}, "https://proxy.test:8443"),
+    ("", "http://internal.test:8000",
+     {"X-Forwarded-Host": "proxy.test", "X-Forwarded-Proto": "https"}, "https://proxy.test"),
+    (None, "http://internal.test:8000", {"X-Forwarded-Host": "proxy.test"}, "http://proxy.test"),
+    ("https://public.test/", "http://internal.test:8000",
+     {"X-Forwarded-Host": "proxy.test", "X-Forwarded-Proto": "http"}, "https://public.test"),
+])
+async def test_public_origin_is_fixed_through_setup_authorize_and_exchange(
+    client, monkeypatch, public_base, request_base, forwarded, expected_base,
+):
+    from urllib.parse import parse_qs, urlsplit
+
+    import httpx
+
+    from server.config import Settings, settings
+
+    configured = Settings(_env_file=None, public_base_url=public_base)
+    monkeypatch.setattr(settings, "public_base_url", configured.public_base_url)
+    client.base_url = request_base
+    client.headers.update(forwarded)
+    await _create_custom(client)
+    expected = expected_base + "/api/connectors/oauth/callback"
+    setup = await _configure(client, "linear")
+    assert setup["redirect_uri"] == expected
+    displayed = await client.get("/api/connectors/linear/oauth-client")
+    assert displayed.status_code == 200 and displayed.json()["redirect_uri"] == expected
+
+    started = await _start(client, "linear")
+    assert started.status_code == 201, started.text
+    login_id = started.json()["login_id"]
+    authorize = parse_qs(urlsplit(started.json()["authorize_url"]).query)
+    assert authorize["redirect_uri"] == [expected]
+    exchanges = []
+
+    def provider(request):
+        assert request.url == "https://provider.test/token"
+        fields = parse_qs(request.content.decode())
+        exchanges.append(fields)
+        return httpx.Response(200, json={"access_token": "origin-access", "scope": "read"})
+
+    actual_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: actual_client(
+        **kwargs, transport=httpx.MockTransport(provider)))
+    # A callback may arrive through another host or after configuration changes.
+    # Its original login must retain the URI that was sent to authorize.
+    monkeypatch.setattr(settings, "public_base_url", "https://changed.test")
+    page = await client.get("http://callback-internal.test/api/connectors/oauth/callback", params={
+        "code": "original", "state": authorize["state"][0],
+    }, headers={"X-Forwarded-Host": "callback-proxy.test", "X-Forwarded-Proto": "http"})
+    assert "Connected" in page.text
+    assert len(exchanges) == 1 and exchanges[0]["redirect_uri"] == [expected]
+    receipt = (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()
+    assert receipt["status"] == "success"
+    installations = (await client.get("/api/connectors")).json()
+    assert [row["id"] for row in installations] == [receipt["installation_id"]]
+    token = await client.get(f"/api/connectors/{receipt['installation_id']}/token")
+    assert token.status_code == 200 and token.json()["access_token"] == "origin-access"
 
 
 @pytest.mark.parametrize("stage", ["exchange", "identity"])
@@ -515,6 +652,28 @@ async def test_oauth_flow_installs_and_reports_success(client):
     assert st.status_code == 200
     assert st.json()["status"] == "success"
     assert st.json()["installation_id"] == inst["id"]
+
+
+async def test_reconnect_cannot_replace_selected_external_account_with_another(client, monkeypatch):
+    async def identity(self, token_set):
+        return token_set.access_token, "Account " + token_set.access_token
+
+    monkeypatch.setattr(FakeConnector, "fetch_external_identity", identity)
+    first, _ = await _install(client, "first")
+    second, _ = await _install(client, "second")
+    before = (await client.get("/api/connectors")).json()
+    started = await _start(client, installation_id=first["id"])
+    assert started.status_code == 201
+    login_id = started.json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    page = await client.get("/api/connectors/oauth/callback", params={
+        "code": "second", "state": f"{login_id}:{login.state}"})
+    assert "Connection failed" in page.text
+    status = (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()
+    assert status["status"] == "error" and status["installation_id"] is None
+    assert (await client.get("/api/connectors")).json() == before
+    assert (await client.get(f"/api/connectors/{first['id']}/token")).json()["access_token"] == "at-first"
+    assert (await client.get(f"/api/connectors/{second['id']}/token")).json()["access_token"] == "at-second"
 
 
 @pytest.mark.parametrize("prior", ["cancelled", "expired", "consumed"])

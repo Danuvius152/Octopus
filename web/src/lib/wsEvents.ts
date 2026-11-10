@@ -110,6 +110,7 @@ const recovery = fields({ kind: oneOf("recovery"), request_id: id, phase: oneOf(
 const legacyOr = <T,>(check: Guard<T>): Guard<string | T | null> => (v): v is string | T | null => v === null || text(v) || check(v);
 
 const envelope = { session_id: optional(id), seq: optional(nullable(integer)), created_at: maybeText,
+  body_state: optional(oneOf("inline", "preview")), detail_ref: maybeText, identity_unavailable: optional(boolean),
   runtime_metadata: optional(nullable(runtime)), tool_input: optional(nullable(record)),
   request_id: maybeText, attempt_id: maybeText, work_id: maybeText };
 const inSession = { session_id: id };
@@ -118,6 +119,7 @@ function event<const K extends string, const S extends Rules>(type: K, rules: S)
   return { type, matches: fields({ ...envelope, type: oneOf(type), ...rules }) };
 }
 const definitions = [
+  event("browser_unavailable", { message: text, detail_ref: maybeText }),
   event("context_state", { ...inSession, generation: id,
     context_state: ((value: unknown): value is ContextState | null => readContextState(value) !== undefined) }),
   event("submission", { ...inSession, client_request_id: id, accepted: boolean, message: maybeText, code: maybeText,
@@ -134,6 +136,7 @@ const definitions = [
   event("assistant_delta", { ...inSession, content: text }),
   event("assistant_text", { ...inSession, content: text }),
   event("subagent", { ...inSession, task_id: id, card_id: maybeText, native_thread_id: maybeText, native_turn_id: maybeText,
+    display_truncated: optional(boolean),
     parent_thread_id: maybeText, tool_call_id: maybeText, tool_use_id: maybeText,
     status: optional(oneOf("running", "completed", "failed", "cancelled", "interrupted", "unknown")), stop_reason: maybeText,
     name: optional(text), description: optional(text), prompt: optional(text), summary: optional(text),
@@ -141,6 +144,7 @@ const definitions = [
   event("tool_use", { ...inSession, tool: id, input: nullable(record), tool_use_id: maybeText }),
   event("tool_result", { ...inSession, output: optional(legacyOr(record)), tool_use_id: maybeText, is_error: optional(boolean) }),
   event("question_request", { ...inSession, question_id: id, questions: array(question), deadline: maybeText,
+    message_seq: optional(nullable(integer)),
     interaction_policy: optional(nullable(oneOf("human", "unattended"))), wait_mode: optional(nullable(oneOf("blocking", "optional", "mcp"))),
     snoozed: optional(nullable(boolean)) }),
   event("question_snoozed", { ...inSession, question_id: id, deadline: nullable(text), snoozed: boolean }),

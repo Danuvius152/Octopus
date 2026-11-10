@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useSessionStore } from "../stores/sessionStore";
 import { ConnectorsPage } from "./ConnectorsPage";
@@ -27,6 +27,38 @@ beforeEach(() => {
 afterEach(() => {
   cleanup(); useSessionStore.getState().setToken("");
   vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
+});
+
+it.each(["first", "second", "new"])("sends the exact %s connection target from the rendered button", async (selected) => {
+  const requests: unknown[] = [];
+  vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path === "/api/connectors") return Promise.resolve(Response.json(["first", "second"].map((id) => ({
+      id, kind: "fake", label: `${id} connection`, needs_reconnect: true, scopes: [],
+    }))));
+    if (path.endsWith("/oauth/start")) {
+      requests.push(JSON.parse(init!.body as string));
+      return Promise.resolve(startReply());
+    }
+    if (path.endsWith("/oauth/cancel")) return Promise.resolve(Response.json({ status: "cancelled" }));
+    return Promise.resolve(background(path));
+  }));
+  render(<ConnectorsPage onToggleSidebar={() => {}} />);
+  await screen.findByText("first connection");
+  await screen.findByText("second connection");
+  if (selected === "new") {
+    fireEvent.click(screen.getByRole("button", { name: "+ New Connector" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect" }));
+  } else {
+    const card = screen.getByText(`${selected} connection`).closest(".connector-item")!;
+    fireEvent.click(within(card as HTMLElement).getByRole("button", { name: "Reconnect →" }));
+  }
+  await screen.findByText("Waiting for sign-in in the opened tab…");
+  expect(requests).toEqual([{
+    kind: "fake", label: null, ...(selected === "new" ? {} : { installation_id: selected }),
+  }]);
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
 it("closing during start consumes the late ID without opening a tab or resuming UI polling", async () => {

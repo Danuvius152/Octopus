@@ -125,6 +125,7 @@ def _copy_tree(source: Path, destination: Path, home: Path, excluded: set[Path])
         target = destination / relative
         metadata = path.lstat()
         if stat.S_ISLNK(metadata.st_mode):
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             links[relative] = _relative(path.resolve(strict=True), home)
         elif stat.S_ISDIR(metadata.st_mode):
             target.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -142,23 +143,47 @@ def _copy_tree(source: Path, destination: Path, home: Path, excluded: set[Path])
     return links
 
 
+def _path_aliases(path: Path) -> list[Path]:
+    """Required link entries at their real parents, without copying subtrees."""
+    return [part.parent.resolve() / part.name for part in (*path.parents, path) if part.is_symlink()]
+
+
 def _application_resources(applications: list[dict]) -> tuple[list[Path], set[Path]]:
     from .applications import data_dir_for, runtime_dir_for
 
-    roots = []
-    excluded = set()
+    required_trees: list[tuple[str, Path]] = []
+    required_links: list[tuple[str, Path]] = []
+    runtimes: list[tuple[str, Path]] = []
+    excluded: set[Path] = set()
     for application in applications:
-        code = Path(application["app_dir"]).resolve()
+        app_id = application["id"]
+        stored_code = Path(application["app_dir"])
+        code = stored_code.resolve()
         deletion = json.loads(application["deletion"]) if application.get("deletion") else None
         if code.is_dir():
-            roots.append(code)
+            required_trees.append((app_id, code))
+            required_links.extend((app_id, link) for link in _path_aliases(stored_code))
         elif not (deletion and deletion["phase"] == "files" and not deletion["keep_files"] and not code.exists()):
             raise ValueError(f"Application code is missing: {code}")
-        data = Path(data_dir_for(str(code)))
+        # Siblings belong to the stored path, even when code is an alias.
+        stored_data = Path(data_dir_for(application["app_dir"]))
+        data = stored_data.resolve()
         if data.exists():
-            roots.append(data)
-        excluded.add(Path(runtime_dir_for(str(code))))
-    return roots, excluded
+            required_trees.append((app_id, data))
+            required_links.extend((app_id, link) for link in _path_aliases(stored_data))
+        runtime = Path(runtime_dir_for(application["app_dir"]))
+        runtimes.extend((app_id, path) for path in (runtime, runtime.parent.resolve() / runtime.name, runtime.resolve()))
+    for app_id, runtime in runtimes:
+        for owner_id, required in required_trees:
+            if runtime.is_relative_to(required) or required.is_relative_to(runtime):
+                raise ValueError(f"Application {app_id} runtime exclusion {runtime} overlaps "
+                                 f"application {owner_id} required resource {required}")
+        for owner_id, link in required_links:
+            if link.is_relative_to(runtime):
+                raise ValueError(f"Application {app_id} runtime exclusion {runtime} contains "
+                                 f"application {owner_id} required link {link}")
+        excluded.add(runtime)
+    return [path for _app_id, path in (*required_trees, *required_links)], excluded
 
 
 def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> dict:
@@ -210,8 +235,8 @@ def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> d
         excluded.update(state / name for name in ("index.sqlite3", "index.sqlite3-wal", "index.sqlite3-shm", "observer.lock", "vault.lock"))
     links = {}
     for root in _minimal_roots(roots):
-        if not root.is_dir() or root.is_symlink():
-            raise ValueError(f"Selected resource is not a regular directory: {root}")
+        if not root.is_dir():
+            raise ValueError(f"Selected resource is not a directory: {root}")
         links.update(_copy_tree(root, staging, home, excluded))
     if wiki:
         target_db = staging / _relative(state / "index.sqlite3", home)
@@ -431,7 +456,7 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
                 for name in [*roots, env_relative]:
                     source, target = staging / name, home / name
                     _ensure_directory(target.parent, home)
-                    if source.is_dir():
+                    if source.is_dir() and not source.is_symlink():
                         target.mkdir(mode=0o700)
                         published.append(target)
                         for child in source.iterdir():

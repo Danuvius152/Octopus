@@ -150,12 +150,16 @@ describe("ResearchCard", () => {
     expect(screen.getByText(/admission is unconfirmed/)).toBeTruthy();
   });
 
-  it("shows the error on failure", () => {
-    useSessionStore.setState({
-      research: { s1: [job({ status: "failed", error: "boom" })] },
-    });
+  it.each(["snapshot", "event"])("shows the original synthesis and diagnostic failure reasons from a %s", (source) => {
+    const error = "Report synthesis failed: original synthesis refusal\nSynthesis diagnostic material unavailable: PermissionError: diagnostic open refused";
+    useSessionStore.getState().setResearch("s1", [job()]);
+    if (source === "snapshot") useSessionStore.getState().setResearch("s1", [job({ status: "failed", error })]);
+    else handleWsMessage({ type: "research_failed", session_id: "s1", research_id: "r1", status: "failed", error });
     render(<ResearchCard sessionId="s1" />);
-    expect(screen.getByText("boom")).toBeTruthy();
+    const failure = screen.getByText(/Report synthesis failed: original synthesis refusal/);
+    expect(failure).toHaveTextContent("Synthesis diagnostic material unavailable: PermissionError: diagnostic open refused");
+    expect(screen.queryByRole("link", { name: "Download report" })).toBeNull();
+    expect(screen.queryByTitle("Cancel research")).toBeNull();
   });
 
   it("ignores a partial upsert for an unknown id (no malformed card)", () => {

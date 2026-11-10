@@ -22,6 +22,7 @@ from ..harness import (
     HarnessCredential,
     HarnessEvent,
     HarnessRun,
+    RunConfig,
     get_harness,
 )
 from ..models import (
@@ -275,6 +276,7 @@ class PendingQuestion:
 
     question_id: str
     questions: list[dict[str, Any]]
+    message_seq: int | None = None
     deadline: str | None = None
     expires_at: float | None = None
     request_id: str | None = None
@@ -481,7 +483,7 @@ class SessionManagerBase:
     def session_owner_failed(self, session_id: str) -> bool:
         raise NotImplementedError  # provided by a mixin
 
-    def _require_session_writer(self, session: Session) -> None:
+    def _require_session_writer(self, session: Session) -> SessionOwner | None:
         raise NotImplementedError  # provided by a mixin
 
     def _session_removed(self, session: Session) -> None:
@@ -553,9 +555,6 @@ class SessionManagerBase:
     ) -> PendingQuestion | None:
         raise NotImplementedError
 
-    async def _clear_fork_first_turn_state(self, session: Session) -> None:
-        raise NotImplementedError  # provided by a mixin
-
     async def _enforce_held_cap(self, *, keep_session_id: str | None = None) -> int:
         raise NotImplementedError  # provided by a mixin
 
@@ -607,6 +606,10 @@ class SessionManagerBase:
     ) -> HarnessRun:
         raise NotImplementedError  # provided by a mixin
 
+    def _run_config(self, session: Session, agent: dict[str, Any] | None = None,
+                    connectors: list[tuple[Any, Any]] | None = None) -> RunConfig:
+        raise NotImplementedError  # provided by a mixin
+
     async def drain_credential_refreshes(self) -> None:
         raise NotImplementedError  # provided by a mixin
 
@@ -630,6 +633,13 @@ class SessionManagerBase:
     async def _resolve_credential(
         self, session: Session, agent: dict[str, Any] | None, harness
     ) -> HarnessCredential | None:
+        raise NotImplementedError  # provided by a mixin
+
+    async def read_credential_for_validation(self, cred_id: str | None, *, backend: str,
+                                             user_id: str | None) -> HarnessCredential | None:
+        raise NotImplementedError  # provided by a mixin
+
+    async def _load_connectors(self, agent: dict[str, Any] | None) -> list[tuple[Any, Any]]:
         raise NotImplementedError  # provided by a mixin
 
 
@@ -723,7 +733,6 @@ class SessionManagerBase:
     ) -> HarnessCredential | None:
         raise NotImplementedError  # provided by a mixin
 
-    _DURABLE_FORK_META_KEYS = ("full_copy", "duplicated_from")
     _AUTO_ARCHIVE_ORIGINS = ("schedule",)
     _AUTO_ARCHIVE_ELIGIBLE = ("schedule", "delegation")
     _MAX_RECOVERY_ATTEMPTS = 1

@@ -12,17 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-
-def _call(tool: str, **kwargs):
-    """Invoke a FastMCP-wrapped tool function directly — FastMCP versions
-    differ in whether they expose the raw callable or a `.fn`."""
-    from server.mcp_servers import schedule as srv
-
-    fn = getattr(srv, tool)
-    try:
-        return fn(**kwargs)
-    except TypeError:
-        return fn.fn(**kwargs)  # type: ignore[attr-defined]
+from tests.schedule_support import call_tool as _call
 
 
 @pytest.fixture

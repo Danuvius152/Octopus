@@ -128,6 +128,8 @@ def frames():
 
 
 for line in frames():
+    with (root / "native-stdin.jsonl").open("ab") as handle:
+        handle.write(line + b"\n")
     frame = json.loads(line)
     with (root / "native-frames.jsonl").open("a") as handle:
         handle.write(json.dumps(frame) + "\n")
@@ -315,6 +317,23 @@ for line in frames():
         if mode == "wrong_root":
             turn_id = "another-root"
         send({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id}}})
+        if mode in {"replay_installed", "replay_installed_failure", "replay_installed_hold", "control_replay_installed"}:
+            # Shape observed from unmodified0.167.0 with a loopback400 provider.
+            with history.open("a") as handle:
+                handle.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "user", "content": [
+                        {"type": "input_text", "text": part["text"]} for part in params["input"]],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": turn_id}}}) + "\n")
+            send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id,
+                "item": {"type": "userMessage", "id": "original-user", "clientId": params["clientUserMessageId"],
+                    "content": params["input"]}}})
+            if mode == "replay_installed_hold":
+                continue
+            if mode == "replay_installed_failure":
+                send({"method": "turn/completed", "params": {"threadId": thread_id,
+                    "turn": {"id": turn_id, "status": "failed", "error": {
+                        "message": "Synthetic provider failure", "codexErrorInfo": "badRequest"}}}})
+                continue
         if mode in {"control_question", "control_question_resolved_before_ack"}:
             # Deliberately collide with the outstanding client turn/start ID.
             send({"id": frame["id"], "method": "item/tool/requestUserInput", "params": {

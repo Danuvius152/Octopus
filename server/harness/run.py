@@ -244,6 +244,7 @@ class HarnessRun:
         self._question_wake: Callable[[], None] | None = None
         self._question_replies: set[asyncio.Task[None]] = set()
         self._input_recorder: Callable[[NativeInputEvidence], Awaitable[None]] | None = None
+        self._input_history_recorder: Callable[[str | None, bool], Awaitable[None]] | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._private_settings: PrivateSettings | None = None
         self._spawn_identity: str | None = None
@@ -541,6 +542,10 @@ class HarnessRun:
             raise
         try:
             try:
+                if self._input_history_recorder is not None and not self.input_may_have_run:
+                    # A crash after this commit is conservative uncertainty.
+                    # Recheck authority after storage, before the actual write.
+                    await self._input_history_recorder(None, True)
                 await self.authorize_input()
                 proc = self._process
                 if target is not None and self.active_turn != target:
@@ -567,6 +572,18 @@ class HarnessRun:
 
     def bind_input_recorder(self, recorder: Callable[[NativeInputEvidence], Awaitable[None]]) -> None:
         self._input_recorder = recorder
+
+    def bind_input_history_recorder(self, recorder: Callable[[str | None, bool], Awaitable[None]] | None) -> None:
+        self._input_history_recorder = recorder
+
+    async def _record_input_history(self) -> None:
+        recorder = self._input_history_recorder
+        if recorder is None:
+            return
+        identity = await asyncio.to_thread(self._driver.installed_input_history) if self.input_may_have_run else None
+        if identity is not None or not self.input_may_have_run:
+            await recorder(identity, self.input_may_have_run)
+            self._input_history_recorder = None
 
     @property
     def input_identity(self) -> tuple[str, str]:
@@ -982,6 +999,7 @@ class HarnessRun:
                 await wait_group_exit(pending.pid, timeout=2.0, after_kill=True)
         proc = self._process
         if proc is None:
+            await self._record_input_history()
             if self._private_settings is not None:
                 self._private_settings.close()
             if self._activity_observer is not None:
@@ -1078,6 +1096,7 @@ class HarnessRun:
                     proc.returncode)
 
         await self._driver.finish_observations()
+        await self._record_input_history()
         self._process = None
         self._stdout_task = None
         self._stderr_task = None
@@ -1123,6 +1142,8 @@ class HarnessRun:
     async def _emit(self, event: HarnessEvent) -> None:
         if self._stream_closed:
             return
+        if event.type == "result":
+            await self._record_input_history()
         if self._driver.multiplexed and event.type == "result":
             if self._provider_terminal is None:
                 self._provider_terminal = event
@@ -1344,6 +1365,7 @@ class HarnessRun:
             if self._driver.multiplexed:
                 self.retire()
             await self._driver.finish_observations()
+            await self._record_input_history()
             if not self._driver.multiplexed and not self._stream_closed:
                 try:
                     await self._drain_observations()

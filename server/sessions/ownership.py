@@ -59,12 +59,16 @@ class OwnershipMixin(SessionManagerBase):
         owner.task.add_done_callback(lambda task: self._owner_ended(owner, task))
         return owner
 
-    def _require_session_writer(self, session: Session) -> None:
+    def _require_session_writer(self, session: Session) -> SessionOwner | None:
+        """Capture the existing writer without applying new-work admission."""
         owner = self._session_owners.get(id(session))
+        if owner is not None and owner.session is not session:
+            raise SessionOwnerUnavailable("The original Session owner has not finished cleanup")
         if owner is not None and owner.failed:
             raise SessionOwnerUnavailable("Session owner failed; retained input requires review")
         if owner is not None and asyncio.current_task() is not owner.task:
             raise RuntimeError("Only the original Session owner may change live runtime state")
+        return owner
 
     def _owner_ended(self, owner: SessionOwner, task: asyncio.Task[None]) -> None:
         if not owner.failed:

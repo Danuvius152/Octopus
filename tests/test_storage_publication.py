@@ -8,7 +8,7 @@ import pytest
 
 from server.config import settings
 from server.database import Database
-from server.storage_verification import verify_storage
+from server.storage_verification import verify_main, verify_storage
 from tests.accounts import create_account
 from tests.test_service_runtime import installation_settings
 
@@ -72,7 +72,7 @@ async def test_publication_rejects_incompatible_current_structure_or_facts_witho
 async def test_publication_verification_leaves_current_messages_and_input_facts_unchanged(installation):
     path = Path(installation.db_path)
     before = path.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 8
+    assert verify_storage(installation)['main_format_version'] == 9
     assert path.read_bytes() == before
     database = Database(str(path))
     await database.initialize()
@@ -92,8 +92,18 @@ async def test_publication_uses_the_same_main_database_alias_as_current_startup(
     alias.symlink_to(original)
     installation.db_path = str(alias)
     before = original.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 8
+    assert verify_storage(installation)['main_format_version'] == 9
     assert original.read_bytes() == before
+
+
+@pytest.mark.parametrize('external_id', [None, 'octocat:123', '01', '1\x00tail'])
+async def test_current_verifier_rejects_invalid_github_facts_even_if_constraints_were_bypassed(installation, external_id):
+    with sqlite3.connect(installation.db_path) as db:
+        db.execute('PRAGMA ignore_check_constraints=ON')
+        db.execute('INSERT INTO connector_installations(id,kind,label,auth_type,external_account_id,created_at) '
+                   'VALUES(?,?,?,?,?,?)', ('bad-github', 'github', 'Original label', 'oauth', external_id, 'time'))
+        with pytest.raises(RuntimeError, match='GitHub identity'):
+            verify_main(db)
 
 
 @pytest.mark.parametrize('damage', ['unknown-disposition', 'missing-error', 'invalid-error-type'])

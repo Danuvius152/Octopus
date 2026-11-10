@@ -46,6 +46,37 @@ def _submission(row) -> dict[str, Any]:
 
 
 class ClientSubmissionsMixin(DatabaseBase):
+    async def record_input_history(self, session_id: str, request_id: str, attempt_id: str,
+                                   generation: str, backend: str, native_id: str | None,
+                                   may_have_run: bool) -> None:
+        """Commit original input and replay consumption together, without an outcome."""
+        from ..fork_helpers import consumed_fork_metadata
+        async with self.transaction(write=True) as tx:
+            row = await tx.fetch_one(
+                "SELECT i.execution_generation,i.execution_owner,i.native_inputs,"
+                "s.backend,s.claude_session_id,s.fork_needs_replay,s.fork_metadata "
+                "FROM client_submissions i JOIN sessions s ON s.id=i.session_id WHERE i.session_id=? AND i.request_id=?",
+                (session_id, request_id))
+            if row is None or row[0] != generation or row[1] != request_id or row[3] != backend:
+                raise ValueError("Input history lost its original execution binding")
+            if not row[5]:
+                return
+            if native_id is not None:
+                if not may_have_run or row[4] is not None and row[4] != native_id:
+                    raise ValueError("Input history identity changed")
+                entries = [NativeInputEvidence.model_validate(item) for item in json.loads(row[2])]
+                if backend == "codex" and not any(item.attempt_id == attempt_id and item.thread_id == native_id
+                        and item.kind == "start" and item.state == "accepted" for item in entries):
+                    raise ValueError("Installed input has no matching native start")
+                await tx.execute("UPDATE sessions SET claude_session_id=?,fork_needs_replay=0,fork_metadata=? WHERE id=?",
+                    (native_id, consumed_fork_metadata(row[6]), session_id))
+            delivery = "confirmed" if native_id else "unknown" if may_have_run else "none"
+            await tx.execute(
+                "UPDATE client_submissions SET delivery_state=?,reason_code=?,state_version=state_version+1,updated_at=? "
+                "WHERE session_id=? AND request_id=?",
+                (delivery, "input_history_unconfirmed" if delivery == "unknown" else None,
+                 datetime.now(UTC).isoformat(), session_id, request_id))
+
     async def record_native_input(self, session_id: str, request_id: str, evidence: NativeInputEvidence,
                                   *, process_group: int | None = None) -> None:
         """Commit protocol evidence on its original submission before business I/O.

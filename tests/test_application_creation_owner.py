@@ -360,7 +360,7 @@ async def test_preparation_failures_close_the_resources_the_original_operation_c
         with pytest.raises(RuntimeError, match="row preparation refused"):
             await operation
         assert await apps.list_applications(user_id=builder["user_id"]) == []
-        assert not (paths_for(builder["user_id"]).applications / "preparation-failure").exists()
+        assert list(paths_for(builder["user_id"]).applications.iterdir()) == []
     else:
         row = await operation
         assert row["status"] == "failed" and f"{boundary} preparation refused" in row["error"]
@@ -379,7 +379,7 @@ async def test_preexisting_application_directory_is_never_claimed_or_removed(cre
     sentinel = directory / "existing.txt"
     sentinel.write_text("Existing user content")
     monkeypatch.setattr(applications, "allocate_app_dir", lambda *args: str(directory))
-    with pytest.raises(FileExistsError):
+    with pytest.raises(applications.ApplicationError, match="resource already exists"):
         await apps.create_application(name="Existing destination", description="Refuse without cleanup", agent_id=builder["id"])
     assert sentinel.read_text() == "Existing user content"
     assert await apps.list_applications(user_id=builder["user_id"]) == []

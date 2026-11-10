@@ -28,7 +28,7 @@ import re
 import shutil
 import uuid
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from weakref import WeakValueDictionary
 
@@ -118,29 +118,17 @@ def slugify(name: str) -> str:
     return slug[:48] or "app"
 
 
-def allocate_app_dir(name: str, user_id: str | None = None) -> str:
-    """Pick an unused directory for `name` under the managed root.
+def allocate_app_dir(name: str, app_id: str, user_id: str | None = None) -> str:
+    """Allocate by immutable identity; the slug only makes the path readable.
 
-    The slug is the readable part; collisions get a `-2`, `-3`, … suffix so
-    two applications never share a directory. The result is stored on the row,
-    which is why renaming an application later never has to move files — and
-    why applications that already exist keep working when this root moves: the
-    row says where they are, not this function.
-
-    Under the owner's root once there is one (multi-tenancy.md §6), which also
-    means two accounts' apps cannot collide on a slug.
+    The stored path remains authoritative for existing apps. Missing code does
+    not release that app's data, runtime or unfinished deletion responsibility.
     """
     root = (
         str(paths_for(user_id).applications) if user_id else applications_root()
     )
     os.makedirs(root, exist_ok=True)
-    stem = slugify(name)
-    candidate = os.path.join(root, stem)
-    n = 2
-    while os.path.exists(candidate):
-        candidate = os.path.join(root, f"{stem}-{n}")
-        n += 1
-    return candidate
+    return os.path.join(root, f"{slugify(name)}--{app_id}")
 
 
 def data_dir_for(app_dir: str) -> str:
@@ -163,6 +151,47 @@ def runtime_dir_for(app_dir: str) -> str:
     doesn't carry a few hundred megabytes of packages.
     """
     return app_dir.rstrip("/") + ".runtime"
+
+
+def _resource_claims(app_id: str, app_dir: str) -> tuple[tuple[str, ...], set[str]]:
+    """Content trees and required link entries have different deletion scope."""
+    paths = (app_dir, data_dir_for(app_dir), runtime_dir_for(app_dir))
+    resolved = []
+    aliases: set[str] = set()
+    for path in paths:
+        try:
+            try:
+                resolved.append(os.path.realpath(path, strict=True))
+            except FileNotFoundError:
+                resolved.append(os.path.realpath(path))
+        except OSError as error:
+            raise ApplicationError(f"Application {app_id} resource cannot be resolved: {path}: {error}",
+                                   status_code=409) from error
+    pending = list(paths)
+    visited = set()
+    while pending:
+        path = pending.pop()
+        if path in visited:
+            continue
+        visited.add(path)
+        try:
+            for part in (*Path(path).parents, Path(path)):
+                if part.is_symlink():
+                    # Removing this entry breaks access even when its final
+                    # target is outside the directory being removed. Follow
+                    # chained links too; a shared parent is only an entry,
+                    # never an exclusive claim to its whole target subtree.
+                    aliases.add(str(part.parent.resolve() / part.name))
+                    target = Path(os.readlink(part))
+                    pending.append(str(target if target.is_absolute() else part.parent / target))
+        except OSError as error:
+            raise ApplicationError(f"Application {app_id} resource cannot be resolved: {path}: {error}",
+                                   status_code=409) from error
+    return tuple(resolved), aliases
+
+
+def _paths_overlap(left: str, right: str) -> bool:
+    return os.path.commonpath((left, right)) in (left, right)
 
 
 def backend_script(app_dir: str, name: str) -> str | None:
@@ -335,6 +364,9 @@ class ApplicationManager:
         # request result or application status is copied into this map.
         self._build_updates: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._deletions: dict[str, tuple[bool, asyncio.Task[None]]] = {}
+        # Allocation commits a row before releasing this lock; deletion keeps
+        # the row's resource claim until all removals and row deletion finish.
+        self._resource_updates = asyncio.Lock()
 
     def bind(self, session_mgr: SessionManager, db: Database) -> None:
         self.session_mgr = session_mgr
@@ -362,6 +394,45 @@ class ApplicationManager:
     def require_writable(row: dict[str, Any]) -> None:
         if row.get("deletion") is not None:
             raise ApplicationError("Application deletion is unfinished; retry deletion", status_code=409)
+
+    async def _require_exclusive_resources(
+        self, app_id: str, app_dir: str, user_id: str | None, *,
+        allocating: bool = False, require_managed: bool = True,
+    ) -> None:
+        """Called under resource coordination immediately before filesystem effects."""
+        paths, _aliases = _resource_claims(app_id, app_dir)
+        if require_managed and any(not is_inside_root(path, user_id) for path in paths):
+            raise ApplicationError(f"Application {app_id} resources are outside the managed account root: {paths}",
+                                   status_code=409)
+        for index, path in enumerate(paths):
+            if any(_paths_overlap(path, other) for other in paths[index + 1:]):
+                raise ApplicationError(f"Application {app_id} resources overlap within its own family: {paths}",
+                                       status_code=409)
+        rows = await self._require_db().load_applications(include_archived=True, user_id=user_id)
+        for other in rows:
+            if other["id"] == app_id:
+                if allocating:
+                    raise ApplicationError(f"Application {app_id} already owns resources: {other['app_dir']}", status_code=409)
+                continue
+            other_paths, other_aliases = _resource_claims(other["id"], other["app_dir"])
+            for owned in other_paths:
+                for path in paths:
+                    if _paths_overlap(path, owned):
+                        raise ApplicationError(
+                            f"Application {app_id} resource {path} conflicts with application {other['id']} resource {owned}",
+                            status_code=409,
+                        )
+            for alias in other_aliases:
+                for path in paths:
+                    if os.path.commonpath((path, alias)) == path:
+                        raise ApplicationError(
+                            f"Application {app_id} resource {path} contains application {other['id']} required link {alias}",
+                            status_code=409,
+                        )
+        if allocating:
+            for path in (app_dir, data_dir_for(app_dir), runtime_dir_for(app_dir)):
+                if os.path.lexists(path):
+                    raise ApplicationError(f"Application {app_id} resource already exists: {path}", status_code=409)
 
     # ------------------------------------------------------------------ reads
 
@@ -501,28 +572,32 @@ class ApplicationManager:
             raise ApplicationError("entrypoint must be a path inside the app")
 
         app_id = uuid.uuid4().hex[:12]
-        app_dir = allocate_app_dir(name, owner_id)
-        os.mkdir(app_dir)  # A preexisting destination is never ours to clean.
+        app_dir = allocate_app_dir(name, app_id, owner_id)
         now = _now()
         session = None
+        created_dir = False
         try:
             # Coordinate the first binding with followup build/delete writers.
             # create_session only prepares storage; notification stays outside.
             async with self._build_updates.setdefault(app_id, asyncio.Lock()):
-                await db.save_application(
-                    app_id=app_id,
-                    name=name,
-                    description=description,
-                    icon=icon,
-                    agent_id=agent_id,
-                    session_id=None,
-                    app_dir=app_dir,
-                    entrypoint=entrypoint,
-                    status=STATUS_BUILDING,
-                    created_at=now,
-                    updated_at=now,
-                    user_id=owner_id,
-                )
+                async with self._resource_updates:
+                    await self._require_exclusive_resources(app_id, app_dir, owner_id, allocating=True)
+                    os.mkdir(app_dir)  # A preexisting destination is never ours to clean.
+                    created_dir = True
+                    await db.save_application(
+                        app_id=app_id,
+                        name=name,
+                        description=description,
+                        icon=icon,
+                        agent_id=agent_id,
+                        session_id=None,
+                        app_dir=app_dir,
+                        entrypoint=entrypoint,
+                        status=STATUS_BUILDING,
+                        created_at=now,
+                        updated_at=now,
+                        user_id=owner_id,
+                    )
 
                 session = await self.session_mgr.create_session(
                     agent_id=agent_id,
@@ -536,9 +611,13 @@ class ApplicationManager:
 
         except Exception as error:
             db.health.require_healthy()
+            if not created_dir:
+                raise
             if await db.get_application(app_id) is None:
                 try:
-                    shutil.rmtree(app_dir)
+                    async with self._resource_updates:
+                        await self._require_exclusive_resources(app_id, app_dir, owner_id)
+                        shutil.rmtree(app_dir)
                 except FileNotFoundError:
                     if os.path.lexists(app_dir):
                         raise
@@ -885,6 +964,12 @@ class ApplicationManager:
             backend_supervisor.close_application(app_id)
         session_ids = await db.application_session_ids(app_id)
         try:
+            # A preexisting conflict must not advance the original phase or
+            # retire writers. Recheck below after those writers have exited.
+            async with self._resource_updates:
+                await self._require_exclusive_resources(
+                    app_id, row["app_dir"], row.get("user_id"), require_managed=not state["keep_files"],
+                )
             if state["phase"] == "retiring":
                 if self.session_mgr is None:
                     raise ApplicationError("ApplicationManager not bound", status_code=500)
@@ -896,20 +981,21 @@ class ApplicationManager:
                     await app_agent_manager.delete_conversations_for_app(app_id)
                 state = dict(state, phase="files")
                 await db.set_application_deletion(app_id, state)
-            if not state["keep_files"]:
-                paths = (row["app_dir"], data_dir_for(row["app_dir"]), runtime_dir_for(row["app_dir"]))
-                # Validate all targets before touching the first one.
-                if any(not is_inside_root(path, row.get("user_id")) for path in paths):
-                    raise ApplicationError("Application files are outside the managed account root", status_code=409)
-                for path in paths:
-                    try:
-                        await asyncio.to_thread(shutil.rmtree, path)
-                    except FileNotFoundError:
-                        # Only an absent target is complete; a missing child
-                        # inside a still-present directory remains an error.
-                        if os.path.lexists(path):
-                            raise
-            await db.delete_application(app_id)
+            async with self._resource_updates:
+                await self._require_exclusive_resources(
+                    app_id, row["app_dir"], row.get("user_id"), require_managed=not state["keep_files"],
+                )
+                if not state["keep_files"]:
+                    paths = (row["app_dir"], data_dir_for(row["app_dir"]), runtime_dir_for(row["app_dir"]))
+                    for path in paths:
+                        try:
+                            await asyncio.to_thread(shutil.rmtree, path)
+                        except FileNotFoundError:
+                            # Only an absent target is complete; a missing child
+                            # inside a still-present directory remains an error.
+                            if os.path.lexists(path):
+                                raise
+                await db.delete_application(app_id)
         except Exception as exc:
             db.health.require_healthy()
             state = dict(state, error=str(exc))

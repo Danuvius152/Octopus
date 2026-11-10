@@ -104,6 +104,8 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
   const addMessage: typeof addMessageRaw = (sid, msg) =>
     addMessageRaw(sid, {
       ...msg,
+      body_state: msg.body_state ?? data.body_state, detail_ref: msg.detail_ref ?? data.detail_ref,
+      identity_unavailable: msg.identity_unavailable ?? data.identity_unavailable,
       runtime_metadata: msg.runtime_metadata ?? data.runtime_metadata,
       seq: msg.seq ?? seq ?? undefined,
       created_at: msg.created_at ?? data.created_at ?? undefined,
@@ -116,6 +118,10 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
   }
 
   switch (data.type) {
+    case "browser_unavailable":
+      addMessage(sessionId || "__global", { role: "system", type: "notice", content: data.message,
+        body_state: data.detail_ref ? "preview" : undefined, detail_ref: data.detail_ref });
+      break;
     case "submission":
     case "command_receipt":
       // Pending command ownership belongs to this hook's captured socket.
@@ -196,6 +202,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         description: (data.description) ?? "",
         prompt: (data.prompt) ?? "",
         summary: (data.summary) ?? "",
+        display_truncated: data.display_truncated ?? false,
         tokens: (data.tokens) ?? null,
         tool_uses: (data.tool_uses) ?? null,
         duration_ms: (data.duration_ms) ?? null,
@@ -243,6 +250,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         tool_use_id: questionId,
       });
       addPendingQuestion(sessionId, {
+        body_state: data.body_state, detail_ref: data.detail_ref, message_seq: data.message_seq,
         question_id: questionId,
         questions,
         deadline: data.deadline,

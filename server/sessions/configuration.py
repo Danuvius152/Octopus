@@ -108,6 +108,7 @@ class ConfigurationMixin(SessionManagerBase):
             state = align_context(session.context_state, target)
             if state is None and context_target(session, agent) != target:
                 state = invalidate_context(None, target, "configuration_changed", binding=True)
+            owner = self._require_session_writer(session)
             updates["context_state"] = state.model_dump_json() if state else None
             await self.db.update_session_field(session_id, **updates)
             for key, value in updates.items():
@@ -115,7 +116,8 @@ class ConfigurationMixin(SessionManagerBase):
                     setattr(session, key, value)
             if state != session.context_state:
                 session.context_state = state
-                self._session_owner(session).runtime.context_changed()
+                if owner is not None:
+                    owner.runtime.context_changed()
         return session
 
     async def delete_credential_binding(self, credential_id: str, user_id: str | None) -> dict[str, Any] | None:

@@ -88,6 +88,32 @@ async def test_ack_is_not_completion_and_second_identity_is_not_accepted(native_
     assert not status["execution"]["recoverable_input"]
 
 
+async def test_archive_after_compact_ack_preserves_original_unknown_effect(native_runtime, tmp_path):
+    manager, _, session, mode, _, _ = native_runtime
+    await submit_client_message(manager, session.id, "Create native history", [], "before", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    mode[0] = "compact_ack_only"
+    accepted = await submit_input(manager, session.id, ClientSubmissionRequest.model_validate({
+        "client_request_id": "archive-compact", "operation": {"kind": "compact"},
+    }), user_id=session.user_id)
+    async with asyncio.timeout(3):
+        while True:
+            status = await get_submission_status(manager, session.id, "archive-compact", user_id=session.user_id)
+            if status["execution"]["native_inputs"] and status["execution"]["native_inputs"][-1]["acknowledged"]:
+                break
+            await asyncio.sleep(0)
+    owner = manager._session_owners[id(session)]
+
+    await asyncio.wait_for(manager.archive_session(session.id, replace=False), 5)
+    assert not owner.failed
+    result = await get_submission_status(manager, session.id, "archive-compact", user_id=session.user_id)
+    assert result["request_id"] == accepted["request_id"]
+    assert result["outcome"]["status"] == "interrupted"
+    assert result["outcome"]["compact"]["effect"] == "unknown"
+    state = (await get_session(manager, session.id, user_id=session.user_id)).context_state
+    assert state.validity == "stale" and state.invalidation.reason == "operation_unconfirmed"
+
+
 @pytest.mark.parametrize("failure", ["no_effect", "native_failed", "disconnect", "conflicting_root", "error_after_root"])
 async def test_native_compact_failure_never_replays_or_claims_noop(native_runtime, tmp_path, failure):
     manager, _, session, mode, starts, _ = native_runtime
@@ -133,7 +159,7 @@ async def test_http_and_ws_share_typed_durable_compact_without_alias_or_recovery
             "recovery_of_client_id": "compact-ws"})).json()
         assert recovery["code"] == "recovery_unavailable" and not recovery["accepted"]
     with sqlite3.connect(tmp_path / "product.db") as reader:
-        assert verify_main(reader) == 8
+        assert verify_main(reader) == 9
 
 
 @pytest.mark.parametrize("point", ["admission", "claim", "possible_send"])
@@ -235,7 +261,7 @@ async def test_restart_keeps_original_compact_fact_without_replay(native_runtime
         assert not status["execution"]["recoverable_input"]
         assert restored.dispatch_snapshot(session.id)["items"] == []
         with sqlite3.connect(copy) as reader:
-            assert verify_main(reader) == 8
+            assert verify_main(reader) == 9
     finally:
         await restored.close_session_owners()
         await restored_db.close()

@@ -29,6 +29,8 @@ import { NativeSubagentCard, SubagentCard } from "./SubagentCard";
 import { projectToolCall, readRuntimeMetadata } from "../lib/toolIdentity";
 import { questionClosure } from "../lib/questionPresentation";
 import { requestSource } from "../lib/injectedTurns";
+import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
+import { displayToolInput } from "../lib/messagePresentation";
 
 // Marker the backend prepends to the synthesized user message it
 // injects when a bg task completes. Used to render those messages
@@ -64,7 +66,7 @@ interface MessageBubbleProps {
   // user messages when set + the message has a known seq. Called with the
   // rewind target seq.
   onFork?: (seq: number) => void;
-  onRestoreInput?: () => void;
+  onRestoreInput?: (message: Message) => void;
   restoreInputDisabled?: boolean;
 }
 
@@ -94,7 +96,7 @@ function OutcomeResult({ message, sessionId, onRestoreInput, restoreInputDisable
       </details>}
     {outcome.code === "attachment_unavailable" && Boolean(message.tool_input?.rejected_input) && onRestoreInput &&
       <button type="button" className="text-sm text-primary underline" disabled={restoreInputDisabled}
-        onClick={onRestoreInput}>Restore draft and re-upload files</button>}
+        onClick={() => onRestoreInput(message)}>Restore draft and re-upload files</button>}
   </div>;
 }
 
@@ -170,7 +172,16 @@ function AttachmentList({
   );
 }
 
-export function MessageBubble({
+export function MessageBubble(props: MessageBubbleProps) {
+  return <MessageDetails key={`${props.sessionId}:${props.message.seq}:${props.message.detail_ref}`}
+    sessionId={props.sessionId} message={props.message}>{(message) =>
+      message !== props.message && (message.type === "native_subagent" || props.message.identity_unavailable)
+        ? <SavedMessageRecord message={message} label={props.message.identity_unavailable ? "Full saved message record" : "Full saved helper record"} />
+        : <MessageBody {...props} message={normalizeMessage(message)} />
+    }</MessageDetails>;
+}
+
+function MessageBody({
   message,
   sessionId,
   agentName,
@@ -184,7 +195,8 @@ export function MessageBubble({
   // Mirror the header's avatar treatment: show the agent's emoji, falling
   // back to the default octopus when an agent exists but set no avatar.
   const assistantAvatar = agentName ? agentAvatar || "🐙" : null;
-  const asyncQuestion = !plain && message.role === "assistant" && hasAsyncQuestions(message.tool_input?.native_item);
+  const asyncQuestion = !plain && message.role === "assistant" &&
+    (message.tool_input?.async_questions_preview === true || hasAsyncQuestions(message.tool_input?.native_item));
   switch (message.type) {
     case "native_subagent":
       return typeof message.tool_input?.card_id === "string"
@@ -418,7 +430,7 @@ function ToolUseBlock({
 }) {
   const [expanded, setExpanded] = useState(false);
   const inputStr = message.tool_input
-    ? JSON.stringify(message.tool_input, null, 2)
+    ? JSON.stringify(displayToolInput(message.tool_input, message.content), null, 2)
     : "";
   const preview = (() => {
     const input = message.tool_input;

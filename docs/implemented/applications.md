@@ -12,11 +12,26 @@ executable `start.sh` enables a supervised backend under the
 
 ## 2. Stored identity and directories
 
-The builder uses an ordinary session (`origin='application'`). Code paths are
-allocated below `workspace.paths_for(owner).applications`, stored on the row and
-not renamed with the display name. Code, durable `.data` and rebuildable
-`.runtime` are separate siblings. Application status, backend status and deletion
-progress describe independent facts.
+The builder uses an ordinary session (`origin='application'`). A new application
+gets its immutable `app_id` before allocating
+`workspace.paths_for(owner).applications/<slug>--<full app_id>`. The slug is
+readable context; the complete stored ID separates applications with the same
+display name. Renaming does not move resources, and existing rows retain their
+stored `app_dir`.
+
+Code, durable `.data` and rebuildable `.runtime` are separate siblings of that
+stored address, including when code uses an alias. The siblings are not derived
+from the code alias's final target. Application status, backend status and
+deletion progress describe independent facts.
+
+Existing application rows retain resource claims, including archived rows,
+unfinished deletion and missing code directories. Allocation checks the whole
+canonical code/data/runtime family against every retained row in the account
+and refuses existing candidate entries, including dangling links. Kept files or
+partially removed code do not make the original family available for reuse.
+Allocation holds resource coordination until its row is saved; completed
+deletion releases that claim only after its remaining effects and row removal.
+The rows remain the persistent authority; there is no second resource registry.
 
 ## 3. Serving the app
 
@@ -157,6 +172,17 @@ are refused. The row's independent `deletion` fact records `retiring` or `files`
 the original file-retention choice and any failure. Build status does not stand
 in for deletion progress.
 
+After closing admission, deletion checks resource ownership before retirement
+advances its phase, then checks again under resource coordination before file
+cleanup and row removal. Canonical families must not overlap within one
+application or with another retained application. Required symlink entries at
+their physical parents, including chained links, are also protected: removing
+one application's tree cannot break another's stored access path. Independent
+applications may share a parent link without claiming its whole target tree.
+Conflicts or unresolvable ownership report application IDs and paths and retain
+the row, current phase and retry responsibility; cleanup does not guess an owner
+or move legacy directories.
+
 The operation first closes input/start admission, then joins the original
 development executions, exact delegated rounds and independent BG, application
 conversations, and backend process group/readers. Session archive or deletion
@@ -175,7 +201,10 @@ targets must be inside the account's managed root before the first removal.
 Missing targets are complete; other filesystem errors preserve the application
 row, remaining files and retry responsibility. Cleanup is not a filesystem
 transaction. Only completed cleanup permits row deletion and its success event.
-`keep_files=true` skips file removal, with the same retirement requirement.
+`keep_files=true` skips file removal, with the same retirement and resource
+conflict requirements. An external legacy address alone does not prevent that
+choice from completing; managed-root restrictions protect allocation and actual
+file removal.
 
 An unfinished deletion remains closed after restart; startup neither runs the
 app nor resumes file deletion. Explicit retry continues its unconfirmed phase.
