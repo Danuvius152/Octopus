@@ -70,6 +70,61 @@ def _repo(tmp_path):
 # ----------------------------------------------------------------- happy path
 
 
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+@pytest.mark.parametrize("relation", ["same", "descendant", "relative", "symlink"])
+async def test_duplicate_refuses_self_contained_destination_before_creating_anything(
+    manager, tmp_path, monkeypatch, backend, relation,
+):
+    repo = _repo(tmp_path)
+    parent = await _seed_parent(manager, repo, backend=backend)
+    alias = tmp_path / "alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    destination = {
+        "same": str(repo), "descendant": str(repo / "new" / "copy"),
+        "relative": "myproject/new/copy", "symlink": str(alias / "new" / "copy"),
+    }[relation]
+    monkeypatch.setattr(manager, "_fork_copy_dest", lambda *_: destination)
+    before = await manager.db.load_sessions(include_archived=True)
+    with pytest.raises(ForkError) as refused:
+        await manager.duplicate_session(parent.id)
+    assert refused.value.reason == "invalid_copy_destination"
+    assert await manager.db.load_sessions(include_archived=True) == before
+    assert not (repo / "new").exists()
+    assert (repo / "code.py").read_text() == "print('hi')\n"
+    assert manager.get_session(parent.id) is parent and not parent._forking
+
+
+async def test_default_copy_base_inside_source_is_rejected_without_creating_base(manager, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    source = home / ".octopus"
+    source.mkdir(parents=True)
+    parent = await _seed_parent(manager, source)
+    before = await manager.db.load_sessions(include_archived=True)
+    with pytest.raises(ForkError) as refused:
+        await manager.duplicate_session(parent.id)
+    assert refused.value.reason == "invalid_copy_destination"
+    assert not (source / "fork").exists()
+    assert await manager.db.load_sessions(include_archived=True) == before
+
+
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+async def test_duplicate_accepts_relative_sibling_with_same_name_prefix(manager, tmp_path, monkeypatch, backend):
+    repo = _repo(tmp_path)
+    parent = await _seed_parent(manager, repo, backend=backend)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(manager, "_fork_copy_dest", lambda *_: "myproject-copy")
+    fork = await manager.duplicate_session(parent.id)
+    copied = Path(fork.working_dir)
+    assert copied == tmp_path / "myproject-copy"
+    assert (copied / "code.py").read_text() == "print('hi')\n"
+    assert (copied / "pkg" / "mod.py").read_text() == "X = 1\n"
+    (copied / "code.py").write_text("Independent edit")
+    assert (repo / "code.py").read_text() == "print('hi')\n"
+    assert manager.get_session(parent.id) is parent
+
+
 @pytest.mark.asyncio
 async def test_duplicate_copies_dir_and_history(manager, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -472,7 +527,7 @@ async def test_duplicate_preserves_an_existing_destination(manager, tmp_path, mo
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     parent = await _seed_parent(manager, _repo(tmp_path))
     destination = Path(manager._fork_copy_dest(parent.working_dir, "existing"))
-    destination.mkdir()
+    destination.mkdir(parents=True)
     sentinel = destination / "existing.txt"
     sentinel.write_text("This directory was not created by the new fork.")
     monkeypatch.setattr(manager, "_fork_copy_dest", lambda *_: str(destination))

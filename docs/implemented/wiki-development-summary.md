@@ -152,12 +152,22 @@ cancel 的 `operation_id` 与取消意图同事务保存，丢确认后重放只
 取消重试后的执行。curate/readmit 保持原 owner-only 策略；App 仅保留原白名单，
 readmit 不向 App/MCP 新开放。
 
-`content_mutations` 为 publish/revise/restructure/organize 保留同代 Store、History
+`content_mutations` 为普通编辑、history restore、旧 snapshot restore 以及
+publish/revise/restructure/organize 保留同代 Store、History
 和注册保护，并把当前 curator、path、source-read、revision 检查交给原 Curation/
 History/grant 规则。效果前仍核验真实授权，原像、prepared/applied、文件效果和
-SQLite 收据各自保留，取消或记录失败不伪造跨资源回滚。普通编辑、history/restore、
-旧 snapshot 恢复、显式 recovery 和 App bridge 继续各自完整操作；snapshot 创建
+SQLite 收据各自保留，取消或记录失败不伪造跨资源回滚。显式 recovery 和 App bridge
+继续各自完整操作；snapshot 创建
 仍为 410。SmartReader 的 agent 通路和 Sapphire 的文件通路保持，同次保存不双写。
+
+三类人工写入在 `using → History.locked → registered → tasks.caller` 内完成。
+App 路由从首次绑定检查使用的同一配置捕获原 registration generation、App 身份
+及 MCP scope，先于请求正文等待；该身份由服务器构造，不接收正文代次或事后补取。
+最终注册保护内核对原代次、当前绑定及原 caller，保护持续到 History 效果结束。
+撤权先提交则旧操作没有正文、历史或回执效果，A→B→A 也不恢复旧资格；写入先
+取得完整保护则先完成，改绑等待，不回滚已完成内容。等待网络正文时不持有 Store
+或文件锁。账户人工入口不额外要求 App 代次；human-only、维护 grant/publish 与
+revision 冲突分别沿用原规则，审计 actor 不授予权限。
 
 Sapphire 的受管 HTTP 操作由 AppMutation/app_bridge 持有完整生命周期，proxy
 只消费结果。它复用 supervisor 的原实例使用登记；202 无 await 转交原登记与
@@ -317,6 +327,12 @@ backend 清理。`require_retired` 使用会话公开的 work/旧会话范围查
 定位结果；旧路径被其他文档占据不能污染其前像，历史展示不自动 restore。
 
 任务详情分页读取完整错误、原执行和输出回执，保留 no_change 原因；jobs 原行按 attempt 保存完整诊断，即使 ingest 或请求准备前失败、尚无执行引用或 items，重试后仍可读取。历史输出按原 receipt/hash 读取，当前正文按稳定文档身份定位移动后的路径。查看只执行 GET。核验原效果和索引、继续已知未完成项、有限 scope 重新准入是三个显式动作；后两者仍要求原资源退役和当前权限，控制操作标识在响应丢失后复用，不能因此新增尝试。
+
+`WikiHistory.read_blob` 在原 Store 使用范围和与 GC 共用的 History 锁内交付经过
+摘要校验的原字节，支持外层写锁中的重入。任务输出及 readback 不自行解释 blob
+布局或分开检查存在再打开。缺失返回 410，摘要损坏返回完整性冲突，权限及其他
+I/O 错误保留存储失败；读取与 GC 交错只返回原字节或明确不可用，不借当前正文
+代替历史。原 job/attempt/receipt 资格、分页、readback 范围与保留策略各自保持。
 
 注册变更后的显式 scope 再准入保留同一文档的原请求录制未确认引用；后续恢复仍须核验原请求的持久终态，再确认输出并归档原会话。重新选择的当前版本和有限写权限继续独立校验，录制引用不能转移到其他文档。
 

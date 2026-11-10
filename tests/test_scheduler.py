@@ -580,6 +580,12 @@ async def test_fire_falls_back_to_fresh_session_when_origin_gone(setup, monkeypa
     assert len(runs) == 1
     fired_sid = runs[0].session_id
     assert fired_sid != "ghost-session-that-was-deleted"
+    # The original Owner's idle action can already own autoarchive when the
+    # scheduler requests it too. Observe that original asynchronous completion
+    # before reading persistence; a contending request is allowed to no-op.
+    async with asyncio.timeout(3):
+        while mgr.get_session(fired_sid) is not None:
+            await asyncio.sleep(0)
     rows = await db.load_sessions(include_archived=True)
     fired = next(r for r in rows if r["id"] == fired_sid)
     assert fired["origin"] == "schedule"

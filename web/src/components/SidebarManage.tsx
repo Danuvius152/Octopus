@@ -1,11 +1,9 @@
-import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect } from "react";
+import { useEffect } from "react";
 import { IconActivity, IconBolt, IconClock, IconSettings } from "@tabler/icons-react";
-import { useSessionStore, type CredentialInfo, type Schedule } from "../stores/sessionStore";
+import { useSessionStore, type Schedule } from "../stores/sessionStore";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { schedules as scheduleList } from "../lib/scheduleList";
-
-const API = window.location.origin;
+import { modelCredentials } from "../lib/modelCredentials";
 
 /** Format the next fire as the design writes it — "next 09:00". Anything
  * further out than today says which day, because "next 09:00" on a Monday
@@ -39,29 +37,21 @@ export function SidebarManage() {
   const schedules = useSessionStore((s) => s.schedules);
   const scheduleRead = useSessionStore((s) => s.scheduleRead);
   const credentials = useSessionStore((s) => s.credentials);
-  const setCredentials = useSessionStore((s) => s.setCredentials);
+  const credentialRead = useSessionStore((s) => s.credentialRead);
   const installations = useSessionStore((s) => s.connectorInstallations);
   const installationRead = useSessionStore((s) => s.connectorRead);
   const identity = useSessionStore((s) => s.identity);
 
-  const load = useCallback(async () => {
-    const headers = { Authorization: `Bearer ${token}` };
-    try {
-      void scheduleList.refresh();
-      const cRes = await fetch(`${API}/api/credentials`, { headers });
-      if (cRes.ok) setCredentials((await cRes.json()) as CredentialInfo[]);
-    } catch {
-      // ignore
-    }
-  }, [token, setCredentials]);
-
   useEffect(() => {
-    if (token) load();
-  }, [token, accountGeneration, load]);
+    if (token) {
+      void scheduleList.refresh();
+      void modelCredentials.refresh();
+    }
+  }, [token, accountGeneration]);
 
   const needsReconnect = installations.some((i) => i.needs_reconnect);
   const connectorError = needsReconnect || !!installationRead.error;
-  const credentialError = credentials.some(
+  const credentialError = !!credentialRead.error || credentials.some(
     (c) => c.needs_reconnect
   );
   const next = nextRunLabel(schedules);
@@ -114,7 +104,7 @@ export function SidebarManage() {
           onClick={() => openManage("harness")}
           summary={
             <>
-              {credentialError ? (
+              {credentialRead.error ? "not synchronized" : credentialError ? (
                 <span className="text-warn-foreground">needs reconnect</span>
               ) : (
                 credentials.length

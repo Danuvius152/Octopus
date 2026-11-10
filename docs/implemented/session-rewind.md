@@ -46,6 +46,16 @@ an explicit label changes its name, otherwise it retains the parent's name.
 The parent is archived after successful branch creation. A rewind shares its
 working directory; full-copy `/fork` leaves the parent open and copies the tree.
 
+For an application development session, shared rewind retains its exact
+application ownership in both SQLite and the installed successor. Admission
+and application deletion are ordered by the insertion transaction, including
+a legacy builder known only through the application's current-session pointer.
+The parent reservation remains held until successor installation and is released
+once by its owning operation. External archive/deletion cannot retire a parent
+while preparation still uses it. Application deletion retires related successors
+without changing the current builder selection or inferring ownership from cwd;
+the complete lifecycle is owned by [applications](applications.md).
+
 The retained prefix must satisfy the replay message contract before insertion;
 damaged message metadata refuses creation without archiving the parent.
 SQLite owns the copied-input projection, including original delivery and native

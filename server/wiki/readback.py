@@ -165,8 +165,7 @@ def response(store, result):
         return result
     from .history import WikiHistory
 
-    blob = WikiHistory(store).blobs / result['revision']
-    text = blob.read_bytes().decode('utf-8')
+    text = WikiHistory(store).read_blob(result['revision']).decode('utf-8')
     ranges = [[0, len(text)]] if state['uncertain'] else _context(text, state['ranges'])
     full = state['uncertain'] or len(ranges) > 32
     if full:

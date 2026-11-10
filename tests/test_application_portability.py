@@ -92,8 +92,9 @@ async def test_current_github_account_archive_preserves_installation_grant_and_a
     assert not target.exists()
 
 
-@pytest.mark.parametrize("phase", ["retiring", "files"])
-@pytest.mark.parametrize("identity_path", [False, True])
+@pytest.mark.parametrize(("phase", "identity_path"), [
+    (phase, path) for phase in ("retiring", "files") for path in (False, True, "alias")
+] + [("link", "alias")])
 async def test_export_import_preserves_remaining_application_files_and_explicit_retry(
     tmp_path, monkeypatch, phase, identity_path,
 ):
@@ -109,9 +110,13 @@ async def test_export_import_preserves_remaining_application_files_and_explicit_
     owner, _ = await create_account(database, extra_roots=[working])
     code = (Path(allocate_app_dir("Partial", "partial", owner["id"])) if identity_path
             else Path(config.users_root) / owner["id"] / "applications" / "partial")
+    if identity_path == "alias":
+        content = code.with_name("original-code")
+        content.mkdir(parents=True)
+        code.symlink_to(content, target_is_directory=True)
     data, runtime = Path(data_dir_for(str(code))), Path(runtime_dir_for(str(code)))
     for directory in (code, data, runtime):
-        directory.mkdir(parents=True)
+        directory.mkdir(parents=True, exist_ok=True)
         (directory / "original.txt").write_text(directory.name)
     await database.save_application(app_id="partial", name="Partial", app_dir=str(code),
                                     created_at="time", updated_at="time", user_id=owner["id"])
@@ -137,6 +142,15 @@ async def test_export_import_preserves_remaining_application_files_and_explicit_
                     return original(path, *args, **kwargs)
 
                 faults.setattr(shutil, "rmtree", fail_data)
+            elif phase == "link":
+                unlink = Path.unlink
+
+                def fail_link(path, *args, **kwargs):
+                    if path == code:
+                        raise PermissionError("remaining application access link")
+                    return unlink(path, *args, **kwargs)
+
+                faults.setattr(Path, "unlink", fail_link)
             else:
                 from server.app_backends import backend_supervisor
 
@@ -147,7 +161,7 @@ async def test_export_import_preserves_remaining_application_files_and_explicit_
             with pytest.raises(ApplicationError):
                 await applications.delete_application("partial")
         state = (await database.get_application("partial"))["deletion"]
-        assert state["phase"] == phase
+        assert state["phase"] == ("files" if phase == "link" else phase)
     finally:
         applications.shutdown()
         await database.close()
@@ -290,7 +304,96 @@ async def test_account_transfer_preserves_app_directory_alias_and_its_actual_sib
         monkeypatch.setattr(settings, name, value)
     copied = Database(restored.db_path)
     await copied.initialize()
+    manager = SessionManager()
+    await manager.initialize(copied)
+    applications = ApplicationManager()
+    applications.bind(manager, copied)
     try:
         assert (await copied.get_application("alias-app"))["app_dir"] == str(restored_alias)
+        if not external:
+            original_code = restored_alias.resolve()
+            restored_data = Path(data_dir_for(str(restored_alias)))
+            original_data = restored_data.resolve()
+            await applications.delete_application("alias-app")
+            assert await copied.get_application("alias-app") is None
+            assert not original_code.exists() and not original_data.exists()
+            assert not restored_alias.exists() and not restored_alias.is_symlink()
+            assert not restored_data.exists() and not restored_data.is_symlink()
     finally:
+        applications.shutdown()
+        await manager.close_session_owners()
+        await copied.close()
+
+
+@pytest.mark.parametrize("outcome", ["delete", "retry", "keep"])
+async def test_transferred_shared_link_chain_preserves_other_application_and_cleanup_retry(tmp_path, monkeypatch, outcome):
+    home = tmp_path / "source"
+    home.mkdir()
+    config, _ = installation_settings(home)
+    for name, value in config.model_dump().items():
+        monkeypatch.setattr(settings, name, value)
+    database = Database(config.db_path)
+    await database.initialize()
+    owner, _ = await create_account(database)
+    root = Path(config.users_root) / owner["id"] / "applications"
+    actual = root / "actual"
+    actual.mkdir(parents=True)
+    inner, outer = root / "inner", root / "outer"
+    inner.symlink_to(actual, target_is_directory=True)
+    outer.symlink_to(inner, target_is_directory=True)
+    for name in ("selected", "other"):
+        stored = outer / name
+        for suffix in ("", ".data", ".runtime"):
+            directory = Path(str(stored) + suffix)
+            directory.mkdir()
+            (directory / "original.txt").write_text(name + suffix)
+        await database.save_application(app_id=name, name=name, app_dir=str(stored), status="ready",
+                                        created_at="time", updated_at="time", user_id=owner["id"])
+    await database.close()
+    archive = tmp_path / "account.zip"
+    export_account(config, owner["id"], archive, home=home)
+    target = tmp_path / "restored"
+    restored = import_account(archive, home=target)
+    imported_root = target / root.relative_to(home)
+    imported_inner, imported_outer = imported_root / "inner", imported_root / "outer"
+    # Import may flatten aliases. Reintroduce the equivalent chain to exercise
+    # effect-time interpretation rather than relying on an export-time plan.
+    imported_outer.unlink()
+    imported_outer.symlink_to(imported_inner, target_is_directory=True)
+    for name, value in restored.model_dump().items():
+        monkeypatch.setattr(settings, name, value)
+    copied = Database(restored.db_path)
+    await copied.initialize()
+    manager = SessionManager()
+    await manager.initialize(copied)
+    applications = ApplicationManager()
+    applications.bind(manager, copied)
+    selected = imported_outer / "selected"
+    data = Path(data_dir_for(str(selected))).resolve()
+    try:
+        if outcome == "retry":
+            remove = shutil.rmtree
+
+            def fail_data(path, *args, **kwargs):
+                if Path(path) == data:
+                    raise PermissionError("selected data is locked")
+                return remove(path, *args, **kwargs)
+
+            with monkeypatch.context() as faults:
+                faults.setattr(shutil, "rmtree", fail_data)
+                with pytest.raises(ApplicationError, match="locked"):
+                    await applications.delete_application("selected")
+            assert (await copied.get_application("selected"))["deletion"]["phase"] == "files"
+            assert not selected.exists() and (data / "original.txt").read_text() == "selected.data"
+        await applications.delete_application("selected", keep_files=outcome == "keep")
+        assert await copied.get_application("selected") is None
+        assert imported_inner.is_symlink() and imported_outer.is_symlink()
+        assert (imported_outer / "other" / "original.txt").read_text() == "other"
+        assert (Path(str(imported_outer / "other") + ".data") / "original.txt").read_text() == "other.data"
+        assert not Path(str(imported_outer / "other") + ".runtime").exists()
+        assert selected.exists() is (outcome == "keep")
+        assert data.exists() is (outcome == "keep")
+    finally:
+        applications.shutdown()
+        await manager.close_session_owners()
         await copied.close()

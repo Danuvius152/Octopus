@@ -175,7 +175,9 @@ in for deletion progress.
 After closing admission, deletion checks resource ownership before retirement
 advances its phase, then checks again under resource coordination before file
 cleanup and row removal. Canonical families must not overlap within one
-application or with another retained application. Required symlink entries at
+application or with another retained application. Allocation reserves missing
+resource addresses too; deletion checks existing content trees that it can
+actually remove, treating absent contents as completed effects. Required symlink entries at
 their physical parents, including chained links, are also protected: removing
 one application's tree cannot break another's stored access path. Independent
 applications may share a parent link without claiming its whole target tree.
@@ -196,11 +198,42 @@ failure permits file cleanup. No cwd or empty-work-ID
 guess identifies ownership, and no deleted history is reconstructed. A completed
 delegation may still own BG; an unrelated later human task in its child survives.
 
+Shared-directory rewind successors inherit the exact application relationship
+in the same SQLite transaction that admits the derived session. That transaction
+also retains a legacy current builder's known relationship and checks deletion
+admission; matching working directories never establish ownership. The returned
+identity constructs the in-memory successor before publication. A committed
+successor enters deletion's enumeration; a deletion that commits first refuses
+new derivation. The parent's fork reservation protects preparation until the
+successor is installed, and each operation releases only the reservation it
+still holds. Archive, session deletion and successful application release use
+this relationship regardless of the session's origin label. Full copies own
+independent resources. The current builder pointer and Iterate's active-session
+reuse policy do not follow rewind successors.
+
 Only confirmed retirement allows file cleanup. All code, `.data` and `.runtime`
 targets must be inside the account's managed root before the first removal.
 Missing targets are complete; other filesystem errors preserve the application
 row, remaining files and retry responsibility. Cleanup is not a filesystem
 transaction. Only completed cleanup permits row deletion and its success event.
+
+`application_resources` owns the common interpretation used by exclusion checks,
+cleanup and account transfer: stored address, code/data/runtime role, actual
+content tree and required link entries. Siblings derive from the stored code
+address; `..` is retained until symlinks resolve. After writer retirement,
+cleanup obtains a fresh observation under resource coordination. It removes
+exclusive real contents and application-owned links inside the managed tree,
+retaining other applications' required links and account-level access aliases.
+An ancestor alias never grants ownership of its entire target tree.
+
+Removal order keeps unfinished resources discoverable from their stored paths.
+Contents precede their access links; an inner link precedes its outer aliases;
+a tree containing another resource's required link follows that resource.
+Completed access chains are removed before unrelated content cleanup proceeds.
+Unsafe cyclic dependencies are refused before file effects. A failed removal
+retains the original files phase; retry reobserves what remains and continues
+without replaying confirmed retirement or persisting another resource ledger.
+
 `keep_files=true` skips file removal, with the same retirement and resource
 conflict requirements. An external legacy address alone does not prevent that
 choice from completing; managed-root restrictions protect allocation and actual

@@ -125,6 +125,19 @@ class WikiHistory:
                 sync_directory(self.blobs)
         return digest
 
+    def read_blob(self, digest: str) -> bytes:
+        """Read verified original bytes under the same lifetime and lock as GC."""
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise WikiError("Invalid historical output digest", 409)
+        with self.locked(shared=True):
+            try:
+                raw = (self.blobs / digest).read_bytes()
+            except FileNotFoundError as error:
+                raise WikiError("Historical output bytes are unavailable; the original receipt is retained", 410) from error
+            if revision(raw) != digest:
+                raise WikiError("Historical output hash mismatch; current content was preserved", 409)
+            return raw
+
     def record(self, *args, **kwargs):
         with self.locked():
             return self._record(*args, **kwargs)

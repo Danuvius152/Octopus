@@ -33,6 +33,13 @@ from typing import TYPE_CHECKING, Any
 from weakref import WeakValueDictionary
 
 from .aio import complete_cleanup
+from .application_resources import (
+    ApplicationResource,
+    application_resources,
+    removal_order,
+)
+from .application_resources import data_dir_for as data_dir_for
+from .application_resources import runtime_dir_for as runtime_dir_for
 from .config import settings
 from .crypto import is_sha256_hexdigest
 from .models import SessionStatus
@@ -131,63 +138,12 @@ def allocate_app_dir(name: str, app_id: str, user_id: str | None = None) -> str:
     return os.path.join(root, f"{slugify(name)}--{app_id}")
 
 
-def data_dir_for(app_dir: str) -> str:
-    """The app's own state, as a SIBLING of the code directory.
-
-    A sibling and not a subdirectory: a rebuild rewrites the code directory,
-    and anything the running app owns — a cloned repo, a database file,
-    uploads — must survive that (application-backends.md §3). Never served
-    statically.
-    """
-    return app_dir.rstrip("/") + ".data"
-
-
-def runtime_dir_for(app_dir: str) -> str:
-    """Where `install.sh` puts dependencies.
-
-    Separate from the data directory because a venv or node_modules is
-    *derived*: this directory can be deleted to force a clean reinstall without
-    risking anything the user cares about, and a backup of the data directory
-    doesn't carry a few hundred megabytes of packages.
-    """
-    return app_dir.rstrip("/") + ".runtime"
-
-
-def _resource_claims(app_id: str, app_dir: str) -> tuple[tuple[str, ...], set[str]]:
-    """Content trees and required link entries have different deletion scope."""
-    paths = (app_dir, data_dir_for(app_dir), runtime_dir_for(app_dir))
-    resolved = []
-    aliases: set[str] = set()
-    for path in paths:
-        try:
-            try:
-                resolved.append(os.path.realpath(path, strict=True))
-            except FileNotFoundError:
-                resolved.append(os.path.realpath(path))
-        except OSError as error:
-            raise ApplicationError(f"Application {app_id} resource cannot be resolved: {path}: {error}",
-                                   status_code=409) from error
-    pending = list(paths)
-    visited = set()
-    while pending:
-        path = pending.pop()
-        if path in visited:
-            continue
-        visited.add(path)
-        try:
-            for part in (*Path(path).parents, Path(path)):
-                if part.is_symlink():
-                    # Removing this entry breaks access even when its final
-                    # target is outside the directory being removed. Follow
-                    # chained links too; a shared parent is only an entry,
-                    # never an exclusive claim to its whole target subtree.
-                    aliases.add(str(part.parent.resolve() / part.name))
-                    target = Path(os.readlink(part))
-                    pending.append(str(target if target.is_absolute() else part.parent / target))
-        except OSError as error:
-            raise ApplicationError(f"Application {app_id} resource cannot be resolved: {path}: {error}",
-                                   status_code=409) from error
-    return tuple(resolved), aliases
+def _application_resources(app_id: str, app_dir: str) -> tuple[ApplicationResource, ...]:
+    try:
+        return application_resources(app_dir)
+    except OSError as error:
+        raise ApplicationError(f"Application {app_id} resource cannot be resolved: {app_dir}: {error}",
+                               status_code=409) from error
 
 
 def _paths_overlap(left: str, right: str) -> bool:
@@ -397,10 +353,12 @@ class ApplicationManager:
 
     async def _require_exclusive_resources(
         self, app_id: str, app_dir: str, user_id: str | None, *,
-        allocating: bool = False, require_managed: bool = True,
-    ) -> None:
+        allocating: bool = False, require_managed: bool = True, removing: bool = False,
+    ) -> list[tuple[Path, bool]]:
         """Called under resource coordination immediately before filesystem effects."""
-        paths, _aliases = _resource_claims(app_id, app_dir)
+        resources = _application_resources(app_id, app_dir)
+        paths = tuple(str(resource.content) for resource in resources if not removing or resource.present)
+        links = {link for resource in resources for link in resource.links}
         if require_managed and any(not is_inside_root(path, user_id) for path in paths):
             raise ApplicationError(f"Application {app_id} resources are outside the managed account root: {paths}",
                                    status_code=409)
@@ -414,7 +372,10 @@ class ApplicationManager:
                 if allocating:
                     raise ApplicationError(f"Application {app_id} already owns resources: {other['app_dir']}", status_code=409)
                 continue
-            other_paths, other_aliases = _resource_claims(other["id"], other["app_dir"])
+            other_resources = _application_resources(other["id"], other["app_dir"])
+            other_paths = tuple(str(resource.content) for resource in other_resources)
+            other_aliases = {str(link) for resource in other_resources for link in resource.links}
+            links.difference_update(Path(alias) for alias in other_aliases)
             for owned in other_paths:
                 for path in paths:
                     if _paths_overlap(path, owned):
@@ -433,6 +394,11 @@ class ApplicationManager:
             for path in (app_dir, data_dir_for(app_dir), runtime_dir_for(app_dir)):
                 if os.path.lexists(path):
                     raise ApplicationError(f"Application {app_id} resource already exists: {path}", status_code=409)
+        # Account/installation ancestor aliases are access infrastructure, not
+        # application-owned entries. Never unlink outside the managed tree.
+        root = Path(str(paths_for(user_id).applications) if user_id else applications_root()).resolve()
+        owned_links = {link for link in links if link != root and link.is_relative_to(root)}
+        return removal_order(resources, owned_links) if removing else []
 
     # ------------------------------------------------------------------ reads
 
@@ -968,7 +934,7 @@ class ApplicationManager:
             # retire writers. Recheck below after those writers have exited.
             async with self._resource_updates:
                 await self._require_exclusive_resources(
-                    app_id, row["app_dir"], row.get("user_id"), require_managed=not state["keep_files"],
+                    app_id, row["app_dir"], row.get("user_id"), require_managed=not state["keep_files"], removing=not state["keep_files"],
                 )
             if state["phase"] == "retiring":
                 if self.session_mgr is None:
@@ -982,12 +948,15 @@ class ApplicationManager:
                 state = dict(state, phase="files")
                 await db.set_application_deletion(app_id, state)
             async with self._resource_updates:
-                await self._require_exclusive_resources(
-                    app_id, row["app_dir"], row.get("user_id"), require_managed=not state["keep_files"],
+                removals = await self._require_exclusive_resources(
+                    app_id, row["app_dir"], row.get("user_id"), require_managed=not state["keep_files"], removing=not state["keep_files"],
                 )
                 if not state["keep_files"]:
-                    paths = (row["app_dir"], data_dir_for(row["app_dir"]), runtime_dir_for(row["app_dir"]))
-                    for path in paths:
+                    for target, is_link in removals:
+                        if is_link:
+                            await asyncio.to_thread(target.unlink, missing_ok=True)
+                            continue
+                        path = str(target)
                         try:
                             await asyncio.to_thread(shutil.rmtree, path)
                         except FileNotFoundError:

@@ -1,4 +1,3 @@
-import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useRef } from "react";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import {
@@ -11,6 +10,7 @@ import { readResearchEvidence } from "../lib/researchEvidence";
 import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList } from "../lib/sessionList";
 import { refreshAgents } from "../lib/refreshAgents";
+import { modelCredentials } from "../lib/modelCredentials";
 import { applications, type ListEventSource } from "../lib/applicationList";
 import { refreshWikiJobs } from "../lib/wikiJobs";
 import type { WikiMessageMode } from "../lib/wikiComposer";
@@ -64,7 +64,6 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
     addMessage: addMessageRaw,
     applyDispatchState,
     addPendingQuestion,
-    removePendingQuestion,
     setLastAppliedSeq,
     lastAppliedSeq,
     appendStreamingText,
@@ -279,7 +278,6 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         tool_use_id: questionId,
         tool_input: data.tool_input ?? undefined,
       });
-      removePendingQuestion(sessionId, questionId);
       break;
     }
 
@@ -292,7 +290,6 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         tool_use_id: questionId,
         tool_input: (data.tool_input) ?? { reason: data.reason },
       });
-      removePendingQuestion(sessionId, questionId);
       break;
     }
 
@@ -320,11 +317,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         session_id: data.claude_session_id ?? undefined,
       });
       if (data.code === "auth_expired") {
-        const t = getState().token;
-        if (t) void fetch(`${window.location.origin}/api/credentials`, {
-          headers: { Authorization: `Bearer ${t}` },
-        }).then((r) => r.ok ? r.json() : null)
-          .then((creds) => creds && getState().setCredentials(creds)).catch(() => {});
+        void modelCredentials.authenticationExpired();
       }
       break;
 
@@ -366,15 +359,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       // (harness-credential-reauth.md §6). Refetch credentials so the Harness
       // sidebar lights up its "Re-authorize" badge without a manual reload.
       if (data.code === "auth_expired") {
-        const t = getState().token;
-        if (t) {
-          fetch(`${window.location.origin}/api/credentials`, {
-            headers: { Authorization: `Bearer ${t}` },
-          })
-            .then((r) => (r.ok ? r.json() : null))
-            .then((creds) => creds && getState().setCredentials(creds))
-            .catch(() => {});
-        }
+        void modelCredentials.authenticationExpired();
       }
       break;
 

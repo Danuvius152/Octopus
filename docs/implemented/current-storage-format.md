@@ -63,16 +63,21 @@ the existing shared uniqueness scope for NULL and empty account IDs. This
 changes no collection root or Wiki format. Online behavior belongs to the
 [Connector contract](connectors.md#github-identity).
 
-The finite private publication helper admits only complete current format 9
-or the explicitly known format-8 source. Source admission checks the frozen
-complete catalog and every table's full `table_xinfo`, integrity, foreign keys
-and retained typed facts. A normalized declaration alone does not prove physical
-column order. Both read-only preflight and the write transaction use the same
-admission check. Every retained application's canonical code/data/runtime
-family and required aliases are checked across all accounts, including archived
-applications and unscoped rows; conflicts do not authorize moving resources.
+This installation's format-8-to-9 handoff is complete. Its finite helper and
+exclusive source fixtures have retired; the private publisher now verifies only
+the complete current format. Application resource-family checks remain in
+read-only preflight, missing-history recovery and offline pre-cutover verification,
+including archived applications and unscoped rows. Conflicts do not authorize
+moving resources. The following records the completed handoff's safety rules,
+not an entry point for admitting old formats.
 
-Before quiescing the old service, read-only inspection enumerates all GitHub
+Source admission checked a frozen complete catalog and two explicitly known
+full physical layouts, including every table's `table_xinfo`, integrity, foreign
+keys and retained typed facts. A normalized declaration alone did not prove
+column order, and per-table mixtures of the known layouts remained unrecognized.
+Read-only preflight and the write transaction shared that admission check.
+
+Before quiescing the old service, read-only inspection enumerated all GitHub
 installations, including disabled accounts and NULL owners. Only recognized
 `login:positive-ID` keys can map to current IDs. Unrecognized keys, unaddressable
 installation identities or owners, and duplicate target IDs within the existing
@@ -81,29 +86,29 @@ details. Different accounts may retain the same provider ID. The helper neither
 chooses a token or owner nor merges or deletes conflicting installations.
 It performs no conversion during preflight or missing-history recovery.
 
-The existing publisher alone converts after the original writer retires, starts
-are masked and offline installation ownership is held. Inside `BEGIN IMMEDIATE`
-it repeats source/fact/resource checks, creates the new installation table,
-copies by explicit column names while applying the ID mapping, drops the old
-table, renames the new one and recreates indexes. It never renames the old parent
-first. FK enforcement is disabled only on this private offline connection before
+The publisher converted only after the original writer retired, starts were
+masked and offline installation ownership was held. Inside `BEGIN IMMEDIATE`
+it repeated source/fact/resource checks, created the new installation table,
+copied by explicit column names while applying the ID mapping, dropped the old
+table, renamed the new one and recreated indexes. It never renamed the old parent
+first. FK enforcement was disabled only on that private offline connection before
 the transaction to prevent cascading removal during reconstruction. Independent
 column-by-column installation, secret-ciphertext and Agent-link comparisons,
-foreign-key checks and the complete current verifier must pass before COMMIT.
-Only the intended GitHub keys change; metadata, constraints and marker 9 commit
-together. IDs, labels, created times, enablement, other kinds and grants remain.
+foreign-key checks and the complete current verifier were required before COMMIT.
+Only intended GitHub keys could change; metadata, constraints and marker 9
+committed together. IDs, labels, created times, enablement, other kinds and grants
+remained.
 
-Confirmed rollback retains format 8. Unconfirmed COMMIT keeps business closed;
-a fresh attempt under the same publication plan inspects actual committed facts.
-Complete format 9 is verified without replaying the mapping or resetting later
-writes; complete known format 8 can convert only within the original offline
-boundary. Strict current main/Wiki verification precedes switching and starting
-the candidate and runs again afterward. Startup, ordinary reads, Connect and
+Confirmed rollback retained format 8. Unconfirmed COMMIT kept business closed;
+a fresh attempt under the same plan inspected actual committed facts. Complete
+format 9 was verified without replaying the mapping or resetting later writes;
+only complete known format 8 could convert within the original offline boundary.
+Strict current main/Wiki verification preceded switching and starting the
+candidate and ran again afterward. Startup, ordinary reads, Connect and
 account import provide no old-key conversion. The finite helper and exclusive
-fixtures remain until authorized publication, acceptance and forward-recovery
-responsibilities finish, then retire without a permanent old-format route.
-Implementation and isolated validation do not establish production conversion;
-operator steps belong to [local publication](../local-wsl.md#自动发布).
+fixtures have retired after publication, acceptance and forward-recovery
+responsibilities closed. There is no permanent old-format route. Operator steps
+belong to [local publication](../local-wsl.md#自动发布).
 
 ## Complete record projections
 

@@ -515,9 +515,10 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
    启动候选。任一库未准备、提交结果未知或跨库部分完成时保持业务关闭，按同一
    发布计划和实际提交事实前向继续。候选只接受[当前完整格式](implemented/current-storage-format.md)，
    不在启动时转换；不变格式也须只读完整核验。首次受管安装完成上文 unit/profile
-   过渡，前端产物随候选一次切换。当前候选 main9 的 GitHub 旧键交接只接受
-   已知完整 main8 或已完成的 main9，详见[有限交接合同](implemented/current-storage-format.md#github-identity-and-finite-publication-handoff)；
-   Wiki 保持17。代码具备交接能力不代表本机已获准或已执行生产转换。
+   过渡，前端产物随候选一次切换。本安装已完成 main9 交接，Wiki保持17；现有
+   publisher只核验当前完整格式，有限8→9入口及专属夹具已退役。
+   [交接约束与保全理由](implemented/current-storage-format.md#github-identity-and-finite-publication-handoff)
+   不构成重新接纳旧格式的入口。
 4. 验证存活与就绪接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
    本次提交及 MainPID、工作目录、cgroup、配置绑定，`/health` 为 ok、`/ready`
    为 ready。在服务快照运行

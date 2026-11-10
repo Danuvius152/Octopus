@@ -278,6 +278,7 @@ class ForkingMixin(SessionManagerBase):
         owner = self._session_owner(parent)
         source = await owner.call_runtime(ReserveFork(True))
 
+        reservation_held = True
         fork_id = uuid.uuid4().hex[:12]
         try:
             assert self.db is not None  # The reservation retains its database binding.
@@ -318,7 +319,7 @@ class ForkingMixin(SessionManagerBase):
             # session (the parent is archived below). An explicit `label` still
             # wins when the caller wants a distinct name.
             fork_name = label or source.name
-            await self.db.create_fork_session(
+            app_id = await self.db.create_fork_session(
                 fork_id=fork_id,
                 name=fork_name,
                 working_dir=source.working_dir,
@@ -345,6 +346,7 @@ class ForkingMixin(SessionManagerBase):
                 reasoning_effort=source.reasoning_effort,
                 service_tier=source.service_tier,
                 agent_id=source.agent_id,
+                app_id=app_id,
                 origin="fork",
                 backend=source.backend,
                 user_id=source.user_id,
@@ -398,6 +400,11 @@ class ForkingMixin(SessionManagerBase):
             self.sessions[fork_id] = fork
             self._session_owner(fork)
 
+            # The installed successor is now capturable by application deletion.
+            # External archive must obey this reservation until this point too.
+            await self._release_session_reservation(owner, ReserveFork(False))
+            reservation_held = False
+
             # 9. Rewind, not branch: the fork takes the parent's place. Archive
             # the parent and surface the swap with the same `session_archived`
             # event `/archive` uses, so the fork slots into the sidebar wearing
@@ -415,7 +422,7 @@ class ForkingMixin(SessionManagerBase):
                 )
             return fork
         finally:
-            if self.sessions.get(parent.id) is parent:
+            if reservation_held and self.sessions.get(parent.id) is parent:
                 await self._release_session_reservation(owner, ReserveFork(False))
 
     @staticmethod
@@ -427,9 +434,8 @@ class ForkingMixin(SessionManagerBase):
     def _fork_copy_dest(src_working_dir: str, fork_id: str) -> str:
         """Destination for a /fork working-dir copy: ~/.octopus/fork/<name>-<id>
         (session-fork.md). Keeps the project basename for readability +
-        the fork id for uniqueness. Creates the base dir."""
+        the fork id for uniqueness. Planning has no filesystem effects."""
         base = ForkingMixin._fork_copy_base()
-        os.makedirs(base, exist_ok=True)
         name = os.path.basename(os.path.normpath(src_working_dir)) or "session"
         return os.path.join(base, f"{name}-{fork_id}")
 
@@ -526,7 +532,16 @@ class ForkingMixin(SessionManagerBase):
         fork_id = uuid.uuid4().hex[:12]
         resume_id_hint = str(uuid.uuid4())
         try:
-            dest = self._fork_copy_dest(parent.working_dir, fork_id)
+            dest = os.path.abspath(os.path.expanduser(self._fork_copy_dest(source.working_dir, fork_id)))
+            # Resolve existing ancestors too: a symlink in the target's parent
+            # can put an apparently separate copy back inside the source tree.
+            source_path = Path(source.working_dir).resolve()
+            dest_path = Path(dest).resolve()
+            if dest_path == source_path or dest_path.is_relative_to(source_path):
+                raise ForkError(
+                    "The copy destination must be outside the source working directory",
+                    reason="invalid_copy_destination", status_code=400,
+                )
             # Snapshot the transcript AFTER claiming `_forking` (Vera review):
             # loading it earlier risks a fast turn slipping in between the read
             # and the guard, which would copy a post-turn working dir against a
@@ -581,6 +596,7 @@ class ForkingMixin(SessionManagerBase):
                 agent_id=parent.agent_id, credential_id=source.credential_id,
                 resume_id=resume_id_hint, fork_after_seq=last_seq,
                 fork_metadata=fork_meta,
+                inherit_application=False,
             )
             fork = Session(
                 id=fork_id, name=fork_name, working_dir=dest, created_at=now,
@@ -599,6 +615,7 @@ class ForkingMixin(SessionManagerBase):
             # mkdir establishes creation; its committed receipt grants cleanup.
             # A crash between them retains the row and directory for inspection.
             try:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
                 os.mkdir(dest)
             except OSError as error:
                 await self.db.delete_session(fork_id)

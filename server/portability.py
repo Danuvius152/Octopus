@@ -143,13 +143,8 @@ def _copy_tree(source: Path, destination: Path, home: Path, excluded: set[Path])
     return links
 
 
-def _path_aliases(path: Path) -> list[Path]:
-    """Required link entries at their real parents, without copying subtrees."""
-    return [part.parent.resolve() / part.name for part in (*path.parents, path) if part.is_symlink()]
-
-
 def _application_resources(applications: list[dict]) -> tuple[list[Path], set[Path]]:
-    from .applications import data_dir_for, runtime_dir_for
+    from .application_resources import application_resources
 
     required_trees: list[tuple[str, Path]] = []
     required_links: list[tuple[str, Path]] = []
@@ -157,22 +152,24 @@ def _application_resources(applications: list[dict]) -> tuple[list[Path], set[Pa
     excluded: set[Path] = set()
     for application in applications:
         app_id = application["id"]
-        stored_code = Path(application["app_dir"])
-        code = stored_code.resolve()
+        resources = application_resources(application["app_dir"])
         deletion = json.loads(application["deletion"]) if application.get("deletion") else None
-        if code.is_dir():
-            required_trees.append((app_id, code))
-            required_links.extend((app_id, link) for link in _path_aliases(stored_code))
-        elif not (deletion and deletion["phase"] == "files" and not deletion["keep_files"] and not code.exists()):
-            raise ValueError(f"Application code is missing: {code}")
-        # Siblings belong to the stored path, even when code is an alias.
-        stored_data = Path(data_dir_for(application["app_dir"]))
-        data = stored_data.resolve()
-        if data.exists():
-            required_trees.append((app_id, data))
-            required_links.extend((app_id, link) for link in _path_aliases(stored_data))
-        runtime = Path(runtime_dir_for(application["app_dir"]))
-        runtimes.extend((app_id, path) for path in (runtime, runtime.parent.resolve() / runtime.name, runtime.resolve()))
+        for resource in resources:
+            if resource.role == "runtime":
+                # Exclude the runtime's own chain, not shared ancestor links.
+                addresses = {resource.stored, resource.entry, resource.content,
+                             *(link for link in resource.links if link.resolve() == resource.content)}
+                runtimes.extend((app_id, path) for path in addresses)
+            elif not resource.present and deletion and deletion["phase"] == "files" and not deletion["keep_files"]:
+                # Content already removed is complete. A failed final unlink
+                # may leave its dangling access chain; it is not durable data
+                # to restore. Keep the deletion phase and remaining resources.
+                excluded.update(link for link in resource.links if link.resolve() == resource.content)
+            elif resource.content.is_dir() or resource.role == "data" and resource.present:
+                required_trees.append((app_id, resource.content))
+                required_links.extend((app_id, link) for link in resource.links)
+            elif resource.role == "code":
+                raise ValueError(f"Application code is missing: {resource.content}")
     for app_id, runtime in runtimes:
         for owner_id, required in required_trees:
             if runtime.is_relative_to(required) or required.is_relative_to(runtime):

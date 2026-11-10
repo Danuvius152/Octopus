@@ -73,7 +73,8 @@ class LifecycleMixin(SessionManagerBase):
             if retirement is None:
                 raise SessionOwnerUnavailable("Original Session resource cleanup is unavailable")
             session = owner.session
-            if command.reason in {"deleted", "application_deleted"} and (session._forking or session._archive_reservation is not None):
+            if (session._forking and command.reason in {"archived", "deleted", "application_deleted"}
+                    or command.reason in {"deleted", "application_deleted"} and session._archive_reservation is not None):
                 raise ForkError("A fork or archive is still using this session; retry deletion when it completes",
                                 reason="session_lifecycle_busy", status_code=409)
             if not owner.runtime.can_close_request(command.only_request_id):
@@ -110,7 +111,7 @@ class LifecycleMixin(SessionManagerBase):
     async def release_application_writers(self, session_ids: list[str]) -> None:
         for sid in session_ids:
             session = self.sessions.get(sid)
-            if session is not None and session.origin == "application":
+            if session is not None:
                 owner = self._session_owners.get(id(session))
                 if owner is not None and not owner.failed:
                     await owner.call_runtime(ReleaseApplication())
@@ -135,11 +136,10 @@ class LifecycleMixin(SessionManagerBase):
             await bg_task_manager.retire_session(session_id)
 
     async def _retire_application_history(self, session: Session) -> None:
-        if session.origin != "application":
-            return
         if session.app_id is None and self.db is not None:
             session.app_id = await self.db.retain_application_session_owner(session.id)
-        await self.retire_application_session_work(session.id)
+        if session.app_id is not None:
+            await self.retire_application_session_work(session.id)
 
     def reopen_application_session_work(self, session_id: str) -> None:
         from ..bg_tasks import bg_task_manager

@@ -53,8 +53,15 @@ async def app_wiki(request: Request, app_id: str, operation: str, session_mgr: S
 
     row = await _application_for_request(request, app_id)
     user_id = row.get("user_id")
-    if registry.config(user_id).get("app_id") != app_id:
+    registration = registry.config(user_id)
+    if registration.get("app_id") != app_id:
         raise WikiError("This application is not bound to this wiki", 403)
+    # Capture original eligibility before waiting for any request body. A later
+    # A -> B -> A binding is a new registration, even for the same application.
+    request.state.wiki_content_caller = {
+        "app_id": app_id, "scope": _mcp_scope(request),
+        "registration_generation": registration["registration_generation"],
+    }
     handlers: dict[tuple[str, str], Callable[..., Any]] = {
         ("GET", "config"): get_config,
         ("GET", "info"): info,
@@ -573,6 +580,11 @@ class Edit(BaseModel):
     reason: str
 
 
+def _content_caller(request: Request) -> dict[str, Any]:
+    captured = getattr(request.state, "wiki_content_caller", None)
+    return captured if captured is not None else {"scope": _mcp_scope(request)}
+
+
 @router.put("/document")
 def edit_document(
     body: Edit,
@@ -581,12 +593,10 @@ def edit_document(
     _: str = Depends(verify_token),
 ):
     access(request, human_only=True)
-    store = registry.store(user_id)
-    if Path(body.path).suffix.lower() not in {".md", ".markdown", ".txt", ".html", ".htm"}:
-        raise WikiError("This endpoint edits text documents only")
-    return WikiHistory(store).write(
-        body.path, body.content.encode(), body.expected_revision, "human", body.reason
-    )
+    from ..wiki.content_mutations import edit
+
+    return edit(user_id, path=body.path, content=body.content, expected_revision=body.expected_revision,
+                reason=body.reason, **_content_caller(request))
 
 
 @router.get("/history")
@@ -618,9 +628,10 @@ def restore(
     _: str = Depends(verify_token),
 ):
     access(request, human_only=True)
-    return WikiHistory(registry.store(user_id)).restore(
-        body.change_id, body.expected_revision, body.side, "human"
-    )
+    from ..wiki.content_mutations import restore
+
+    return restore(user_id, change_id=body.change_id, expected_revision=body.expected_revision,
+                   side=body.side, **_content_caller(request))
 
 
 @router.post("/snapshot")
@@ -653,9 +664,10 @@ def restore_snapshot(
     _: str = Depends(verify_token),
 ):
     access(request, human_only=True)
-    return WikiHistory(registry.store(user_id)).restore_snapshot(
-        body.snapshot_id, body.paths, body.expected_revisions
-    )
+    from ..wiki.content_mutations import restore_snapshot
+
+    return restore_snapshot(user_id, snapshot_id=body.snapshot_id, paths=body.paths,
+                            expected_revisions=body.expected_revisions, **_content_caller(request))
 
 
 class Publish(Edit):

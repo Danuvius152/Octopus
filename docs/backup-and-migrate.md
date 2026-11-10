@@ -206,6 +206,19 @@ excluded. If a runtime exclusion overlaps any application's required code/data
 or removes a required alias entry, export reports the application identities
 and paths and refuses to publish a partial archive.
 
+Collection, resource exclusion checks and deletion share the application
+resource interpretation. Stored paths retain `..` until real symlink traversal;
+runtime exclusion includes its own content and access chain while preserving
+ancestors still required by code or data. Deletion's policy remains separate:
+after original writers retire it removes exclusive contents and owned links
+inside the managed root, preserving other applications' access paths.
+
+An unfinished deletion retains its phase and original `keep_files` choice on
+transfer and does not restart execution or cleanup at import. If contents have
+already been removed but a final unlink failed, their dangling owned chain is
+excluded from the archive; remaining durable resources and deletion responsibility
+are preserved. Explicit retry on the imported account continues remaining effects.
+
 Locate the active source configuration using [local configuration](local-wsl.md#配置和数据).
 Do not infer its database or provider paths from the development checkout, and
 do not print secret environment-file values. Resolve pending writes affecting

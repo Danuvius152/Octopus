@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { components } from "../api/contracts";
 import {
   IconCheck,
@@ -24,6 +24,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { modelCredentials } from "../lib/modelCredentials";
 
 const API = `${window.location.origin}/api/credentials`;
 
@@ -73,6 +74,7 @@ type FlowState =
   | { kind: "claude_awaiting_code"; loginId: string; deviceUrl: string }
   | { kind: "claude_operation"; loginId: string; request: OAuthRequest | null; phase: "submitting" | "cancelling" | "error"; message?: string }
   | { kind: "claude_result"; message: string }
+  | { kind: "sign_in_result"; backend: "codex" | "claude-code"; credentialId: string | null; phase: "syncing" | "failed" | "missing"; alreadyCompleted?: boolean }
   | { kind: "codex_label" }
   | { kind: "codex_starting" }
   | { kind: "codex_device"; loginId: string; url: string; code: string }
@@ -84,8 +86,9 @@ export function HarnessPage({
   onToggleSidebar: () => void;
 }) {
   const token = useSessionStore((s) => s.token);
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const credentials = useSessionStore((s) => s.credentials);
-  const setCredentials = useSessionStore((s) => s.setCredentials);
+  const credentialRead = useSessionStore((s) => s.credentialRead);
   // Which agents a credential is bound to — the design puts "in use by Agent"
   // on every card, because that's what makes an expired token urgent.
   const agents = useSessionStore((s) => s.agents);
@@ -120,25 +123,9 @@ export function HarnessPage({
     [token]
   );
 
-  const fetchCredentials = useCallback(async (current: () => boolean = () => true) => {
-    const account = useSessionStore.getState().accountGeneration;
-    try {
-      const res = await fetch(API, { headers });
-      if (res.ok) {
-        const items: CredentialInfo[] = await res.json();
-        if (!current() || useSessionStore.getState().accountGeneration !== account) return null;
-        setCredentials(items);
-        return items;
-      }
-    } catch {
-      // ignore
-    }
-    return null;
-  }, [headers, setCredentials]);
-
   useEffect(() => {
-    fetchCredentials();
-  }, [fetchCredentials]);
+    void modelCredentials.refresh();
+  }, [token, accountGeneration]);
 
   // ----------------------------------------------------------- open / close
 
@@ -158,6 +145,18 @@ export function HarnessPage({
     setCopiedCode(false);
     setReauthId(null);
     setFlow({ kind: "idle" });
+  };
+
+  const confirmSignIn = async (backend: "codex" | "claude-code", credentialId: string | null, alreadyCompleted = false) => {
+    const current = beginViewRequest();
+    const result = { kind: "sign_in_result" as const, backend, credentialId, alreadyCompleted };
+    setFlow({ ...result, phase: "syncing" });
+    const confirmation = await modelCredentials.loginCompleted();
+    if (!current()) return;
+    if (confirmation.state === "applied") {
+      if (credentialId && useSessionStore.getState().credentials.some((row) => row.id === credentialId)) closeAndReset();
+      else setFlow({ ...result, phase: "missing" });
+    } else if (confirmation.state === "failed") setFlow({ ...result, phase: "failed" });
   };
 
   // Re-authorize an existing (expired) credential: jump straight into its
@@ -224,12 +223,7 @@ export function HarnessPage({
       }
       const created: CredentialInfo = await res.json();
       if (!current()) return;
-      const items = await fetchCredentials(current);
-      if (!current()) return;
-      if (items?.some((item) => item.id === created.id)) closeAndReset();
-      else setFlow({ kind: "claude_result", message: items
-        ? "Sign-in completed, but this result is no longer in your credential list."
-        : "Sign-in completed. Reopen Engines to check the credential list; it could not be refreshed." });
+      await confirmSignIn("claude-code", created.id);
     } catch (e) {
       if (current()) setFlow({ ...operation, phase: "error", message: String(e) });
     }
@@ -254,9 +248,8 @@ export function HarnessPage({
       const result: components["schemas"]["OAuthCancelResponse"] = await response.json();
       if (!current()) return;
       if (result.status !== "cancelled" && result.status !== "already_completed") throw new Error("Login cancellation was not confirmed.");
-      if (result.status === "already_completed") await fetchCredentials(current);
-      if (current()) setFlow({ kind: "claude_result", message: result.status === "cancelled"
-        ? "Sign-in cancelled." : "Sign-in already completed. Check the credential list for current availability." });
+      if (result.status === "already_completed") await confirmSignIn("claude-code", null, true);
+      else setFlow({ kind: "claude_result", message: "Sign-in cancelled." });
     } catch (error) {
       if (current()) setFlow({ ...operation, phase: "error", message: String(error) });
     }
@@ -327,9 +320,9 @@ export function HarnessPage({
             message?: string | null;
             credential?: CredentialInfo | null;
           } = await res.json();
+          if (!current()) return;
           if (body.state === "success") {
-            await fetchCredentials(current);
-            if (current()) closeAndReset();
+            await confirmSignIn("codex", body.credential?.id ?? null);
             return;
           }
           if (body.state === "error" || body.state === "cancelled") {
@@ -388,17 +381,6 @@ export function HarnessPage({
 
   // --------------------------------------------------------------- Delete
 
-  const remove = async (id: string) => {
-    try {
-      const res = await fetch(`${API}/${id}`, { method: "DELETE", headers });
-      if (res.ok) {
-        setCredentials(credentials.filter((c) => c.id !== id));
-      }
-    } catch {
-      // ignore
-    }
-  };
-
   // --------------------------------------------------------------- Render
 
   const brokenCount = credentials.filter(
@@ -427,6 +409,10 @@ export function HarnessPage({
       />
 
       <div className="page-body">
+        {credentialRead.error && <div role="alert" className="mb-4 text-sm text-destructive">
+          Credential list is not synchronized. {credentialRead.error}
+          <Button variant="outline" size="sm" onClick={() => void modelCredentials.refresh()}>Refresh credential list</Button>
+        </div>}
         <div className="credential-list flex flex-col gap-3.5">
           {credentials.map((c) => {
             const broken = c.needs_reconnect;
@@ -484,7 +470,7 @@ export function HarnessPage({
                     )}
                     <button
                       className="btn-delete inline-flex size-8 items-center justify-center rounded-lg text-gray-600 opacity-0 transition-opacity hover:bg-danger-bg hover:text-destructive group-hover:opacity-100"
-                      onClick={() => remove(c.id)}
+                      onClick={() => void modelCredentials.remove(c.id)}
                       title="Delete credential"
                       aria-label={`Delete ${c.label}`}
                     >
@@ -549,7 +535,7 @@ export function HarnessPage({
             <DialogTitle>
               {flow.kind === "codex_label" ||
               flow.kind === "codex_starting" ||
-              flow.kind === "codex_device"
+              flow.kind === "codex_device" || flow.kind === "sign_in_result" && flow.backend === "codex"
                 ? "Sign in with Codex"
                 : flow.kind === "choose"
                 ? "Add a credential"
@@ -560,7 +546,7 @@ export function HarnessPage({
                 ? "Connect an AI backend so its sessions can authenticate."
                 : flow.kind === "codex_label" ||
                   flow.kind === "codex_starting" ||
-                  flow.kind === "codex_device"
+                  flow.kind === "codex_device" || flow.kind === "sign_in_result" && flow.backend === "codex"
                 ? "Authorize Octopus with your ChatGPT account on any device."
                 : "Octopus stores the resulting long-lived API key encrypted at rest."}
             </DialogDescription>
@@ -736,8 +722,17 @@ export function HarnessPage({
             </div>
           )}
           {flow.kind === "claude_result" && <p role="status" className="text-sm">{flow.message}</p>}
+          {flow.kind === "sign_in_result" && <p role="status" className="text-sm">
+            {flow.phase === "syncing" ? "Sign-in completed. Confirming the credential list…"
+              : flow.phase === "failed" ? "Sign-in completed; credential list is not synchronized."
+              : flow.alreadyCompleted ? "Sign-in already completed. Check the credential list for current availability."
+              : "Sign-in completed, but this result is no longer in your credential list."}
+          </p>}
 
           <DialogFooter>
+            {flow.kind === "sign_in_result" && flow.phase === "failed" && (
+              <Button variant="outline" onClick={() => void confirmSignIn(flow.backend, flow.credentialId, flow.alreadyCompleted)}>Refresh credential list</Button>
+            )}
             {flow.kind === "error" ? (
               <Button variant="outline" onClick={() => setFlow({ kind: "choose" })}>
                 Back

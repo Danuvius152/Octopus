@@ -2,7 +2,7 @@
 
 from . import grants, job_items
 from .history import WikiHistory
-from .store import WikiError, revision
+from .store import WikiError
 
 
 def receipt_attempt(receipt):
@@ -88,12 +88,10 @@ def output_page(jobs, job_id, receipt_id, *, attempt, view="history", start=0, l
         path, digest = document["path"], document["revision"]
     else:
         digest = receipt["output_revision"]
-        if not digest or not (WikiHistory(jobs.store).blobs / digest).is_file():
+        if not digest:
             raise WikiError("Historical output bytes are unavailable; the original receipt is retained", 410)
         path = receipt["path"]
-        raw = (WikiHistory(jobs.store).blobs / digest).read_bytes()
-        if revision(raw) != digest:
-            raise WikiError("Historical output hash mismatch; current content was preserved", 409)
+        raw = WikiHistory(jobs.store).read_blob(digest)
     text = raw.decode("utf-8", errors="replace")
     end = min(start + length, len(text))
     return {"receipt_id": receipt_id, "doc": receipt["doc_id"], "path": path, "revision": digest, "view": view,

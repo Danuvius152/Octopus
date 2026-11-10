@@ -291,7 +291,8 @@ late process output and bounded, masked full logging.
 - `HarnessPage.tsx`: per-credential `needs_reconnect` → amber/destructive
   "needs reauth" badge + a "Re-authorize" button that opens the existing
   dialog in re-auth mode, threading `credential_id` (Claude) /
-  `reauth_credential_id` (Codex). On success, refetch → flag clears.
+  `reauth_credential_id` (Codex). On success, the shared credential module
+  confirms the current list, including its current reconnect state.
   Claude's OAuth authorization action also supports an existing API-key record;
   the dialog explains that conversion retains its ID and bindings.
 - Claude submission and recoverable errors retain the original completion request
@@ -299,13 +300,25 @@ late process output and bounded, masked full logging.
   consumes the typed cancellation receipt. Late success, error and cancellation
   cannot update a retired account/view. Historical completion refetches the
   current credential list instead of upserting its old result, so deleting a
-  credential is not undone by a late response. Codex also stops polling on
-  historical success even if its current credential is gone, and rereads the
-  current list; view/account generation guards reject late results.
-  `HarnessPage.test.tsx` covers these actual consumers.
-- `useWebSocket.ts`: an `error` event with `code === "auth_expired"` renders
-  the chat error text (as today) AND refetches `/api/credentials` so the
-  sidebar badge appears immediately without a reload.
+  credential is not undone by a late response. Codex stops status polling on
+  historical success, including when its current credential is gone.
+- Both backends retain **Sign-in completed; credential list is not synchronized**
+  when confirmation fails. **Close** ends that result view; **Refresh credential
+  list** only reads the list and cannot replay authorization or deletion. A
+  confirmed list containing the original credential closes the still-current
+  result view normally. If that credential is gone, the view explains current
+  absence without restoring the historical row. Claude cancellation's
+  `already_completed` receipt follows the same confirmation/failure behavior.
+- Login body decoding rechecks the captured account/view before interpreting
+  any branch. Subsequent list confirmation, errors and cleanup retain the same
+  view qualification; closing/reopening, unmounting or account A→B→A permanently
+  retires it. An old response cannot show a code/error, resume polling or close
+  a new dialog. Ending observation does not undo server authorization.
+- `modelCredentials` owns all shared credential publications, including Harness
+  and Sidebar first reads, independent DELETE acknowledgments, login confirmation
+  and both WS `auth_expired` event variants. The list's account/service lifetime,
+  write/GET ordering and deadlines are owned by the
+  [frontend list contract](frontend-list-reconciliation.md#模型凭据列表).
 
 ## 7. Real-CLI verification boundary
 

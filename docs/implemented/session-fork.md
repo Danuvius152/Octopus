@@ -13,6 +13,15 @@ throwaway copy of the project without disturbing the original.
 
 ## 2. Behavior
 
+Planning resolves the source, destination and existing symlink ancestors before
+session insertion, directory creation or copying. An equal destination or one
+inside the source is refused with `invalid_copy_destination`; relative paths
+and aliases use their actual filesystem relationship. Legal independent targets
+keep the complete-copy and failure-compensation behavior below. Planning never
+creates the copy base, skips content or silently selects another target.
+An application session's independent full copy does not inherit responsibility
+for the original application's resources or deletion.
+
 - New session under the same agent/backend/credential, **renamed** (`/fork
   <name>`, default `"<parent name> (fork)"`).
 - Working dir = a **literal full copy** of the parent's working dir at

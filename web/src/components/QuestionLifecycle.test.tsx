@@ -6,7 +6,8 @@ import { ChatView } from "./ChatView";
 import { mockChatViewport } from "./chatViewport.test-support";
 import { handleWsMessage, useWebSocket } from "../hooks/useWebSocket";
 import { applyTranscript } from "../lib/transcript";
-import { applySessionSnapshot } from "../lib/hydrateSession";
+import { applySessionSnapshot, loadSessionSnapshot } from "../lib/hydrateSession";
+import { deferred } from "../test-support/deferred";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { sessions } from "../lib/sessionList";
 
@@ -375,6 +376,48 @@ it("closes a form when history records its resolution before the pending snapsho
   });
   expect(screen.queryByRole("button", { name: "Submit" })).toBeNull();
   expect(await screen.findByText(/A: Yes/)).toBeTruthy();
+});
+
+it.each(["question_answer", "question_closed"])("an older detail's %s immediately closes its form and preserves another question and draft", async (type) => {
+  useSessionStore.setState({ token: "question-account" });
+  const first = deferred<Response>(), second = deferred<Response>();
+  let reads = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
+    if (new URL(String(url), window.location.origin).pathname === `/api/sessions/${sid}`) {
+      return ++reads === 1 ? first.promise : second.promise;
+    }
+    return Response.json({ items: [] });
+  }));
+  const older = loadSessionSnapshot(sid), newer = loadSessionSnapshot(sid);
+  await act(async () => {
+    second.resolve(Response.json({ id: sid, active_attempt: null, dispatch_state: emptyDispatch, next_message_seq: 2,
+      messages: [{ role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: { questions: [question] } }],
+      pending_questions: [{ question_id: "q1", questions: [question] }] }));
+    await newer;
+  });
+  renderChat();
+  fireEvent.change(await screen.findByPlaceholderText("Or type your own answer…"), { target: { value: "Keep my unsent answer" } });
+  act(() => handleWsMessage({ ...requested, question_id: "q2", seq: 3, questions: [{ question: "Another question?" }] }));
+  const invalid: boolean[] = [];
+  const stop = useSessionStore.subscribe((state) => {
+    if (state.closedQuestionIds[sid]?.q1) invalid.push(Boolean(state.pendingQuestions[sid]?.some((item) => item.question_id === "q1")));
+  });
+  try {
+    await act(async () => {
+      first.resolve(Response.json({ id: sid, active_attempt: null, dispatch_state: emptyDispatch, next_message_seq: 3,
+        messages: [{ role: type === "question_answer" ? "user" : "system", type, seq: 2, tool_use_id: "q1", content: "Original question resolved." }],
+        pending_questions: [] }));
+      await older;
+    });
+    expect(useSessionStore.getState().pendingQuestions[sid].map((item) => item.question_id)).toEqual(["q2"]);
+    expect(invalid).not.toContain(true);
+    expect(await screen.findAllByRole("button", { name: "Submit" })).toHaveLength(1);
+    expect(await screen.findByText("Another question?")).toBeVisible();
+    expect(screen.getByText("Saved answer draft")).toBeVisible();
+    expect(Object.values(useSessionStore.getState().questionDrafts)[0].answers).toEqual([{ selected: undefined, text: "Keep my unsent answer" }]);
+    act(() => handleWsMessage({ ...closed, seq: 2 }));
+    expect(useSessionStore.getState().pendingQuestions[sid].map((item) => item.question_id)).toEqual(["q2"]);
+  } finally { stop(); }
 });
 
 it("keeps a newer WebSocket question answerable when the earlier HTTP refetch completes", async () => {

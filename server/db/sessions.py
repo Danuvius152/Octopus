@@ -25,7 +25,11 @@ from ..models import (
     NativeDetailPage,
 )
 from ..session_results import SessionResult, committed_result
-from .applications import ApplicationDeleting
+from .applications import (
+    ApplicationDeleting,
+    require_application_writable,
+    retain_application_session_owner,
+)
 from .base import DatabaseBase
 from .transaction import Transaction
 
@@ -386,7 +390,8 @@ class SessionsMixin(DatabaseBase):
         fork_after_seq: int,
         fork_metadata: str | None = None,
         message_snapshot: ForkMessageSnapshot | None = None,
-    ) -> None:
+        inherit_application: bool = True,
+    ) -> str | None:
         """The DB-only half of the fork saga (session-rewind.md §5.1 step
         5): INSERT the fork `sessions` row (origin='fork',
         fork_status='initializing', optional native-copy resume hint) and copy the
@@ -402,20 +407,28 @@ class SessionsMixin(DatabaseBase):
                 message_snapshot.parent_id != parent_id or message_snapshot.after_seq != fork_after_seq):
             raise ValueError("Fork message snapshot belongs to a different boundary")
         async with self.transaction(write=True) as tx:
+            # Admission and ownership share the deletion phase's commit order.
+            # A full copy reads the original files but owns independent resources.
+            await require_application_writable(tx, parent_id)
+            app_id = await retain_application_session_owner(tx, parent_id) if inherit_application else None
+            if app_id is not None:
+                parent = await tx.fetch_one("SELECT user_id FROM sessions WHERE id=?", (parent_id,))
+                if parent is None or parent[0] != user_id:
+                    raise ValueError("Application session ownership cannot cross accounts")
             snapshot = message_snapshot or await _fork_message_snapshot(tx, parent_id, fork_after_seq)
             await tx.execute(
                 "INSERT INTO sessions "
                 "(id, name, working_dir, created_at, claude_session_id, "
                 " credential_id, agent_id, origin, backend, model, user_id, "
                 " forked_from_session_id, fork_after_seq, fork_needs_replay, "
-                " fork_status, fork_metadata, reasoning_effort, service_tier) "
+                " fork_status, fork_metadata, reasoning_effort, service_tier, app_id) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 'fork', ?, ?, ?, ?, ?, 0, "
-                " 'initializing', ?, ?, ?)",
+                " 'initializing', ?, ?, ?, ?)",
                 (
                     fork_id, name, working_dir, created_at, resume_id,
                     credential_id, agent_id, backend, model, user_id, parent_id,
                     fork_after_seq, fork_metadata, reasoning_effort,
-                    service_tier,
+                    service_tier, app_id,
                 ),
             )
             await tx.execute_many(
@@ -426,6 +439,7 @@ class SessionsMixin(DatabaseBase):
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ((fork_id, *row) for row in snapshot.rows),
             )
+        return app_id
 
     async def load_sessions(
         self, *, include_archived: bool = False, user_id: str | None = None

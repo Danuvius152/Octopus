@@ -583,7 +583,8 @@ class OwnerRuntime:
                     # but unfinished application deletion already forbids dispatch.
                     session._admission_closed = True
                     session._dispatch_paused = True
-                if command.reason in {"deleted", "application_deleted"} and (session._forking or session._archive_reservation is not None):
+                if (session._forking and command.reason in {"archived", "deleted", "application_deleted"}
+                        or command.reason in {"deleted", "application_deleted"} and session._archive_reservation is not None):
                     self.changed()
                     raise ForkError("A fork or archive is still using this session; retry deletion when it completes",
                                     reason="session_lifecycle_busy", status_code=409)

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -126,8 +127,9 @@ async def _create_app(am, db, *, name="Todo App", **extra) -> dict:
 
 
 @pytest.mark.parametrize("action", ["archive", "delete"])
+@pytest.mark.parametrize("history", ["builder", "rewind"])
 async def test_build_history_retires_its_background_writers_before_losing_link(
-    am, db, mgr, sent, monkeypatch, tmp_path, action,
+    am, db, mgr, sent, models, monkeypatch, tmp_path, action, history,
 ):
     from server import bg_tasks
 
@@ -141,23 +143,210 @@ async def test_build_history_retires_its_background_writers_before_losing_link(
     background.bind(db, discard, discard)
     monkeypatch.setattr(bg_tasks, "bg_task_manager", background)
     row = await _create_app(am, db)
+    session_id = row["session_id"]
+    if history == "rewind":
+        await models.emit(mgr, {"type": "result", "session_id": session_id})
+        session_id = (await mgr.fork_session(session_id, 0)).id
     unrelated = await mgr.create_session(agent_id=row["agent_id"])
     own = await background.start_task(
-        session_id=row["session_id"], command="sleep 120", working_dir=row["app_dir"],
+        session_id=session_id, command="sleep 120", working_dir=row["app_dir"],
     )
     other = await background.start_task(
         session_id=unrelated.id, command="sleep 120", working_dir=row["app_dir"],
     )
     try:
         if action == "archive":
-            await mgr.archive_session(row["session_id"], replace=False)
+            await mgr.archive_session(session_id, replace=False)
         else:
-            await mgr.delete_session(row["session_id"])
+            await mgr.delete_session(session_id)
         assert own.id not in background._running
         assert other.id in background._running
         assert (await db.get_application(row["id"])) is not None
     finally:
         await background.shutdown()
+
+
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("builder_removed", [False, True])
+async def test_rewind_writers_retire_before_application_files_are_deleted(
+    am, db, mgr, sent, models, monkeypatch, backend, legacy, builder_removed,
+):
+    from server import bg_tasks
+    from server.process_groups import group_exists
+
+    background = bg_tasks.BgTaskManager()
+
+    async def discard(_):
+        from server.sessions.submission import ReturnRefused
+
+        return ReturnRefused("source_withdrawn")
+
+    background.bind(db, discard, discard)
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", background)
+    owner = await db.get_system_agent()
+    agent = await AgentManager(db).create_agent(name="Rewind builder", backend=backend, user_id=owner["user_id"])
+    row = await _create_app(am, db, agent=agent)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    if legacy:
+        mgr.get_session(row["session_id"]).app_id = None
+        async with db.transaction(write=True) as tx:
+            await tx.execute("UPDATE sessions SET app_id=NULL WHERE id=?", (row["session_id"],))
+    first = await mgr.fork_session(row["session_id"], 0)
+    await db.append_message(session_id=first.id, seq=0, role="user", type="text", content="New build")
+    successor = await mgr.fork_session(first.id, 0)
+    # The UI's current build selection does not follow rewind.
+    assert (await am.get_application(row["id"]))["session_id"] == row["session_id"]
+    if builder_removed:
+        await mgr.delete_session(row["session_id"])
+        assert (await am.get_application(row["id"]))["session_id"] is None
+        await mgr.initialize(db)
+        successor = mgr.get_session(successor.id)
+        assert successor is not None and successor.app_id == row["id"]
+    # Same-directory sessions carry no application relationship.
+    unrelated = await mgr.create_session(agent_id=agent["id"], working_dir=row["app_dir"])
+    own = await background.start_task(session_id=successor.id, command="sleep 120", working_dir=row["app_dir"])
+    other = await background.start_task(session_id=unrelated.id, command="sleep 120", working_dir=row["app_dir"])
+    own_group = background._running[own.id].pgid
+    other_group = background._running[other.id].pgid
+    try:
+        await am.delete_application(row["id"])
+        assert not group_exists(own_group), "Deletion returned while a rewind writer could recreate application files"
+        assert group_exists(other_group)
+        assert (await background.get_task(own.id)).status == "cancelled"
+        assert not Path(row["app_dir"]).exists()
+        assert await db.get_application(row["id"]) is None
+        assert successor.app_id == row["id"]
+        assert mgr.get_session(successor.id) is successor
+        assert not successor._admission_closed
+        # Successful cleanup releases the history for explicitly requested new work.
+        Path(row["app_dir"]).mkdir()
+        fresh = await background.start_task(session_id=successor.id, command="true", working_dir=row["app_dir"])
+        assert fresh.id != own.id
+    finally:
+        await background.shutdown()
+
+
+@pytest.mark.parametrize("committed", [False, True])
+async def test_application_delete_and_archive_cannot_lose_a_preparing_rewind(
+    am, db, mgr, sent, models, monkeypatch, committed,
+):
+    from server.db.applications import ApplicationDeleting
+    from server.sessions.base import ForkError
+
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    entered, release = asyncio.Event(), asyncio.Event()
+    create = db.create_fork_session
+
+    async def held_create(**kwargs):
+        if committed:
+            result = await create(**kwargs)
+        entered.set()
+        await release.wait()
+        return result if committed else await create(**kwargs)
+
+    monkeypatch.setattr(db, "create_fork_session", held_create)
+    pending = asyncio.create_task(mgr.fork_session(row["session_id"], 0))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        with pytest.raises(ForkError, match="fork"):
+            await mgr.archive_session(row["session_id"], replace=False)
+        assert mgr.get_session(row["session_id"]) is not None
+        with pytest.raises(ApplicationError, match="fork"):
+            await am.delete_application(row["id"])
+        assert Path(row["app_dir"]).is_dir()
+        assert (await am.get_application(row["id"]))["deletion"]["phase"] == "retiring"
+        release.set()
+        if committed:
+            successor = await asyncio.wait_for(pending, 3)
+            assert successor.app_id == row["id"]
+            assert successor.id in await db.application_session_ids(row["id"])
+        else:
+            with pytest.raises((ForkError, ApplicationDeleting), match="delet"):
+                await asyncio.wait_for(pending, 3)
+            assert await db.application_session_ids(row["id"]) == [row["session_id"]]
+        await am.delete_application(row["id"])
+        assert await db.get_application(row["id"]) is None
+        assert not Path(row["app_dir"]).exists()
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_independent_application_copy_and_its_rewind_survive_original_deletion(
+    am, db, mgr, sent, models, monkeypatch, tmp_path,
+):
+    from server.sessions.forking import ForkingMixin
+
+    monkeypatch.setattr(ForkingMixin, "_fork_copy_base", staticmethod(lambda: str(tmp_path / "copies")))
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    (Path(row["app_dir"]) / "independent.txt").write_text("Keep this full copy")
+    copy = await mgr.duplicate_session(row["session_id"])
+    assert copy.app_id is None
+    await db.append_message(session_id=copy.id, seq=2, role="user", type="text", content="Independent work")
+    successor = await mgr.fork_session(copy.id, 2)
+    assert successor.app_id is None
+    assert successor.id not in await db.application_session_ids(row["id"])
+    await am.delete_application(row["id"])
+    assert Path(successor.working_dir, "independent.txt").read_text() == "Keep this full copy"
+    assert mgr.get_session(successor.id) is successor
+    assert not successor._admission_closed
+
+
+async def test_finished_rewind_does_not_release_a_later_rewinds_reservation(am, db, mgr, sent, models, monkeypatch):
+    from server.sessions.base import ForkError
+
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    first_tail, finish_first = asyncio.Event(), asyncio.Event()
+    second_insert, finish_second = asyncio.Event(), asyncio.Event()
+    archive, create = mgr._archive_original, db.create_fork_session
+    archives, inserts = 0, 0
+
+    async def held_archive(*args, **kwargs):
+        nonlocal archives
+        archives += 1
+        if archives == 1:
+            first_tail.set()
+            await finish_first.wait()
+        return await archive(*args, **kwargs)
+
+    async def held_insert(**kwargs):
+        nonlocal inserts
+        result = await create(**kwargs)
+        inserts += 1
+        if inserts == 2:
+            second_insert.set()
+            await finish_second.wait()
+        return result
+
+    monkeypatch.setattr(mgr, "_archive_original", held_archive)
+    monkeypatch.setattr(db, "create_fork_session", held_insert)
+    first = asyncio.create_task(mgr.fork_session(row["session_id"], 0))
+    second = None
+    try:
+        await asyncio.wait_for(first_tail.wait(), 3)
+        second = asyncio.create_task(mgr.fork_session(row["session_id"], 0))
+        await asyncio.wait_for(second_insert.wait(), 3)
+        finish_first.set()
+        await asyncio.wait_for(first, 3)
+        with pytest.raises(ForkError, match="fork"):
+            await mgr.archive_session(row["session_id"], replace=False)
+        with pytest.raises(ApplicationError, match="fork"):
+            await am.delete_application(row["id"])
+        assert Path(row["app_dir"]).exists()
+        finish_second.set()
+        successor = await asyncio.wait_for(second, 3)
+        assert mgr.get_session(successor.id) is successor
+        await am.delete_application(row["id"])
+        assert not Path(row["app_dir"]).exists()
+        assert await db.get_application(row["id"]) is None
+    finally:
+        finish_first.set()
+        finish_second.set()
+        await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1069,6 +1258,91 @@ async def test_partial_file_failure_retries_only_files_and_restart_keeps_admissi
     finally:
         restored.shutdown()
         await restarted.close_session_owners()
+
+
+async def test_cleanup_preserves_a_data_access_link_inside_code_until_data_has_been_removed(am, db, mgr, sent, models, monkeypatch):
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    code = Path(row["app_dir"])
+    data = code.parent / "actual-data"
+    data.mkdir()
+    (data / "original.txt").write_text("durable data")
+    middle = code / "data-bridge"
+    middle.symlink_to(data, target_is_directory=True)
+    stored_data = Path(str(code) + ".data")
+    stored_data.symlink_to(middle, target_is_directory=True)
+    remove = shutil.rmtree
+
+    def fail_data(path, *args, **kwargs):
+        if Path(path) == data:
+            raise PermissionError("original data is locked")
+        return remove(path, *args, **kwargs)
+
+    with monkeypatch.context() as faults:
+        faults.setattr(shutil, "rmtree", fail_data)
+        with pytest.raises(ApplicationError, match="locked"):
+            await am.delete_application(row["id"])
+    assert (stored_data / "original.txt").read_text() == "durable data"
+    assert middle.is_symlink() and code.is_dir()
+    await am.delete_application(row["id"])
+    assert await db.get_application(row["id"]) is None
+    assert not code.exists() and not data.exists() and not stored_data.is_symlink()
+
+
+@pytest.mark.parametrize("relative", [False, True])
+async def test_application_create_and_delete_resolve_parent_components_after_symlinks(am, db, mgr, sent, models, tmp_path, monkeypatch, relative):
+    entry, actual = tmp_path / "entry", tmp_path / "actual"
+    entry.mkdir()
+    nested = actual / "nested"
+    nested.mkdir(parents=True)
+    (entry / "link").symlink_to(nested, target_is_directory=True)
+    if relative:
+        monkeypatch.chdir(tmp_path)
+    users = os.path.join("entry" if relative else str(entry), "link", "..", "users")
+    monkeypatch.setattr(settings, "users_root", users)
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    expected = actual / "users" / row["user_id"] / "applications" / Path(row["app_dir"]).name
+    assert Path(row["app_dir"]).resolve() == expected
+    for suffix in ("", ".data", ".runtime"):
+        directory = Path(str(expected) + suffix)
+        directory.mkdir(exist_ok=True)
+        (directory / "original.txt").write_text("resource" + suffix)
+    await am.delete_application(row["id"])
+    assert await db.get_application(row["id"]) is None
+    for suffix in ("", ".data", ".runtime"):
+        assert not Path(str(expected) + suffix).exists()
+    assert (entry / "link").is_symlink()
+
+
+@pytest.mark.parametrize("names", [("a", "b"), ("c", "d"), ("outer", "inner")])
+@pytest.mark.parametrize("failed_link", ["inner", "outer"])
+async def test_cleanup_retries_an_inner_link_failure_without_losing_its_stored_entry(am, db, mgr, sent, models, monkeypatch, names, failed_link):
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    code = Path(row["app_dir"])
+    outer, inner = (code.parent / name for name in names)
+    inner.symlink_to(code, target_is_directory=True)
+    outer.symlink_to(inner, target_is_directory=True)
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE applications SET app_dir=? WHERE id=?", (str(outer), row["id"]))
+    unlink = Path.unlink
+
+    def fail_inner(path, *args, **kwargs):
+        if path == (inner if failed_link == "inner" else outer):
+            raise PermissionError("inner access link is locked")
+        return unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as faults:
+        faults.setattr(Path, "unlink", fail_inner)
+        with pytest.raises(ApplicationError, match="locked"):
+            await am.delete_application(row["id"])
+    assert outer.is_symlink()
+    assert inner.is_symlink() is (failed_link == "inner")
+    assert (await db.get_application(row["id"]))["deletion"]["phase"] == "files"
+    await am.delete_application(row["id"])
+    assert await db.get_application(row["id"]) is None
+    assert not code.exists() and not outer.is_symlink() and not inner.is_symlink()
 
 
 @pytest.mark.parametrize("restart", [False, True])

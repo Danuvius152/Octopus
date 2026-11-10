@@ -349,7 +349,7 @@ interface SessionStore {
   scheduleRead: ListReadState;
 
   credentials: CredentialInfo[];
-  setCredentials: (c: CredentialInfo[]) => void;
+  credentialRead: ListReadState;
 
   // Connector catalog and installations (connectors.md). AgentFormPage owns
   // its enablement draft, backed by the agent connector routes.
@@ -564,6 +564,19 @@ function dispatchUpdate(s: SessionStore, sessionId: string, snapshot: DispatchSt
     dispatchStates: { ...(changed ? {} : s.dispatchStates),
       [sessionId]: previous?.revision === snapshot.revision ? { ...previous } : snapshot },
     dispatchUnavailable: errors,
+  };
+}
+
+function settledQuestions(state: SessionStore, sessionId: string, messages: MessageInput[]): Partial<SessionStore> {
+  const ids = messages.filter((message) =>
+    (message.type === "question_answer" || message.type === "question_closed") && message.tool_use_id
+  ).map((message) => message.tool_use_id!);
+  if (!ids.length) return {};
+  const closed = { ...state.closedQuestionIds[sessionId], ...Object.fromEntries(ids.map((id) => [id, true as const])) };
+  const pending = (state.pendingQuestions[sessionId] || []).filter((question) => !closed[question.question_id]);
+  return {
+    closedQuestionIds: { ...state.closedQuestionIds, [sessionId]: closed },
+    pendingQuestions: pending.length ? { ...state.pendingQuestions, [sessionId]: pending } : dropKey(state.pendingQuestions, sessionId),
   };
 }
 
@@ -816,6 +829,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           ? dropKey(s.streamingText, sessionId)
           : s.streamingText;
       return {
+        ...settledQuestions(s, sessionId, [msg]),
         messages: {
           ...s.messages,
           [sessionId]: [...(s.messages[sessionId] || []), normalizeMessage(msg)],
@@ -834,17 +848,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const continuous = first !== undefined && first === previous.find((message) => typeof message.seq === "number")?.seq &&
         previous.every((message) => message.seq !== undefined && seqs.has(message.seq));
       return {
+      ...settledQuestions(s, sessionId, msgs),
       messageWindows: { ...s.messageWindows, [sessionId]: continuous ? s.messageWindows[sessionId] : Symbol() },
       messages: { ...s.messages, [sessionId]: msgs.map(normalizeMessage) },
-      closedQuestionIds: {
-        ...s.closedQuestionIds,
-        [sessionId]: {
-          ...s.closedQuestionIds[sessionId],
-          ...Object.fromEntries(msgs.filter((m) =>
-            (m.type === "question_answer" || m.type === "question_closed") && m.tool_use_id
-          ).map((m) => [m.tool_use_id!, true as const])),
-        },
-      },
       // A snapshot reload is authoritative; any half-streamed text it doesn't
       // contain is stale by definition.
       streamingText: preserveStreaming ? s.streamingText : dropKey(s.streamingText, sessionId),
@@ -880,6 +886,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       }
       result = { state: "merged", added: fresh.length };
       return {
+      ...settledQuestions(cur, sessionId, fresh),
       messages: {
         ...cur.messages,
         [sessionId]: [...fresh.map(normalizeMessage), ...(cur.messages[sessionId] || [])],
@@ -964,7 +971,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   scheduleRead: unreadList(),
 
   credentials: [],
-  setCredentials: (credentials) => set({ credentials }),
+  credentialRead: unreadList(),
 
   connectorCatalog: [],
   setConnectorCatalog: (connectorCatalog) => set({ connectorCatalog }),

@@ -1,12 +1,21 @@
 """The application bridge consumes the main API's parameter contract."""
 
+import asyncio
+import fcntl
+import json
+import os
+import threading
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from server.applications import ApplicationManager, app_scope_token
 from server.routers import applications as app_routes
+from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs
+from server.wiki.registry import registry
+from server.wiki.store import revision
 from tests import wiki_api as api
 from tests.test_wiki_maintenance_state import client as client
 from tests.test_wiki_maintenance_state import prepare
@@ -35,6 +44,152 @@ async def bound(client, tmp_path, monkeypatch):
         yield client, jobs, {"Authorization": "Bearer " + app_scope_token("parameters")}
     finally:
         manager.shutdown()
+
+
+def human_mutation(jobs, operation):
+    from tests.test_wiki_history import legacy_snapshot
+
+    history = WikiHistory(jobs.store)
+    path = "Library/note.md"
+    original = jobs.store.path(path).read_bytes()
+    changed = history.write(path, b"# Current\nCurrent editable words.\n", revision(original), "human", "prepare restore")
+    if operation == "document":
+        return "PUT", {"path": path, "content": "# New\nAuthorized edit.\n", "expected_revision": changed["revision"], "reason": "Edit"}
+    if operation == "restore":
+        return "POST", {"change_id": changed["change_id"], "expected_revision": changed["revision"], "side": "before"}
+    snapshot = legacy_snapshot(history, {path: original})
+    return "POST", {"snapshot_id": snapshot["id"], "paths": [path], "expected_revisions": {path: changed["revision"]}}
+
+
+def mutation_evidence(jobs):
+    with jobs.store.connect() as db:
+        return jobs.store.path("Library/note.md").read_bytes(), [
+            [tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+            for table in ("changes", "operation_receipts")
+        ]
+
+
+@pytest.mark.parametrize("operation", ["document", "restore", "snapshot/restore"])
+@pytest.mark.parametrize("rebind", [False, True])
+async def test_retired_app_request_cannot_write_after_body_wait_even_when_rebound(bound, operation, rebind):
+    client, jobs, headers = bound
+    method, body = human_mutation(jobs, operation)
+    before = mutation_evidence(jobs)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_body():
+        entered.set()
+        await release.wait()
+        yield json.dumps(body).encode()
+
+    pending = asyncio.create_task(client.request(method, f"/apps/parameters/wiki/{operation}",
+        headers={**headers, "Content-Type": "application/json"}, content=delayed_body()))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        root = jobs.store.root
+        registry.configure(jobs.user_id, root, jobs.registration["curator_agent_id"], "another-app")
+        if rebind:
+            registry.configure(jobs.user_id, root, jobs.registration["curator_agent_id"], "parameters")
+        release.set()
+        response = await asyncio.wait_for(pending, 3)
+        assert response.status_code in {403, 409}, response.text
+        assert mutation_evidence(WikiJobs(jobs.user_id)) == before
+        # Rebinding grants new requests authority, never the old request.
+        registry.configure(jobs.user_id, root, jobs.registration["curator_agent_id"], "parameters")
+        fresh = await client.request(method, f"/apps/parameters/wiki/{operation}", headers=headers, json=body)
+        assert fresh.status_code == 200, fresh.text
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.parametrize("operation", ["document", "restore", "snapshot/restore"])
+@pytest.mark.parametrize("rebind", [False, True])
+async def test_app_mutation_rechecks_registration_after_real_history_lock_wait(bound, monkeypatch, operation, rebind):
+    client, jobs, headers = bound
+    method, body = human_mutation(jobs, operation)
+    before = mutation_evidence(jobs)
+    history = WikiHistory(jobs.store)
+    lock_path = history.state / "vault.lock"
+    flock = fcntl.flock
+    entered = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def observe_flock(handle, flags):
+        if flags == fcntl.LOCK_EX and getattr(handle, "name", None) == str(lock_path):
+            loop.call_soon_threadsafe(entered.set)
+        return flock(handle, flags)
+
+    with lock_path.open("a+b") as handle:
+        flock(handle, fcntl.LOCK_EX)
+        monkeypatch.setattr(fcntl, "flock", observe_flock)
+        pending = asyncio.create_task(client.request(method, f"/apps/parameters/wiki/{operation}", headers=headers, json=body))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            await asyncio.wait_for(asyncio.to_thread(registry.configure, jobs.user_id, jobs.store.root,
+                jobs.registration["curator_agent_id"], "another-app"), 3)
+            if rebind:
+                await asyncio.wait_for(asyncio.to_thread(registry.configure, jobs.user_id, jobs.store.root,
+                    jobs.registration["curator_agent_id"], "parameters"), 3)
+            assert not pending.done()
+        finally:
+            flock(handle, fcntl.LOCK_UN)
+            response = await asyncio.wait_for(pending, 3)
+    assert response.status_code in {403, 409}, response.text
+    assert mutation_evidence(WikiJobs(jobs.user_id)) == before
+
+
+@pytest.mark.parametrize("operation", ["document", "restore", "snapshot/restore"])
+async def test_protected_human_mutation_finishes_before_rebinding_can_commit(bound, monkeypatch, operation):
+    client, jobs, headers = bound
+    original = jobs.store.path("Library/note.md").read_bytes()
+    method, body = human_mutation(jobs, operation)
+    entered, changing = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    replace = os.replace
+    destination = jobs.store.path("Library/note.md")
+    account = registry._account_lock(jobs.user_id)
+
+    def held_effect(source, target, *args, **kwargs):
+        if Path(target) == destination:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5), "Original protected write did not resume"
+        return replace(source, target, *args, **kwargs)
+
+    def rebind():
+        # Probe the real lock from the competing thread. No authorization or
+        # effect boundary is replaced; configure itself must wait on this lock.
+        acquired = account.acquire(blocking=False)
+        if acquired:
+            account.release()
+        assert not acquired, "The file effect escaped its registration protection"
+        loop.call_soon_threadsafe(changing.set)
+        return registry.configure(jobs.user_id, jobs.store.root, jobs.registration["curator_agent_id"], "another-app")
+
+    monkeypatch.setattr(os, "replace", held_effect)
+    pending = asyncio.create_task(client.request(method, f"/apps/parameters/wiki/{operation}", headers=headers, json=body))
+    change = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        change = asyncio.create_task(asyncio.to_thread(rebind))
+        await asyncio.wait_for(changing.wait(), 3)
+        assert not change.done()
+        release.set()
+        response, config = await asyncio.wait_for(asyncio.gather(pending, change), 5)
+        assert response.status_code == 200, response.text
+        assert config["app_id"] == "another-app"
+        expected = body["content"].encode() if operation == "document" else original
+        assert destination.read_bytes() == expected
+        before_refusal = mutation_evidence(WikiJobs(jobs.user_id))
+        history = WikiHistory(registry.store(jobs.user_id)).history("Library/note.md")["items"]
+        assert history and all(row["status"] == "applied" for row in history)
+        refused = await client.request(method, f"/apps/parameters/wiki/{operation}", headers=headers, json=body)
+        assert refused.status_code == 403
+        assert mutation_evidence(WikiJobs(jobs.user_id)) == before_refusal
+    finally:
+        release.set()
+        await asyncio.gather(pending, *([change] if change else []), return_exceptions=True)
 
 
 async def test_app_cancel_uses_the_original_job_and_rejects_stale_target_without_effects(bound):

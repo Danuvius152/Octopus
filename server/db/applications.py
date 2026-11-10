@@ -29,6 +29,22 @@ async def require_application_writable(tx: Transaction, session_id: str) -> None
         raise ApplicationDeleting("Application deletion is unfinished; retry deletion before writing")
 
 
+async def retain_application_session_owner(tx: Transaction, session_id: str) -> str | None:
+    """Resolve and retain the known relationship within the caller's commit."""
+    rows = await tx.fetch_all(
+        "SELECT s.app_id, a.id FROM sessions s LEFT JOIN applications a ON "
+        "a.session_id=s.id AND a.user_id IS s.user_id WHERE s.id=?", (session_id,),
+    )
+    owners = {value for row in rows for value in row if value is not None}
+    if len(owners) > 1:
+        raise ValueError("Application builder has multiple owners")
+    if not owners:
+        return None
+    app_id = owners.pop()
+    await tx.execute("UPDATE sessions SET app_id=? WHERE id=? AND app_id IS NULL", (app_id, session_id))
+    return app_id
+
+
 class ApplicationsMixin(DatabaseBase):
 
     async def require_application_session_writable(self, session_id: str) -> None:
@@ -52,19 +68,7 @@ class ApplicationsMixin(DatabaseBase):
     async def retain_application_session_owner(self, session_id: str) -> str | None:
         """Keep a legacy builder's known relationship before replacing it."""
         async with self.transaction(write=True) as tx:
-            rows = await tx.fetch_all(
-                "SELECT s.app_id, a.id FROM sessions s LEFT JOIN applications a ON "
-                "a.session_id=s.id AND a.user_id IS s.user_id WHERE s.id=?",
-                (session_id,),
-            )
-            owners = {value for row in rows for value in row if value is not None}
-            if len(owners) > 1:
-                raise ValueError("Application builder has multiple owners")
-            if not owners:
-                return None
-            app_id = owners.pop()
-            await tx.execute("UPDATE sessions SET app_id=? WHERE id=? AND app_id IS NULL", (app_id, session_id))
-            return app_id
+            return await retain_application_session_owner(tx, session_id)
 
 
     async def save_application(
