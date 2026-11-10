@@ -15,6 +15,83 @@ import { useSessionStore } from "../stores/sessionStore";
 
 afterEach(cleanup);
 
+const nativeRuntime = (item_id: string) => ({ request_id: "request", attempt_id: "attempt", native: {
+  thread_id: "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn", item_id } });
+
+it("shows a Bash command once and keeps native bookkeeping in optional raw data", () => {
+  const command = "/bin/bash -lc 'cp source/trace.zip workspace/trace.zip'";
+  const input = { command, native_item: { type: "commandExecution", id: "exec-original", command,
+    cwd: "/working", status: "inProgress", processId: "123", exitCode: null,
+    commandActions: [{ type: "unknown", command }] } };
+  const view = render(<MessageBubble sessionId="bash-reader" message={{ role: "assistant", type: "tool_use",
+    tool_name: "Bash", tool_input: input, runtime_metadata: nativeRuntime("exec-original") }} />);
+  fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+  const detail = view.container.querySelector(".tool-detail")!;
+  expect(detail.textContent).toBe(command);
+  expect(detail).not.toHaveTextContent("native_item");
+  const raw = view.getByLabelText("Raw tool input");
+  expect(raw).not.toBeVisible();
+  fireEvent.click(view.getByText("Raw tool data", { exact: true }));
+  expect(raw).toBeVisible();
+  expect(raw).toHaveTextContent('"id": "exec-original"');
+  expect(raw).toHaveTextContent('"exitCode": null');
+  expect(raw).toHaveTextContent('"cwd": "/working"');
+  expect(input.native_item.commandActions).toEqual([{ type: "unknown", command }]);
+});
+
+it("preserves structured Bash input when no canonical command is available", () => {
+  const view = render(<MessageBubble sessionId="bash-reader" message={{ role: "assistant", type: "tool_use",
+    tool_name: "Bash", tool_input: { unknown_argument: "original input" } }} />);
+  fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+  expect(view.container.querySelector(".tool-detail")).toHaveTextContent('"unknown_argument": "original input"');
+});
+
+it("keeps real Bash options alongside the command", () => {
+  const parameters = { command: "echo original", timeout: 5000, description: "Check the original file" };
+  const view = render(<MessageBubble sessionId="tool-reader" message={{ role: "assistant", type: "tool_use",
+    tool_name: "Bash", tool_input: parameters }} />);
+  fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+  expect(view.container.querySelector(".tool-detail")!.textContent).toBe(JSON.stringify(parameters, null, 2));
+});
+
+it.each([
+  { native_item: { type: "futureNativeTool", id: "native-id", meaningful_field: "Original business value", extension: null } },
+  { threadId: "thread", turnId: "turn", item: { type: "fileChange", id: "native-id", changes: [{ path: "/original", diff: "+saved change" }] },
+    unknown_sibling: { business: "Keep the original observation" } },
+])("keeps native-only or unknown input readable when no separate arguments exist", (tool_input) => {
+  const view = render(<MessageBubble sessionId="tool-reader" message={{ role: "assistant", type: "tool_use",
+    tool_name: "nativeTool", tool_input, runtime_metadata: nativeRuntime("native-id") }} />);
+  fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+  expect(view.container.querySelector(".tool-detail")!.textContent).toBe(JSON.stringify(tool_input, null, 2));
+});
+
+it.each(["Read", "mcp__wiki__read", "mcp__custom__lookup"])("separates %s native bookkeeping while retaining all business arguments", (tool_name) => {
+  const parameters = { path: "/original", id: "business-id", nullable: null, options: { input: "real argument" },
+    request_context: { request_id: "business-request", content: "Original business context" }, attempt_context: null };
+  const input = { ...parameters, native_item: { type: "mcpToolCall", id: "native-audit-id", arguments: parameters, status: "completed" } };
+  const view = render(<MessageBubble sessionId="tool-reader" message={{ role: "assistant", type: "tool_use", tool_name, tool_input: input,
+    runtime_metadata: nativeRuntime("native-audit-id") }} />);
+  fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+  expect(view.container.querySelector(".tool-detail")!.textContent).toBe(JSON.stringify(parameters, null, 2));
+  const raw = view.getByLabelText("Raw tool input");
+  expect(raw).not.toBeVisible();
+  fireEvent.click(view.getByText("Raw tool data", { exact: true }));
+  expect(raw).toBeVisible();
+  expect(raw).toHaveTextContent('"id": "native-audit-id"');
+  expect(raw).toHaveTextContent("Original business context");
+  expect(input.native_item.arguments).toBe(parameters);
+});
+
+it.each([undefined, nativeRuntime("different-item")])("preserves envelope-like business arguments without matching native provenance", (runtime_metadata) => {
+  const input = { id: "business-id", input: null, request_context: { caller: "business caller" }, attempt_context: { mode: "business" },
+    native_item: { id: "business-item", type: "custom", value: "Actual argument" } };
+  const view = render(<MessageBubble sessionId="tool-reader" message={{ role: "assistant", type: "tool_use",
+    tool_name: "mcp__custom__lookup", tool_input: input, runtime_metadata }} />);
+  fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+  expect(view.container.querySelector(".tool-detail")!.textContent).toBe(JSON.stringify(input, null, 2));
+  expect(view.queryByText("Raw tool data", { exact: true })).not.toBeInTheDocument();
+});
+
 it("keeps an asynchronous question visible when its saved body needs expansion", () => {
   const view = render(<MessageBubble sessionId="question-preview" message={{ role: "assistant", type: "text", seq: 4,
     content: "Question body preview…", body_state: "preview", detail_ref: "/api/sessions/question-preview/messages/4",
@@ -40,8 +117,25 @@ describe("saved message previews", () => {
     expect(view.getByText("Saved preview…")).toBeVisible();
     fireEvent.click(view.getByRole("button", { name: "Retry full message" }));
     await waitFor(() => expect(view.getByText("Complete original answer")).toBeVisible());
-    expect(view.getByText("Full message")).toBeVisible();
+    expect(view.getByRole("button", { name: "Show preview" })).toBeVisible();
     expect(fetcher.mock.calls.map(([url]) => url)).toEqual([preview.detail_ref, preview.detail_ref]);
+  });
+
+  it.each(["tool_use", "tool_result"])("loads a %s through its existing expansion without preview notices", async (type) => {
+    useSessionStore.setState({ token: "tool-reader" });
+    const tool = { ...preview, type, tool_name: "Read", tool_input: { file_path: "/original" }, content: "Short result" };
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ ...tool, content: "Complete result", tool_input: { file_path: "/original", complete: true } }));
+    vi.stubGlobal("fetch", fetcher);
+    const view = render(<MessageBubble sessionId="original" message={tool} />);
+    expect(view.queryByText("Preview · some content is not shown")).not.toBeInTheDocument();
+    expect(view.queryByRole("button", { name: "View full message" })).not.toBeInTheDocument();
+    expect(fetcher).not.toHaveBeenCalled();
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+    await waitFor(() => expect(view.getByText(type === "tool_use" ? /"complete": true/ : "Complete result")).toBeVisible());
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([preview.detail_ref]);
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it("renders the complete saved card record after expansion without replacing live card state", async () => {

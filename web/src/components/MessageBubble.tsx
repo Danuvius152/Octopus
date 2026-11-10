@@ -30,7 +30,7 @@ import { projectToolCall, readRuntimeMetadata } from "../lib/toolIdentity";
 import { questionClosure } from "../lib/questionPresentation";
 import { requestSource } from "../lib/injectedTurns";
 import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
-import { displayToolInput } from "../lib/messagePresentation";
+import { ToolInputDetails } from "./ToolInputDetails";
 
 // Marker the backend prepends to the synthesized user message it
 // injects when a bg task completes. Used to render those messages
@@ -174,10 +174,11 @@ function AttachmentList({
 
 export function MessageBubble(props: MessageBubbleProps) {
   return <MessageDetails key={`${props.sessionId}:${props.message.seq}:${props.message.detail_ref}`}
-    sessionId={props.sessionId} message={props.message}>{(message) =>
+    sessionId={props.sessionId} message={props.message}
+    expandWithMessage={props.message.type === "tool_use" || props.message.type === "tool_result"}>{(message, loadDetail) =>
       message !== props.message && (message.type === "native_subagent" || props.message.identity_unavailable)
         ? <SavedMessageRecord message={message} label={props.message.identity_unavailable ? "Full saved message record" : "Full saved helper record"} />
-        : <MessageBody {...props} message={normalizeMessage(message)} />
+        : <MessageBody {...props} message={normalizeMessage(message)} onExpand={loadDetail} />
     }</MessageDetails>;
 }
 
@@ -190,7 +191,8 @@ function MessageBody({
   onFork,
   onRestoreInput,
   restoreInputDisabled,
-}: MessageBubbleProps) {
+  onExpand,
+}: MessageBubbleProps & { onExpand?: () => void }) {
   const assistantLabel = agentName || "Assistant";
   // Mirror the header's avatar treatment: show the agent's emoji, falling
   // back to the default octopus when an agent exists but set no avatar.
@@ -328,10 +330,10 @@ function MessageBody({
       );
 
     case "tool_use":
-      return <ToolUseBlock message={message} sessionId={sessionId} />;
+      return <ToolUseBlock message={message} sessionId={sessionId} onExpand={onExpand} />;
 
     case "tool_result":
-      return <ToolResultBlock message={message} sessionId={sessionId} />;
+      return <ToolResultBlock message={message} sessionId={sessionId} onExpand={onExpand} />;
 
     case "tool_approval_request":
       return (
@@ -424,14 +426,13 @@ function MessageBody({
 function ToolUseBlock({
   message,
   sessionId,
+  onExpand,
 }: {
   message: Message;
   sessionId: string;
+  onExpand?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const inputStr = message.tool_input
-    ? JSON.stringify(displayToolInput(message.tool_input, message.content), null, 2)
-    : "";
   const preview = (() => {
     const input = message.tool_input;
     if (input && "command" in input) return String(input.command).slice(0, 80);
@@ -473,7 +474,7 @@ function ToolUseBlock({
           /* `pr-12`, like every other shape: the hover timestamp lives in
              this corner, and a long tool argument would run under it. */
           className="tool-header flex w-full items-center gap-2 px-3 py-2 pr-12 text-left font-mono text-[12px] transition-colors hover:bg-gray-100"
-          onClick={() => setExpanded(!expanded)}
+          onClick={() => { if (!expanded) onExpand?.(); setExpanded(!expanded); }}
         >
           <span className="tool-icon text-muted-foreground shrink-0">
             {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
@@ -488,11 +489,7 @@ function ToolUseBlock({
             </code>
           )}
         </button>
-        {expanded && (
-          <pre className="tool-detail max-h-80 overflow-x-auto overflow-y-auto whitespace-pre-wrap break-words border-t border-gray-300 bg-card px-4 py-2.5 font-mono text-[11.5px] text-gray-900">
-            {inputStr}
-          </pre>
-        )}
+        {expanded && <ToolInputDetails message={message} />}
       </div>
       {isBgRun && <BgChipForToolUse sessionId={sessionId} message={message} />}
       {/* Native sub-agents (native-subagents.md). Deliberately NOT matched on
@@ -574,7 +571,7 @@ function BgTaskResultMessage({
   );
 }
 
-function ToolResultBlock({ message, sessionId }: { message: Message; sessionId: string }) {
+function ToolResultBlock({ message, sessionId, onExpand }: { message: Message; sessionId: string; onExpand?: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [copyStatus, setCopyStatus] = useState("Copy path");
   const content = message.content || "";
@@ -599,7 +596,7 @@ function ToolResultBlock({ message, sessionId }: { message: Message; sessionId: 
         type="button"
         /* `pr-12` — the same reserved corner. */
         className="tool-header w-full flex items-center gap-2 px-3 py-2 pr-12 text-left text-sm hover:bg-accent/50 transition-colors"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => { if (!expanded) onExpand?.(); setExpanded(!expanded); }}
       >
         <span className="tool-icon text-muted-foreground shrink-0">
           {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}

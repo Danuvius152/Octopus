@@ -25,6 +25,25 @@ test("saved details render separately from the main transcript and leave its hig
   expect(useSessionStore.getState().lastAppliedSeq.s).toBe(10);
 });
 
+test("saved helper tool calls separate arguments from optional raw audit data", async () => {
+  const parameters = { pattern: "original input", id: "business-id", nullable: null, request_context: { request_id: "business-request" } };
+  const input = { ...parameters, native_item: { type: "mcpToolCall", id: "native-audit-id", arguments: parameters } };
+  const fetch = vi.fn().mockResolvedValue(respond({ ...page(""), messages: [{ role: "assistant", type: "tool_use",
+    tool_name: "mcp__wiki__search", tool_input: input, seq: 2, runtime_metadata: { request_id: "request", attempt_id: "attempt",
+      native: { thread_id: "child", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn", item_id: "native-audit-id" } } }] }));
+  vi.stubGlobal("fetch", fetch);
+  render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
+  const primary = await screen.findByText(/"pattern": "original input"/, { selector: ".tool-detail" });
+  expect(primary.textContent).toBe(JSON.stringify(parameters, null, 2));
+  const raw = screen.getByLabelText("Raw tool input");
+  expect(raw).not.toBeVisible();
+  fireEvent.click(screen.getByText("Raw tool data", { exact: true }));
+  expect(raw).toBeVisible();
+  expect(raw).toHaveTextContent("native-audit-id");
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(useSessionStore.getState().messages).toEqual({});
+});
+
 test("a collected preview expands its original full message without fetching unrelated bodies", async () => {
   const first = page("Child preview…");
   const fetch = vi.fn().mockResolvedValueOnce(respond({ ...first, messages: first.messages.map((message) => ({

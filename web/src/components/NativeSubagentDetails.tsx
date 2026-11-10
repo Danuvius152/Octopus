@@ -4,6 +4,7 @@ import { accountFetch } from "../lib/accountFetch";
 import { useSessionStore } from "../stores/sessionStore";
 import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { displayToolInput } from "../lib/messagePresentation";
+import { ToolInputDetails } from "./ToolInputDetails";
 
 /** A separate read view: it never merges detail pages into chat or usage. */
 export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: string; anchorSeq?: number }) {
@@ -75,7 +76,8 @@ export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: str
         "identity_unavailable" in message && message.identity_unavailable === true
         ? <SavedMessageRecord message={shown} label="Full saved helper record" /> : <>
         <p className="font-mono text-[10px] text-gray-600">{shown.type}{shown.tool_name ? ` · ${shown.tool_name}` : ""}{shown.is_error ? " · failed" : ""}</p>
-        {shown.tool_input && <pre className="whitespace-pre-wrap break-words">{JSON.stringify(displayToolInput(shown.tool_input, shown.content), null, 2)}</pre>}
+        {shown.tool_input && (shown.type === "tool_use" ? <ToolInputDetails message={shown} /> :
+          <pre className="whitespace-pre-wrap break-words">{JSON.stringify(displayToolInput(shown.tool_input, shown.content), null, 2)}</pre>)}
         {shown.content !== null && shown.content !== undefined && <pre className="whitespace-pre-wrap break-words">{
           typeof shown.content === "string" ? shown.content : JSON.stringify(shown.content, null, 2)
         }</pre>}
