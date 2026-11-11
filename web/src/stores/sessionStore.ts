@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { readResearchEvidence, type ResearchEvidence } from "../lib/researchEvidence";
 import { mergeAuxiliarySnapshot, mergeCardSnapshot } from "../lib/cardSnapshots";
-import { agentRequestIsCurrent, beginAgentRequest, canApplyAgent, endAgentRequest, recordAgentChanges, recordAgentSnapshot, type AgentRequest } from "../lib/agentUpdates";
+import { agentOrderIsProtected, agentReadStatusIsCurrent, agentRequestIsCurrent, agentSnapshotCovers, beginAgentRequest, canApplyAgent, canApplyAgentObservation, endAgentRequest, finishAgentOrder, recordAgentChanges, recordAgentOrder, recordAgentOrderReceipt, recordAgentSnapshot, type AgentRequest } from "../lib/agentUpdates";
 import { withPinOrder } from "../lib/sidebarPins";
 import { unreadList, type ListReadState } from "../lib/listState";
 import type { ControlCommandStatus } from "../lib/submission";
@@ -233,11 +233,14 @@ interface SessionStore {
   // is two-pane: pick an agent, then see its sessions. `activeAgentId`
   // drives the session/schedule filters.
   agents: Agent[];
-  setAgents: (a: Agent[]) => void;
-  beginAgentRequest: (kind?: AgentRequest["kind"]) => AgentRequest;
+  archivedAgents: Agent[];
+  archivedAgentsRead: { loaded: boolean; loading: boolean; invalidated: boolean; error: string | null };
+  beginAgentRequest: (scope?: AgentRequest["scope"]) => AgentRequest;
   endAgentRequest: (request: AgentRequest) => void;
-  applyAgentSnapshot: (agents: Agent[], request: AgentRequest) => void;
+  applyAgentSnapshot: (agents: Agent[], request: AgentRequest, scope?: AgentRequest["scope"]) => void;
   applyAgentOrder: (ids: string[], request: AgentRequest) => void;
+  confirmAgentOrder: (ids: string[], request: AgentRequest) => void;
+  finishAgentOrder: (request: AgentRequest) => void;
   upsertAgent: (a: Agent, request?: AgentRequest) => void;
   removeAgent: (id: string, request?: AgentRequest) => void;
   activeAgentId: string | null;
@@ -661,52 +664,65 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   agents: [],
-  setAgents: (agents) => {
-    recordAgentChanges(new Set([...get().agents, ...agents].map((agent) => agent.id)));
-    set({ agents });
-  },
-  beginAgentRequest: (kind) => beginAgentRequest(get(), kind),
+  archivedAgents: [],
+  archivedAgentsRead: { loaded: false, loading: false, invalidated: false, error: null },
+  beginAgentRequest: (scope) => beginAgentRequest(get(), scope),
   endAgentRequest,
-  applyAgentSnapshot: (rows, request) => set((s) => {
+  finishAgentOrder,
+  applyAgentSnapshot: (rows, request, scope = request.scope) => set((s) => {
     if (!agentRequestIsCurrent(request, s)) return s;
-    const incoming = new Map(rows.filter((agent) => !agent.archived).map((agent) => [agent.id, agent]));
-    const ids = new Set([...s.agents, ...rows].map((agent) => agent.id));
-    const current = new Map(s.agents.map((agent) => [agent.id, agent]));
-    const accepted = [...ids].filter((id) => canApplyAgent(id, request));
+    const incoming = new Map(rows.map((agent) => [agent.id, agent]));
+    const current = new Map([...s.agents, ...s.archivedAgents].map((agent) => [agent.id, agent]));
+    const ids = new Set([...current.keys(), ...incoming.keys()]);
+    const accepted = [...ids].filter((id) => canApplyAgentObservation(id, request)
+      && agentSnapshotCovers(request, scope, (incoming.get(id) ?? current.get(id))!.archived));
     for (const id of accepted) {
       const row = incoming.get(id);
-      if (row) current.set(id, row);
+      const previous = current.get(id);
+      if (row) current.set(id, previous && !row.archived && agentOrderIsProtected(id, request, true)
+        ? { ...row, pin_order: previous.pin_order } : row);
       else current.delete(id);
     }
-    recordAgentChanges(accepted, request);
-    recordAgentSnapshot(request);
-    return { agents: [...current.values()] };
+    // A live absence says nothing about the archived partition. Only complete
+    // rows or full-range absences protect both partitions of older requests.
+    recordAgentSnapshot(request, scope, accepted.filter((id) => incoming.has(id) || scope === "all"));
+    const merged = [...current.values()];
+    return { agents: merged.filter((agent) => !agent.archived), archivedAgents: merged.filter((agent) => agent.archived),
+      ...(scope === "all" && agentReadStatusIsCurrent(request) ? { archivedAgentsRead: { loaded: true, loading: false, invalidated: false, error: null } }
+        : scope === "live" && accepted.some((id) => !incoming.has(id)) ? { archivedAgentsRead: { ...s.archivedAgentsRead, invalidated: true } } : {}) };
   }),
   applyAgentOrder: (ids, request) => set((s) => {
     if (!agentRequestIsCurrent(request, s)) return s;
     const current = new Map(s.agents.map((agent) => [agent.id, agent]));
-    const accepted = new Set(ids.filter((id) => current.has(id) && canApplyAgent(id, request)));
+    const accepted = new Set(ids.filter((id) => current.has(id) && canApplyAgent(id, request) && !agentOrderIsProtected(id, request)));
     const ordered = withPinOrder(s.agents, ids);
-    recordAgentChanges(accepted, request, true);
+    recordAgentOrder(accepted, request);
     return { agents: ordered.map((agent) => accepted.has(agent.id) ? agent : current.get(agent.id)!) };
+  }),
+  confirmAgentOrder: (ids, request) => set((s) => {
+    if (!agentRequestIsCurrent(request, s)) return s;
+    const accepted = new Set(s.agents.filter((agent) => ids.includes(agent.id) && agent.pinned !== false
+      && canApplyAgent(agent.id, request) && !agentOrderIsProtected(agent.id, request)).map((agent) => agent.id));
+    recordAgentOrderReceipt(accepted, request);
+    const ordered = withPinOrder(s.agents, ids);
+    return { agents: ordered.map((agent, index) => accepted.has(agent.id) ? agent : s.agents[index]) };
   }),
   upsertAgent: (agent, request) =>
     set((s) => {
       if ((request && !agentRequestIsCurrent(request, s)) || !canApplyAgent(agent.id, request)) return s;
       recordAgentChanges([agent.id], request);
-      if (agent.archived) return { agents: s.agents.filter((row) => row.id !== agent.id) };
-      const idx = s.agents.findIndex((a) => a.id === agent.id);
-      const agents =
-        idx >= 0
-          ? [...s.agents.slice(0, idx), agent, ...s.agents.slice(idx + 1)]
-          : [...s.agents, agent];
-      return { agents };
+      const current = new Map([...s.agents, ...s.archivedAgents].map((row) => [row.id, row]));
+      const previous = current.get(agent.id);
+      current.set(agent.id, request && previous && !agent.archived && agentOrderIsProtected(agent.id, request)
+        ? { ...agent, pin_order: previous.pin_order } : agent);
+      const rows = [...current.values()];
+      return { agents: rows.filter((row) => !row.archived), archivedAgents: rows.filter((row) => row.archived) };
     }),
   removeAgent: (id, request) =>
     set((s) => {
       if ((request && !agentRequestIsCurrent(request, s)) || !canApplyAgent(id, request)) return s;
       recordAgentChanges([id], request);
-      return { agents: s.agents.filter((a) => a.id !== id) };
+      return { agents: s.agents.filter((a) => a.id !== id), archivedAgents: s.archivedAgents.filter((a) => a.id !== id) };
     }),
   activeAgentId: null,
   setActiveAgentId: (activeAgentId) => set({ activeAgentId }),

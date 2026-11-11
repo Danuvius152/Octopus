@@ -32,6 +32,20 @@ restore a later deletion or re-enable a disabled schedule. Deletion commits
 before removing its trigger. Cancelling the HTTP/MCP waiter does not cancel this
 responsibility or its list-change notification.
 
+Target validation is an observation of one captured definition; it never disables
+a row or removes a trigger. Startup, archive/restore, a suppressed fire and an
+unaccepted one-shot all ask the original Runner to reconcile the schedule ID.
+Under the registration lock it rereads the current definition before deciding
+whether to register, leave suspended or remove the trigger. A late archived-target
+observation therefore cannot remove the trigger installed by a completed restore.
+
+Temporary Agent archive keeps the enabled definition for restoration. Permanent
+target or knowledge invalidity, including an invalid stored one-shot time,
+disables only the definition actually checked and records its reason. The
+expected-definition comparison includes Agent and origin session as well as text,
+timing and permission. A conflicting edit or deletion restarts reconciliation
+from the current row instead of disabling or recreating the old definition.
+
 A registration failure is observed with the original schedule ID and cause;
 the saved definition remains authoritative. There is no automatic business replay
 or compensating create. The [tool contract](schedule-tool.md#6-the-list-moves-while-you-watch)
@@ -55,10 +69,12 @@ hold only the schedule ID and each fire rereads the database origin, so repointi
 needs no re-registration and preserves the original cadence, including an archive
 that reaches this step after Runner admission closed.
 
-Regressions in `test_schedules.py`, `test_scheduler.py`,
+Regressions in `test_agents_api.py`, `test_schedules.py`, `test_scheduler.py`,
 `test_knowledge_schedules.py` and `test_session_manager.py` cover cancelled waiters
 after actual writes, competing definitions, HTTP/MCP registration failures,
-shutdown timeout/rejoin and archive followed by a real successor fire.
+shutdown timeout/rejoin and archive followed by a real successor fire. The
+restored-Agent regression releases the old archived-target observation only
+after restore completes, then checks the current trigger and a real later fire.
 
 ### Captured fire definitions
 
@@ -107,6 +123,9 @@ is deleted at that admission point; callback return and model completion do
 not decide whether it was consumed. An overdue, unaccepted one-shot is
 registered on startup. A transient refusal retries the same source identity;
 an already accepted or uncertain execution is never submitted as a new fire.
+The retry also reconciles current eligibility and registers an unconsumed source
+no earlier than five seconds later; it does not directly reinstall a captured
+trigger outside the Runner's owned control path.
 See [input reliability](input-reliability.md) for the shared input contract.
 
 ## 3. A scheduled turn says it is one

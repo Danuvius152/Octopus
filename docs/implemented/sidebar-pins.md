@@ -52,10 +52,14 @@ everyone else). A drop sends the whole pinned order with
 * places pinned rows the list *doesn't* name after the named ones, in their
   existing order — a tab that last looked before another tab pinned something
   must not throw that pin away;
-* returns every live row, so the client replaces its list in one step.
+* returns every live row as an observation for the client's domain merge.
 
-The client applies the new order optimistically and rolls back to the
-server's list if the request fails.
+The client applies the new order optimistically. A successful Agent reorder
+confirms only its submitted ID positions; the attached list does not authorize
+whole-row replacement. Failure ends that operation's optimistic order and reads
+the server under its original identity, preserving newer facts instead of
+restoring an old whole list. Each domain's [list contract](frontend-list-reconciliation.md)
+owns the merge and confirmation rules.
 
 Session details and events replace an existing session at its current list
 position. Selecting a session refreshes its data without moving it to the
@@ -145,8 +149,19 @@ different sidebars is the bug this would otherwise be.
 * **Agents** had no broadcast channel at all, so no agent edit ever synced
   across tabs. They get the same shape now, sent from the agents router:
   `agent_created` / `agent_updated` (edit, pin, unpin, restore, and each row
-  a reorder moved) upsert the row; `agent_archived` / `agent_deleted` remove
-  it. A request that fails broadcasts nothing.
+  a reorder moved) publish the complete row into the live or archived partition.
+  A complete `agent_archived` row moves into archived, retaining All's Restore
+  action; an ID-only event uses the known row or confirms missing data. `agent_deleted` removes
+  both partitions. A request that fails broadcasts nothing.
+
+Agent ordering receipts confirm only the submitted positions; their attached live
+list remains a read observation. Success and failure both finish that operation's
+optimistic order before confirmation or compensation continues. Reads preserve
+confirmed or pending order fields while still admitting names and archive facts.
+Pin failure and ordering confirmation include archives once All has been requested,
+using the original operation identity. The [Agent list contract](frontend-list-reconciliation.md#agent-联合列表)
+owns scope, overlapping requests and completeness; no component keeps its own
+archived authority.
 
 §3's reorder rule is what keeps two tabs from destroying each other's pins in
 the window before an event lands.

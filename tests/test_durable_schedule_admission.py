@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,8 @@ from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status
 from server.users import UserManager
 from tests.accounts import create_account
-from tests.test_scheduler import capture_model_runs, save_schedule
+from tests.fake_run import capture_model_runs
+from tests.test_scheduler import save_schedule
 from tests.test_scheduler import setup as setup
 from tests.test_submission_recovery import _submit_paused
 from tests.test_submission_recovery import offline_harness as offline_harness
@@ -63,10 +65,12 @@ async def test_refused_one_shot_keeps_its_definition_and_retry_without_an_orphan
         created_at="2020-01-01T00:00:00Z", run_at="2020-01-01T01:00:00Z",
     )
     await runner.initialize(paused=True)
+    original = await db.get_schedule_definition("refused")
     manager.close_admission()
+    earliest = datetime.now(UTC) + timedelta(seconds=5)
     await runner._fire("refused")
-    assert await db.get_schedule_definition("refused") is not None
-    assert runner._scheduler.get_job("refused") is not None
+    assert await db.get_schedule_definition("refused") == original
+    assert datetime.fromisoformat(runner.next_run_at("refused")) >= earliest
     assert not [row for row in await db.load_sessions(include_archived=True) if row["origin"] == "schedule"]
 
 

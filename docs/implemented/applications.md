@@ -172,6 +172,24 @@ are refused. The row's independent `deletion` fact records `retiring` or `files`
 the original file-retention choice and any failure. Build status does not stand
 in for deletion progress.
 
+New App Wiki effects share the application's update/deletion coordination in
+`ApplicationManager.run_effect`. Each finite effect rechecks the owned row,
+unfinished deletion and account availability under that App's lock. Deletion
+that closes admission first refuses the old request; an effect admitted first
+keeps the lock until its actual exit, and deletion waits. This applies to both
+ordinary deletion and `keep_files=true`, including unfinished deletion phases.
+Unrelated applications have separate locks.
+
+The App bridge captures its original Wiki caller and ApplicationManager before
+waiting for the request body, but body parsing holds no effect lock. Synchronous
+file work retains the owned task and real thread exit through HTTP cancellation.
+Maintenance submission protects commit and worker handoff rather than the later
+model run; cancel, retry and verify retain their own finite completion boundaries.
+The [Wiki operation contract](wiki-development-summary.md#受保护操作与入口) owns
+those phases and the independent registration-generation checks. Deleting an App
+does not delete Wiki content, History or registration, or revoke a previously
+admitted independent Wiki job.
+
 After closing admission, deletion checks resource ownership before retirement
 advances its phase, then checks again under resource coordination before file
 cleanup and row removal. Canonical families must not overlap within one

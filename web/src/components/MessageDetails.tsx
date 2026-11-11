@@ -42,7 +42,7 @@ export function useMessageDetail(sessionId: string, detailRef?: string | null, s
     try {
       const expected = `/api/sessions/${encodeURIComponent(sessionId)}/messages/${seq}`;
       if (!context.token || seq === undefined || detailRef !== expected) throw new Error("No complete saved message reference is available.");
-      const response = await accountFetch(expected, { headers: { Authorization: `Bearer ${context.token}` },
+      const response = await accountFetch(`${expected}?view=browser`, { headers: { Authorization: `Bearer ${context.token}` },
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]), cache: "no-store" });
       if (!response.ok) throw new Error(`Could not load full message (HTTP ${response.status}).`);
       const value: MessageInput = await response.json();

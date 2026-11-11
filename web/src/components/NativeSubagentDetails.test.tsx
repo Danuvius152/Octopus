@@ -25,7 +25,7 @@ test("saved details render separately from the main transcript and leave its hig
   expect(useSessionStore.getState().lastAppliedSeq.s).toBe(10);
 });
 
-test("saved helper tool calls separate arguments from optional raw audit data", async () => {
+test("saved helper tool calls show arguments without raw audit data", async () => {
   const parameters = { pattern: "original input", id: "business-id", nullable: null, request_context: { request_id: "business-request" } };
   const input = { ...parameters, native_item: { type: "mcpToolCall", id: "native-audit-id", arguments: parameters } };
   const fetch = vi.fn().mockResolvedValue(respond({ ...page(""), messages: [{ role: "assistant", type: "tool_use",
@@ -35,11 +35,8 @@ test("saved helper tool calls separate arguments from optional raw audit data", 
   render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
   const primary = await screen.findByText(/"pattern": "original input"/, { selector: ".tool-detail" });
   expect(primary.textContent).toBe(JSON.stringify(parameters, null, 2));
-  const raw = screen.getByLabelText("Raw tool input");
-  expect(raw).not.toBeVisible();
-  fireEvent.click(screen.getByText("Raw tool data", { exact: true }));
-  expect(raw).toBeVisible();
-  expect(raw).toHaveTextContent("native-audit-id");
+  expect(screen.queryByText("Raw tool data", { exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Raw tool input")).not.toBeInTheDocument();
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(useSessionStore.getState().messages).toEqual({});
 });
@@ -59,7 +56,7 @@ test("a collected preview expands its original full message without fetching unr
   fireEvent.click(screen.getByRole("button", { name: "View full message" }));
   expect(await screen.findByText("Complete collected child body")).toBeVisible();
   expect(screen.getAllByText(/Complete collected child body/)).toHaveLength(1);
-  expect(fetch.mock.calls[1][0]).toBe("/api/sessions/s/messages/2");
+  expect(fetch.mock.calls[1][0]).toBe("/api/sessions/s/messages/2?view=browser");
   expect(useSessionStore.getState().messages).toEqual({});
 });
 

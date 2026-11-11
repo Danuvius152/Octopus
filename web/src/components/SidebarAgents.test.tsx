@@ -8,9 +8,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { SidebarAgents } from "./SidebarAgents";
+import { AgentFormPage } from "./AgentFormPage";
+import { deferred } from "../test-support/deferred";
+import { refreshAgents } from "../lib/refreshAgents";
 import {
   useSessionStore,
   type Agent,
@@ -84,6 +87,7 @@ const jsonRes = (body: unknown) =>
   });
 
 beforeEach(() => {
+  useSessionStore.setState({ ...useSessionStore.getInitialState(), accountGeneration: useSessionStore.getState().accountGeneration + 1 });
   fetchMock = vi.fn(async (url: RequestInfo | URL) => {
     const u = String(url);
     if (u.includes("/api/agents")) return jsonRes(AGENTS);
@@ -92,6 +96,171 @@ beforeEach(() => {
     return jsonRes([]);
   });
   vi.stubGlobal("fetch", fetchMock);
+});
+
+describe("SidebarAgents archive confirmation", () => {
+  async function moveFirstPin(container: HTMLElement, name: string, count: number, position = 2) {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const row = this.querySelector(".agent-item") ?? this;
+      const index = [...container.querySelectorAll(".agent-item")].indexOf(row);
+      return new DOMRect(0, Math.max(0, index) * 40, 240, 40);
+    });
+    const first = container.querySelector<HTMLElement>(".agent-item")!;
+    first.focus();
+    fireEvent.keyDown(first, { key: " ", code: "Space" });
+    await waitFor(() => expect(container.querySelector(".dragging")).not.toBeNull());
+    for (let index = 1; index < position; index++) {
+      fireEvent.keyDown(first, { key: "ArrowDown", code: "ArrowDown" });
+      await screen.findByText(`${name} moved to position ${index + 1} of ${count}.`);
+    }
+    fireEvent.keyDown(first, { key: " ", code: "Space" });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit)?.method === "PUT")).toBe(true));
+  }
+
+  it.each(["receipt-first", "all-first"])("All opened during ordering retains its archive with %s and failed confirmation", async (arrival) => {
+    const first = agent({ id: "a", name: "Alpha", is_system: false, pinned: true, pin_order: 1 });
+    const second = agent({ id: "b", name: "Beta", is_system: false, pinned: true, pin_order: 2 });
+    const order = deferred<Response>();
+    const initialAll = deferred<Response>();
+    const confirmation = deferred<Response>();
+    let fullReads = 0;
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "PUT") return order.promise;
+      if (String(url).includes("include_archived=true")) return ++fullReads === 1 ? initialAll.promise : confirmation.promise;
+      if (String(url).endsWith("/api/agents")) return jsonRes([first, second]);
+      return jsonRes([]);
+    });
+    const { container } = mount();
+    await screen.findByText("Alpha");
+    await moveFirstPin(container, "Alpha", 2);
+    act(() => useSessionStore.setState({ mainView: "agent-form", pageTab: "all" }));
+    render(<AgentFormPage onToggleSidebar={() => {}} />);
+    await waitFor(() => expect(fullReads).toBe(1));
+    if (arrival === "all-first") {
+      await act(async () => initialAll.resolve(jsonRes([{ ...first, archived: true }, { ...second, pin_order: 1 }])));
+      expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
+    }
+    await act(async () => order.resolve(jsonRes([{ ...second, pin_order: 1 }, { ...first, pin_order: 2 }])));
+    await waitFor(() => expect(fullReads).toBe(2));
+    if (arrival === "receipt-first") await act(async () => initialAll.resolve(jsonRes([{ ...first, archived: true }, { ...second, pin_order: 1 }])));
+    await act(async () => confirmation.resolve(new Response("{}", { status: 503 })));
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
+    expect(useSessionStore.getState().agents.map((row) => row.id)).toEqual([second.id]);
+    expect(useSessionStore.getState().archivedAgents.map((row) => row.id)).toEqual([first.id]);
+    expect(screen.getByRole("button", { name: "All 2" })).toBeVisible();
+    expect(useSessionStore.getState().archivedAgentsRead).toEqual({ loaded: true, loading: false, invalidated: false, error: null });
+  });
+
+  it.each(["before", "during"])("a failed sidebar pin confirms All requested %s the write", async (when) => {
+    const rows = [agent(), agent({ id: "ag2", name: "Researcher", is_system: false })];
+    let archived = false;
+    const reply = deferred<Response>();
+    fetchMock.mockImplementation(async (url: unknown) => {
+      if (String(url).endsWith("/unpin")) return reply.promise;
+      if (String(url).includes("include_archived=true")) return jsonRes([rows[0], { ...rows[1], archived }]);
+      if (String(url).endsWith("/api/agents")) return jsonRes(archived ? [rows[0]] : rows);
+      return jsonRes([]);
+    });
+    mount();
+    await screen.findByText("Researcher");
+    if (when === "during") fireEvent.click(screen.getByLabelText("Unpin Researcher from the sidebar"));
+    act(() => useSessionStore.setState({ mainView: "agent-form", pageTab: "all" }));
+    render(<AgentFormPage onToggleSidebar={() => {}} />);
+    await screen.findByRole("button", { name: "All 2" });
+    if (when === "before") fireEvent.click(screen.getAllByLabelText("Unpin Researcher from the sidebar")[0]);
+    await act(async () => { archived = true; reply.resolve(new Response("{}", { status: 503 })); });
+    await screen.findByRole("button", { name: "Restore" });
+    expect(screen.getByRole("button", { name: "All 2" })).toBeVisible();
+  });
+
+  it("a successful ordering confirmation cannot rewind All completed after that GET began", async () => {
+    const first = agent({ id: "a", name: "Alpha", is_system: false, pinned: true, pin_order: 1 });
+    const second = agent({ id: "b", name: "Beta", is_system: false, pinned: true, pin_order: 2 });
+    const order = deferred<Response>();
+    const confirmation = deferred<Response>();
+    let fullReads = 0;
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "PUT") return order.promise;
+      if (String(url).includes("include_archived=true")) {
+        fullReads++;
+        if (fullReads === 2) return confirmation.promise;
+        return jsonRes(fullReads === 1 ? [first, second] : [{ ...first, archived: true }, { ...second, pin_order: 1 }]);
+      }
+      if (String(url).endsWith("/api/agents")) return jsonRes([first, second]);
+      return jsonRes([]);
+    });
+    const { container } = mount();
+    await screen.findByText("Alpha");
+    act(() => useSessionStore.setState({ mainView: "agent-form", pageTab: "all" }));
+    render(<AgentFormPage onToggleSidebar={() => {}} />);
+    await screen.findByRole("button", { name: "All 2" });
+    await moveFirstPin(container, "Alpha", 2);
+    await act(async () => order.resolve(jsonRes([{ ...second, pin_order: 1 }, { ...first, pin_order: 2 }])));
+    await waitFor(() => expect(fullReads).toBe(2));
+    await act(async () => { await refreshAgents(undefined, "all"); });
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
+    await act(async () => confirmation.resolve(jsonRes([first, second])));
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
+    expect(useSessionStore.getState().agents.map((row) => row.id)).toEqual(["b"]);
+    expect(useSessionStore.getState().archivedAgents.map((row) => row.id)).toEqual(["a"]);
+    expect(useSessionStore.getState().archivedAgentsRead).toEqual({ loaded: true, loading: false, invalidated: false, error: null });
+  });
+
+  it.each(["success", "failure"])("a later failed keyboard sort recovers while the earlier %s confirmation waits", async (earlier) => {
+    const rows = ["Alpha", "Beta", "Gamma"].map((name, index) => agent({ id: name, name, is_system: false, pinned: true, pin_order: index + 1 }));
+    const firstReply = deferred<Response>();
+    const secondReply = deferred<Response>();
+    const firstConfirmation = deferred<Response>();
+    const actual = earlier === "success" ? [{ ...rows[1], pin_order: 1 }, { ...rows[0], pin_order: 2 }, rows[2]] : rows;
+    let writes = 0;
+    let fullReads = 0;
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "PUT") return ++writes === 1 ? firstReply.promise : secondReply.promise;
+      if (String(url).includes("include_archived=true")) return ++fullReads === 2 ? firstConfirmation.promise : jsonRes(fullReads === 1 ? rows : actual);
+      if (String(url).endsWith("/api/agents")) return jsonRes(rows);
+      return jsonRes([]);
+    });
+    const { container } = mount();
+    await screen.findByText("Alpha");
+    act(() => useSessionStore.setState({ mainView: "agent-form", pageTab: "all" }));
+    render(<AgentFormPage onToggleSidebar={() => {}} />);
+    await screen.findByRole("button", { name: "All 3" });
+    await moveFirstPin(container, "Alpha", 3);
+    await moveFirstPin(container, "Beta", 3, 3);
+    await waitFor(() => expect(writes).toBe(2));
+    await act(async () => firstReply.resolve(earlier === "success" ? jsonRes(actual) : new Response("{}", { status: 503 })));
+    await waitFor(() => expect(fullReads).toBe(2));
+    await act(async () => secondReply.resolve(new Response("{}", { status: 503 })));
+    await waitFor(() => expect(fullReads).toBe(3));
+    expect([...container.querySelectorAll(".agent-item")].map((row) => row.querySelector(".agent-name")?.textContent)).toEqual(actual.map((row) => row.name));
+    await act(async () => firstConfirmation.resolve(jsonRes(actual)));
+    expect([...container.querySelectorAll(".agent-item")].map((row) => row.querySelector(".agent-name")?.textContent)).toEqual(actual.map((row) => row.name));
+    expect(useSessionStore.getState().archivedAgentsRead).toEqual({ loaded: true, loading: false, invalidated: false, error: null });
+  });
+
+  it.each(["success", "failure"])("a keyboard order %s confirms an offline archive without losing All", async (result) => {
+    const rows = [agent({ pinned: true, pin_order: 1 }),
+      agent({ id: "ag2", name: "Researcher", is_system: false, pinned: true, pin_order: 2 }),
+      agent({ id: "ag3", name: "Retired elsewhere", is_system: false, pinned: true, pin_order: 3 })];
+    let archived = false;
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        archived = true;
+        return result === "success" ? jsonRes([rows[1], rows[0]]) : new Response("{}", { status: 503 });
+      }
+      if (String(url).includes("include_archived=true")) return jsonRes([rows[1], rows[0], { ...rows[2], archived }]);
+      if (String(url).endsWith("/api/agents")) return jsonRes(archived ? [rows[1], rows[0]] : rows);
+      return jsonRes([]);
+    });
+    const { container } = mount();
+    await screen.findByText("Researcher");
+    act(() => useSessionStore.setState({ mainView: "agent-form", pageTab: "all" }));
+    render(<AgentFormPage onToggleSidebar={() => {}} />);
+    await screen.findByRole("button", { name: "All 3" });
+    await moveFirstPin(container, "Octo", 3);
+    await screen.findByRole("button", { name: "Restore" });
+    expect(screen.getByRole("button", { name: "All 3" })).toBeVisible();
+  });
 });
 
 afterEach(() => {

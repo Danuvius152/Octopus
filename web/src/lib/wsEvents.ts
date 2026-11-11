@@ -180,7 +180,7 @@ const definitions = [
   event("application_deleted", { application_id: id }),
   event("agent_created", { agent, agent_id: optional(id) }),
   event("agent_updated", { agent, agent_id: optional(id) }),
-  event("agent_archived", { agent_id: id }),
+  event("agent_archived", { agent_id: id, agent: optional(agent) }),
   event("agent_deleted", { agent_id: id }),
   event("session_unarchived", { ...inSession, session, dispatch_state: optional(dispatch) }),
   event("session_archived", { old_session_id: id, new_session_id: nullable(id), name: optional(text), ...settings,
@@ -206,6 +206,8 @@ function identitiesAgree(data: WsEvent): boolean {
     case "agent_created":
     case "agent_updated":
       return data.agent_id === undefined || data.agent_id === data.agent.id;
+    case "agent_archived":
+      return data.agent === undefined || data.agent_id === data.agent.id && data.agent.archived;
     case "session_archived":
       return data.new_session_id === null || data.name !== undefined;
     case "session_unarchived":

@@ -216,7 +216,7 @@ class SchedulesMixin(DatabaseBase):
             values = list(updates.values()) + [schedule_id]
             # Operational fire timestamps do not change the definition. Every
             # definition field does, including an omitted permission or target.
-            definition = allowed - {"last_run_at", "last_run_session_id"}
+            definition = (allowed - {"last_run_at", "last_run_session_id"}) | {"agent_id", "origin_session_id"}
             compare = {key: expected.get(key) for key in sorted(definition)} if expected is not None else {}
             where = " AND ".join(f"{key} IS ?" for key in compare)
             values.extend(compare.values())

@@ -9,7 +9,7 @@ import { decodeWsEvent, type WsEvent } from "../lib/wsEvents";
 import { readResearchEvidence } from "../lib/researchEvidence";
 import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList } from "../lib/sessionList";
-import { refreshAgents } from "../lib/refreshAgents";
+import { refreshKnownAgents } from "../lib/refreshAgents";
 import { modelCredentials } from "../lib/modelCredentials";
 import { applications, type ListEventSource } from "../lib/applicationList";
 import { refreshWikiJobs } from "../lib/wikiJobs";
@@ -380,7 +380,17 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       break;
     }
 
-    case "agent_archived":
+    case "agent_archived": {
+      const store = getState();
+      const row = data.agent ?? [...store.agents, ...store.archivedAgents].find((agent) => agent.id === data.agent_id);
+      if (row) store.upsertAgent({ ...row, archived: true });
+      else {
+        store.removeAgent(data.agent_id);
+        useSessionStore.setState({ archivedAgentsRead: { ...store.archivedAgentsRead, invalidated: true } });
+        void refreshKnownAgents().catch(() => {});
+      }
+      break;
+    }
     case "agent_deleted": {
       const id = data.agent_id;
       if (id) getState().removeAgent(id);
@@ -610,7 +620,7 @@ export function useWebSocket() {
   const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const dispatchGeneration = useSessionStore((s) => s.dispatchGeneration);
   useEffect(() => {
-    if (token && dispatchGeneration !== null) void refreshAgents().catch(() => {});
+    if (token && dispatchGeneration !== null) void refreshKnownAgents().catch(() => {});
   }, [token, dispatchGeneration]);
   const submissions = useRef(new Map<string, {
     sessionId: string;
@@ -642,7 +652,7 @@ export function useWebSocket() {
         const snapshotStart = getState();
         const { activeSessionId, token: t } = snapshotStart;
         if (t) {
-          void refreshAgents().catch(() => {});
+          void refreshKnownAgents().catch(() => {});
 
           if (activeSessionId) {
             void loadSessionSnapshots(activeSessionId).catch(() => {});

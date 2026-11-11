@@ -5,7 +5,8 @@ import asyncio
 import pytest
 
 from server.knowledge import decode_context
-from tests.test_scheduler import capture_model_runs, save_schedule
+from tests.fake_run import capture_model_runs
+from tests.test_scheduler import save_schedule
 from tests.test_scheduler import setup as setup
 
 

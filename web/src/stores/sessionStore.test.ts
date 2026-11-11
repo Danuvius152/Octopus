@@ -221,7 +221,7 @@ describe("sessionStore", () => {
   });
 
   it("manages agents, active agent, and upsert/remove", () => {
-    const { setAgents, upsertAgent, removeAgent, setActiveAgentId } =
+    const { upsertAgent, removeAgent, setActiveAgentId } =
       useSessionStore.getState();
     const mk = (id: string, name: string, extra = {}) => ({
       id,
@@ -246,7 +246,7 @@ describe("sessionStore", () => {
       ...extra,
     });
 
-    setAgents([mk("a1", "Default", { is_system: true })]);
+    upsertAgent(mk("a1", "Default", { is_system: true }));
     expect(useSessionStore.getState().agents).toHaveLength(1);
 
     // upsert appends a new agent, patches an existing one in place.

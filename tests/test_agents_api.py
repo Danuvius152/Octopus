@@ -289,6 +289,54 @@ async def test_archive_agent_cascades_sessions(client):
     assert sess["id"] in [s["id"] for s in arch]
 
 
+@pytest.mark.parametrize("restore_first", [False, True])
+async def test_late_archived_fire_preserves_restored_schedule(client, monkeypatch, restore_first):
+    from tests.fake_run import capture_model_runs
+
+    agent = await _create_agent(client, name="Restored planner")
+    created = await client.post(f"/api/agents/{agent['id']}/schedules", json={
+        "name": "Retained plan", "prompt": "Run after restore", "interval_seconds": 3600,
+    })
+    assert created.status_code == 201, created.text
+    schedule_id = created.json()["id"]
+    runner = schedules_mod._get_runner()
+    runner._scheduler.pause()
+    assert (await client.post(f"/api/agents/{agent['id']}/archive")).status_code == 200
+    database = session_manager.db
+    get_agent = database.get_agent
+    observed, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_archived_result(identifier, *args, **kwargs):
+        row = await get_agent(identifier, *args, **kwargs)
+        if identifier == agent["id"] and row["archived"] and not observed.is_set():
+            observed.set()
+            await release.wait()
+        return row
+
+    monkeypatch.setattr(database, "get_agent", hold_archived_result)
+    fire = asyncio.create_task(runner._fire(schedule_id))
+    try:
+        await asyncio.wait_for(observed.wait(), 3)
+        if not restore_first:
+            release.set()
+            await fire
+        restored = await client.post(f"/api/agents/{agent['id']}/unarchive")
+        assert restored.status_code == 200, restored.text
+        release.set()
+        await fire
+        rows = (await client.get("/api/schedules")).json()
+        schedule = next(row for row in rows if row["id"] == schedule_id)
+        assert schedule["enabled"] and schedule["next_run_at"] is not None
+        assert runner._scheduler.get_job(schedule_id) is not None
+        assert not (await get_agent(agent["id"]))["archived"]
+        runs = capture_model_runs(session_manager, monkeypatch)
+        await runner._fire(schedule_id)
+        assert len(runs) == 1 and runs[0].prompt.endswith("Run after restore")
+    finally:
+        release.set()
+        await asyncio.gather(fire, return_exceptions=True)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("committed", [False, True])
 async def test_archive_agent_storage_refusal_keeps_agent_and_session_live(tmp_path, committed):

@@ -152,6 +152,15 @@ cancel 的 `operation_id` 与取消意图同事务保存，丢确认后重放只
 取消重试后的执行。curate/readmit 保持原 owner-only 策略；App 仅保留原白名单，
 readmit 不向 App/MCP 新开放。
 
+App 请求的有限效果由原 `WikiEffects` 进入 ApplicationManager 的每 App 保护，
+不把整个 handler 或模型运行放进删除锁。maintain、maintain-batch、curate 保护
+job/grant/别名/订阅提交及现有 worker 接管；selection 创建保护到持久提交。
+cancel 保护取消标记、控制收据提交与原取消 owner 建立，后续退休等待在保护外；
+提交后的 HTTP 取消不丢失交接。retry 保护原控制提交及派发交接。verify 保留其
+有限操作保护，并在每次异步等待后的同步恢复效果和最终提交处重验原调用身份，
+不能只检查末次收据。已合法接纳的独立 job/取消 owner 不继承这次 App 请求资格，
+继续使用原 Store、注册和 grant；删除 App 不另外撤销它们。
+
 `content_mutations` 为普通编辑、history restore、旧 snapshot restore 以及
 publish/revise/restructure/organize 保留同代 Store、History
 和注册保护，并把当前 curator、path、source-read、revision 检查交给原 Curation/
@@ -160,13 +169,18 @@ SQLite 收据各自保留，取消或记录失败不伪造跨资源回滚。显�
 继续各自完整操作；snapshot 创建
 仍为 410。SmartReader 的 agent 通路和 Sapphire 的文件通路保持，同次保存不双写。
 
-三类人工写入在 `using → History.locked → registered → tasks.caller` 内完成。
-App 路由从首次绑定检查使用的同一配置捕获原 registration generation、App 身份
-及 MCP scope，先于请求正文等待；该身份由服务器构造，不接收正文代次或事后补取。
-最终注册保护内核对原代次、当前绑定及原 caller，保护持续到 History 效果结束。
+七类内容命令 edit、restore、restore_snapshot、publish、organize、restructure、
+revise（含写收据的 no_change）均在 `using → History.locked → registered → tasks.caller`
+内完成。App 路由从首次绑定检查使用的同一配置，在请求正文等待前捕获不可变的
+`WikiCaller`：原 registration generation、App 身份及 MCP scope。身份由服务器
+构造，不接收正文代次或事后补取；请求另保留原效果 owner，不重取新 manager
+恢复资格。最终注册保护内核对原代次、当前绑定及原 caller，保护持续到真实文件、
+History 和收据效果结束。
 撤权先提交则旧操作没有正文、历史或回执效果，A→B→A 也不恢复旧资格；写入先
-取得完整保护则先完成，改绑等待，不回滚已完成内容。等待网络正文时不持有 Store
-或文件锁。账户人工入口不额外要求 App 代次；human-only、维护 grant/publish 与
+取得完整保护则先完成，改绑等待，不回滚已完成内容。等待网络正文时不持有 Store、
+文件锁或 App 效果保护。App 删除接纳与真实效果退出由
+[应用生命周期](applications.md#5-rest-surface)协调；已退休的原 Store 可以拒绝操作，不能
+重取新 Store 或重试身份来继续写入。账户人工入口不额外要求 App 代次；human-only、维护 grant/publish 与
 revision 冲突分别沿用原规则，审计 actor 不授予权限。
 
 Sapphire 的受管 HTTP 操作由 AppMutation/app_bridge 持有完整生命周期，proxy
@@ -181,6 +195,9 @@ client 给既有 follower，后续每次 poll 验证原 target，直到实际工
 事务失败、原 key 找回并唤醒、原控制重放及退休证明；入口参数、模型回包预算、
 读取证据、文件恢复与 App bridge 的既有回归继续保留。没有新增持久表、存储根或
 迁移表示，控制收据仍随既有 Wiki 账本保全。
+慢正文/删除、绑定 A→B→A、实际文件线程与 HTTP 取消、控制提交前后交接及等待后
+重绑回归分别验证拒绝无效果、先获准效果真实退出和独立工作继续；无关 App 并行
+保持，不以响应取消或模型结果推断持久效果是否发生。
 
 ## WikiJobs 与 Worker 的协作
 

@@ -139,7 +139,21 @@ def _input_view(controls: dict[str, Any] | None, display: dict[str, Any], kind: 
     return {**shown, **controls}
 
 
+def tool_arguments_view(message: MessageContent) -> MessageContent:
+    """Omit proven native tool wrappers only from disposable browser records."""
+    inputs = message.tool_input
+    native = message.runtime_metadata.native if message.runtime_metadata else None
+    item = inputs.get("native_item") if inputs else None
+    if message.type == "tool_use" and inputs and native and native.item_id and isinstance(item, dict) and item.get("id") == native.item_id:
+        parameters = {key: value for key, value in inputs.items() if key != "native_item"}
+        # A native-only record may be the sole business payload.
+        if parameters:
+            return message.model_copy(update={"tool_input": parameters})
+    return message
+
+
 def message_view(session_id: str, message: MessageContent) -> BrowserMessageContent:
+    message = tool_arguments_view(message)
     source = message.model_dump(mode="json")
     values = dict(source)
     input_parts = _input_parts(source["tool_input"], message.type)

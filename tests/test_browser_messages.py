@@ -113,6 +113,60 @@ def wire_size(value):
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
 
 
+@pytest.mark.parametrize("tool,arguments", [("Bash", {"command": "echo original"}),
+    ("mcp__custom__lookup", {"id": "business-id", "input": None, "options": {"mode": "original"}})])
+async def test_browser_tool_arguments_omit_proven_audit_copies_on_http_and_ws(export_runtime, tool, arguments):
+    db, manager, session, client, _, _ = export_runtime
+    metadata = {"request_id": "request", "attempt_id": "attempt", "native": {
+        "thread_id": "root", "turn_id": "turn", "root_thread_id": "root", "root_turn_id": "turn", "item_id": "native-tool"}}
+    inputs = {**arguments, "native_item": {"id": "native-tool", "type": "mcpToolCall", "arguments": arguments,
+        "audit_extension": "audit copy " * 5_000}}
+    await db.append_message(session.id, 0, "assistant", "tool_use", None, tool_name=tool, tool_use_id="tool-id",
+        tool_input=inputs, runtime_metadata=metadata)
+    url = f"/api/sessions/{session.id}/messages/0"
+    raw = (await client.get(url)).json()
+    shown = (await client.get(f"/api/sessions/{session.id}?view=browser")).json()["messages"][0]
+    assert shown["tool_input"] == arguments
+    assert shown["body_state"] == "inline" and shown["detail_ref"] is None
+    detail = (await client.get(url + "?view=browser")).json()
+    assert detail["tool_input"] == arguments
+    assert detail["runtime_metadata"] == raw["runtime_metadata"]
+    assert wire_size(detail) < wire_size(raw) / 10
+    async with connection(manager, client.headers["Authorization"].removeprefix("Bearer ")) as browser:
+        outgoing = {"type": "tool_use", "session_id": session.id, "seq": 0, "tool": tool, "tool_use_id": "tool-id",
+            "input": inputs, "runtime_metadata": metadata}
+        await manager._broadcast(outgoing)
+        event = await frame(browser[1])
+    assert event["input"] == arguments and event["body_state"] == "inline"
+    assert wire_size(event) < wire_size(outgoing) / 10
+    assert outgoing["input"] == inputs
+    assert (await client.get(url)).json() == raw
+
+
+@pytest.mark.parametrize("provenance", ["missing", "different", "native_only", "large_arguments"])
+async def test_browser_full_tool_detail_preserves_business_payload_and_unproven_inputs(export_runtime, provenance):
+    db, _, session, client, _, _ = export_runtime
+    parameters = {"id": "business-id", "input": None, "request_context": {"caller": "business caller"},
+        "payload": "original " * 10_000}
+    inputs = {**parameters, "native_item": {"type": "unknown-tool", "id": "original-item", "unknown_value": "original observation"}}
+    metadata = {"request_id": "r", "attempt_id": "a", "native": {
+        "thread_id": "root", "turn_id": "turn", "root_thread_id": "root", "root_turn_id": "turn",
+        "item_id": "different-item" if provenance == "different" else "original-item"}}
+    if provenance == "native_only":
+        inputs = {"native_item": inputs["native_item"]}
+    await db.append_message(session.id, 0, "assistant", "tool_use", None, tool_name="custom", tool_input=inputs,
+        runtime_metadata=None if provenance == "missing" else metadata)
+    url = f"/api/sessions/{session.id}/messages/0"
+    original = (await client.get(url)).json()
+    shown = (await client.get(url + "?view=browser")).json()
+    expected = parameters if provenance == "large_arguments" else inputs
+    assert shown == {**original, "tool_input": expected}
+    if provenance == "large_arguments":
+        preview = (await client.get(f"/api/sessions/{session.id}?view=browser")).json()["messages"][0]
+        assert preview["body_state"] == "preview" and preview["detail_ref"] == url
+    assert (await client.get(url)).json() == original
+
+
 async def test_browser_windows_are_byte_bounded_and_page_without_holes(export_runtime):
     db, _, session, client, _, _ = export_runtime
     body = '中\\"\n' * 6_000

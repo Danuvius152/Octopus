@@ -18,7 +18,7 @@ afterEach(cleanup);
 const nativeRuntime = (item_id: string) => ({ request_id: "request", attempt_id: "attempt", native: {
   thread_id: "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn", item_id } });
 
-it("shows a Bash command once and keeps native bookkeeping in optional raw data", () => {
+it("shows a Bash command once without rendering native bookkeeping", () => {
   const command = "/bin/bash -lc 'cp source/trace.zip workspace/trace.zip'";
   const input = { command, native_item: { type: "commandExecution", id: "exec-original", command,
     cwd: "/working", status: "inProgress", processId: "123", exitCode: null,
@@ -29,13 +29,9 @@ it("shows a Bash command once and keeps native bookkeeping in optional raw data"
   const detail = view.container.querySelector(".tool-detail")!;
   expect(detail.textContent).toBe(command);
   expect(detail).not.toHaveTextContent("native_item");
-  const raw = view.getByLabelText("Raw tool input");
-  expect(raw).not.toBeVisible();
-  fireEvent.click(view.getByText("Raw tool data", { exact: true }));
-  expect(raw).toBeVisible();
-  expect(raw).toHaveTextContent('"id": "exec-original"');
-  expect(raw).toHaveTextContent('"exitCode": null');
-  expect(raw).toHaveTextContent('"cwd": "/working"');
+  expect(view.queryByText("Raw tool data", { exact: true })).not.toBeInTheDocument();
+  expect(view.queryByLabelText("Raw tool input")).not.toBeInTheDocument();
+  expect(view.container).not.toHaveTextContent("exec-original");
   expect(input.native_item.commandActions).toEqual([{ type: "unknown", command }]);
 });
 
@@ -73,12 +69,8 @@ it.each(["Read", "mcp__wiki__read", "mcp__custom__lookup"])("separates %s native
     runtime_metadata: nativeRuntime("native-audit-id") }} />);
   fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
   expect(view.container.querySelector(".tool-detail")!.textContent).toBe(JSON.stringify(parameters, null, 2));
-  const raw = view.getByLabelText("Raw tool input");
-  expect(raw).not.toBeVisible();
-  fireEvent.click(view.getByText("Raw tool data", { exact: true }));
-  expect(raw).toBeVisible();
-  expect(raw).toHaveTextContent('"id": "native-audit-id"');
-  expect(raw).toHaveTextContent("Original business context");
+  expect(view.queryByText("Raw tool data", { exact: true })).not.toBeInTheDocument();
+  expect(view.queryByLabelText("Raw tool input")).not.toBeInTheDocument();
   expect(input.native_item.arguments).toBe(parameters);
 });
 
@@ -118,7 +110,7 @@ describe("saved message previews", () => {
     fireEvent.click(view.getByRole("button", { name: "Retry full message" }));
     await waitFor(() => expect(view.getByText("Complete original answer")).toBeVisible());
     expect(view.getByRole("button", { name: "Show preview" })).toBeVisible();
-    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([preview.detail_ref, preview.detail_ref]);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([`${preview.detail_ref}?view=browser`, `${preview.detail_ref}?view=browser`]);
   });
 
   it.each(["tool_use", "tool_result"])("loads a %s through its existing expansion without preview notices", async (type) => {
@@ -132,7 +124,7 @@ describe("saved message previews", () => {
     expect(fetcher).not.toHaveBeenCalled();
     fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
     await waitFor(() => expect(view.getByText(type === "tool_use" ? /"complete": true/ : "Complete result")).toBeVisible());
-    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([preview.detail_ref]);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([`${preview.detail_ref}?view=browser`]);
     fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
     fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
     expect(fetcher).toHaveBeenCalledTimes(1);

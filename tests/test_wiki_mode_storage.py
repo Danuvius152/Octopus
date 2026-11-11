@@ -19,7 +19,7 @@ from server.session_manager import SessionManager
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
 from tests.accounts import create_account
-from tests.test_scheduler import capture_model_runs
+from tests.fake_run import capture_model_runs
 
 STAMP = "2026-10-19T12:00:00+00:00"
 

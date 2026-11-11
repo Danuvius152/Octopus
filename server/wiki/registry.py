@@ -371,7 +371,7 @@ class WikiRegistry:
             yield store, captured
 
     @contextlib.contextmanager
-    def registered(self, user_id, store, registration=None):
+    def registered(self, user_id, store, registration=None, *, caller=None):
         """Protect a captured binding; never construct or switch Stores here."""
         with self._account_lock(user_id), self.registration_lock(user_id):
             self.health.require_healthy()
@@ -386,6 +386,8 @@ class WikiRegistry:
                 from .maintenance_selections import error
 
                 raise error("registration_changed", "Wiki registration changed; retry with the current Store", 409)
+            if caller is not None:
+                caller.require_binding(current)
             yield current
 
     def recoveries(self):

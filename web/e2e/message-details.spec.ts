@@ -157,14 +157,13 @@ test("saved previews retry full reads and keep an outside-window question answer
   expect(bashReads).toBe(0);
   expect(mcpReads).toBe(0);
   await expect(page.getByText("Preview · some content is not shown", { exact: true })).toHaveCount(0);
-  for (const [name, expected, rawIdentity] of [["Bash", "printf 'Complete saved command'", "original-command"],
-    ["mcp__wiki__read", JSON.stringify({ path: "/original" }, null, 2), "original-tool"]]) {
+  for (const [name, expected] of [["Bash", "printf 'Complete saved command'"],
+    ["mcp__wiki__read", JSON.stringify({ path: "/original" }, null, 2)]]) {
     const card = page.locator(".msg-tool").filter({ has: page.locator(".tool-name", { hasText: name }) });
     await card.locator(".tool-header").click();
     await expect(card.locator(".tool-detail")).toHaveText(expected);
-    await expect(card.getByLabel("Raw tool input")).not.toBeVisible();
-    await card.getByText("Raw tool data", { exact: true }).click();
-    await expect(card.getByLabel("Raw tool input")).toContainText(rawIdentity);
+    await expect(card.getByText("Raw tool data", { exact: true })).toHaveCount(0);
+    await expect(card.getByLabel("Raw tool input")).toHaveCount(0);
     await card.locator(".tool-header").click();
   }
   expect(bashReads).toBe(1);

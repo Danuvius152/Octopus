@@ -11,6 +11,7 @@ import { AgentFormPage } from "./AgentFormPage";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { connectorInstallations } from "../lib/connectorInstallations";
 import { deferred } from "../test-support/deferred";
+import { refreshAgents } from "../lib/refreshAgents";
 import {
   useSessionStore, type Agent, type BackendKind, type SessionInfo,
 } from "../stores/sessionStore";
@@ -65,6 +66,7 @@ function mount(
 }
 
 beforeEach(() => {
+  useSessionStore.setState({ ...useSessionStore.getInitialState(), accountGeneration: useSessionStore.getState().accountGeneration + 1 });
   fetchMock = vi.fn(async (url: unknown) => emptyRead(url));
   vi.stubGlobal("fetch", fetchMock);
   vi.stubGlobal("confirm", vi.fn(() => true));
@@ -77,6 +79,225 @@ afterEach(() => {
 });
 
 describe("AgentFormPage", () => {
+  it.each(["archive", "delete"])("an external %s keeps the draft's original edit target", async (change) => {
+    const existing = agent({ is_system: false, name: "Original" });
+    const writes: { url: string; method: string; body: unknown }[] = [];
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "PATCH" || init?.method === "POST") {
+        writes.push({ url: String(url), method: init.method, body: JSON.parse(init.body as string) });
+        return change === "archive" ? json({ ...existing, archived: true, description: "Saved draft" }) : json({ detail: "Agent not found" }, 404);
+      }
+      return emptyRead(url);
+    });
+    mount(existing.id, [existing]);
+    fireEvent.change(screen.getByLabelText("One-line role"), { target: { value: "Saved draft" } });
+    act(() => handleWsMessage(change === "archive"
+      ? { type: "agent_archived", agent_id: existing.id, agent: { ...existing, archived: true } }
+      : { type: "agent_deleted", agent_id: existing.id }));
+    expect(screen.getByRole("button", { name: "Edit" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Create Agent" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    await waitFor(() => expect(writes).toEqual([{ url: `${window.location.origin}/api/agents/${existing.id}`, method: "PATCH", body: { description: "Saved draft" } }]));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save Agent" })).toBeEnabled());
+    expect(screen.getByLabelText("One-line role")).toHaveValue("Saved draft");
+    expect(useSessionStore.getState().mainView).toBe("agent-form");
+    expect(useSessionStore.getState().agents).toEqual([]);
+    expect(useSessionStore.getState().archivedAgents.map((row) => row.id)).toEqual(change === "archive" ? [existing.id] : []);
+  });
+
+  it("keeps a restored receipt when an overlapping full snapshot arrives late", async () => {
+    const retired = agent({ id: "retired", name: "Retired", is_system: false, archived: true });
+    const read = deferred<Response>();
+    let fullReads = 0;
+    fetchMock.mockImplementation(async (url: unknown) => {
+      if (String(url).includes("/unarchive")) return json({ ...retired, archived: false });
+      if (String(url).includes("include_archived=true")) return ++fullReads === 1 ? json([retired]) : read.promise;
+      return emptyRead(url);
+    });
+    const { container } = mount(null, [], "all");
+    await screen.findByRole("button", { name: "Restore" });
+    let loading!: Promise<void>;
+    act(() => { loading = refreshAgents(undefined, "all"); });
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(useSessionStore.getState().agents).toHaveLength(1));
+    await act(async () => { read.resolve(json([retired])); await loading; });
+    expect(container.querySelectorAll(".library-name")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(screen.getByRole("button", { name: "All 1" })).toBeVisible();
+    expect(useSessionStore.getState().archivedAgents).toEqual([]);
+  });
+
+  it("a newer live read preserves pending archive coverage and supersedes old live rows", async () => {
+    const read = deferred<Response>();
+    const retired = agent({ id: "retired", name: "Retired", archived: true, is_system: false });
+    fetchMock.mockImplementation(async (url: unknown) => String(url).includes("include_archived=true") ? read.promise
+      : json([agent({ name: "Current" })]));
+    const { container } = mount(null, [agent()], "all");
+    await act(async () => { await refreshAgents(); });
+    await act(async () => { read.resolve(json([agent({ name: "Stale" }), agent({ id: "unseen", name: "Absent" }), retired])); });
+    expect([...container.querySelectorAll(".library-name")].map((row) => row.textContent)).toEqual(["Current", "Retired"]);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "All 2" })).toBeVisible();
+  });
+
+  it("a live absence leaves an older full read free to supply the same Agent's archive", async () => {
+    const existing = agent({ is_system: false });
+    const read = deferred<Response>();
+    fetchMock.mockImplementation(async (url: unknown) => String(url).includes("include_archived=true") ? read.promise : json([]));
+    const { container } = mount(null, [existing], "all");
+    await act(async () => { await refreshAgents(); });
+    await act(async () => read.resolve(json([{ ...existing, archived: true }])));
+    expect(container.querySelectorAll(".library-name")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "All 1" })).toBeVisible();
+  });
+
+  it("a late full-read failure cannot clear the next read's loading state", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    let reads = 0;
+    fetchMock.mockImplementation(async () => ++reads === 1 ? first.promise : second.promise);
+    mount(null, [], "all");
+    let loading!: Promise<void>;
+    act(() => { loading = refreshAgents(undefined, "all"); });
+    await act(async () => first.resolve(json({}, 503)));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading all agents");
+    expect(screen.queryByRole("alert")).toBeNull();
+    await act(async () => { second.resolve(json([agent()])); await loading; });
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("button", { name: "All 1" })).toBeVisible();
+  });
+
+  it("loads All lazily, retains partial archives on failure and confirms them on retry", async () => {
+    const existing = agent({ is_system: false });
+    let failing = true;
+    fetchMock.mockImplementation(async (url: unknown) => String(url).includes("include_archived=true")
+      ? failing ? json({}, 503) : json([{ ...existing, archived: true }]) : emptyRead(url));
+    mount(existing.id, [existing]);
+    await act(async () => {});
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("include_archived=true"))).toBe(false);
+    act(() => handleWsMessage({ type: "agent_archived", agent_id: existing.id, agent: { ...existing, archived: true } }));
+    expect(screen.getByRole("button", { name: "All 1+" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "All 1+" }));
+    await screen.findByRole("alert");
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "All 1+" })).toBeVisible();
+    failing = false;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh agents" }));
+    await screen.findByRole("button", { name: "All 1" });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each(["success", "failure"])("retires an original account's full %s through account ABA", async (result) => {
+    const read = deferred<Response>();
+    let reads = 0;
+    fetchMock.mockImplementation(async (url: unknown) => String(url).includes("include_archived=true")
+      ? ++reads === 1 ? read.promise : json([agent({ name: "Current account" })]) : emptyRead(url));
+    mount(null, [agent()], "all");
+    act(() => {
+      useSessionStore.getState().setToken("account-b");
+      useSessionStore.getState().setToken("tok");
+      useSessionStore.setState({ mainView: "agent-form", pageTab: "all" });
+    });
+    await screen.findByText("Current account");
+    await act(async () => read.resolve(result === "success"
+      ? json([agent({ id: "retired-account", archived: true })]) : json({}, 503)));
+    expect(useSessionStore.getState().agents.map((row) => row.name)).toEqual(["Current account"]);
+    expect(useSessionStore.getState().archivedAgents).toEqual([]);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each(["success", "failure"])("an old restore %s preserves the next draft while publishing qualified facts", async (result) => {
+    const retired = agent({ id: "retired", name: "Retired", is_system: false, archived: true });
+    const reply = deferred<Response>();
+    fetchMock.mockImplementation(async (url: unknown) => String(url).endsWith("/unarchive") ? reply.promise
+      : String(url).includes("include_archived=true") ? json([agent(), retired]) : emptyRead(url));
+    mount(null, [agent()], "all");
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    act(() => useSessionStore.getState().openAgentForm());
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Next draft" } });
+    await act(async () => reply.resolve(result === "success"
+      ? json({ ...retired, archived: false }) : json({ detail: "Old restore failed" }, 503)));
+    expect(screen.getByLabelText("Name")).toHaveValue("Next draft");
+    expect(useSessionStore.getState().mainView).toBe("agent-form");
+    expect(screen.queryByText("Old restore failed")).toBeNull();
+    expect(useSessionStore.getState().agents.some((row) => row.id === retired.id)).toBe(result === "success");
+  });
+
+  it.each(["success", "failure"])("a pin %s and its original compensation preserve another Agent's archive", async (result) => {
+    const first = agent({ is_system: false });
+    const second = agent({ id: "second", name: "Second", is_system: false });
+    const reply = deferred<Response>();
+    fetchMock.mockImplementation(async (url: unknown) => String(url).endsWith("/unpin") ? reply.promise : emptyRead(url));
+    const { container } = mount(null, [first, second], "all");
+    await act(async () => {});
+    fireEvent.click(screen.getByLabelText(`Unpin ${first.name} from the sidebar`));
+    act(() => handleWsMessage({ type: "agent_archived", agent_id: second.id, agent: { ...second, archived: true } }));
+    // The failed write's GET contains stale B, but also a real offline addition.
+    fetchMock.mockImplementation(async () => json([first, second, agent({ id: "third", name: "Third" })]));
+    await act(async () => reply.resolve(result === "success" ? json({ ...first, pinned: false }) : json({}, 503)));
+    expect(useSessionStore.getState().agents.some((row) => row.id === second.id)).toBe(false);
+    expect(useSessionStore.getState().archivedAgents.map((row) => row.id)).toEqual([second.id]);
+    expect(container.querySelectorAll(".library-archived .library-name")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
+    if (result === "failure") expect(screen.getByText("Third")).toBeVisible();
+  });
+
+  it("a failed pin confirms an offline archive in the already requested All range", async () => {
+    const existing = agent({ is_system: false });
+    let offlineArchive = false;
+    fetchMock.mockImplementation(async (url: unknown) => {
+      if (String(url).endsWith("/unpin")) { offlineArchive = true; return json({}, 503); }
+      if (String(url).includes("include_archived=true")) return json([{ ...existing, archived: offlineArchive }]);
+      if (String(url).endsWith("/api/agents")) return json(offlineArchive ? [] : [existing]);
+      return emptyRead(url);
+    });
+    mount(null, [existing], "all");
+    await screen.findByRole("button", { name: "All 1" });
+    fireEvent.click(screen.getByLabelText(`Unpin ${existing.name} from the sidebar`));
+    await screen.findByRole("button", { name: "Restore" });
+    expect(screen.getByRole("button", { name: "All 1" })).toBeVisible();
+  });
+
+  it.each([false, true])("a hard delete cannot be resurrected by an old full snapshot (archived=%s)", async (archived) => {
+    const existing = agent({ is_system: false, archived });
+    const read = deferred<Response>();
+    fetchMock.mockImplementation(async (url: unknown) => String(url).includes("include_archived=true") ? read.promise : emptyRead(url));
+    mount(null, archived ? [] : [existing], "all");
+    act(() => {
+      if (archived) handleWsMessage({ type: "agent_archived", agent_id: existing.id, agent: existing });
+      handleWsMessage({ type: "agent_deleted", agent_id: existing.id });
+    });
+    await act(async () => read.resolve(json([existing])));
+    expect(useSessionStore.getState().agents).toEqual([]);
+    expect(useSessionStore.getState().archivedAgents).toEqual([]);
+    expect(screen.queryByText(existing.name)).toBeNull();
+  });
+
+  it("keeps Restore when a complete external archive moves a live row", async () => {
+    const existing = agent({ id: "other", name: "Other", is_system: false });
+    const { container } = mount(null, [existing], "all");
+    await act(async () => {});
+    act(() => handleWsMessage({ type: "agent_archived", agent_id: existing.id,
+      agent: { ...existing, archived: true, description: "Archived elsewhere" } }));
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
+    expect(container.querySelectorAll(".library-name")).toHaveLength(1);
+    expect(useSessionStore.getState().agents).toEqual([]);
+    expect(screen.getByText("Archived elsewhere")).toBeVisible();
+  });
+
+  it("publishes an external restore once across All sections and its count", async () => {
+    const retired = agent({ id: "retired", name: "Retired", is_system: false, archived: true });
+    fetchMock.mockImplementation(async (url: unknown) => String(url).includes("include_archived=true")
+      ? json([agent(), retired]) : emptyRead(url));
+    const { container } = mount(null, [agent()], "all");
+    await screen.findByRole("button", { name: "Restore" });
+    act(() => handleWsMessage({ type: "agent_updated", agent: { ...retired, archived: false } }));
+    expect(container.querySelectorAll(".library-name")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(screen.getByRole("button", { name: "All 2" })).toBeVisible();
+  });
+
   it("keeps a reopened Agent's connector selection when the first opening's GET arrives late", async () => {
     const read = deferred<Response>();
     let reads = 0;
@@ -163,7 +384,7 @@ describe("AgentFormPage", () => {
         if (transition === "account") {
           useSessionStore.getState().setToken("other-account");
           useSessionStore.getState().setToken("tok");
-          useSessionStore.getState().setAgents([existing, other]);
+          useSessionStore.setState({ agents: [existing, other] });
         } else if (transition === "switch") useSessionStore.getState().openAgentForm("ag2");
         else useSessionStore.getState().showChat();
         useSessionStore.getState().openAgentForm("ag1");
@@ -553,6 +774,8 @@ describe("AgentFormPage", () => {
 
   it("archives an ordinary agent and drops it from the sidebar", async () => {
     const vera = agent({ id: "ag9", name: "Vera", is_system: false });
+    fetchMock.mockImplementation(async (url: unknown) => String(url).endsWith("/archive")
+      ? json({ ...vera, archived: true }) : emptyRead(url));
     const { container } = mount("ag9", [vera]);
     fireEvent.click(container.querySelector(".btn-agent-archive")!);
     await waitFor(() =>
@@ -567,7 +790,7 @@ describe("AgentFormPage", () => {
     const retired = agent({ id: "ag8", name: "Retired", is_system: false, archived: true });
     fetchMock.mockImplementation(async (url: unknown) =>
       String(url).includes("include_archived=true")
-        ? json([agent(), retired])
+        ? json([...useSessionStore.getState().agents, retired])
         : emptyRead(url)
     );
     const { container } = mount(null, [
@@ -654,13 +877,16 @@ describe("AgentFormPage", () => {
 
   it("archives from a row and keeps the page open", async () => {
     const vera = agent({ id: "ag2", name: "Vera", is_system: false });
+    fetchMock.mockImplementation(async (url: unknown) => String(url).endsWith("/archive")
+      ? json({ ...vera, archived: true }) : emptyRead(url));
     const { container } = mount(null, [agent(), vera], "all");
     fireEvent.click(screen.getByLabelText("Archive Vera"));
     await waitFor(() =>
       expect(useSessionStore.getState().agents.some((a) => a.id === "ag2")).toBe(false)
     );
     expect(useSessionStore.getState().mainView).toBe("agent-form");
-    expect(container.querySelector(".library-archived")).toBeNull(); // the mock archive is empty
+    expect(container.querySelector(".library-archived")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
     expect(screen.queryByLabelText("Archive Octo")).toBeNull();
   });
 
@@ -755,6 +981,10 @@ function mockCodexEdit(existing: Agent) {
 }
 
 function emptyRead(url: unknown): Response {
+  if (String(url).includes("include_archived=true")) {
+    const state = useSessionStore.getState();
+    return json([...state.agents, ...state.archivedAgents]);
+  }
   return json(/\/api\/agents\/[^/]+\/connectors$/.test(String(url)) ? { installation_ids: [] } : []);
 }
 

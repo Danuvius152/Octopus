@@ -17,14 +17,13 @@ def status(user_id, *, scope=None, app_id=None, **filters):
             return result
 
 
-def create(user_id, *, scope=None, app_id=None, directory="Library", limit=None):
+def create(user_id, *, caller, directory="Library", limit=None):
     with registry.using(user_id) as (store, registration), WikiHistory(store).locked():
-        with registry.registered(user_id, store, registration):
-            task = tasks.caller(user_id, scope, registration, app_id=app_id)
-            return maintenance_selections.create(store, registration, user_id, actor=actor_for(task, app_id),
+        with registry.registered(user_id, store, registration, caller=caller):
+            task = caller.task(user_id, registration)
+            return maintenance_selections.create(store, registration, user_id, actor=actor_for(task, caller.app_id),
                                                  directory=directory, limit=limit,
-                                                 authorize=lambda: tasks.caller(user_id, scope, registration,
-                                                                                app_id=app_id, original=task))
+                                                 authorize=lambda: caller.task(user_id, registration, original=task))
 
 
 def read(user_id, selection_id, *, scope=None, app_id=None, limit=None, cursor=None):

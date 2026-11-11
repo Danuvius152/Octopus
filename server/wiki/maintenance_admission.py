@@ -20,40 +20,40 @@ from .tasks import tasks
 
 
 def submit(user_id, key, material, scope, paths, target, sources, created_changes=None, *,
-           mcp_scope=None, app_id=None, **options):
+           caller, **options):
     from .jobs import WikiJobs
     from .maintenance_contract import actor_for
 
     with registry.using(user_id) as (store, registration):
-        with registry.registered(user_id, store, registration):
-            task = tasks.caller(user_id, mcp_scope, registration, app_id=app_id, write=True)
+        with registry.registered(user_id, store, registration, caller=caller):
+            task = caller.task(user_id, registration, write=True)
             tasks.require_submitter(task, registration)
-        return WikiJobs(user_id, store=store, registration=registration).maintain(
-            key, material, scope, paths, target, sources, actor_for(task, app_id), created_changes,
-            selection_task=task, mcp_scope=mcp_scope, requester=job_events.requester_for(user_id, task, app_id), **options)
+        return WikiJobs(user_id, store=store, registration=registration, caller=caller).maintain(
+            key, material, scope, paths, target, sources, actor_for(task, caller.app_id), created_changes,
+            selection_task=task, mcp_scope=caller.scope, requester=job_events.requester_for(user_id, task, caller.app_id), **options)
 
 
-def submit_batch(user_id, selection_id, ordinals, *, mcp_scope=None, app_id=None):
+def submit_batch(user_id, selection_id, ordinals, *, caller):
     from .jobs import WikiJobs
     from .maintenance_contract import actor_for
 
     with registry.using(user_id) as (store, registration):
-        with registry.registered(user_id, store, registration):
-            task = tasks.caller(user_id, mcp_scope, registration, app_id=app_id, write=True)
+        with registry.registered(user_id, store, registration, caller=caller):
+            task = caller.task(user_id, registration, write=True)
             tasks.require_submitter(task, registration)
-        return admit_batch(WikiJobs(user_id, store=store, registration=registration), selection_id,
-                           ordinals, actor_for(task, app_id), task, mcp_scope=mcp_scope,
-                           requester=job_events.requester_for(user_id, task, app_id))
+        return admit_batch(WikiJobs(user_id, store=store, registration=registration, caller=caller), selection_id,
+                           ordinals, actor_for(task, caller.app_id), task, mcp_scope=caller.scope,
+                           requester=job_events.requester_for(user_id, task, caller.app_id))
 
 
-def curate(user_id, key, scope, *, mcp_scope=None, app_id=None):
+def curate(user_id, key, scope, *, caller):
     from .jobs import WikiJobs
 
     with registry.using(user_id) as (store, registration):
-        with registry.registered(user_id, store, registration):
-            tasks.caller(user_id, mcp_scope, registration, app_id=app_id, human_only=True)
-        return WikiJobs(user_id, store=store, registration=registration).curate(
-            key, scope, requester=job_events.requester_for(user_id, app_id=app_id))
+        with registry.registered(user_id, store, registration, caller=caller):
+            caller.task(user_id, registration, human_only=True)
+        return WikiJobs(user_id, store=store, registration=registration, caller=caller).curate(
+            key, scope, requester=job_events.requester_for(user_id, app_id=caller.app_id))
 
 
 def prepare(jobs, review):
@@ -177,7 +177,7 @@ def admit(jobs, key, material, paths, target, sources, actor, created_changes, r
     # shared-locked from its final generation check through commit.
     with jobs.store.borrow(), WikiHistory(jobs.store).locked():
         prepare(jobs, review)
-        with registry.registered(jobs.user_id, jobs.store, jobs.registration):
+        with registry.registered(jobs.user_id, jobs.store, jobs.registration, caller=jobs.caller):
             try:
                 result = commit(jobs, key, request, review, task,
                                 selection_id=selection_id, selection_ordinal=selection_ordinal,
@@ -201,7 +201,7 @@ def admit_batch(jobs, selection_id, ordinals, actor, task, *, mcp_scope=None, re
             reviews = [selections.item(db, selection_id, ordinal)["review"] for ordinal in ordinals]
         for review in reviews:
             prepare(jobs, review)
-        with registry.registered(jobs.user_id, jobs.store, jobs.registration) as registration:
+        with registry.registered(jobs.user_id, jobs.store, jobs.registration, caller=jobs.caller) as registration:
             with jobs.store.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
                 states = []

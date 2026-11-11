@@ -46,11 +46,12 @@ class JobOwner:
 
 
 class WikiJobs:
-    def __init__(self, user_id, *, store=None, registration=None):
+    def __init__(self, user_id, *, store=None, registration=None, caller=None):
         self.user_id = user_id
+        self.caller = caller
         self.store = store if store is not None else registry.store(user_id)
         if registration is None:
-            with registry.registered(user_id, self.store) as current:
+            with registry.registered(user_id, self.store, caller=caller) as current:
                 registration = dict(current)
         self.registration = registration
         with self.store.connect() as db:
@@ -119,7 +120,7 @@ class WikiJobs:
 
     def replay(self, key, request, *, task=None, mcp_scope=None, requester=None, alias_job=None, alias_sources=None):
         """Even an idempotent return admits its subscriber in the final writer TX."""
-        with registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
+        with registry.registered(self.user_id, self.store, self.registration, caller=self.caller), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             from .tasks import tasks
 
@@ -242,7 +243,7 @@ class WikiJobs:
         outputs = grants.targets(self.store, creation.get("paths") or [f"Library/Inbox/{job_id}-knowledge.md"]) if creation else []
         material = (grants.targets(self.store, [payload.get("target") or f"Library/Inbox/{job_id}.md"])[0]
                     if payload.get("material") and not items else None)
-        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
+        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration, caller=self.caller), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             from .tasks import tasks
 
@@ -484,7 +485,7 @@ class WikiJobs:
                 or job["payload"].get("paths")
             ):
                 raise WikiError("Idempotency key already names a different task", 409)
-            with registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
+            with registry.registered(self.user_id, self.store, self.registration, caller=self.caller), self.store.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
                 from .tasks import tasks
 
@@ -534,7 +535,7 @@ class WikiJobs:
         control = job_controls.identity(operation_id, "cancel", {
             "expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id,
         })
-        with registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
+        with registry.registered(self.user_id, self.store, self.registration, caller=self.caller), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self.require_job_caller(job_id, task, mcp_scope, db=db)
             if job_controls.replay(db, job_id, control):
@@ -552,7 +553,8 @@ class WikiJobs:
                         close_work(work_id)
         return self.get(job_id)
 
-    async def cancel(self, job_id, manager, *, expected_attempt=None, expected_vault_id=None, operation_id=None, task=None, mcp_scope=None):
+    async def cancel(self, job_id, manager, *, expected_attempt=None, expected_vault_id=None, operation_id=None, task=None, mcp_scope=None,
+                     effects=None):
         async def begin():
             job = await _io(self.mark_cancelled, job_id, expected_attempt=expected_attempt, expected_vault_id=expected_vault_id,
                             operation_id=operation_id, task=task, mcp_scope=mcp_scope)
@@ -560,7 +562,7 @@ class WikiJobs:
                     if job["status"] == "cancelled" and job["settlement_phase"] != "confirmed" else None)
 
         # A disconnected waiter cannot leave a committed cancellation ownerless.
-        stopping = await complete_cleanup(begin())
+        stopping = await complete_cleanup(effects.run(begin) if effects is not None else begin())
         if stopping is not None:
             await asyncio.wait({stopping}, timeout=0.05)
             if stopping.done():
@@ -790,7 +792,7 @@ class WikiJobs:
         control = job_controls.identity(operation_id, "readmit", intent | {
             "expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id,
         })
-        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration):
+        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration, caller=self.caller):
             job = self.get(job_id)
             with self.store.connect() as db:
                 if job_controls.replay(db, job_id, control):
@@ -941,7 +943,7 @@ class WikiJobs:
         control = job_controls.identity(operation_id, "retry", {
             "expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id,
         })
-        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration):
+        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration, caller=self.caller):
             self.require_job_caller(job_id, task, mcp_scope)
             job = self.get(job_id)
             with self.store.connect() as db:
@@ -1092,7 +1094,10 @@ class WikiJobs:
         control = job_controls.identity(operation_id, "verify", {
             "expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id,
         })
-        await _io(self.require_job_caller, job_id, task, mcp_scope)
+        async def verify_io(function, *args, **kwargs):
+            return await _io(self._verification_effect, job_id, task, mcp_scope, function, *args, **kwargs)
+
+        await verify_io(self.require_job_caller, job_id, task, mcp_scope)
         job = await _io(self.get, job_id)
         original = self.verification_input(job)
         with self.store.connect() as db:
@@ -1102,7 +1107,7 @@ class WikiJobs:
         if job["status"] in {"running", "queued"}:
             raise WikiError("Stop the original maintenance work before verifying its effects", 409)
         await _io(self.require_retired, job, manager=manager)
-        await _io(self.store.refresh)
+        await verify_io(self.store.refresh)
         if job["status"] == "cancelled":
             await self.settle_cancelled(job_id, manager)
             job = await _io(self.get, job_id)
@@ -1114,10 +1119,16 @@ class WikiJobs:
                 if item["status"] == "excluded":
                     continue
                 if item.get("worker_request", {}).get("request_id"):
-                    await verifier._recover_recorded_item(self, job_id, item)
+                    await verifier._recover_recorded_item(self, job_id, item, io=verify_io)
                 elif item["status"] not in {"pending", "done"} or await _io(self.publication, job_id, item.get("doc")):
-                    await _io(self.settle_item, job_id, item)
+                    await verify_io(self.settle_item, job_id, item)
         return await _io(self._commit_verification, job, control, original, task=task, mcp_scope=mcp_scope)
+
+    def _verification_effect(self, job_id, task, mcp_scope, function, *args, **kwargs):
+        """Recheck the request before each recovery effect following an async wait."""
+        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration, caller=self.caller):
+            self.require_job_caller(job_id, task, mcp_scope)
+            return function(*args, **kwargs)
 
     @staticmethod
     def verification_input(job):
@@ -1126,7 +1137,7 @@ class WikiJobs:
                                      for item in job["items"]]}, sort_keys=True)
 
     def _commit_verification(self, job, control, original, *, task=None, mcp_scope=None):
-        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
+        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration, caller=self.caller), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self.require_job_caller(job["id"], task, mcp_scope, db=db)
             current = self.get(job["id"], db=db)
@@ -1381,6 +1392,11 @@ class WikiWorker:
 
     @staticmethod
     async def _cancel_attempt(jobs, job, manager, owner, *, verify=False):
+        if jobs.caller is not None:
+            # The committed cancellation handed responsibility to this owner;
+            # it no longer borrows the HTTP request's application identity.
+            jobs = copy.copy(jobs)
+            jobs.caller = None
         try:
             if not verify and manager is not None:
                 await job_execution.cancel_requests(manager, job_items.references(job["items"]))
@@ -1875,7 +1891,7 @@ class WikiWorker:
         await _io(job_execution.transition, current_jobs, job_id, reference, "unknown",
                   recording_state=completion.recording_state)
 
-    async def _recover_recorded_item(self, jobs, job_id, item):
+    async def _recover_recorded_item(self, jobs, job_id, item, *, io=_io):
         """Storage/publication verification only; never start another model."""
         reference = item["worker_request"]
         session_id, request_id = reference["session_id"], reference["request_id"]
@@ -1888,20 +1904,20 @@ class WikiWorker:
             item.update(status="attention", error="Original execution result is not committed; content was not regenerated")
             return
         reference = dict(reference)
-        current = await _io(jobs.get, job_id)
+        current = await io(jobs.get, job_id)
         if job_execution.is_current(current, reference):
-            await _io(job_execution.transition, jobs, job_id, reference, "settled", recording_state="committed", terminal=outcome)
+            await io(job_execution.transition, jobs, job_id, reference, "settled", recording_state="committed", terminal=outcome)
         else:
             # A retained original request supplies evidence, never admission or
             # a state transition in the replacement maintenance attempt.
             reference.update(phase="settled", recording_state="committed", terminal=outcome)
         item["worker_request"] = reference
-        await self._settle_original_item(jobs, job_id, item, outcome)
+        await self._settle_original_item(jobs, job_id, item, outcome, io=io)
         if session is not None:
             await self.manager.archive_session(session_id, replace=False, only_request_id=request_id)
 
-    async def _settle_original_item(self, jobs, job_id, item, outcome=None):
-        recovered = await _io(jobs.settle_item, job_id, item, outcome)
+    async def _settle_original_item(self, jobs, job_id, item, outcome=None, *, io=_io):
+        recovered = await io(jobs.settle_item, job_id, item, outcome)
         reference = item.get("worker_request") or {}
         if not recovered and reference.get("request_id"):
             decisions = await self.manager.db.get_request_missing_decisions(reference["session_id"], reference["request_id"])

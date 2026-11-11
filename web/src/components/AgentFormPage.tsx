@@ -5,7 +5,7 @@ import { setAgentPinned } from "../api/agents";
 import { fetchAgentConnectors, toggleAgentConnector } from "../api/connectors";
 import { openAgentChat } from "../lib/openAgentChat";
 import { pinnedInOrder } from "../lib/sidebarPins";
-import { refreshAgents, withAgentRequest } from "../lib/refreshAgents";
+import { knownAgentScope, refreshAgents, withAgentRequest } from "../lib/refreshAgents";
 import { agentRequestIsCurrent } from "../lib/agentUpdates";
 import { useModelSettings } from "../hooks/useModelSettings";
 import {
@@ -89,8 +89,9 @@ function AgentFormInstance({
 }) {
   const token = useSessionStore((s) => s.token);
   const agents = useSessionStore((s) => s.agents);
+  const archived = useSessionStore((s) => s.archivedAgents);
+  const archivedRead = useSessionStore((s) => s.archivedAgentsRead);
   const upsertAgent = useSessionStore((s) => s.upsertAgent);
-  const removeAgent = useSessionStore((s) => s.removeAgent);
   const editingAgentId = useSessionStore((s) => s.editingAgentId);
   const credentials = useSessionStore((s) => s.credentials);
   const installations = useSessionStore((s) => s.connectorInstallations);
@@ -104,7 +105,8 @@ function AgentFormInstance({
   const setTab = useSessionStore((s) => s.setPageTab);
   const sessions = useSessionStore((s) => s.sessions);
 
-  const editing = agents.find((a) => a.id === editingAgentId) ?? null;
+  const editing = agents.find((a) => a.id === editingAgentId)
+    ?? archived.find((a) => a.id === editingAgentId) ?? null;
   const [opening] = useState(() => {
     const { accountGeneration, agentFormGeneration, editingAgentId } = useSessionStore.getState();
     return { accountGeneration, agentFormGeneration, editingAgentId };
@@ -135,7 +137,6 @@ function AgentFormInstance({
     toolDeny: editing?.tool_deny ?? "",
     subagents: editing?.subagents ?? [],
   }));
-  const [archived, setArchived] = useState<Agent[]>([]);
   const [name, setName] = useState(initialDraft.name);
   const [description, setDescription] = useState(initialDraft.description);
   const [avatar, setAvatar] = useState(initialDraft.avatar);
@@ -189,22 +190,12 @@ function AgentFormInstance({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, editingAgentId, isCurrent]);
 
-  const loadArchived = useCallback(async () => {
-    try {
-      const res = await fetch(`${API}?include_archived=true`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) return;
-      const all = (await res.json()) as Agent[];
-      if (isCurrent()) setArchived(all.filter((a) => a.archived));
-    } catch {
-      // empty tab; the create flow is unaffected
-    }
-  }, [token, isCurrent]);
-
   useEffect(() => {
-    loadArchived();
-  }, [loadArchived]);
+    const read = useSessionStore.getState().archivedAgentsRead;
+    if (tab === "all" && !read.loading && (!read.loaded || read.invalidated)) {
+      void refreshAgents(undefined, "all").catch(() => {});
+    }
+  }, [tab, token]);
 
   const save = async () => {
     if (!isCurrent() || !name.trim() || busy) return;
@@ -225,7 +216,9 @@ function AgentFormInstance({
     });
     const initial = initialFields.current;
     const backendChanged = initial && fields.backend !== initial.backend;
-    const body = editing
+    // The opening owns create/edit identity; list membership can change while
+    // its draft remains mounted, including a confirmed archive or deletion.
+    const body = editingAgentId
       ? Object.fromEntries(Object.entries(fields).filter(([key, value]) =>
         JSON.stringify(value) !== JSON.stringify(initial?.[key as keyof typeof fields])
         // Changing the engine intentionally resets its associated settings,
@@ -235,8 +228,8 @@ function AgentFormInstance({
       : { ...fields, mcp_servers: [...BUILTIN_MCP] };
     const request = useSessionStore.getState().beginAgentRequest();
     try {
-      const res = await fetch(editing ? `${API}/${editing.id}` : API, {
-        method: editing ? "PATCH" : "POST",
+      const res = await fetch(editingAgentId ? `${API}/${editingAgentId}` : API, {
+        method: editingAgentId ? "PATCH" : "POST",
         headers,
         body: JSON.stringify(body),
       });
@@ -270,18 +263,21 @@ function AgentFormInstance({
     if (!window.confirm(`Archive "${agent.name}"? You can restore it later.`))
       return false;
     return withAgentRequest(async (request) => {
-      const res = await fetch(`${API}/${agent.id}/archive`, { method: "POST", headers });
-      if (!agentRequestIsCurrent(request, useSessionStore.getState())) return false;
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null);
-        if (isCurrent()) setError(detail?.detail || "Failed to archive agent");
+      try {
+        const res = await fetch(`${API}/${agent.id}/archive`, { method: "POST", headers });
+        if (!res.ok) {
+          const detail = await res.json().catch(() => null);
+          throw new Error(detail?.detail || "Failed to archive agent");
+        }
+        upsertAgent(await res.json() as Agent, request);
+        const current = useSessionStore.getState();
+        return agentRequestIsCurrent(request, current) && current.archivedAgents.some((row) => row.id === agent.id);
+      } catch (e) {
+        if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to archive agent");
+        await refreshAgents(request, knownAgentScope()).catch(() => {});
         return false;
       }
-      removeAgent(agent.id, request);
-      if (useSessionStore.getState().agents.some((row) => row.id === agent.id)) return false;
-      loadArchived();
-      return true;
-    });
+    }, knownAgentScope());
   };
 
   const archive = async () => {
@@ -293,19 +289,18 @@ function AgentFormInstance({
   const restore = async (agent: Agent) => {
     setError(null);
     await withAgentRequest(async (request) => {
-      const res = await fetch(`${API}/${agent.id}/unarchive`, { method: "POST", headers });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null);
-        if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) setError(detail?.detail || "Failed to restore agent");
-        return;
+      try {
+        const res = await fetch(`${API}/${agent.id}/unarchive`, { method: "POST", headers });
+        if (!res.ok) {
+          const detail = await res.json().catch(() => null);
+          throw new Error(detail?.detail || "Failed to restore agent");
+        }
+        upsertAgent(await res.json() as Agent, request);
+      } catch (e) {
+        if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to restore agent");
+        await refreshAgents(request, knownAgentScope()).catch(() => {});
       }
-      const restored = await res.json() as Agent;
-      if (!agentRequestIsCurrent(request, useSessionStore.getState())) return;
-      upsertAgent(restored, request);
-      if (isCurrent() && useSessionStore.getState().agents.some((row) => row.id === agent.id)) {
-        setArchived((cur) => cur.filter((a) => a.id !== agent.id));
-      }
-    });
+    }, knownAgentScope());
   };
 
   const togglePin = async (agent: Agent, pinned: boolean) => {
@@ -315,9 +310,9 @@ function AgentFormInstance({
         upsertAgent((await setAgentPinned(token, agent.id, pinned)) as Agent, request);
       } catch (e) {
         if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to update the sidebar");
-        await refreshAgents(request).catch(() => {});
+        await refreshAgents(request, knownAgentScope()).catch(() => {});
       }
-    });
+    }, knownAgentScope());
   };
 
   const chat = async (agent: Agent) => {
@@ -357,7 +352,7 @@ function AgentFormInstance({
       <PageHeader
         crumbs={[
           "Agents",
-          tab === "all" ? "All" : editing ? editing.name : "New Agent",
+          tab === "all" ? "All" : editingAgentId ? editing?.name ?? initialDraft.name : "New Agent",
         ]}
         onToggleSidebar={onToggleSidebar}
         actions={
@@ -366,11 +361,12 @@ function AgentFormInstance({
               tab={tab}
               setTab={setTab}
               allCount={agents.length + archived.length}
-              formLabel={editing ? "Edit" : "Create"}
+              allComplete={archivedRead.loaded && !archivedRead.invalidated}
+              formLabel={editingAgentId ? "Edit" : "Create"}
             />
             {tab === "form" && (
               <>
-                {editing && !editing.is_system && (
+                {editing && !editing.archived && !editing.is_system && (
                   <button
                     type="button"
                     className="btn-agent-archive inline-flex items-center gap-1.5 text-[13.5px] text-gray-800 transition-colors hover:text-warn-foreground"
@@ -393,7 +389,7 @@ function AgentFormInstance({
                   onClick={save}
                   disabled={busy || !name.trim()}
                 >
-                  {editing ? "Save Agent" : "Create Agent"}
+                  {editingAgentId ? "Save Agent" : "Create Agent"}
                 </Button>
               </>
             )}
@@ -410,6 +406,11 @@ function AgentFormInstance({
           )}
 
           {tab === "all" ? (
+            <>
+            {archivedRead.loading && <p role="status">Loading all agents…</p>}
+            {archivedRead.error && <p role="alert">Agents not synchronized: {archivedRead.error}
+              <button onClick={() => void refreshAgents(undefined, "all").catch(() => {})}>Refresh agents</button>
+            </p>}
             <AgentLibrary
               live={agents}
               archived={archived}
@@ -424,6 +425,7 @@ function AgentFormInstance({
               onArchive={archiveAgent}
               onRestore={restore}
             />
+            </>
           ) : (
             <div className="space-y-6">
               <div className="flex items-start gap-4">
@@ -444,7 +446,7 @@ function AgentFormInstance({
                       onChange={(e) => setName(e.target.value)}
                       placeholder="sre-ops"
                       disabled={!!editing?.is_system}
-                      autoFocus={!editing}
+                      autoFocus={!editingAgentId}
                     />
                   </div>
                   <div className="space-y-2">
@@ -575,7 +577,7 @@ function AgentFormInstance({
                 <div className="space-y-2">
                   <Label>
                     Connectors
-                    {!editing && (
+                    {!editingAgentId && (
                       <span className="ml-2 font-normal text-gray-700">
                         enable after creating
                       </span>
@@ -769,11 +771,13 @@ function TabSwitch({
   tab,
   setTab,
   allCount,
+  allComplete,
   formLabel,
 }: {
   tab: PageTab;
   setTab: (t: PageTab) => void;
   allCount: number;
+  allComplete: boolean;
   formLabel: string;
 }) {
   return (
@@ -787,7 +791,7 @@ function TabSwitch({
         }`}
         onClick={() => setTab("all")}
       >
-        All{allCount > 0 ? ` ${allCount}` : ""}
+        All{allCount > 0 ? ` ${allCount}${allComplete ? "" : "+"}` : ""}
       </button>
       <button
         type="button"

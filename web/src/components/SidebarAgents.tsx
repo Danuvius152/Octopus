@@ -15,7 +15,7 @@ import { connectorInstallations } from "../lib/connectorInstallations";
 import { selectSession } from "../lib/selectSession";
 import { loadSessionSnapshot } from "../lib/hydrateSession";
 import { sidebarAgents } from "../lib/sidebarPins";
-import { refreshAgents, withAgentRequest } from "../lib/refreshAgents";
+import { knownAgentScope, refreshAgents, refreshKnownAgents, withAgentRequest } from "../lib/refreshAgents";
 import { sessions as sessionList } from "../lib/sessionList";
 import { isImeComposing } from "../lib/composerKeys";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
@@ -86,11 +86,11 @@ export function SidebarAgents() {
     setCreating(false);
     setCreateError("");
     setFormAgentId(null);
-  }, [token]);
+  }, [token, accountGeneration]);
 
   useEffect(() => {
     if (!token) return;
-    void refreshAgents().catch(() => {});
+    void refreshKnownAgents().catch(() => {});
     void sessionList.refresh();
     fetch(`${API}/api/backends`, { headers })
       .then((r) => (r.ok ? r.json() : null))
@@ -102,7 +102,7 @@ export function SidebarAgents() {
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [token, accountGeneration]);
 
   useEffect(() => {
     if (token) void connectorInstallations.refresh();
@@ -232,11 +232,16 @@ export function SidebarAgents() {
       const store = useSessionStore.getState();
       store.applyAgentOrder(orderedIds, request);
       try {
-        store.applyAgentSnapshot((await reorderAgentPins(token, orderedIds)) as Agent[], request);
+        const observed = (await reorderAgentPins(token, orderedIds)) as Agent[];
+        store.confirmAgentOrder(orderedIds, request);
+        store.applyAgentSnapshot(observed, request, "live");
       } catch {
-        await refreshAgents(request).catch(() => {});
+        store.finishAgentOrder(request);
+        await refreshAgents(request, knownAgentScope()).catch(() => {});
+        return;
       }
-    });
+      if (knownAgentScope() === "all") await refreshAgents(request, "all").catch(() => {});
+    }, knownAgentScope());
   };
 
   const setPinned = async (agent: Agent, pinned: boolean) => {
@@ -244,9 +249,9 @@ export function SidebarAgents() {
       try {
         useSessionStore.getState().upsertAgent((await setAgentPinned(token, agent.id, pinned)) as Agent, request);
       } catch {
-        await refreshAgents(request).catch(() => {});
+        await refreshAgents(request, knownAgentScope()).catch(() => {});
       }
-    });
+    }, knownAgentScope());
   };
 
   // Archive, not delete: the conversation leaves the rail with nothing in

@@ -70,18 +70,7 @@ class ScheduleRunner:
         if self._closing:
             raise RuntimeError("ScheduleRunner is shutting down")
         for row in await self._db.load_schedules():
-            if not await self._target_is_active(row):
-                continue
-            if row.get("run_at"):
-                # An unconsumed one-shot still owns its original fire. It may
-                # be overdue; registration catches it up after startup opens.
-                try:
-                    datetime.fromisoformat(row["run_at"])
-                except ValueError:
-                    await self._db.update_schedule(row["id"], enabled=False, invalid_reason="invalid_run_at")
-                    continue
-            if row["enabled"]:
-                self._add_job(row)
+            await self.reconcile(row["id"])
         # Metrics retention, on the durable scheduler this class already owns
         # rather than a second timer or a cron entry (§9 G2). Daily at 04:00
         # local: cheap, and outside any plausible working hour.
@@ -165,7 +154,12 @@ class ScheduleRunner:
         now = datetime.now(UTC).isoformat()
         row = await self._schedule_row(schedule_id)
         # Only the current durable row can authorize a fire or supply text.
-        if row is None or not row["enabled"] or not await self._target_is_active(row):
+        if row is None or not row["enabled"]:
+            return
+        if (reason := await self._target_unavailable_reason(row)) is not None:
+            logger.warning("Schedule %s suppressed: %s", schedule_id, reason)
+            if not self._closing:
+                await self.reconcile(schedule_id)
             return
         agent_id = row["agent_id"]
         origin_session_id = row.get("origin_session_id")
@@ -173,7 +167,7 @@ class ScheduleRunner:
         prompt = row["prompt"]
         body = self._compose_prompt(row, prompt)
         context = decode_context(row.get("knowledge_context"))
-        assert context is not None  # _target_is_active validated this exact definition snapshot.
+        assert context is not None  # Target validation checked this exact definition snapshot.
 
         if run_at is not None:
             target = None
@@ -190,12 +184,9 @@ class ScheduleRunner:
                 if target is not None and target != origin_session_id:
                     await self._session_mgr.auto_archive_scheduled_session(target)
                 if not self._closing and self._scheduler.running:
-                    retained = await self._db.get_schedule_definition(schedule_id)
-                    if retained is not None and retained["enabled"]:
-                        # Presence proves admission did not consume this fire.
-                        # Retry the same source after transient refusal, without
-                        # spinning on a full Owner or manufacturing a new fire.
-                        self._add_job(retained, not_before=datetime.now(UTC) + timedelta(seconds=5))
+                    # Admission alone consumes the original source. Reconcile
+                    # current state before retrying an unconsumed one-shot.
+                    await self.reconcile(schedule_id, not_before=datetime.now(UTC) + timedelta(seconds=5))
             return
 
         if origin_session_id and self._session_mgr.get_session(origin_session_id):
@@ -369,7 +360,8 @@ class ScheduleRunner:
     async def delete(self, schedule_id: str) -> None:
         await self._change(schedule_id, lambda: self._db.delete_schedule(schedule_id))
 
-    async def _change(self, schedule_id: str, write: Callable[[], Awaitable[None]] | None = None) -> None:
+    async def _change(self, schedule_id: str, write: Callable[[], Awaitable[None]] | None = None,
+                      *, not_before: datetime | None = None) -> None:
         """Take ownership before the first DB/registration wait, until convergence.
 
         Each edit is a distinct operation. Cancelling a waiter cannot cancel an
@@ -383,7 +375,7 @@ class ScheduleRunner:
                 await write()
             try:
                 async with self._registration_lock:
-                    await self._register(schedule_id)
+                    await self._register(schedule_id, not_before=not_before)
             except Exception as exc:
                 raise ScheduleRegistrationError(schedule_id) from exc
             if write is not None:
@@ -405,21 +397,39 @@ class ScheduleRunner:
         task.add_done_callback(retired)
         await asyncio.shield(task)
 
-    async def reconcile(self, schedule_id: str) -> None:
+    async def reconcile(self, schedule_id: str, *, not_before: datetime | None = None) -> None:
         """Rebuild only this identity's trigger from its current definition."""
-        await self._change(schedule_id)
+        await self._change(schedule_id, not_before=not_before)
 
-    async def _register(self, schedule_id: str) -> None:
+    async def _register(self, schedule_id: str, *, not_before: datetime | None = None) -> None:
         # The DB definition is authoritative even when a later edit/deletion
         # overtook this operation. No SQL transaction spans target validation.
-        current = await self._db.get_schedule_definition(schedule_id)
-        self._remove_job(schedule_id)
-        if current is not None and current["enabled"] and await self._target_is_active(current):
-            self._add_job(current)
-
-    async def remove(self, schedule_id: str) -> None:
-        async with self._registration_lock:
+        while True:
+            current = await self._db.get_schedule_definition(schedule_id)
             self._remove_job(schedule_id)
+            if current is None or not current["enabled"]:
+                return
+            reason = await self._target_unavailable_reason(current)
+            if reason is None and current.get("run_at"):
+                try:
+                    datetime.fromisoformat(current["run_at"])
+                except ValueError:
+                    reason = "invalid_run_at"
+            if reason is None:
+                self._add_job(current, not_before=not_before)
+                return
+            if reason == "agent_archived":
+                return
+            try:
+                # Definitions can be edited outside the registration lock.
+                # An old observation cannot disable the replacement definition.
+                await self._db.update_schedule(
+                    schedule_id, expected=current, enabled=False, invalid_reason=reason,
+                )
+            except ScheduleChangedError:
+                continue
+            logger.warning("Schedule %s disabled: %s", schedule_id, reason)
+            return
 
     def _remove_job(self, schedule_id: str) -> None:
         try:
@@ -429,7 +439,8 @@ class ScheduleRunner:
             # removing twice is how delete-after-disable arrives here.
             pass
 
-    async def _target_is_active(self, row: dict) -> bool:
+    async def _target_unavailable_reason(self, row: dict) -> str | None:
+        """Observe this fire's target without mutating current registration."""
         try:
             agent = await resolve_schedule_target(
                 self._db, row["agent_id"], row.get("origin_session_id"),
@@ -441,20 +452,13 @@ class ScheduleRunner:
             if context.origin.user_id != agent.get("user_id"):
                 raise ScheduleTargetError("knowledge_owner_mismatch", "Schedule knowledge belongs to another account")
         except ScheduleTargetError as exc:
-            if exc.reason != "agent_archived":
-                # Preserve the original association and text for inspection.
-                await self._db.update_schedule(
-                    row["id"], enabled=False, invalid_reason=exc.reason,
-                )
-            self._remove_job(row["id"])
-            logger.warning("Schedule %s suppressed: %s", row["id"], exc.reason)
-            return False
-        return row["agent_id"] not in self._session_mgr._closed_agents
+            return exc.reason
+        return "agent_archived" if row["agent_id"] in self._session_mgr._closed_agents else None
 
     async def suspend_agent(self, agent_id: str) -> None:
         for row in await self._db.load_schedules():
             if row["agent_id"] == agent_id:
-                await self.remove(row["id"])
+                await self.reconcile(row["id"])
 
     async def restore_agent(self, agent_id: str) -> None:
         for row in await self._db.load_schedules():

@@ -14,6 +14,7 @@ from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
 from ..mcp_identity import McpScope, verify
 from ..wiki import WikiError, registry
+from ..wiki.caller import AppBinding, WikiCaller
 from ..wiki.contracts import (
     CreationRequest,
     GrantReadmissionRequest,
@@ -31,6 +32,7 @@ from ..wiki.contracts import (
     Source,
 )
 from ..wiki.curation import WikiCuration
+from ..wiki.effects import WikiEffects
 from ..wiki.history import WikiHistory
 from ..wiki.jobs import WikiJobs
 from ..wiki.tasks import tasks
@@ -49,7 +51,7 @@ async def app_wiki(request: Request, app_id: str, operation: str, session_mgr: S
     import anyio
     from pydantic import ValidationError
 
-    from .applications import _application_for_request
+    from .applications import _application_for_request, _get_manager
 
     row = await _application_for_request(request, app_id)
     user_id = row.get("user_id")
@@ -58,10 +60,8 @@ async def app_wiki(request: Request, app_id: str, operation: str, session_mgr: S
         raise WikiError("This application is not bound to this wiki", 403)
     # Capture original eligibility before waiting for any request body. A later
     # A -> B -> A binding is a new registration, even for the same application.
-    request.state.wiki_content_caller = {
-        "app_id": app_id, "scope": _mcp_scope(request),
-        "registration_generation": registration["registration_generation"],
-    }
+    request.state.wiki_caller = WikiCaller(_mcp_scope(request), AppBinding(app_id, registration["registration_generation"]))
+    request.state.wiki_effects = WikiEffects(user_id, request.state.wiki_caller, _get_manager())
     handlers: dict[tuple[str, str], Callable[..., Any]] = {
         ("GET", "config"): get_config,
         ("GET", "info"): info,
@@ -299,7 +299,7 @@ def maintenance_status(
 
 
 @router.post("/maintenance-selections")
-def create_maintenance_selection(
+async def create_maintenance_selection(
     body: MaintenanceSelectionRequest,
     request: Request,
     user_id: ScopeUser = None,
@@ -307,8 +307,8 @@ def create_maintenance_selection(
 ):
     from ..wiki.maintenance_observation import create
 
-    return create(user_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
-                  directory=body.directory, limit=body.limit)
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(create, user_id, caller=effects.caller, directory=body.directory, limit=body.limit)
 
 
 @router.get("/maintenance-selections/{selection_id}")
@@ -580,13 +580,18 @@ class Edit(BaseModel):
     reason: str
 
 
-def _content_caller(request: Request) -> dict[str, Any]:
-    captured = getattr(request.state, "wiki_content_caller", None)
-    return captured if captured is not None else {"scope": _mcp_scope(request)}
+def _wiki_caller(request: Request) -> WikiCaller:
+    captured = getattr(request.state, "wiki_caller", None)
+    return captured if captured is not None else WikiCaller(_mcp_scope(request))
+
+
+def _wiki_effects(request: Request, user_id: str | None) -> WikiEffects:
+    captured = getattr(request.state, "wiki_effects", None)
+    return captured if captured is not None else WikiEffects(user_id, _wiki_caller(request))
 
 
 @router.put("/document")
-def edit_document(
+async def edit_document(
     body: Edit,
     request: Request,
     user_id: ScopeUser = None,
@@ -595,8 +600,9 @@ def edit_document(
     access(request, human_only=True)
     from ..wiki.content_mutations import edit
 
-    return edit(user_id, path=body.path, content=body.content, expected_revision=body.expected_revision,
-                reason=body.reason, **_content_caller(request))
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(edit, user_id, path=body.path, content=body.content, expected_revision=body.expected_revision,
+                                  reason=body.reason, caller=effects.caller)
 
 
 @router.get("/history")
@@ -621,7 +627,7 @@ class Restore(BaseModel):
 
 
 @router.post("/restore")
-def restore(
+async def restore(
     body: Restore,
     request: Request,
     user_id: ScopeUser = None,
@@ -630,8 +636,9 @@ def restore(
     access(request, human_only=True)
     from ..wiki.content_mutations import restore
 
-    return restore(user_id, change_id=body.change_id, expected_revision=body.expected_revision,
-                   side=body.side, **_content_caller(request))
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(restore, user_id, change_id=body.change_id, expected_revision=body.expected_revision,
+                                  side=body.side, caller=effects.caller)
 
 
 @router.post("/snapshot")
@@ -657,7 +664,7 @@ class SnapshotRestore(BaseModel):
 
 
 @router.post("/snapshot/restore")
-def restore_snapshot(
+async def restore_snapshot(
     body: SnapshotRestore,
     request: Request,
     user_id: ScopeUser = None,
@@ -666,8 +673,9 @@ def restore_snapshot(
     access(request, human_only=True)
     from ..wiki.content_mutations import restore_snapshot
 
-    return restore_snapshot(user_id, snapshot_id=body.snapshot_id, paths=body.paths,
-                            expected_revisions=body.expected_revisions, **_content_caller(request))
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(restore_snapshot, user_id, snapshot_id=body.snapshot_id, paths=body.paths,
+                                  expected_revisions=body.expected_revisions, caller=effects.caller)
 
 
 class Publish(Edit):
@@ -681,7 +689,7 @@ class Publish(Edit):
 
 
 @router.post("/publish")
-def publish(
+async def publish(
     body: Publish,
     request: Request,
     user_id: ScopeUser = None,
@@ -689,8 +697,8 @@ def publish(
 ):
     from ..wiki.content_mutations import publish
 
-    return publish(user_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
-                   **body.model_dump())
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(publish, user_id, caller=effects.caller, **body.model_dump())
 
 
 @router.get("/blocks")
@@ -713,10 +721,11 @@ def get_blocks(
 
 
 @router.post("/revise")
-def revise_document(body: Revision, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+async def revise_document(body: Revision, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.content_mutations import revise
 
-    return revise(user_id, body, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(revise, user_id, body, caller=effects.caller)
 
 
 class Addition(BaseModel):
@@ -744,7 +753,7 @@ class Organize(BaseModel):
 
 
 @router.post("/organize")
-def organize(
+async def organize(
     body: Organize,
     request: Request,
     user_id: ScopeUser = None,
@@ -752,8 +761,8 @@ def organize(
 ):
     from ..wiki.content_mutations import organize
 
-    return organize(user_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
-                    **body.model_dump())
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(organize, user_id, caller=effects.caller, **body.model_dump())
 
 
 class Restructure(BaseModel):
@@ -769,7 +778,7 @@ class Restructure(BaseModel):
 
 
 @router.post("/restructure")
-def restructure(
+async def restructure(
     body: Restructure,
     request: Request,
     user_id: ScopeUser = None,
@@ -777,8 +786,8 @@ def restructure(
 ):
     from ..wiki.content_mutations import restructure
 
-    return restructure(user_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
-                       **body.model_dump())
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(restructure, user_id, caller=effects.caller, **body.model_dump())
 
 
 class Maintenance(BaseModel):
@@ -797,7 +806,7 @@ class Maintenance(BaseModel):
 
 
 @router.post("/maintain")
-def maintain(
+async def maintain(
     body: Maintenance,
     request: Request,
     user_id: ScopeUser = None,
@@ -805,8 +814,9 @@ def maintain(
 ):
     from ..wiki.maintenance_admission import submit
 
-    return submit(
-        user_id,
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(
+        submit, user_id,
         body.idempotency_key,
         body.material,
         body.scope,
@@ -815,8 +825,7 @@ def maintain(
         [s.model_dump() for s in body.sources],
         body.created_changes,
         review=body.review.model_dump() if body.review is not None else None,
-        mcp_scope=_mcp_scope(request),
-        app_id=request.path_params.get("app_id"),
+        caller=effects.caller,
         selection_id=body.selection_id,
         selection_ordinal=body.selection_ordinal,
         creation=body.creation.model_dump() if body.creation is not None else None,
@@ -824,11 +833,11 @@ def maintain(
 
 
 @router.post("/maintain-batch")
-def maintain_batch(body: MaintenanceBatchRequest, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+async def maintain_batch(body: MaintenanceBatchRequest, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.maintenance_admission import submit_batch
 
-    return submit_batch(user_id, body.selection_id, body.ordinals,
-                        mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(submit_batch, user_id, body.selection_id, body.ordinals, caller=effects.caller)
 
 
 class Curate(BaseModel):
@@ -843,14 +852,10 @@ async def curate(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    import anyio
-
     from ..wiki.maintenance_admission import curate
 
-    return await anyio.to_thread.run_sync(
-        lambda: curate(user_id, body.idempotency_key, body.scope, mcp_scope=_mcp_scope(request),
-                       app_id=request.path_params.get("app_id"))
-    )
+    effects = _wiki_effects(request, user_id)
+    return await effects.run_sync(curate, user_id, body.idempotency_key, body.scope, caller=effects.caller)
 
 
 @router.get("/jobs")
@@ -925,7 +930,7 @@ async def cancel_job(
     from ..wiki.job_controls import control
 
     return await control(user_id, job_id, "cancel", body.model_dump() if body else {},
-                         mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
+                         effects=_wiki_effects(request, user_id))
 
 
 @router.post("/jobs/{job_id}/retry")
@@ -940,7 +945,7 @@ async def retry_job(
     from ..wiki.job_controls import control
 
     return await control(user_id, job_id, "retry", body.model_dump() if body else {}, manager=session_mgr,
-                         mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
+                         effects=_wiki_effects(request, user_id))
 
 
 @router.post("/jobs/{job_id}/verify")
@@ -951,7 +956,7 @@ async def verify_job(
     from ..wiki.job_controls import control
 
     return await control(user_id, job_id, "verify", body.model_dump(),
-                         mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
+                         effects=_wiki_effects(request, user_id))
 
 
 @router.post("/jobs/{job_id}/readmit")
@@ -966,4 +971,4 @@ async def readmit_job(
     from ..wiki.job_controls import control
 
     return await control(user_id, job_id, "readmit", body.model_dump(), manager=session_mgr,
-                         mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
+                         effects=_wiki_effects(request, user_id))

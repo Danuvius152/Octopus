@@ -390,13 +390,16 @@ describe("agent and application events", () => {
     expect(agents[0].pinned).toBe(false);
   });
 
-  it("agent_archived / agent_deleted remove it", () => {
+  it("agent_archived moves the complete row and agent_deleted removes both partitions", () => {
     handleWsMessage({ type: "agent_created", agent_id: "ag2", agent: agentRow() });
-    handleWsMessage({ type: "agent_archived", agent_id: "ag2", agent: agentRow() });
+    handleWsMessage({ type: "agent_archived", agent_id: "ag2", agent: agentRow({ archived: true }) });
     expect(useSessionStore.getState().agents).toEqual([]);
+    expect(useSessionStore.getState().archivedAgents.map((row) => row.id)).toEqual(["ag2"]);
     handleWsMessage({ type: "agent_created", agent_id: "ag2", agent: agentRow() });
+    expect(useSessionStore.getState().archivedAgents).toEqual([]);
     handleWsMessage({ type: "agent_deleted", agent_id: "ag2", agent: agentRow() });
     expect(useSessionStore.getState().agents).toEqual([]);
+    expect(useSessionStore.getState().archivedAgents).toEqual([]);
   });
 
   it("application_archived removes the row", () => {

@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -316,8 +317,8 @@ class ApplicationManager:
     def __init__(self) -> None:
         self.session_mgr: SessionManager | None = None
         self.db: Database | None = None
-        # Only projection writers share this short-lived coordination. No
-        # request result or application status is copied into this map.
+        # Projection writers and finite application effects share per-App
+        # coordination. No result or application status is copied into this map.
         self._build_updates: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._deletions: dict[str, tuple[bool, asyncio.Task[None]]] = {}
         # Allocation commits a row before releasing this lock; deletion keeps
@@ -350,6 +351,29 @@ class ApplicationManager:
     def require_writable(row: dict[str, Any]) -> None:
         if row.get("deletion") is not None:
             raise ApplicationError("Application deletion is unfinished; retry deletion", status_code=409)
+
+    async def run_effect[T](self, app_id: str, user_id: str | None, operation: Callable[[], Awaitable[T]]) -> T:
+        """Order a new effect against deletion; retain its actual exit owner."""
+        from .users import owner_is_available
+
+        if self.session_mgr is None:
+            raise ApplicationError("ApplicationManager not bound", status_code=500)
+
+        async def finish() -> T:
+            if app_id in self._deletions:
+                raise ApplicationError("Application deletion is unfinished; retry deletion", status_code=409)
+            async with self._build_updates.setdefault(app_id, asyncio.Lock()):
+                row = await self.get_application(app_id, user_id)
+                self.require_writable(row)
+                if app_id in self._deletions:
+                    raise ApplicationError("Application deletion is unfinished; retry deletion", status_code=409)
+                if row.get("user_id") != user_id or not await owner_is_available(self._require_db(), user_id):
+                    raise ApplicationError("Application owner is unavailable", status_code=403)
+                return await operation()
+
+        task = asyncio.create_task(finish(), name=f"application-effect-{app_id}")
+        self.session_mgr._own_task(task)
+        return await asyncio.shield(task)
 
     async def _require_exclusive_resources(
         self, app_id: str, app_dir: str, user_id: str | None, *,

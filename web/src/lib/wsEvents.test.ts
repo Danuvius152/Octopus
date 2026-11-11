@@ -35,6 +35,8 @@ it.each([
   { ...producers.subagent, runtime_metadata: { request_id: 4, attempt_id: "a" } },
   { ...producers.session_unarchived, session_id: "another-session" },
   { ...producers.agent_updated, agent_id: "another-agent" },
+  { ...producers.agent_updated, type: "agent_archived", agent_id: "another-agent", agent: { ...producers.agent_updated.agent, archived: true } },
+  { ...producers.agent_updated, type: "agent_archived" },
 ])("rejects malformed wire input: %j", (value) => {
   expect(decodeWsEvent(value).kind).toBe("invalid");
 });

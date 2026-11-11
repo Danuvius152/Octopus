@@ -6,7 +6,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 
 from ..auth import verify_token
-from ..browser_messages import native_view, page_view, session_view
+from ..browser_messages import native_view, page_view, session_view, tool_arguments_view
 from ..config import settings
 from ..credential_bindings import CredentialBindingError, validate_credential_binding
 from ..db.native_details import NativeDetailError
@@ -445,6 +445,7 @@ async def get_session(
 @router.get("/{session_id}/messages/{seq}", response_model=MessageContent)
 async def message_detail(
     session_manager: SessionMgr, session_id: str, seq: int, user_id: ScopeUser = None,
+    view: Literal["full", "browser"] = Query("full"),
     _: str = Depends(verify_token),
 ):
     assert session_manager.db is not None
@@ -455,6 +456,8 @@ async def message_detail(
     except MessageExportError as error:
         code = str(error)
         raise HTTPException(404 if code == "not_found" else 409, {"code": code}, headers={"Cache-Control": "private, no-store"}) from error
+    if view == "browser":
+        message = tool_arguments_view(message)
     return Response(message.model_dump_json(), media_type="application/json", headers={"Cache-Control": "private, no-store"})
 
 

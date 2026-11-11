@@ -8281,6 +8281,7 @@ export interface operations {
     message_detail_api_sessions__session_id__messages__seq__get: {
         parameters: {
             query?: {
+                view?: "full" | "browser";
                 token?: string | null;
             };
             header?: never;

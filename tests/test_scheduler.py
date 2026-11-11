@@ -9,7 +9,7 @@ from server.knowledge import encode, for_account
 from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import capture_model_runs
 from tests.submission import accepted_receipt
 
 
@@ -20,37 +20,6 @@ async def save_schedule(db, **fields):
                           request_id=fields["schedule_id"], user_id=agent["user_id"],
                           prompt=fields["prompt"], selected=fields.get("wiki_mode"))
     await db.save_schedule(**fields, knowledge_context=encode(context))
-
-
-def capture_model_runs(manager, monkeypatch, *, hold=False):
-    """Keep scheduling, admission and settlement real at the Harness seam."""
-    from server.harness import HarnessEvent
-
-    started = []
-
-    class Run(FakeRunBase):
-        def __init__(self, session_id):
-            self.session_id = session_id
-            self.release = asyncio.Event()
-
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
-            self.prompt = prompt
-            self.request_id = manager.dispatch_snapshot(self.session_id)["active_request_id"]
-            started.append(self)
-
-        async def stream(self):
-            if hold:
-                await self.release.wait()
-            yield HarnessEvent(type="result", is_error=False)
-
-        async def interrupt(self):
-            self.release.set()
-
-        async def stop(self):
-            self.release.set()
-
-    monkeypatch.setattr(manager, "_make_run", lambda session, *args, **kwargs: Run(session.id))
-    return started
 
 
 @pytest.fixture
@@ -674,6 +643,93 @@ async def test_initialize_retains_and_registers_missed_run_at_schedules(setup):
     assert {r["id"] for r in remaining} == {"missed1", "recurring1"}
     assert runner._scheduler.get_job("missed1") is not None
     assert runner._scheduler.get_job("recurring1") is not None
+
+
+@pytest.mark.parametrize("invalid", ["knowledge", "run_at"])
+@pytest.mark.parametrize("change", ["none", "edit", "delete"])
+async def test_initial_invalid_definition_does_not_disable_its_replacement(setup, monkeypatch, invalid, change):
+    _manager, db, runner = setup
+    agent = await db.get_system_agent()
+    await save_schedule(db, schedule_id="invalid", agent_id=agent["id"], name="Original", prompt="check",
+                        interval_seconds=3600, created_at="2026-01-01T00:00:00Z")
+    valid = await db.get_schedule_definition("invalid")
+    await db.update_schedule("invalid", **({"knowledge_context": None} if invalid == "knowledge" else {"run_at": "bad-time"}))
+    original = await db.get_schedule_definition("invalid")
+    update = db.update_schedule
+    observed, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_invalidation(identifier, **fields):
+        if fields.get("invalid_reason") and not observed.is_set():
+            observed.set()
+            await release.wait()
+        await update(identifier, **fields)
+
+    monkeypatch.setattr(db, "update_schedule", hold_invalidation)
+    initialization = asyncio.create_task(runner.initialize(paused=True))
+    newer = None
+    try:
+        await asyncio.wait_for(observed.wait(), 3)
+        if change != "none":
+            newer = asyncio.create_task(runner.delete("invalid") if change == "delete" else runner.update(original, {
+                "knowledge_context": valid["knowledge_context"], "run_at": None, "prompt": "Current task",
+            }))
+            async with asyncio.timeout(3):
+                while True:
+                    current = await db.get_schedule_definition("invalid")
+                    if current is None or current["prompt"] == "Current task":
+                        break
+                    await asyncio.sleep(0)
+        release.set()
+        await initialization
+        if newer is not None:
+            await newer
+        current = await db.get_schedule_definition("invalid")
+        if change == "delete":
+            assert current is None and runner.next_run_at("invalid") is None
+        elif change == "edit":
+            assert current["enabled"] and current["prompt"] == "Current task"
+            assert current["invalid_reason"] is None and runner.next_run_at("invalid") is not None
+        else:
+            assert not current["enabled"] and runner.next_run_at("invalid") is None
+            assert current["invalid_reason"] == ("invalid_run_at" if invalid == "run_at" else "knowledge_contract_missing")
+    finally:
+        release.set()
+        await asyncio.gather(initialization, *([newer] if newer is not None else []), return_exceptions=True)
+
+
+async def test_origin_repoint_prevents_stale_target_invalidation(setup, monkeypatch):
+    from server.agent_manager import AgentManager
+
+    manager, db, runner = setup
+    agent = await db.get_system_agent()
+    other = await AgentManager(db).create_agent(name="Other target", user_id=agent["user_id"])
+    wrong_origin = await manager.create_session(other["id"])
+    right_origin = await manager.create_session(agent["id"])
+    await save_schedule(db, schedule_id="repointed", agent_id=agent["id"], name="Retained", prompt="check",
+                        interval_seconds=3600, created_at="2026-01-01T00:00:00Z", origin_session_id=wrong_origin.id)
+    update = db.update_schedule
+    observed, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_invalidation(identifier, **fields):
+        if fields.get("invalid_reason") and not observed.is_set():
+            observed.set()
+            await release.wait()
+        await update(identifier, **fields)
+
+    monkeypatch.setattr(db, "update_schedule", hold_invalidation)
+    registration = asyncio.create_task(runner.reconcile("repointed"))
+    try:
+        await asyncio.wait_for(observed.wait(), 3)
+        await db.repoint_schedules_origin(wrong_origin.id, right_origin.id)
+        release.set()
+        await registration
+        current = await db.get_schedule_definition("repointed")
+        assert current["enabled"] and current["invalid_reason"] is None
+        assert current["origin_session_id"] == right_origin.id
+        assert runner._scheduler.get_job("repointed") is not None
+    finally:
+        release.set()
+        await asyncio.gather(registration, return_exceptions=True)
 
 
 @pytest.mark.asyncio
