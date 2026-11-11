@@ -278,6 +278,7 @@ evidence under the reuse policy above.
   fileno/context behavior and explicit before/after barriers. Use the actual I/O
   boundary when checking source-version consistency, replacement, byte cost or
   history locks; observing only `Path.read_bytes` misses bounded readers.
+
 ## Native protocol fixture scope
 
 - Ordinary App Server has no transport opt-in. `OCTOPUS_CODEX_APP_SERVER_BINARY`

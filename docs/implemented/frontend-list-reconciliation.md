@@ -618,7 +618,11 @@ BG/Research 每个 id 对应一次执行，终态不因另一份 running/pending
 任务使用新 id。两个请求共享 running baseline 时，无论返回顺序，另一份快照的
 对象变化都不能遮住合法 completed。
 
-transcript 沿持久 seq、历史窗口与 WS 去重合并；旧详情保留期间的新消息与新问题。
+transcript 沿持久 seq、历史窗口与 WS 去重合并；详情合并保留已接纳的新消息与新问题。
+这里不保证任意广播乱序都能合并：[WS 序号守卫](../../web/src/hooks/useWebSocket.ts)
+把实时收到的 seq 也推进到 `lastAppliedSeq`，随后到达的较低 seq 会被丢弃，即使该行
+从未显示。已确认的 Claude 插话交错、历史恢复与不可自动重发的边界归
+[插话合同](inline-steering.md#live-transcript-limitation)；这仍是未修复的发布/消费缺口。
 关闭问题不能复活；被较新成功详情替代的旧读取不再重建问题或 active attempt。
 接纳可靠 `question_answer` 或 `question_closed` 历史时，在同一次 store 提交内
 写入消息、联合关闭事实并过滤当前可答集合。旧读取仍可贡献这类历史，不整表

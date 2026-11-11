@@ -14,7 +14,10 @@
 被反驳主张不作正向建议，反证仍进入综合；全检索失败显式交付不足与原因。
 有界摘要沿原 job 文件留存，没有新增通用 Run 表。多次核验与搜索角度不是多个
 独立来源；URL 也不证明实际读取，流程生成报告仍不证明原问点已有充分证据。
-[配置捕获](../../server/research/manager.py)同样已实现。
+[配置捕获](../../server/research/manager.py)同样已实现，但不等于全部捕获字段已传给 leaf：
+当前 [orchestrator](../../server/research/orchestrator.py) 和 [leaf](../../server/research/leaf.py)
+只传 model 等参数，未传捕获的 reasoning effort 与 service tier。继承缺口归
+[Research 当前合同](../implemented/native-deep-research.md)，不能据配置快照声称实际执行已采用全部设置。
 
 A 尚缺原问点覆盖、版本／读取位置／摘录与来源独立性的证据，以及真实实验配置
 和复现关系。已有失败／反证保全不代表这些范围或完整 A/P/B 已交付。

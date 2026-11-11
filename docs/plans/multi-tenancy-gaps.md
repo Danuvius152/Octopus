@@ -25,7 +25,7 @@
 依据：[OAuth routes](../../server/routers/connectors.py)、
 [Agent Connector 关系](../../server/db/agents.py)、
 [Connector scope](../../server/mcp_servers/connectors/_shared.py)、
-[Schedule 通知](../../server/routers/schedules.py)。
+[Schedule 管理通知](../../server/routers/schedules.py)及[执行通知](../../server/scheduler.py)。
 
 ## 已处理的旧待办与明确例外
 

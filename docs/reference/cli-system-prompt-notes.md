@@ -22,10 +22,13 @@ the model, with different scopes and reload semantics:
 
 ## How `--append-system-prompt` is wired
 
-`server/harness/claude_code.py` builds a long Python string
-(`_OCTOPUS_SYSTEM_PROMPT`) describing the MCP tools Octopus injects
-(`bg`, `ask`, `ask_agent`), and how to use each. The string is then passed as a
-positional argv element on every CLI spawn:
+The snapshot's `_OCTOPUS_SYSTEM_PROMPT` described the injected MCP tools
+(`bg`, `ask`, `ask_agent`) and their use. The example below records that wiring;
+it is not today's complete prompt assembly. Current
+[`assembly.py`](../../server/harness/assembly.py) composes the persona, profile
+tool instructions and applicable context; the Claude
+[argv renderer](../../server/harness/claude_code.py) passes the resulting
+`ctx.system_prompt` to `--append-system-prompt` on spawn:
 
 ```python
 argv = [
@@ -54,8 +57,8 @@ Moving the rule into `--append-system-prompt` means:
 - The auto-memory copy is now redundant for *new* sessions, but
   remains valid as a per-user reinforcement.
 
-The actual text of the rule (see `_OCTOPUS_SYSTEM_PROMPT` in
-`server/harness/claude_code.py`) is intentionally strict: "use
+The snapshot's rule was intentionally strict (the current tool blurb remains
+in [`claude_code.py`](../../server/harness/claude_code.py)): "use
 bg_run unconditionally for any test suite / build / install /
 sleep / network fetch". That's framed as a bright line because
 "≥30s use bg_run, <30s use Bash" — the prior wording — was too

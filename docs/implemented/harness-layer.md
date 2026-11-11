@@ -88,8 +88,9 @@ through [confirmed original-call cleanup](#mcp-question-retirement).
 Discovery checks the executable selected for ordinary interaction, using the
 same profile selector as invocation construction. Codex reads
 `OCTOPUS_CODEX_APP_SERVER_BINARY` at the operation boundary; an invalid explicit
-path does not fall back to another PATH entry. Preparation still verifies the
-captured binary's pin. Availability proves resolvability/executability, not
+path does not fall back to another PATH entry. Preparation validates the
+native protocol and required effective configuration, not an exact version or
+binary digest. Availability proves resolvability/executability, not
 authentication, model access or readiness of the separate Research exec leaf,
 tool-free worker and device-login commands.
 

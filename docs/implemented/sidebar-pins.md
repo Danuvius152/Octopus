@@ -84,9 +84,11 @@ Unpinned must not mean unreachable at the moment it matters. An unpinned row
 appears in the sidebar — after the pinned ones, dimmed, not draggable, with a
 pin button — while:
 
-* **agent:** it owns the session you have open; any of its sessions (other
-  than an application's own conversations, which never show in the rail) is
-  running or waiting on approval; or one of them has a question pending;
+* **agent:** it owns the active session; or a non-application session has
+  `status === "running"` or a nonempty `pendingQuestions` entry. Waiting on
+  approval is not a separate selector condition: it keeps the agent visible
+  only while one of those actual states applies. Application-origin sessions
+  do not contribute to the running/question check;
 * **application:** it's the one you have open; it's building; or a build of
   it failed while you weren't looking at it, until you open it.
 
@@ -97,8 +99,10 @@ app that isn't open, and cleared by `openApplication`. It is not persisted — a
 reload shows the failure on the Applications page, where the status is
 printed on the row.
 
-The rules live in `lib/sidebarPins.ts` as pure functions over store state, so
-both sections and their tests read the same definition.
+The rules live in [sidebarPins.ts](../../web/src/lib/sidebarPins.ts) as pure
+functions over store state. [sidebarPins.test.ts](../../web/src/lib/sidebarPins.test.ts)
+covers running/question/active-session presence and exclusion of application
+conversations, plus open/building/unseen-failure application presence.
 
 ## 6. The pages
 

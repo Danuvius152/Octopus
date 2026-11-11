@@ -24,8 +24,9 @@ Pass exactly one of `cron`, `interval_seconds` or `run_at` (got: cron, interval_
 `cron` must be a 5-field crontab expression: '<minute> <hour> <day-of-month> <month> <day-of-week>' (e.g. '0 9 * * 1-5' for weekdays at 9am).
 ```
 
-A model that gets one of those back fixes the call and retries. That is the
-whole error-handling design.
+These validation errors describe a refused candidate that the caller can correct.
+They are distinct from a later registration error, where the definition may
+already be saved and creation must not be blindly repeated (§6).
 
 **Timezone.** The browser sends its own zone with `/schedule`, so a human's
 "9am" is their 9am. An agent has no browser, and defaulting to UTC would
@@ -167,13 +168,16 @@ stacking, are unchanged from scheduled-runs.md §1-2.
 
 ## 6. The list moves while you watch
 
-Every schedule mutation now broadcasts `{"type": "schedules_changed"}` and
-the client refetches through `schedules.refresh()` in the
+After a schedule mutation commits and trigger reconciliation succeeds, the Runner
+attempts `{"type": "schedules_changed"}` and the client refetches through
+`schedules.refresh()` in the
 [schedule list module](../../web/src/lib/scheduleList.ts). Without it, a schedule an agent
 sets mid-conversation is invisible until the user reloads — which looks
 exactly like the tool having failed. The payload is deliberately empty:
 one code path, whether the change came from this browser, another tab, or
-an agent.
+an agent. This invalidation currently broadcasts globally, not just to the
+owning account; the subsequent list fetch remains account-scoped. It carries
+no schedule content but still reveals that some schedule changed.
 
 The Runner owns this notification with the definition write and trigger
 reconciliation, so losing the caller does not lose the change. Registration
@@ -185,6 +189,14 @@ the definition. A successful definition control does not prove a fire ran or
 that an earlier execution retired. The
 [Runner contract](scheduled-runs.md#definition-controls-and-shutdown) owns the
 ordering and shutdown boundary.
+
+Interval validation currently enforces an integer and the 60-second floor, but
+not APScheduler/datetime's representable upper bound. A sufficiently large
+interval can pass validation and commit before trigger construction fails;
+startup can fail again when reloading that enabled definition. This is a current
+validation gap, not proof that every accepted recurrence is runnable. Preserve
+the returned identity and inspect/correct the saved definition rather than
+creating a replacement blindly.
 
 ## 7. On by default
 

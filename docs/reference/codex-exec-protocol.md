@@ -7,7 +7,7 @@ The normalizer lives in `server/harness/codex.py` (formerly
 `server/backends/codex.py`, before the harness-layer refactor); the fake CLI
 that scripts these shapes is `tests/_fixtures/fake_codex_cli.py`.
 
-These are version-bound exec observations. Ordinary sessions now use the pinned
+These are version-bound exec observations. Ordinary sessions now follow the
 [App Server contract](../implemented/codex-backend.md); only the independent Research
 leaf retains exec. The historical spawn/resume example below is not a current
 ordinary-session entry point or a template for that restricted leaf.
@@ -85,8 +85,8 @@ Text turn:
 {"type":"turn.completed","usage":{"input_tokens":11175,"cached_input_tokens":1920,"output_tokens":20,"reasoning_output_tokens":12}}
 ```
 
-MCP tool call (this capture predates the viewer-MCP removal, but the shape is
-what matters — it's identical for any `mcp_servers.<key>` we register today):
+MCP tool call (this capture predates the viewer-MCP removal; it records the
+0.132.0 exec item shape, not today's App Server notification schema):
 ```json
 {"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"viewer","tool":"show_file","arguments":{"path":"hello.txt"},"result":{"content":[{"type":"text","text":"Opened hello.txt (text, 14 bytes) in the viewer. The user can see it now."}],"structured_content":{"result":"Opened hello.txt …"}},"error":null,"status":"completed"}}
 ```
@@ -94,10 +94,15 @@ what matters — it's identical for any `mcp_servers.<key>` we register today):
 ## Questions at the time of capture
 
 - **Login UI / flow decision** (`codex-backend.md` §10 #1): host `codex login`
-  (option A, works today) vs an in-app `--device-auth` flow (option B). Not
+  (option A, working at capture time) vs an in-app `--device-auth` flow (option B). Not
   built at the time of this capture. Current code provides per-credential
   in-app device authorization in [`codex_login.py`](../../server/codex_login.py)
   and [credential routes](../../server/routers/credentials.py); this historical
   question is closed and is not a new implementation task.
-- The `test_backend_codex_real.py` suite (gated on `codex` + `~/.codex/auth.json`)
-  is the standing guard against version drift in the shapes above.
+- The capture-era `test_backend_codex_real.py` guarded the exec path. The
+  [current suite](../../tests/test_backend_codex_real.py) instead exercises
+  ordinary App Server resume and per-turn settings; it is not a live revalidation
+  of these historical exec frames. Live checks require explicit opt-in and the
+  selected CLI/login probes, not merely the presence of `~/.codex/auth.json`.
+  Selection and credential isolation belong to the
+  [testing policy](../testing.md#markers-providers-and-isolation).

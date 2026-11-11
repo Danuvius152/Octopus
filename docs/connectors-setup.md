@@ -1,9 +1,15 @@
 # Connectors — setup
 
-Connectors let an agent call third-party accounts (GitHub, Gmail, or any
-OAuth2 API you define) as tools. Everything here is doable **from the browser**
-— no server shell, env, or filesystem access required — so it works when you
-reach Octopus remotely (e.g. via a tunnel).
+Connectors let an agent call third-party accounts (GitHub, Gmail, or a compatible
+OAuth2 API you define) as tools. Connector configuration is available **from the
+browser**, without server shell or filesystem access. This assumes Octopus already
+has a reachable public/callback address when the provider requires one; connector
+setup does not configure the host's network or tunnel.
+
+OAuth client registration and custom connector definitions are installation-wide
+administrator operations. Each account authorizes its own installations and
+chooses which of its agents may use them; a regular account cannot replace the
+shared client credentials.
 
 The one unavoidable step is registering an OAuth app with the provider to get a
 **client id + secret** — but that's done in your browser too. (A hosted SaaS
@@ -76,9 +82,14 @@ observations, not a current expiry or review guarantee. If Octopus shows
 not by themselves invalidate the grant; see
 [token failure classification](implemented/connectors.md#token-failures-and-delayed-rejection).
 
-## Custom connectors (any OAuth2 API)
+<a id="custom-connectors-any-oauth2-api"></a>
+## Custom connectors (compatible OAuth2 APIs)
 
-Catalog → **Add custom connector** to define a new kind without server code:
+An administrator can use Catalog → **Add custom connector** to define a new
+kind without server code. The generic adapter supports authorization-code OAuth2,
+optional PKCE, form-encoded token requests and JSON token responses; providers
+requiring a different protocol or token-authentication scheme may need a dedicated
+adapter rather than configuration alone:
 
 - **Slug** (e.g. `linear`) and **display name**.
 - **Authorize URL**, **Token URL**, **API base URL**, **scopes**, **PKCE** on/off.
@@ -87,8 +98,9 @@ Catalog → **Add custom connector** to define a new kind without server code:
 
 The agent gets one tool, `mcp__<kind>_<id>__request(method, path, query?,
 body?)`, that calls `{api_base}{path}` with the stored token attached. Remove a
-custom connector anytime with the **×** in the catalog (this also deletes its
-installations + stored creds).
+custom connector with the **×** in the catalog as an administrator. This deletes
+the shared definition and **all accounts'** installations, stored credentials and
+Agent enablement links for that kind; it is not an account-local disconnect.
 
 ## Env-var fallback (operators with server access)
 

@@ -51,12 +51,12 @@ SQLite file, uploads — and must survive the agent rewriting the app around it;
 that is the whole reason it is a sibling rather than a subdirectory, since a
 subdirectory is inside what a rebuild may clobber.
 
-The runtime directory is separate from data for a reason worth stating: a
-`.venv` or `node_modules` is **derived**, not user state. Keeping it out of the
-data directory means "reinstall from scratch" is
-`rm -rf <slug>--<app_id>.runtime` with no risk to anything the user cares about,
-and means a backup of the data directory doesn't carry a few hundred megabytes
-of packages.
+The runtime directory is separate from data because a `.venv` or `node_modules`
+is **derived**, not application state. This keeps rebuildable packages out of a
+data-only backup. Runtime also contains diagnostic logs (§8), however: removing
+it loses those logs, and removal is not a safe way to stop a live backend.
+Confirm retirement and preserve any needed diagnostics before clearing runtime
+files; use the supervised reinstall action for ordinary dependency preparation.
 
 Neither `.data` nor `.runtime` is ever served statically — only the code directory
 is reachable through `/apps/{id}/…`, exactly as today.
@@ -138,6 +138,14 @@ running processes and unconfirmed retirement. The supervisor reserves a slot
 atomically on its event loop before spawn; only confirmed spawn failure or
 retirement of the original process group, output readers and request cleanup releases it.
 Dependency installation does not consume a backend slot.
+
+Current exception: if a running app's `start.sh` disappears or loses its executable
+bit, a later `ensure_running` marks the state `absent` before retiring the existing
+process. The slot and handle can remain live, while idle reaping and LRU eviction
+only select `running` states. `absent` therefore does not prove process retirement;
+explicit stop/rebuild/shutdown must still join that original lifecycle. The
+implementation is in [the supervisor](../../server/app_backends.py); do not use
+script removal as a stop operation.
 
 Before reading a body, `BackendSupervisor.acquire` selects and registers the
 original port/process without an intervening await. The same `BackendUse`
@@ -273,8 +281,10 @@ Abort stops that captured instance, never a later instance with the same app ID.
 Confirmed cleanup can retire an observation error while retaining its diagnostic;
 failed journal or transport cleanup remains a drain blocker.
 
-A backend is reachable **only** through this proxy. It binds `127.0.0.1`, so it
-is not exposed on the network, and the tunnel exposes Octopus, not the app.
+The supported remote entry is this authenticated proxy. A conforming backend
+binds `127.0.0.1`, so it is not directly exposed on the network; the tunnel exposes
+Octopus, not its port. Same-host processes can still connect directly, and
+Octopus does not enforce the script's bind address with an OS sandbox.
 
 ## 8. Logs, because a dead backend with no output is useless
 
@@ -336,10 +346,11 @@ do not provide an operating-system sandbox.
 
 What this design does add, and what it deliberately does not:
 
-* **Adds:** a backend is bound to loopback and reachable only through an
-  authenticated proxy; scripts get a minimal environment, not the server's;
-  the data and runtime directories are per-app and never served; process groups
-  are killed on stop so nothing outlives its app.
+* **Adds:** the backend contract requires loopback binding and provides an
+  authenticated remote proxy; scripts get a minimal environment, not the server's;
+  the data and runtime directories are per-app and never served statically.
+  Stop joins the supervised process group and readers; unconfirmed retirement
+  retains its handle and slot rather than claiming cleanup succeeded.
 * **Does not add:** a sandbox. No namespaces, no seccomp, no resource limits
   beyond the process cap. An application can read the user's home directory if
   it tries. Anyone deploying this multi-tenant needs a container per app, and

@@ -49,9 +49,14 @@ effort，并保留工具调用、入队范围和提交者未改文件的断言�
   --knowledge-eval-output=/path/to/fresh-chat-evidence -q
 ```
 
-该会话固定 `gpt-6.1-sol/high`、正常速度与既有 credential，不改 agent 默认、
-回退登录或先发额外付费探针。报告保留隔离 DB、认证宿主、文件访问和源绑定的
-实际限制；新 cwd/空 memory 不证明盲测，资料变化后须按当前版本评阅。
+registration 可显式提供 `profile`，必须恰含非空字符串 `model`、
+`reasoning_effort`、`service_tier`；省略时才默认
+`gpt-6.1-sol/high/default`（正常速度）。实际配置由
+[load_registration](../tests/wiki_query_evidence.py)解析，再用于新建的隔离评测
+agent，不是不可变的模型锁定，也不修改现有 agent 默认。既有 credential 仍须
+匹配选定绑定，不回退登录或先发额外付费探针。报告同时保留配置与实际原生模型
+观测，以及隔离 DB、认证宿主、文件访问和源绑定的实际限制；新 cwd/空 memory
+不证明盲测，资料变化后须按当前版本评阅。
 
 扩展评测夹具以公布普通内置工具时，须配套其 REST 路由、隔离管理器、回调和
 资源退休；只挂载 MCP namespace 不证明工具可用。进入付费样本前，用无模型

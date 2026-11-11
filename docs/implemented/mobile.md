@@ -139,9 +139,12 @@ keyboard animation, which iOS doesn't reliably send), and a tap anywhere
 re-measures as a last resort for a keyboard dismissed while the field kept
 focus.
 
-The bottom inset uses `max()` rather than adding to the bar's own padding: 34pt
-of home indicator already clears the edge, and stacking both lifts the composer
-off the bottom for no reason.
+The bottom rule is `max(var(--bottom-bar-pad), safe-area-inset-bottom - 12px)`,
+not the full inset added to the bar's own padding. It clears the indicator's swipe
+zone without lifting the composer by the entire 34pt inset. The composer uses
+1.25rem normal padding, reduced to 0.5rem at widths up to 768px; the larger of
+that padding and the adjusted safe area wins. The exact rule lives in
+[index.css](../../web/src/index.css).
 
 ## 7. Long strings
 
@@ -155,8 +158,13 @@ prompt at every width) break instead.
 E2E at phone width: the drawer closes when a session is picked, the closed
 drawer is entirely off-screen, no surface scrolls horizontally, and every
 field is at least 16px. Unit: the store's navigation actions close the drawer.
-Manual verification: 320 / 390 / 412 / 810 / 844×390, zero overflow on chat,
-applications, schedules, connectors, harness, the agent form and dialogs.
+The original manual verification reported zero overflow at
+320 / 390 / 412 / 810 / 844×390 on chat, applications, schedules, connectors,
+harness, the agent form and dialogs. That is version-bound evidence, not
+certification of current devices, browser versions or deployment.
+[useViewportHeight.test.ts](../../web/src/hooks/useViewportHeight.test.ts) covers
+focused-field sizing and stale viewport recovery; simulated viewport events do
+not establish every physical iOS keyboard/browser-toolbar transition.
 
 ## 9. What this defers
 

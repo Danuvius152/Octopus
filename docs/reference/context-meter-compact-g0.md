@@ -123,7 +123,8 @@ token，没有安装或登录，也没有访问真实 DeepSeek/Anthropic API。
 
 [CLI 原始流摘录](claude-context-compact-2.1.319.json) 保存实际 init、user UUID、
 command 生命周期、assistant usage、result、compacting/boundary 和各进程
-退出结果；模型响应由人工服务生成，CLI 输出没有用 fixture 仿造。
+退出结果；该捕获的 Octopus revision 单独记为 `e6b350b`，不同于上方 Codex
+实验基线。模型响应由人工服务生成，CLI 输出没有用 fixture 仿造。
 
 | 场景 | 实际观察 | 证明范围 |
 | --- | --- | --- |
@@ -192,10 +193,11 @@ terminal_reason 可缺失。故不能仅看 success 判 compact/no-op，也不�
 argv 发出所需字段。现在以以上 2.1.319 原始流核对实际结果；pre_tokens 仍只
 描述压缩前用量，不能从其名字推导额外字段不存在。
 
-因此 01 所需的 Claude 生产者来源缺口已经补齐，并修正了会误导后票的结果
-假设。G0-A1 的**产品 parser/driver 消费回归**仍属后票，不是本次已经通过的
-产品测试。仍未验证真实 DeepSeek 模型、自动压缩、各种模型 alias 或生产生效
-配置；这些边界没有被本地模拟扩大。常规安装政策继续由
+因此，原 G0 阶段所需的 Claude 生产者来源缺口已经补齐，并修正了会误导产品
+适配的结果假设。在该阶段，G0-A1 的**产品 parser/driver 消费回归**尚未执行；
+后续已交付的离线消费回归见下节，不能倒算成原 G0 的通过项。原生产者实验仍未
+验证真实 DeepSeek 模型、自动压缩、各种模型 alias 或生产生效配置；这些边界
+没有被本地模拟扩大。常规安装政策继续由
 [验证规则](../testing.md#markers-providers-and-isolation)维护，本次用户指定的
 离线专项不扩大日常实机范围。
 

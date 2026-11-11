@@ -49,7 +49,11 @@ from the current row instead of disabling or recreating the old definition.
 A registration failure is observed with the original schedule ID and cause;
 the saved definition remains authoritative. There is no automatic business replay
 or compensating create. The [tool contract](schedule-tool.md#6-the-list-moves-while-you-watch)
-describes the actionable error returned to callers.
+describes the actionable error returned to callers and the current upper-bound
+validation gap for intervals. Reloading an enabled interval that APScheduler
+cannot represent can also fail startup; persistence alone does not prove trigger
+registration. The list-change notification is attempted only after successful
+reconciliation, so that failure can leave browsers unaware of the saved change.
 
 Shutdown closes new control and fire admission and pauses launches, while already
 owned controls may still register their committed definitions. It joins these

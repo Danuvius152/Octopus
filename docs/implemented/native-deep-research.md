@@ -155,6 +155,13 @@ through SessionManager's short configuration boundary, resolving the actual mode
 and credential ID into the job's private request value. Capacity waits, credential
 resolution and model execution occur outside that lock. A queued job therefore
 keeps its admitted choice when defaults change; a later job sees the new defaults.
+This capture does not yet carry selected reasoning effort or service tier into
+execution: the manager passes only `model` to the orchestrator, and both web and
+reasoning leaves construct their run contexts without those two controls. They
+therefore retain runtime defaults rather than the selected effort/tier
+(see [manager invocation](../../server/research/manager.py#L362-L378),
+[pipeline arguments](../../server/research/orchestrator.py#L89-L120) and
+[leaf configuration](../../server/research/leaf.py#L58-L152)).
 Every leaf spawn rechecks current account, credential and execution authority;
 revocation ends the original job rather than switching it to another credential.
 After configuration waiting, admission rechecks shutdown synchronously before
@@ -238,6 +245,15 @@ An ordinary missing-job refusal preserves its caller's error without poisoning
 shutdown; an unexpected control failure or cancellation remains visible as
 unconfirmed cleanup. `test_research_manager.py` exercises real UPDATE/COMMIT
 barriers, repeated cancellation, shutdown/rejoin and original subprocess exit.
+
+A known preparation gap remains before any leaf starts: an `OSError` creating
+the per-job scratch directory follows the generic failure handler, which can
+commit `failed` and then re-raise. The registry retains that exceptional task and
+its context, so drain/shutdown cannot complete even though no leaf was launched.
+This is not proof of an unretired subprocess; it is the current classification
+limitation (see [scratch preparation and failure handling](../../server/research/manager.py#L350-L422)
+and [exceptional-task retention](../../server/research/manager.py#L135-L155)).
+It does not authorize clearing genuinely unknown retirement or storage failures.
 
 A web leaf needs a successful provider terminal. Parseable text followed by
 EOF without that terminal remains diagnostic material and supplies neither

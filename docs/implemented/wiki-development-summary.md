@@ -35,7 +35,10 @@
 <a id="4-当前运行合同"></a>
 ## 查询和证据
 
-所有有效账户内 agent 均可按任务需要查共享 Wiki，不要求先询问 Weber 或输入 `/wiki`。只读与旧 Off 只收窄维护权。已知身份/路径直接读；否则保留原问题命名对象，用 compact 导航定位：明确文章用 lookup，具体问题用 question，宽主题用 overview，多方比较用 compare。
+所有有效账户内 agent 均可按任务需要查共享 Wiki，不要求先询问 Weber 或输入 `/wiki`。
+`read` 只收窄维护权，不关闭查询；旧 Off 是历史控制语义，不是当前可提交的第四种模式。
+当前只接纳 auto/read/maintain，旧合同保全及重新授权归
+[知识请求](knowledge-requests.md)。已知身份/路径直接读；否则保留原问题命名对象，用 compact 导航定位：明确文章用 lookup，具体问题用 question，宽主题用 overview，多方比较用 compare。
 
 索引卡和 snippet 只作导航；实际读到的当前摘要、Key note 或知识页已覆盖问题及条件即可回答。缺少定义、理由、条件、出处或另一方观点才补相关正文。明确整篇总结/评价须以同一 revision 的实际正文覆盖 `[0,end)`，没有缺口；工具预算不构成全文上限。比较需各方依据，未读/失败范围不算已读。
 
@@ -367,7 +370,12 @@ I/O 错误保留存储失败；读取与 GC 交错只返回原字节或明确不
 外部文件移入尚未观察的新目录存在身份盲窗；使用既有诊断和显式核对入口，
 不能靠扫描或 hash 重建从未取得的身份。
 
-查询热路径不重复全库回填/扫描；改动增量更新。默认导航/读取 compact，原生读取完整 MCP 结果上限 32,768 UTF-8 字节，不是 token 或整篇上限。任务默认小摘要，按固定 key 服务端定位；full/export 返回文件、字节数和 SHA，用短程序读必要字段，不把大 JSON 塞入 shell 参数。
+查询热路径不重复全库回填/扫描；改动增量更新。模型默认导航/读取 compact。
+模型读取的 32,768 UTF-8 字节预算计入序列化后的 MCP text result 及结果包装，
+不是仅正文字节、token 或整篇上限，也不计传输 framing 与客户端后续上下文限制。
+[reading](../../server/wiki/reading.py)在 compact 视图或带 task 的读取中应用
+[read_response](../../server/wiki/read_response.py)裁剪，模型请求 full 视图不绕过预算；
+不能把该预算误写成所有普通 HTTP full 读取的统一上限。任务默认小摘要，按固定 key 服务端定位；full/export 返回文件、字节数和 SHA，用短程序读必要字段，不把大 JSON 塞入 shell 参数。
 
 ## 查询投影与性能
 

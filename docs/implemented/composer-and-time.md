@@ -20,9 +20,14 @@ assert box placement and intersections, not only that a label exists.
 ArrowUp walks backward through human-entered prompts, ArrowDown forward, and
 moving past the newest restores the draft present before navigation. At the
 oldest entry the key remains consumed. History activates only on the first/last
-line as appropriate; an open slash menu owns its arrow keys. Machine-injected
-BG, research, delegation and scheduled messages are excluded through the shared
-injected-turn predicate, also used by rewind selection.
+line as appropriate; an open slash menu owns its arrow keys. Only nonblank
+user text is eligible, and consecutive duplicate prompts collapse. Structured
+`tool_input.request_context.source` takes precedence: `human` remains eligible
+even when its text resembles an injection marker, while non-human sources are
+excluded. Only history without that provenance falls back to the shared legacy
+prefix predicate (BG results, agent replies/questions/errors and scheduled fires).
+Rewind uses the same provenance-first distinction; a markerless legacy machine
+message cannot reliably be classified from text alone.
 
 ## Model selection
 

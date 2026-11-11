@@ -353,6 +353,21 @@ would silently vary across supported Python versions. The narrow dependency
 reuses the existing grammar and accepts comments/quoted IDs rather than splitting
 on spaces or angle brackets. It adds no provider retry or compatibility state.
 
+## Current limitations
+
+GitHub `get_file` currently interpolates the repository path into a URL without
+encoding each path segment. Names containing `#`, `?` or literal percent escapes
+can be interpreted as URL syntax rather than the requested filename. A failed
+lookup is not proof that such a file is absent; this remains a tool limitation
+in [the GitHub adapter](../../server/mcp_servers/connectors/github.py).
+
+Connector monitoring is incomplete: the shared adapter emits `connector_call`
+for token/authentication failures, but has no successful resource-call producer.
+The monitor's call totals and success rate therefore do not describe all provider
+requests and cannot establish connector health. This is separate from the
+operation results and retry rules above; see [the event hook](../../server/mcp_servers/connectors/_shared.py)
+and [its query](../../server/monitor/query.py).
+
 ## Navigation and verification
 
 [Connector setup](../connectors-setup.md) owns operator instructions. The

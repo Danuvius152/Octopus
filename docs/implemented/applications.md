@@ -128,6 +128,13 @@ leave the build permanently building. The shared ownership and completion
 rules are in the [original completion contract](input-reliability.md#原请求完成与失败交接);
 deployment is verified separately.
 
+This completion ordering does not cover the separate metadata PATCH path:
+changing `entrypoint` calls `_evaluate` immediately, even during an active build.
+It can project `ready`/`failed` and update `last_built_at` before that writer has
+completed. Until this path is coordinated with build completion, neither the
+projected status nor that timestamp alone proves writer retirement. See
+[`update_application` and `_evaluate`](../../server/applications.py).
+
 For App Server, completion follows the bound root and its original resource
 retirement. A remaining helper partial neither proves a valid app nor forces a
 build failure. The entrypoint check still decides the artifact status, including

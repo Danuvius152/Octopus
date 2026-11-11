@@ -35,7 +35,7 @@ for the original application's resources or deletion.
     `<dest-slug>/<new-id>.jsonl`, rewriting each line's `cwd`→dest and
     `sessionId`→new id. (Empirically the CLI resumes a copied *real* transcript
     fine — the old "No conversation found" was specific to *synthesized* ones.)
-  - **Codex App Server**: use the pinned native `thread/fork` in the same home,
+  - **Codex App Server**: use native `thread/fork` in the same home,
     save its actual returned identity and retire its short management host before
     installing the branch. This supports both old exec and native source histories;
     branch creation sends no model input. [Native protocol details](codex-backend.md#native-history-branching).

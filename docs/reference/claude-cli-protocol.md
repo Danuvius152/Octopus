@@ -13,17 +13,20 @@ about unused stdin and fresh processes apply only to that historical shape.
 
 **Captured against**: `claude` v2.1.143.
 
-**Reproduce**: `tests/_fixtures/fake_claude_cli.py` scripts the same
-shape; `tests/test_backend_claude_code.py` exercises the normalizer
-against it. For the real binary, `tests/test_backend_claude_code_real.py`
-runs against `claude` if it's on `$PATH`.
+**Regression entry points**: the [fake CLI](../../tests/_fixtures/fake_claude_cli.py)
+and [normalizer tests](../../tests/test_harness_claude.py) provide synthetic
+coverage; they are not a replay of this exact installed CLI version. The
+[real suite](../../tests/test_backend_claude_code_real.py) requires explicit live
+opt-in and a working signed-in CLI, not merely a binary on `$PATH`. Follow the
+[current test policy](../testing.md#markers-providers-and-isolation); this
+historical capture does not expand the installation's routine live-test scope.
 
 **Note on revision**: this doc was rewritten after the VM0-shape
 refactor (commit `5815560`). The old shape used
 `--input-format=stream-json` + `--permission-prompt-tool=stdio` and
 drove a bidirectional control protocol over stdin; that path is gone.
 The refactor and the recovery loop that sits on top of it are
-documented in `docs/post-mortems/2026-05-18-bg-pipeline-hardening.md` §2.
+documented in the [BG pipeline post-mortem](../post-mortems/2026-05-18-bg-pipeline-hardening.md) §2.
 
 ## Historical VM0 invocation
 
@@ -56,12 +59,12 @@ Notes per flag:
   already trusts the call. The previous shape
   (`--permission-prompt-tool=stdio` + host callback) gave us nothing
   we needed and was on the failure surface for the CLI
-  premature-exit bug; see `docs/post-mortems/2026-05-18-bg-pipeline-hardening.md`
+  premature-exit bug; see the [BG pipeline post-mortem](../post-mortems/2026-05-18-bg-pipeline-hardening.md)
   §2.
 - `--disallowedTools AskUserQuestion`: prevents the model from
   calling the built-in AUQ. We provide `mcp__ask__user` (see below)
   as the replacement.
-- `--mcp-config <JSON>`: registers our in-process MCP servers
+- `--mcp-config <JSON>`: registers our in-app stdio MCP servers
   (`bg`, `ask`). The CLI accepts either a file path or an inline JSON
   string; we use inline.
 - `--append-system-prompt <text>`: short addendum teaching the model
@@ -137,7 +140,7 @@ itself — no host involvement. We only see the `tool_use` and
 
 ## MCP tools we register
 
-`--mcp-config` registers our in-process MCP servers, each launched by the
+`--mcp-config` registers our in-app stdio MCP servers, each launched by the
 CLI as its own subprocess (children of `claude`, grandchildren of the
 FastAPI process). The model sees them as `mcp__<server-key>__<tool-fn>`:
 

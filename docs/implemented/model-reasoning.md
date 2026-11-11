@@ -127,8 +127,12 @@ native thread start/resume and verifies the returned effective settings before
 business input. Fast maps to native `priority`; Normal is explicit `default`,
 so a resumed thread cannot retain its previous Fast setting. Model-only changes
 keep the effort binding; effort is not converted into another model. The
-independent Research exec leaf renders `-m` and TOML effort/tier overrides;
-one-shot schedule parsing and file-reference resolution pass the same selected
+independent exec adapter can render `-m` and TOML effort/tier overrides, but
+Research currently forwards only the model: its manager, orchestrator and both
+leaf entry points omit selected effort/tier. Capturing the configured session
+therefore does not prove those controls reach a Research execution; see
+[the current Research limitation](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler).
+One-shot schedule parsing and file-reference resolution pass the selected
 settings to the text worker. No global Codex config or saved agent row is rewritten.
 
 Claude Code renders explicit effort as `--effort` and sets

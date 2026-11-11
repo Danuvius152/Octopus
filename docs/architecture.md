@@ -85,7 +85,7 @@ In production `octopus serve` serves everything from one port (default 8000):
   application errors propagate unchanged.
 
 In development, Vite serves the SPA on port 5173 with HMR and proxies `/api`,
-`/ws`, `/health` to the backend on 8000.
+`/apps`, `/ws` and `/health` to the backend (`OCTOPUS_API_PORT`, default 8000).
 
 ## Components
 
@@ -155,8 +155,9 @@ Source: `wiki/registry.py`, `wiki/history.py`, `wiki/job_execution.py`.
 ### Applications
 
 ApplicationManager projects a build's original completion plus actual entrypoint
-to status. AppAgent owns scoped conversations, original ask/SSE/status and request
-slots. BackendSupervisor owns process instances, active uses and confirmed cleanup;
+to status; the entrypoint PATCH path still has a premature-ready exception documented
+in the [application contract](implemented/applications.md). AppAgent owns scoped
+conversations, original ask/SSE/status and request slots. BackendSupervisor owns process instances, active uses and confirmed cleanup;
 code, durable data and rebuildable runtime have different lifetimes. Failed
 retirement preserves files, identity and deletion responsibility. Contract:
 [applications](implemented/applications.md).
@@ -334,7 +335,7 @@ owns that question-bound lifetime.
 | --- | --- | --- |
 | BG shell work | Persistent ownership before spawn, bounded output, deadlines, captured process-group retirement and original-result return | [Background tasks](implemented/background-tasks.md) |
 | Named-agent delegation | Same-account conversation and work rounds, nested questions/relay, original completion and exact-work cancellation | [Agent collaboration](implemented/agent-collaboration.md) |
-| Research | Pipeline/report completion, bounded native web leaves, captured configuration, follow-up processing and retirement | [Native Research](implemented/native-deep-research.md) |
+| Research | Pipeline/report completion, bounded native web leaves, captured configuration (effort/tier forwarding is incomplete), follow-up processing and retirement | [Native Research](implemented/native-deep-research.md) |
 | Scheduled run | Agent-owned definition and fire snapshot, overlap/one-shot admission and original run completion | [Scheduled runs](implemented/scheduled-runs.md), [schedule tools](implemented/schedule-tool.md) |
 | Native helper | Provider-owned root/child activity and saved observations within the original resource lifetime | [Native subagents](implemented/native-subagents.md) |
 | Application build | Current build session's original completion plus real entrypoint verification | [Applications](implemented/applications.md) |

@@ -181,6 +181,14 @@ in `fork_revert_record`. Failure does not erase the successfully created fork or
 pretend file restoration succeeded. This does not roll back commits, send/unsend
 messages, undo database writes, cancel original BG jobs or reverse provider calls.
 
+The shared Git helper still has an execution-retirement gap: timeout kills only
+the parent without awaiting exit, and caller cancellation does not retire its
+process group. Anchor capture, preview/preflight and stash/restore use that helper;
+a returned timeout or cancelled call is therefore not proof that Git or its hooks
+have stopped touching the tree. This limits isolation around failed operations,
+not the path-ownership checks above
+(see [the shared Git subprocess helper](../../server/fork_helpers.py#L80-L105)).
+
 #### 5.6.4 First-turn context
 
 The trusted note tells the model which effects occurred after the branch point

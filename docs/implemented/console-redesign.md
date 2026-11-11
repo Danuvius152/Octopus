@@ -4,7 +4,11 @@
 
 ## 2. The token layer is the design
 
-Everything visual comes from `tokens.css`; no component hard-codes a hex.
+[tokens.css](../../web/src/styles/tokens.css) owns the shared palette, typography
+and semantic theme values. It is not an exhaustive source of every visual value:
+components and [index.css](../../web/src/index.css) also specify geometry and
+utility styles. The logo deliberately uses its own fixed brand navy (`--logo`),
+not the interactive `--primary` color.
 
 | Token | Value | Where it shows |
 |---|---|---|
@@ -16,9 +20,10 @@ Everything visual comes from `tokens.css`; no component hard-codes a hex.
 | `--success` / `--warn` | `#3f9d6b` / `#c8703f` | healthy vs needs-attention |
 | `--running` | `#8a6db5` | a delegation in flight — neither healthy nor broken |
 
-Type is Hanken Grotesk for the interface and **IBM Plex Mono for every
-technical string** — ids, counts, cron, costs, status words, command names.
-That split is what makes the console read as a console; keep it.
+The shared sans and mono families are Hanken Grotesk and IBM Plex Mono.
+Technical labels such as ids, counts, cron, costs and command names use the mono
+style where their component applies it; the font token alone does not enforce
+that choice for every technical string.
 
 Shared primitives live in `index.css`: `.tile` (identity squares), `.pill`
 (status chips in four tints), `.badge-running`, `.card`, `.page-body`.
@@ -51,7 +56,8 @@ connector is visible from anywhere without opening anything.
 
 `mainView` in the store is the router (`chat` | `application` |
 `application-create` | `agent-form` | `schedules` | `connectors` | `harness` |
-`monitor`). The authoritative union is the store's `MainView` type.
+`monitor` | `account`). The authoritative union is the store's
+[MainView](../../web/src/stores/sessionStore.ts) type.
 `setActiveSessionId` resets it to `chat`, so every existing "open this
 session" call site keeps working. ChatView stays mounted but hidden behind
 other views — it owns the composer draft, scroll position and pending

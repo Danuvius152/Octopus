@@ -65,7 +65,7 @@ progress. Complete business and control frames share a write lock. After the
 last authorization await, target/lease validation and the business write have no
 intervening await; terminal/Stop closure uses the same event-loop ordering.
 Before writing, the original submission commits its possible-send marker.
-The pinned server's explicit rejection, or proof that no send marker exists,
+The native protocol's explicit rejection, or proof that no send marker exists,
 permits Owner to return the original input and order to ordinary dispatch.
 Generic internal errors and missing acknowledgments remain unknown. They cannot
 trigger replay, a different target or automatic resumption after Stop.
@@ -88,6 +88,20 @@ restore-and-run action. Requeued input that later runs normally does not retain
 a stale steer notice. Full identity, evidence and
 recovery rules belong to the
 [input contract](input-reliability.md#codex-native-input-evidence).
+
+## Live transcript limitation
+
+A current UI limitation is separate from delivery evidence: on the Claude
+path the user row is persisted before its asynchronous stdin write, but `steered`
+is published only after that write finishes. Output persisted meanwhile can be
+broadcast first; the WebSocket reducer's maximum-sequence guard can then discard
+the late, lower-sequence input. Refreshing from durable history restores it.
+A missing live row therefore proves neither failed admission nor non-delivery,
+and is not a reason to repeat the input. This interleaving is confirmed for
+Claude, not a claim of a reproduced native Codex failure
+(see [Owner persistence and writer ordering](../../server/sessions/owner_runtime.py#L2204-L2239),
+[late publication](../../server/sessions/owner_runtime.py#L2290-L2295) and
+[the live sequence guard](../../web/src/hooks/useWebSocket.ts#L112-L116)).
 
 ## Output and process lifetime
 

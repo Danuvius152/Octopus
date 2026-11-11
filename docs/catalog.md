@@ -83,7 +83,7 @@
 
 ## 活动审阅材料
 
-- 基于 `0a56386` 的架构精读与 deep module 入门（正文缺失，待补 `review/architecture/Octopus_Architecture_Deep_Dive.html`）：从调用者知识、内部责任和故障测试深入讲解 SessionOwner、HarnessRun、返回接管与 Wiki 快照；包含前后图解、练习和两项待探索的深化候选。这项临时学习材料不代表候选已实施或生产已部署。
+- 基于 `0a56386` 的架构精读与 deep module 入门（本机临时材料，未随仓库交付）：从调用者知识、内部责任和故障测试深入讲解 SessionOwner、HarnessRun、返回接管与 Wiki 快照；包含前后图解、练习和两项待探索的深化候选。这项临时学习材料不代表候选已实施或生产已部署。
 - [基于 `fd7ab9c` 的架构精读](review/architecture/architecture-review-20261102-191500.html)：用七个现行实例解释返回接纳、原请求完成、协议适配、配置捕获、资源退休、前端观察和 Wiki 快照；五项旧候选已有实现，一处 BG 详情观察问题有内存探针复现。提议另行标注；这是临时学习与审阅材料。
 
 ## 版本参考与历史证据

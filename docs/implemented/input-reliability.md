@@ -610,7 +610,7 @@ Owner 在标记请求 started、启动异步 claim/附件/凭据/配置准备之
 | `not_sent` | 未记录业务帧可能发送；spawn、握手、只读查询不算首输入执行。controller 修改的不确定性独立保留。 |
 | `unknown` | 原 submission 已先提交可能发送边界及 RPC 身份，随后才能写业务帧。写前存储失败不发送，写后 ACK 丢失不自动重放。 |
 | `accepted` | 原 start/steer 响应或匹配的完整 user-message client ID 证明接纳并关联原根 turn；不证明模型消费。 |
-| `rejected` | 锁版协议明确未接纳。当前 Owner 的未接纳 steer 可按原身份和顺序回普通队列；首输入或迟到拒绝按原恢复合同处理。通用内部错误不证明拒绝。 |
+| `rejected` | 原生协议明确未接纳。当前 Owner 的未接纳 steer 可按原身份和顺序回普通队列；首输入或迟到拒绝按原恢复合同处理。通用内部错误不证明拒绝。 |
 
 产品 input、attempt、RPC、native thread 与 turn 身份分别解释；细化不能覆盖已知
 身份或倒退证据。thread 与输入证据一起提交，后续 writer 在原资源退休后读取

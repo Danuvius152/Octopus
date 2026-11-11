@@ -39,7 +39,7 @@ OAuth 认证表示、Claude 诊断归属和 Connector 授权失败，分别归�
   通过公开 API、真实 loader、steer、完整结果、问答与退出的能力门，再接全部消费者。
 - [Wiki 与阅读应用](plans/wiki-future-plan.md)：选择多 App、标签、引用或 reader 旅程，
   先确定 owner/client 授权。
-- [Research 工作流](plans/ai-research-workflow.md)：补证据结构与反证保全，复用现有研究执行。
+- [Research 工作流](plans/ai-research-workflow.md)：补问点覆盖、来源独立性和阅读／复现证据，复用现有反证保全与研究执行。
 - [Codex 原生角色](plans/codex-native-roles.md)：验证角色映射和能力，独立于完整递归闭合目标。
 
 ## 继承的产品完善

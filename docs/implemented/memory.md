@@ -102,9 +102,10 @@ each harness's config/auth directories; its provisioning does not relocate
 - `build_turn_argv` sets
   `env["CLAUDE_COWORK_MEMORY_PATH_OVERRIDE"] = ctx.memory_dir` (when an agent
   owns the session). This relocates *only* Claude's auto-memory dir to the
-  canonical per-agent dir. `CLAUDE_CONFIG_DIR` is **left at the host default**,
-  so session transcripts (`projects/<cwd-slug>/*.jsonl`, what `--resume`
-  reads) and auth stay where they are. No symlink, no auth copy, no cwd-slug.
+  canonical per-agent dir. Memory wiring **does not change `CLAUDE_CONFIG_DIR`**;
+  session transcripts (`projects/<cwd-slug>/*.jsonl`, what `--resume` reads) and
+  auth stay in the selected configuration directory, or the host default when
+  unset. No symlink, no auth copy, no cwd-slug.
 - No system-prompt text: Claude's native memory auto-activates and
   auto-injects `MEMORY.md` from the override dir.
 
