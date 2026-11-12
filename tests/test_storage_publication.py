@@ -2,12 +2,15 @@
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
 from server.config import settings
+from server.crypto import master_key
 from server.database import Database
+from server.db.portability import snapshot_account
 from server.storage_verification import verify_main, verify_storage
 from tests.accounts import create_account
 from tests.test_service_runtime import installation_settings
@@ -72,7 +75,7 @@ async def test_publication_rejects_incompatible_current_structure_or_facts_witho
 async def test_publication_verification_leaves_current_messages_and_input_facts_unchanged(installation):
     path = Path(installation.db_path)
     before = path.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 9
+    assert verify_storage(installation)['main_format_version'] == 10
     assert path.read_bytes() == before
     database = Database(str(path))
     await database.initialize()
@@ -86,13 +89,48 @@ async def test_publication_verification_leaves_current_messages_and_input_facts_
         await database.close()
 
 
+@pytest.mark.parametrize('raw', ['{}', '{"version":true,"paths":[]}', '{"version":2,"paths":[]}',
+                                '{"version":1,"paths":["../outside"]}', '{"version":1,"paths":["a","a"]}',
+                                '{"version":1,"paths":["unfinished"', '{"version":1,"paths":["' + 'x' * 262144 + '"]}'])
+async def test_publication_refuses_incomplete_or_invalid_ignored_baseline(installation, raw):
+    path = Path(installation.db_path)
+    with closing(sqlite3.connect(path)) as stored, stored:
+        stored.execute('UPDATE messages SET git_ignored_baseline=?', (raw,))
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match='ignored-path baseline'):
+        verify_storage(installation)
+    assert path.read_bytes() == before
+
+
+async def test_full_database_backup_preserves_ignored_proof_while_account_transfer_excludes_chats(installation, tmp_path):
+    baseline = '{"version":1,"paths":["private/existing"]}'
+    path = Path(installation.db_path)
+    with closing(sqlite3.connect(path)) as source, source:
+        source.execute('UPDATE messages SET git_ignored_baseline=?', (baseline,))
+    backup = tmp_path / 'full-backup.db'
+    transfer = tmp_path / 'account.db'
+    with closing(sqlite3.connect(path)) as source, closing(sqlite3.connect(backup)) as target:
+        source.backup(target)
+        source.row_factory = sqlite3.Row
+        owner = source.execute('SELECT id FROM users').fetchone()[0]
+        snapshot_account(source, transfer, owner, key=master_key())
+    with closing(sqlite3.connect(backup)) as reader:
+        assert verify_main(reader) == 10
+        assert reader.execute('SELECT git_ignored_baseline FROM messages').fetchall() == [(baseline,)]
+    with closing(sqlite3.connect(transfer)) as reader:
+        assert verify_main(reader) == 10
+        assert reader.execute('SELECT * FROM messages').fetchall() == []
+        assert reader.execute('SELECT * FROM sessions').fetchall() == []
+        assert reader.execute('SELECT id FROM users').fetchall() == [(owner,)]
+
+
 async def test_publication_uses_the_same_main_database_alias_as_current_startup(installation, tmp_path):
     original = Path(installation.db_path)
     alias = tmp_path / 'main-alias.db'
     alias.symlink_to(original)
     installation.db_path = str(alias)
     before = original.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 9
+    assert verify_storage(installation)['main_format_version'] == 10
     assert original.read_bytes() == before
 
 

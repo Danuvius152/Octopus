@@ -150,7 +150,7 @@ export function QuestionPrompt({ question, sessionId, onSubmit, onSnooze, agentL
           <p>Question preview · load the complete question and options before answering.</p>
           {detail.busy && <p role="status">Loading full question…</p>}
           {(detail.error || saved && !complete) && <p role="alert">{detail.error || "The saved question does not match this pending question."}</p>}
-          <button type="button" className="underline" disabled={detail.busy} onClick={() => void detail.load()}>Load full question</button>
+          <button type="button" className="underline" aria-expanded={false} disabled={detail.busy} onClick={() => void detail.load()}>Load full question</button>
         </div>}
         {!needsFull && questions.map((q, i) => {
           const multi = !!q.multiSelect;

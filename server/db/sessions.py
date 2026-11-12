@@ -41,7 +41,7 @@ class MessageExportError(ValueError):
 _MESSAGE_COLUMNS = (
     "seq, role, type, content, tool_name, tool_input, tool_use_id, "
     "is_error, session_id_ref, cost, attachments, git_head, "
-    "git_status_clean, created_at, runtime_metadata"
+    "git_status_clean, created_at, runtime_metadata, git_ignored_baseline"
 )
 
 
@@ -59,6 +59,7 @@ def _decode_message(row: Any) -> dict[str, Any]:
         "git_status_clean": bool(row[12]) if row[12] is not None else None,
         "created_at": row[13],
         "runtime_metadata": json.loads(row[14]) if row[14] else None,
+        "git_ignored_baseline": row[15],
     }
 
 
@@ -87,7 +88,7 @@ async def _fork_message_snapshot(tx: Transaction, parent_id: str, after_seq: int
         "'request_id',i.request_id,'source_session_id',m.session_id,'execution_owner',i.execution_owner,"
         "'delivery_state',i.delivery_state,'native_inputs',json(i.native_inputs))) END,"
         "m.tool_use_id,m.is_error,m.session_id_ref,m.cost,m.attachments,m.git_head,m.git_status_clean,"
-        "m.created_at,m.runtime_metadata,m.terminal_request_id FROM messages m "
+        "m.created_at,m.runtime_metadata,m.git_ignored_baseline,m.terminal_request_id FROM messages m "
         "LEFT JOIN client_submissions i ON i.session_id=m.session_id AND m.role='user' AND m.type='text' "
         "AND i.request_id=json_extract(m.tool_input,'$.request_context.request_id') "
         "WHERE m.session_id=? AND m.seq<=? ORDER BY m.seq", (parent_id, after_seq))
@@ -435,8 +436,8 @@ class SessionsMixin(DatabaseBase):
                 "INSERT INTO messages "
                 "(session_id, seq, role, type, content, tool_name, tool_input, "
                 " tool_use_id, is_error, session_id_ref, cost, attachments, "
-                " git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " git_head, git_status_clean, created_at, runtime_metadata, git_ignored_baseline, terminal_request_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ((fork_id, *row) for row in snapshot.rows),
             )
         return app_id
@@ -588,9 +589,10 @@ class SessionsMixin(DatabaseBase):
         created_at: str | None = None,
         runtime_metadata: dict[str, Any] | None = None,
         terminal_request_id: str | None = None,
+        git_ignored_baseline: str | None = None,
     ) -> None:
         async with self.transaction(write=True) as tx:
-            return await self._append_message(tx, session_id, seq, role, type, content, tool_name, tool_input, tool_use_id, is_error, session_id_ref, cost, attachments, git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id)
+            return await self._append_message(tx, session_id, seq, role, type, content, tool_name, tool_input, tool_use_id, is_error, session_id_ref, cost, attachments, git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id, git_ignored_baseline)
 
     async def _append_message(
         self, tx: Transaction,
@@ -611,6 +613,7 @@ class SessionsMixin(DatabaseBase):
         created_at: str | None = None,
         runtime_metadata: dict[str, Any] | None = None,
         terminal_request_id: str | None = None,
+        git_ignored_baseline: str | None = None,
     ) -> None:
         content_str = json.dumps(content) if content is not None else None
         tool_input_str = json.dumps(tool_input) if tool_input is not None else None
@@ -626,8 +629,8 @@ class SessionsMixin(DatabaseBase):
             "INSERT INTO messages "
             "(session_id, seq, role, type, content, tool_name, tool_input, "
             "tool_use_id, is_error, session_id_ref, cost, attachments, "
-            "git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id, git_ignored_baseline) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 seq,
@@ -646,6 +649,7 @@ class SessionsMixin(DatabaseBase):
                 created_at or datetime.now(UTC).isoformat(),
                 json.dumps(runtime_metadata) if runtime_metadata is not None else None,
                 terminal_request_id,
+                git_ignored_baseline,
             ),
         )
 
@@ -669,7 +673,7 @@ class SessionsMixin(DatabaseBase):
                 "session_id", "seq", "role", "type", "content", "tool_name",
                 "tool_input", "tool_use_id", "is_error", "session_id_ref", "cost",
                 "attachments", "git_head", "git_status_clean", "created_at",
-                "runtime_metadata", "terminal_request_id",
+                "runtime_metadata", "terminal_request_id", "git_ignored_baseline",
             )
             # No extra request registry: the input's existing sequence owns the
             # context. Also find the same request at a different sequence, which
@@ -908,7 +912,7 @@ class SessionsMixin(DatabaseBase):
             cursor = await tx.execute(
                 "SELECT id, forked_from_session_id, working_dir, backend, "
                 "claude_session_id, fork_status, fork_revert_record, credential_id, "
-                "agent_id, fork_metadata, user_id "
+                "agent_id, fork_metadata, user_id, fork_after_seq "
                 "FROM sessions WHERE origin = 'fork' AND fork_status IN "
                 "('initializing', 'reverting')"
             )
@@ -926,6 +930,7 @@ class SessionsMixin(DatabaseBase):
                     "agent_id": r[8],
                     "fork_metadata": r[9],
                     "user_id": r[10],
+                    "fork_after_seq": r[11],
                 }
                 for r in rows
             ]

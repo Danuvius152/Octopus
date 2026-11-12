@@ -244,6 +244,7 @@ class _PreparedInput:
     paths: tuple[str, ...]
     git_head: str | None
     git_clean: bool | None
+    git_ignored_baseline: str | None
 
 
 @dataclass(frozen=True)
@@ -1511,15 +1512,15 @@ class OwnerRuntime:
         if request.operation == "compact":
             if not request.native_session_id or configured.claude_session_id != request.native_session_id:
                 raise ValueError("The original native history is no longer available to compact")
-            return _PreparedInput((), (), None, None)
+            return _PreparedInput((), (), None, None, None)
         if configured.user_id is None:
             raise AttachmentUnavailable()
         files = await asyncio.to_thread(validate_message_attachments, configured.id, request.attachment_ids,
                                         user_id=configured.user_id)
-        head, clean = await fork_helpers.capture_git_anchor(configured.working_dir)
+        head, clean, ignored = await fork_helpers.capture_git_anchor(configured.working_dir)
         return _PreparedInput(
             tuple(AttachmentMetadata(id=item.id, filename=item.filename, size=item.size, mime_type=item.mime_type) for item in files),
-            tuple(str(item.path) for item in files), head, clean,
+            tuple(str(item.path) for item in files), head, clean, ignored,
         )
 
     async def _input_ready(self, execution: Execution, prepared: _PreparedInput) -> None:
@@ -1547,7 +1548,8 @@ class OwnerRuntime:
                                      "request_id": request.request_id, "source": request.source,
                                      "work_id": request.work_id, "knowledge": json.loads(encode(knowledge)),
                                  }})
-        seq = await manager._persist_message(session, message, git_head=prepared.git_head, git_status_clean=prepared.git_clean)
+        seq = await manager._persist_message(session, message, git_head=prepared.git_head,
+            git_status_clean=prepared.git_clean, git_ignored_baseline=prepared.git_ignored_baseline)
         session._run.knowledge_context, session._run.wiki_mode = knowledge, mode
         session._run.wiki_task_id = tasks.open(session, mode, knowledge.trusted_request,
                                               request_id=request.request_id, knowledge=knowledge) if mode in {"auto", "read", "maintain"} else None
@@ -2210,7 +2212,8 @@ class OwnerRuntime:
                     steer.message.tool_input["native_steer"] = True
                 else:
                     steer.seq = await manager._persist_message(
-                        session, steer.message, git_head=prepared.git_head, git_status_clean=prepared.git_clean)
+                        session, steer.message, git_head=prepared.git_head, git_status_clean=prepared.git_clean,
+                        git_ignored_baseline=prepared.git_ignored_baseline)
                 # Constraints are installed before frame I/O can expose them to
                 # tools. The original owner restores them if no frame is sent.
                 session._run.knowledge_context = merged
@@ -2278,7 +2281,8 @@ class OwnerRuntime:
             assert steer.message is not None
             _, prepared = steer.prepared.result()
             steer.seq = await manager._persist_message(session, steer.message,
-                git_head=prepared.git_head, git_status_clean=prepared.git_clean)
+                git_head=prepared.git_head, git_status_clean=prepared.git_clean,
+                git_ignored_baseline=prepared.git_ignored_baseline)
             session._request_observations[request.request_id].follow(
                 session._request_observations[execution.request.request_id])
         if uncertain:
@@ -2323,8 +2327,8 @@ class OwnerRuntime:
         merged = revise(previous, AdmittedRequest(RequestRef(configured.id, request.request_id, configured.user_id),
                                                  request.knowledge_context, request.work_id),
                         {"prompt": request.prompt if request.trusted_request is None else request.trusted_request}, human=True)
-        head, clean = await fork_helpers.capture_git_anchor(configured.working_dir)
-        return merged, _PreparedInput((), (), head, clean)
+        head, clean, ignored = await fork_helpers.capture_git_anchor(configured.working_dir)
+        return merged, _PreparedInput((), (), head, clean, ignored)
 
     async def _write_steer(
         self, backend: HarnessRun, prompt: str, session_id: str, user_id: str | None,

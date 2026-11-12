@@ -620,6 +620,7 @@ class SessionManagerBase:
         *,
         git_head: str | None = None,
         git_status_clean: bool | None = None,
+        git_ignored_baseline: str | None = None,
     ) -> int | None:
         raise NotImplementedError  # provided by a mixin
 

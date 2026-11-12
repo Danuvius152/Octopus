@@ -417,6 +417,9 @@ async def test_recover_finalizes_reverting(manager):
     assert row["fork_status"] == "ready"
     rec = json.loads(row["fork_revert_record"])
     assert rec["status"] == "unknown_post_crash"
+    note = json.loads(row["fork_metadata"])["first_turn_note"]
+    assert "unknown" in note and "Inspect" in note
+    assert "were NOT reverted" not in note and "WERE reverted" not in note
 
 
 # ------------------------------------------------------------------ persistence

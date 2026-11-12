@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -402,6 +403,44 @@ async def test_native_patch_is_attributed_before_real_rewind_file_restore(native
     assert file.read_text() == "original\n"
     if rename:
         assert not destination.exists()
+
+
+async def test_rewind_refuses_an_ignored_file_even_when_current_dirty_is_empty(native_runtime, tmp_path):
+    manager, database, source, mode, _, _ = native_runtime
+    repo = tmp_path / "ignored-work"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    (repo / ".gitignore").write_text("private.txt\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-qm", "Ignore existing private data")
+    file = repo / "private.txt"
+    file.write_text("before the request\n")
+    parent = await manager.create_session(source.agent_id, "Ignored edit", str(repo), backend="codex")
+    mode[0] = "control_output"
+    reply = await submit_client_message(manager, parent.id, "Edit private.txt", [], "ignored-edit", wiki_mode=None)
+    assert reply["accepted"]
+    await until(lambda: parent._run.backend is not None and parent._run.backend.active_turn is not None)
+    file.write_text("agent changed the existing ignored file\n")
+    inject(tmp_path, {"method": "item/completed", "params": {
+        "threadId": ROOT, "turnId": "turn-1", "item": {
+            "id": "patch", "type": "fileChange", "status": "completed",
+            "changes": [{"path": str(file), "kind": {"type": "update"}, "diff": "+changed"}]}}}, terminal())
+    await wait_dispatch_idle(manager, parent.id)
+    preview = await manager.fork_preview(parent.id, 0, user_id=parent.user_id)
+    assert preview["side_effect_summary"]["agent_touched_paths"] == [str(file)]
+    assert preview["revert"]["available"] is False
+    assert "private.txt" in preview["revert"]["refused_reason"]
+    branch = await manager.fork_session(parent.id, 0, revert_files=True, user_id=parent.user_id)
+    assert branch.fork_status == "ready"
+    record = json.loads(branch.fork_revert_record)
+    assert record["status"] == "refused" and record["ran"] is False
+    saved = next(row for row in await database.load_sessions() if row["id"] == branch.id)
+    assert json.loads(saved["fork_revert_record"]) == record
+    assert "were NOT" in json.loads(branch.fork_metadata)["first_turn_note"]
+    assert file.read_text() == "agent changed the existing ignored file\n"
+    assert subprocess.check_output(["git", "stash", "list"], cwd=repo) == b""
 
 
 @pytest.mark.parametrize("phase,status,path_kind", [

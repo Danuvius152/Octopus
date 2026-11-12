@@ -77,7 +77,7 @@ export function MessageDetails<T extends SavedMessageReference>({ sessionId, mes
   const action = displayed ? "Show preview" : "View full message";
   return <div className={`relative group/message${expandWithMessage ? "" : " min-h-12 pr-10"}`}>
     {children(displayed || message, expandWithMessage ? load : undefined)}
-    {!expandWithMessage && <button type="button" aria-label={action} title={action}
+    {!expandWithMessage && <button type="button" aria-label={action} title={action} aria-expanded={Boolean(displayed)}
       className="absolute top-6 right-2 rounded p-1 text-muted-foreground bg-card shadow-sm opacity-0 group-hover/message:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 hover:text-foreground"
       disabled={detail.busy} onClick={() => { if (displayed) setExpanded(false); else load(); }}>
       {displayed ? <IconArrowsMinimize size={14} /> : <IconArrowsMaximize size={14} />}
@@ -85,7 +85,7 @@ export function MessageDetails<T extends SavedMessageReference>({ sessionId, mes
     {(detail.busy || detail.error) && <div className="text-xs text-muted-foreground space-y-1">
       {detail.busy && <p role="status">Loading full message…</p>}
       {detail.error && <><p role="alert">{detail.error}</p>
-        <button type="button" className="underline" disabled={detail.busy} onClick={load}>Retry full message</button></>}
+        <button type="button" className="underline" disabled={detail.busy} aria-expanded={Boolean(displayed)} onClick={load}>Retry full message</button></>}
     </div>}
   </div>;
 }

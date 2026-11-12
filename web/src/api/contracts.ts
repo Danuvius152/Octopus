@@ -4675,6 +4675,7 @@ export interface components {
         ForkRevertRecord: {
             /**
              * Ran
+             * @description A mutating Git operation started, or preflight verified a completed no-op. This does not imply success: a failed operation may already have changed files.
              * @default false
              */
             ran: boolean;

@@ -82,9 +82,9 @@ async def test_native_local_failure_is_not_hidden_by_success_wrapper(claude_runt
     await manager.stop_all_held_processes()
     await manager.close_session_owners()
     with closing(sqlite3.connect(tmp_path / "product.db")) as source, closing(sqlite3.connect(tmp_path / "backup.db")) as target:
-        assert verify_main(source) == 9
+        assert verify_main(source) == 10
         source.backup(target)
-        assert verify_main(target) == 9
+        assert verify_main(target) == 10
     restored_db = Database(str(tmp_path / "backup.db"))
     await restored_db.initialize()
     restored = SessionManager()

@@ -2684,7 +2684,7 @@ async def test_steer_backlog_is_bounded(manager, monkeypatch):
     async def capture_before_frame(*arguments, **kwargs):
         nonlocal gate_next
         process = await spawn(*arguments, **kwargs)
-        if gate_next and arguments[:3] == ("git", "rev-parse", "HEAD"):
+        if gate_next and arguments[:3] == ("git", "rev-parse", "--show-toplevel"):
             gate_next = False
             processes.append(process)
             entered.set()

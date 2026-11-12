@@ -16,6 +16,20 @@ from tests.websocket_client import connection, frame
 CONTROL_SAMPLES = Path(__file__).parents[1] / "web/src/lib/browserProjectionReplay.json"
 
 
+async def test_historical_ignored_baseline_stays_private_in_all_browser_message_reads(export_runtime):
+    db, _, session, client, _, _ = export_runtime
+    baseline = '{"version":1,"paths":["private-build-directory"]}'
+    await db.append_message(session.id, 0, "user", "text", "Original input", git_ignored_baseline=baseline)
+    assert (await db.load_messages(session.id))[0]["git_ignored_baseline"] == baseline
+    base = f"/api/sessions/{session.id}"
+    for endpoint in (base, base + "?view=browser", base + "/messages/0", base + "/messages/0?view=browser",
+                     base + "/messages?before_seq=1&view=browser"):
+        response = await client.get(endpoint)
+        assert response.status_code == 200
+        assert "git_ignored_baseline" not in response.text
+        assert "private-build-directory" not in response.text
+
+
 @pytest.mark.parametrize("record", ["head_tail_inline", "head_tail_preview", "legacy_preview"])
 async def test_saved_command_capture_is_independent_of_browser_preview_and_old_records(export_runtime, record):
     from server.harness.codex_items import item_events

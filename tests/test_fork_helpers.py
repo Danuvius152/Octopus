@@ -5,6 +5,7 @@ replay-prompt wrapper, the first-turn note, git-anchor capture, and the
 safe-revert preflight over a real temp git repo.
 """
 
+import json
 import subprocess
 
 import pytest
@@ -99,7 +100,7 @@ async def test_classify_respects_from_seq(db):
 
 async def test_shell_example_cannot_authorize_reverting_user_file(db, git_repo):
     await _seed_session(db)
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     path = git_repo / "a.py"
     path.write_bytes(b"private user edit\n")
     command = f"printf '%s\\n' 'rm {path}'"
@@ -107,7 +108,7 @@ async def test_shell_example_cannot_authorize_reverting_user_file(db, git_repo):
     await _append(db, "parent", 0, "assistant", "tool_use", tool_name="Bash",
                   tool_input={"command": command})
     summary = await fh.classify_side_effects(db, "parent", 0)
-    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "shell")
+    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "shell", fork_ignored_baseline=ignored)
     assert record["status"] == "refused"
     assert path.read_bytes() == b"private user edit\n"
 
@@ -116,7 +117,7 @@ async def test_shell_example_cannot_authorize_reverting_user_file(db, git_repo):
 async def test_only_correlated_successful_file_tools_authorize_revert(db, git_repo, result):
     await _seed_session(db)
     path = git_repo / "a.py"
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     path.write_text("agent edit\n")
     identity = {"request_id": "r", "attempt_id": "a", "tool_call_id": "call"}
     await _append(db, "parent", 0, "assistant", "tool_use", tool_name="Edit", tool_use_id="reused",
@@ -129,7 +130,7 @@ async def test_only_correlated_successful_file_tools_authorize_revert(db, git_re
     # Bash activity does not prohibit a revert that has independent file evidence.
     await _append(db, "parent", 2, "assistant", "tool_use", tool_name="Bash", tool_input={"command": "pwd"})
     summary = await fh.classify_side_effects(db, "parent", 0)
-    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "file-tool")
+    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "file-tool", fork_ignored_baseline=ignored)
     assert record["status"] == ("completed" if result == "success" else "refused")
     assert path.read_text() == ("v1\n" if result == "success" else "agent edit\n")
 
@@ -157,7 +158,7 @@ async def test_symlink_parent_path_cannot_authorize_the_lexical_neighbor(db, git
     (git_repo / "link").symlink_to(outside / "deep", target_is_directory=True)
     _git(git_repo, "add", "-A")
     _git(git_repo, "commit", "-qm", "link baseline")
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     raw_path = str(git_repo / "link" / ".." / "a.py")
     # POSIX traversal follows link before applying '..'. These are two files.
     with open(raw_path, "w") as stream:
@@ -171,7 +172,7 @@ async def test_symlink_parent_path_cannot_authorize_the_lexical_neighbor(db, git
     ])
     summary = await fh.classify_side_effects(db, "parent", 0)
     assert summary["file_edits"] == [{"path": raw_path, "turns": 1}]
-    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "symlink-parent")
+    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "symlink-parent", fork_ignored_baseline=ignored)
     assert record["status"] == "refused"
     assert summary["agent_touched_paths"] == []
     assert user_file.read_text() == "private user edit\n"
@@ -181,7 +182,7 @@ async def test_symlink_parent_path_cannot_authorize_the_lexical_neighbor(db, git
 @pytest.mark.parametrize("sequence", ["unique", "overlap-reused", "sequential-reused"])
 async def test_claude_protocol_reused_id_does_not_prove_a_file_result(db, git_repo, sequence):
     await _seed_session(db)
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     file = git_repo / "a.py"
     file.write_text("preserve this edit\n")
     read_id = "read" if sequence == "unique" else "reused"
@@ -199,7 +200,7 @@ async def test_claude_protocol_reused_id_does_not_prove_a_file_result(db, git_re
     await _record_claude_protocol(db, frames)
     # Ambiguity before the rewind boundary must still invalidate attribution.
     summary = await fh.classify_side_effects(db, "parent", 1 if sequence == "overlap-reused" else 2)
-    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "reused-id")
+    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "reused-id", fork_ignored_baseline=ignored)
     assert summary["file_edits"] == [{"path": str(file), "turns": 1}]
     assert record["status"] == ("completed" if sequence == "unique" else "refused")
     assert file.read_text() == ("v1\n" if sequence == "unique" else "preserve this edit\n")
@@ -211,10 +212,10 @@ async def test_repository_relative_path_does_not_also_authorize_cwd_path(git_rep
     (subdir / "a.py").write_text("sub original\n")
     _git(git_repo, "add", "-A")
     _git(git_repo, "commit", "-qm", "sub baseline")
-    head, clean = await fh.capture_git_anchor(str(subdir))
+    head, clean, ignored = await fh.capture_git_anchor(str(subdir))
     (git_repo / "a.py").write_text("root edit\n")
     (subdir / "a.py").write_text("sub edit\n")
-    record = await fh.safe_revert_files(str(subdir), ["a.py"], head, clean, "ambiguous")
+    record = await fh.safe_revert_files(str(subdir), ["a.py"], head, clean, "ambiguous", fork_ignored_baseline=ignored)
     assert record["status"] == "refused"
     assert (subdir / "a.py").read_text() == "sub edit\n"
 
@@ -300,10 +301,10 @@ def test_first_turn_note_reverted_phrasing():
         "bg_tasks": [{"task_id": "t", "command": "x", "status": "running"}],
         "other_tools": [{"label": "Bash commands", "count": 5}],
     }
-    note = fh.render_first_turn_note(parent_label="Refactor", n=2, summary=summary, reverted=True)
+    note = fh.render_first_turn_note(parent_label="Refactor", n=2, summary=summary, revert_record={"status": "completed"})
     assert "[fork from Refactor at message 2]" in note
     assert "WERE reverted" in note
-    note2 = fh.render_first_turn_note(parent_label="Refactor", n=2, summary=summary, reverted=False)
+    note2 = fh.render_first_turn_note(parent_label="Refactor", n=2, summary=summary)
     assert "were NOT reverted" in note2
 
 
@@ -330,7 +331,7 @@ def git_repo(tmp_path):
 
 @pytest.mark.asyncio
 async def test_capture_git_anchor_clean(git_repo):
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     assert head and len(head) == 40
     assert clean is True
 
@@ -338,19 +339,146 @@ async def test_capture_git_anchor_clean(git_repo):
 @pytest.mark.asyncio
 async def test_capture_git_anchor_dirty(git_repo):
     (git_repo / "a.py").write_text("v2\n")
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     assert head and clean is False
 
 
 @pytest.mark.asyncio
 async def test_capture_git_anchor_non_repo(tmp_path):
-    head, clean = await fh.capture_git_anchor(str(tmp_path))
+    head, clean, ignored = await fh.capture_git_anchor(str(tmp_path))
     assert head is None and clean is None
+
+
+@pytest.mark.parametrize("observation", ["missing-nul", "bad-status", "empty-path", "warning", "failed"])
+async def test_anchor_does_not_call_an_incomplete_observation_clean(git_repo, monkeypatch, observation):
+    real_git = fh._git
+
+    async def git(cwd, *args, **kwargs):
+        if args[0] == "status":
+            return {
+                "missing-nul": (0, "!! existing", ""), "bad-status": (0, "?! existing\0", ""),
+                "empty-path": (0, "!! \0", ""), "warning": (0, "", "warning: cannot open directory"),
+                "failed": (1, "", "cannot read status"),
+            }[observation]
+        return await real_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(fh, "_git", git)
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
+    assert head and clean is None and ignored is None
+    available, _, _ = await fh.safe_revert_preflight(str(git_repo), ["a.py"], head, True)
+    assert not available
+
+
+@pytest.mark.parametrize("size", [262143, 262144, 262145])
+async def test_complete_ignored_json_budget_preserves_independent_head_and_clean(git_repo, monkeypatch, size):
+    # Realistic short filenames; choose the last one to hit the complete JSON
+    # byte boundary, including all quotes, commas, version and object overhead.
+    paths = [f"file-{index:05}-" + "x" * 180 for index in range(1350)]
+    raw = json.dumps({"version": 1, "paths": paths}, separators=(",", ":"))
+    padding = size - len(raw.encode())
+    paths.append("last-" + "x" * (padding - 8))
+    expected = json.dumps({"version": 1, "paths": paths}, separators=(",", ":"))
+    assert len(expected.encode()) == size
+    real_git = fh._git
+
+    async def git(cwd, *args, **kwargs):
+        if args[0] == "status":
+            assert "--ignored=matching" in args and "-z" in args
+            return 0, "".join(f"!! {path}\0" for path in paths), ""
+        return await real_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(fh, "_git", git)
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
+    assert head and clean is True
+    assert ignored == (expected if size <= 262144 else None)
+
+
+@pytest.mark.parametrize("pattern", ["cache/", "cache/*.tmp"])
+async def test_matching_ignored_observation_handles_collapsed_directory_and_children(git_repo, pattern):
+    directory = git_repo / "cache"
+    directory.mkdir()
+    for index in range(80):
+        (directory / f"{index}.tmp").write_text("existing bytes")
+    (git_repo / ".git/info/exclude").write_text(pattern + "\n")
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
+    assert head and clean
+    covers = json.loads(ignored)["paths"]
+    assert covers == (["cache"] if pattern == "cache/" else sorted(f"cache/{index}.tmp" for index in range(80)))
+    (git_repo / ".git/info/exclude").write_text("")
+    available, reason, _ = await fh.safe_revert_preflight(str(git_repo), ["cache/0.tmp"], head, clean, ignored)
+    assert not available and "historical ignored" in reason
+
+
+@pytest.mark.parametrize("kind", ["metadata", "nested", "gitlink", "head-symlink", "head-directory"])
+async def test_absence_proof_never_authorizes_an_unsupported_git_location(git_repo, kind):
+    if kind == "gitlink":
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=git_repo).decode().strip()
+        _git(git_repo, "clone", "-q", "--shared", str(git_repo), "nested")
+        _git(git_repo, "update-index", "--add", "--cacheinfo", f"160000,{head},nested")
+        _git(git_repo, "commit", "-qm", "Submodule entry")
+    elif kind == "head-symlink":
+        (git_repo / "nested").symlink_to("elsewhere")
+        _git(git_repo, "add", "nested")
+        _git(git_repo, "commit", "-qm", "Symlink entry")
+    elif kind == "head-directory":
+        (git_repo / "nested").mkdir()
+        (git_repo / "nested/original").write_text("original")
+        _git(git_repo, "add", "nested")
+        _git(git_repo, "commit", "-qm", "Directory entry")
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
+    if kind == "metadata":
+        path = ".git/config"
+    elif kind == "head-directory":
+        path = "nested"
+    else:
+        nested = git_repo / "nested"
+        if nested.is_symlink():
+            nested.unlink()
+        nested.mkdir(exist_ok=True)
+        if kind == "nested":
+            _git(nested, "init", "-q")
+        (nested / "new").write_text("retain these bytes")
+        path = "nested/new"
+    before = subprocess.check_output(["git", "status", "--porcelain=v1", "-z"], cwd=git_repo)
+    record = await fh.safe_revert_files(str(git_repo), [path], head, clean, "unsupported", ignored)
+    assert record["status"] == "refused" and path in record["refused_reason"]
+    assert subprocess.check_output(["git", "status", "--porcelain=v1", "-z"], cwd=git_repo) == before
+    assert subprocess.check_output(["git", "stash", "list"], cwd=git_repo) == b""
+
+
+@pytest.mark.parametrize("descendant", [True, False])
+async def test_historical_ignored_symlink_covers_components_even_after_becoming_directory(git_repo, descendant):
+    old = git_repo / "hidden"
+    old.symlink_to("missing")
+    rules = git_repo / ".git/info/exclude"
+    rules.write_text("hidden\n")
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
+    assert json.loads(ignored)["paths"] == ["hidden"]
+    old.unlink()
+    old.mkdir()
+    rules.write_text("")
+    path = git_repo / ("hidden" if descendant else "hidden-neighbor") / "new"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("Agent bytes")
+    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "component-coverage", ignored)
+    assert record["status"] == ("refused" if descendant else "completed"), record
+    assert path.exists() is descendant
+
+
+async def test_legacy_null_baseline_allows_head_restore_but_cannot_prove_new_file_absent(git_repo):
+    head, clean, _ = await fh.capture_git_anchor(str(git_repo))
+    (git_repo / "a.py").write_text("Agent edit")
+    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "legacy-tracked")
+    assert record["status"] == "completed"
+    (git_repo / "new.txt").write_text("retain unknown origin")
+    record = await fh.safe_revert_files(str(git_repo), ["new.txt"], head, clean, "legacy-new")
+    assert record["status"] == "refused" and "unavailable" in record["refused_reason"]
+    assert (git_repo / "new.txt").read_text() == "retain unknown origin"
 
 
 @pytest.mark.asyncio
 async def test_safe_revert_runs_when_clean_and_head_matches(git_repo):
-    head, _ = await fh.capture_git_anchor(str(git_repo))
+    head, _, _ = await fh.capture_git_anchor(str(git_repo))
     # Agent dirtied a.py after the fork point.
     (git_repo / "a.py").write_text("agent-edit\n")
     record = await fh.safe_revert_files(
@@ -379,9 +507,9 @@ async def test_safe_revert_preserves_literal_filenames_and_recoverable_stash(git
         path.write_text("original\n")
         _git(git_repo, "add", "-A")
         _git(git_repo, "commit", "-qm", "filename baseline")
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     path.write_text("agent edit\n")
-    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "literal-path")
+    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "literal-path", fork_ignored_baseline=ignored)
     assert record["status"] == "completed", record
     assert record["files"] == [name]
     if tracked:
@@ -394,18 +522,18 @@ async def test_safe_revert_preserves_literal_filenames_and_recoverable_stash(git
 
 @pytest.mark.parametrize("staged", [False, True])
 async def test_safe_revert_restores_file_type_and_stash_recovers_original_type(git_repo, staged):
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     path = git_repo / "a.py"
     original = path.read_bytes()
     path.unlink()
     path.symlink_to("missing-target")
     if staged:
         _git(git_repo, "add", "--", path.name)
-    record = await fh.safe_revert_files(str(git_repo), [path.name], head, clean, "type-change")
+    record = await fh.safe_revert_files(str(git_repo), [path.name], head, clean, "type-change", fork_ignored_baseline=ignored)
     assert record["status"] == "completed", record
     assert record["files"] == [path.name]
     assert not path.is_symlink() and path.read_bytes() == original
-    _, reverted_clean = await fh.capture_git_anchor(str(git_repo))
+    _, reverted_clean, _ = await fh.capture_git_anchor(str(git_repo))
     assert reverted_clean is True
     _git(git_repo, "stash", "apply", "--index", record["stash_ref"])
     assert path.is_symlink() and str(path.readlink()) == "missing-target"
@@ -415,12 +543,12 @@ async def test_safe_revert_restores_file_type_and_stash_recovers_original_type(g
 
 
 async def test_safe_revert_checks_both_rename_locations_and_restores_stash(git_repo):
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     destination = "renamed 中文\n -> file.py"
     _git(git_repo, "mv", "--", "a.py", destination)
-    refused = await fh.safe_revert_files(str(git_repo), [destination], head, clean, "incomplete-rename")
+    refused = await fh.safe_revert_files(str(git_repo), [destination], head, clean, "incomplete-rename", fork_ignored_baseline=ignored)
     assert refused["status"] == "refused" and (git_repo / destination).exists()
-    record = await fh.safe_revert_files(str(git_repo), ["a.py", destination], head, clean, "rename")
+    record = await fh.safe_revert_files(str(git_repo), ["a.py", destination], head, clean, "rename", fork_ignored_baseline=ignored)
     assert record["status"] == "completed", record
     assert set(record["files"]) == {"a.py", destination}
     assert (git_repo / "a.py").read_text() == "v1\n"
@@ -433,14 +561,14 @@ async def test_safe_revert_checks_both_rename_locations_and_restores_stash(git_r
 @pytest.mark.parametrize("staged,recreated", [(False, False), (True, False), (True, True)])
 async def test_safe_revert_restores_deleted_paths_and_preserves_original_staging(git_repo, staged, recreated):
     path = git_repo / "a.py"
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     if staged:
         _git(git_repo, "rm", "--", "a.py")
     else:
         path.unlink()
     if recreated:
         path.write_text("new untracked contents")
-    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "deletion")
+    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "deletion", fork_ignored_baseline=ignored)
     assert record["status"] == "completed", record
     assert path.read_text() == "v1\n"
     recovered = subprocess.run(["git", "stash", "apply", "--index", record["stash_ref"]],
@@ -462,9 +590,9 @@ async def test_safe_revert_restores_deleted_paths_and_preserves_original_staging
 async def test_safe_revert_preserves_whitespace_in_repository_root(git_repo):
     root = git_repo.with_name("repository \n")
     git_repo.rename(root)
-    head, clean = await fh.capture_git_anchor(str(root))
+    head, clean, ignored = await fh.capture_git_anchor(str(root))
     (root / "a.py").write_text("agent")
-    record = await fh.safe_revert_files(str(root), ["a.py"], head, clean, "root-whitespace")
+    record = await fh.safe_revert_files(str(root), ["a.py"], head, clean, "root-whitespace", fork_ignored_baseline=ignored)
     assert record["status"] == "completed", record
     assert (root / "a.py").read_text() == "v1\n"
     _git(root, "stash", "apply", record["stash_ref"])
@@ -472,7 +600,7 @@ async def test_safe_revert_preserves_whitespace_in_repository_root(git_repo):
 
 
 async def test_failed_restore_keeps_original_changes_in_a_named_stash(git_repo, monkeypatch):
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     _git(git_repo, "rm", "a.py")
     real_git = fh._git
 
@@ -482,8 +610,8 @@ async def test_failed_restore_keeps_original_changes_in_a_named_stash(git_repo, 
         return await real_git(cwd, *args, **kwargs)
 
     monkeypatch.setattr(fh, "_git", git)
-    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "failed-restore")
-    assert record["status"] == "failed" and record["ran"] is False
+    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "failed-restore", fork_ignored_baseline=ignored)
+    assert record["status"] == "failed" and record["ran"] is True
     assert len(record["stash_ref"]) == 40 and "restore denied" in record["error"]
     # Recovery does not depend on the failed restore's current tree.
     _git(git_repo, "reset", "--hard", "HEAD")
@@ -497,7 +625,7 @@ async def test_safe_revert_consumes_real_copy_records(git_repo):
     _git(git_repo, "add", "-A")
     _git(git_repo, "commit", "-qm", "copy baseline")
     _git(git_repo, "config", "status.renames", "copies")
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     copy = git_repo / "copy 中文.py"
     copy.write_bytes(source.read_bytes())
     source.write_text("different line\n" * 50)
@@ -505,7 +633,7 @@ async def test_safe_revert_consumes_real_copy_records(git_repo):
     actual = subprocess.run(["git", "status", "--porcelain=v1", "-z"], cwd=git_repo,
                             capture_output=True, check=True).stdout
     assert b"C  " in actual, "The integration must actually exercise Git's copy record"
-    record = await fh.safe_revert_files(str(git_repo), ["a.py", copy.name], head, clean, "copy")
+    record = await fh.safe_revert_files(str(git_repo), ["a.py", copy.name], head, clean, "copy", fork_ignored_baseline=ignored)
     assert record["status"] == "completed", record
     assert source.read_text() == "original line\n" * 50 and not copy.exists()
     _git(git_repo, "stash", "apply", "--index", record["stash_ref"])
@@ -514,7 +642,7 @@ async def test_safe_revert_consumes_real_copy_records(git_repo):
 
 
 async def test_recovery_snapshot_identity_survives_interleaved_and_later_stashes(git_repo, monkeypatch):
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     path = git_repo / "a.py"
     path.write_text("original agent edit\n")
     real_git = fh._git
@@ -527,7 +655,7 @@ async def test_recovery_snapshot_identity_survives_interleaved_and_later_stashes
         return result
 
     monkeypatch.setattr(fh, "_git", git)
-    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "stable")
+    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "stable", fork_ignored_baseline=ignored)
     assert record["status"] == "completed"
     path.write_text("later stash\n")
     _git(git_repo, "stash", "push", "-m", "later")
@@ -539,7 +667,7 @@ async def test_unverified_snapshot_never_borrows_an_old_stash_or_restores(git_re
     path = git_repo / "a.py"
     path.write_text("old snapshot\n")
     _git(git_repo, "stash", "push", "-m", "old")
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     _git(git_repo, "rm", "a.py")
     real_git = fh._git
 
@@ -549,7 +677,7 @@ async def test_unverified_snapshot_never_borrows_an_old_stash_or_restores(git_re
         return await real_git(cwd, *args, **kwargs)
 
     monkeypatch.setattr(fh, "_git", git)
-    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "unverified")
+    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "unverified", fork_ignored_baseline=ignored)
     assert record["status"] == "failed" and record["stash_ref"] is None
     assert not path.exists()  # no explicit restore after identity verification failed
     assert "snapshot" in record["error"]
@@ -564,7 +692,7 @@ async def test_unidentified_present_snapshot_never_restores_other_paths(git_repo
     present = git_repo / "a.py"
     present.write_text("unrelated old stash\n")
     _git(git_repo, "stash", "push", "-m", "old")
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     present.write_text("original agent changes\n")
     _git(git_repo, "rm", "removed.py")
     real_git, restores = fh._git, []
@@ -581,7 +709,7 @@ async def test_unidentified_present_snapshot_never_restores_other_paths(git_repo
         return result
 
     monkeypatch.setattr(fh, "_git", git)
-    record = await fh.safe_revert_files(str(git_repo), [str(present), str(removed)], head, clean, "missing-marker")
+    record = await fh.safe_revert_files(str(git_repo), [str(present), str(removed)], head, clean, "missing-marker", fork_ignored_baseline=ignored)
     assert record["status"] == "failed" and record["stash_ref"] is None
     assert "snapshot" in record["error"] and "marker" in record["error"]
     assert restores == [] and not removed.exists()
@@ -592,7 +720,7 @@ async def test_unidentified_present_snapshot_never_restores_other_paths(git_repo
 
 
 async def test_copy_source_is_not_itself_a_changed_path(git_repo, monkeypatch):
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     copy = git_repo / "copy.py"
     copy.write_bytes((git_repo / "a.py").read_bytes())
     _git(git_repo, "add", "copy.py")
@@ -605,7 +733,7 @@ async def test_copy_source_is_not_itself_a_changed_path(git_repo, monkeypatch):
         return await real_git(cwd, *args, **kwargs)
 
     monkeypatch.setattr(fh, "_git", git)
-    record = await fh.safe_revert_files(str(git_repo), ["copy.py"], head, clean, "clean-copy-source")
+    record = await fh.safe_revert_files(str(git_repo), ["copy.py"], head, clean, "clean-copy-source", fork_ignored_baseline=ignored)
     assert record["status"] == "completed" and record["files"] == ["copy.py"]
     assert not copy.exists() and (git_repo / "a.py").read_text() == "v1\n"
     _git(git_repo, "stash", "apply", "--index", record["stash_ref"])
@@ -620,10 +748,10 @@ async def test_safe_revert_from_a_subdirectory(git_repo, touched):
     path.write_text("original")
     _git(git_repo, "add", "-A")
     _git(git_repo, "commit", "-qm", "subdirectory baseline")
-    head, clean = await fh.capture_git_anchor(str(subdir))
+    head, clean, ignored = await fh.capture_git_anchor(str(subdir))
     path.write_text("agent")
     names = {"cwd": path.name, "repo": "sub/" + path.name, "absolute": str(path)}
-    record = await fh.safe_revert_files(str(subdir), [names[touched]], head, clean, "subdir")
+    record = await fh.safe_revert_files(str(subdir), [names[touched]], head, clean, "subdir", fork_ignored_baseline=ignored)
     assert record["status"] == "completed", record
     assert path.read_text() == "original"
     _git(git_repo, "stash", "apply", record["stash_ref"])
@@ -632,7 +760,7 @@ async def test_safe_revert_from_a_subdirectory(git_repo, touched):
 
 @pytest.mark.parametrize("porcelain", [" M a.py", "bad\0", "XX a.py\0", "R  renamed\0", " M \0"])
 async def test_safe_revert_refuses_malformed_git_status(git_repo, monkeypatch, porcelain):
-    head, clean = await fh.capture_git_anchor(str(git_repo))
+    head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
     path = git_repo / "a.py"
     path.write_text("agent")
     real_git = fh._git
@@ -643,7 +771,7 @@ async def test_safe_revert_refuses_malformed_git_status(git_repo, monkeypatch, p
         return await real_git(cwd, *args, **kwargs)
 
     monkeypatch.setattr(fh, "_git", git)
-    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "malformed")
+    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "malformed", fork_ignored_baseline=ignored)
     assert record["status"] == "refused" and "parsed safely" in record["refused_reason"]
     assert path.read_text() == "agent"
     assert subprocess.run(["git", "stash", "list"], cwd=git_repo, capture_output=True, check=True).stdout == b""
@@ -653,10 +781,10 @@ async def test_safe_revert_refuses_malformed_git_status(git_repo, monkeypatch, p
 async def test_safe_revert_removes_untracked_agent_file(git_repo):
     # Regression for the real-CLI failure: an agent-created (untracked) file
     # must be removed by revert without a `git checkout` pathspec error.
-    head, _ = await fh.capture_git_anchor(str(git_repo))
+    head, _, ignored = await fh.capture_git_anchor(str(git_repo))
     (git_repo / "notes.txt").write_text("HELLO\n")  # new, untracked
     record = await fh.safe_revert_files(
-        str(git_repo), [str(git_repo / "notes.txt")], head, True, "fork-unt"
+        str(git_repo), [str(git_repo / "notes.txt")], head, True, "fork-unt", ignored
     )
     assert record["status"] == "completed", record
     assert not (git_repo / "notes.txt").exists()  # removed → fork-point state
@@ -667,7 +795,7 @@ async def test_safe_revert_removes_untracked_agent_file(git_repo):
 
 @pytest.mark.asyncio
 async def test_safe_revert_refused_when_fork_point_not_clean(git_repo):
-    head, _ = await fh.capture_git_anchor(str(git_repo))
+    head, _, _ = await fh.capture_git_anchor(str(git_repo))
     (git_repo / "a.py").write_text("dirty\n")
     record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, False, "f")
     assert record["status"] == "refused"
@@ -685,7 +813,7 @@ async def test_safe_revert_refused_when_head_moved(git_repo):
 
 @pytest.mark.asyncio
 async def test_safe_revert_refused_when_unknown_dirty(git_repo):
-    head, _ = await fh.capture_git_anchor(str(git_repo))
+    head, _, _ = await fh.capture_git_anchor(str(git_repo))
     # A file the agent never touched is dirty → refuse to protect user work.
     (git_repo / "human.py").write_text("hand-written\n")
     record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, True, "f")

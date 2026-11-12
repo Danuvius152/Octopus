@@ -107,19 +107,70 @@ async def _git(working_dir: str, *args: str, timeout: float = 10.0) -> tuple[int
     )
 
 
-async def capture_git_anchor(working_dir: str) -> tuple[str | None, bool | None]:
-    """Capture (git_head, git_status_clean) for a turn-start row. Returns
-    (None, None) when `working_dir` isn't inside a git repo or git is
-    unavailable. `git_status_clean` is True iff `git status --porcelain` was
-    empty (no dirty tree)."""
-    rc, out, _ = await _git(working_dir, "rev-parse", "HEAD")
+IGNORED_BASELINE_BYTES = 262144
+
+
+def _repo_path(path: str) -> str:
+    """Canonical root-relative entry, independent of today's symlink targets."""
+    path = path.removesuffix("/")
+    if not path or "\0" in path or any(part in {"", ".", ".."} for part in path.split("/")):
+        raise ValueError("Invalid repository-relative path")
+    return path
+
+
+def decode_ignored_baseline(raw: str) -> list[str]:
+    """Validate the complete saved observation; NULL is handled as unknown."""
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > IGNORED_BASELINE_BYTES:
+        raise ValueError("Ignored baseline exceeds its storage budget")
+    value = json.loads(raw)
+    if (not isinstance(value, dict) or set(value) != {"version", "paths"}
+            or type(value["version"]) is not int or value["version"] != 1
+            or not isinstance(value["paths"], list)):
+        raise ValueError("Invalid ignored baseline")
+    paths = value["paths"]
+    if any(not isinstance(path, str) or _repo_path(path) != path for path in paths):
+        raise ValueError("Invalid ignored baseline path")
+    if len(set(paths)) != len(paths):
+        raise ValueError("Repeated ignored baseline path")
+    return paths
+
+
+async def _index_observable(top: str) -> bool:
+    # assume-unchanged and skip-worktree can hide edits from status. Do not
+    # mutate their flags to manufacture a clean-tree proof.
+    rc, out, err = await _git(top, "ls-files", "-v", "-z")
+    if rc or err or (out and not out.endswith("\0")):
+        return False
+    try:
+        return all(len(row) >= 3 and row[:2] == "H " and _repo_path(row[2:]) == row[2:]
+                   for row in out[:-1].split("\0")) if out else True
+    except ValueError:
+        return False
+
+
+async def capture_git_anchor(working_dir: str) -> tuple[str | None, bool | None, str | None]:
+    """One matching status observation owns clean and historical ignored paths.
+
+    The serialized evidence is private message data. A missing/oversize ignored
+    observation cannot prove absence, but does not erase a reliable HEAD/clean.
+    These observations are not an atomic filesystem snapshot.
+    """
+    top = await _git_toplevel(working_dir)
+    if top is None:
+        return (None, None, None)
+    rc, out, err = await _git(top, "rev-parse", "HEAD")
     if rc != 0 or not out.strip():
-        return (None, None)
+        return (None, None, None)
     head = out.strip()
-    rc2, out2, _ = await _git(working_dir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    if rc2 != 0:
-        return (head, None)
-    return (head, not out2)
+    rc2, out2, err2 = await _git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+    if rc2 or err or err2 or not await _index_observable(top):
+        return (head, None, None)
+    try:
+        dirty, ignored = _porcelain_status(out2)
+    except ValueError:
+        return (head, None, None)
+    raw = json.dumps({"version": 1, "paths": ignored}, separators=(",", ":"))
+    return (head, not dirty, raw if len(raw.encode("utf-8")) <= IGNORED_BASELINE_BYTES else None)
 
 
 # ------------------------------------------------------------------ classifier
@@ -436,7 +487,7 @@ def wrap_for_fork_replay(prompt: str, parent_messages: list[MessageContent]) -> 
 
 
 def render_first_turn_note(
-    *, parent_label: str, n: int, summary: dict[str, Any], reverted: bool
+    *, parent_label: str, n: int, summary: dict[str, Any], revert_record: dict[str, Any] | None = None
 ) -> str:
     """The ~150-token system-addendum note the fork's first turn carries so the
     model knows the world moved on (session-rewind.md §5.6.4)."""
@@ -453,13 +504,26 @@ def render_first_turn_note(
     if other_total:
         phrases.append(f"made {other_total} other tool call(s)")
     did = "; ".join(phrases) if phrases else "made no recorded side effects"
-    reverted_clause = "WERE" if reverted else "were NOT"
+    record = revert_record or {}
+    status = record.get("status")
+    if status == "completed":
+        files = "Files modified during those turns: WERE reverted to the fork-point state."
+    elif status == "unknown_post_crash" or status == "failed" and record.get("ran"):
+        files = ("File restoration is incomplete or unknown. File operations may already have changed "
+                 "the working tree; this is not a rollback. Inspect git status and the recovery stash "
+                 "before proceeding.")
+    else:
+        files = "Files modified during those turns: were NOT reverted to the fork-point state."
+    reason = record.get("refused_reason") or record.get("error")
+    if reason:
+        files += f" Revert {status}: {reason}"
+    if record.get("stash_ref"):
+        files += f" Recovery snapshot: {record['stash_ref']}."
     return (
         f"[fork from {parent_label} at message {n}]\n"
         "The session that produced this fork continued after the branch "
         f"point. In those turns the agent: {did}.\n"
-        f"Files modified during those turns: {reverted_clause} reverted to the "
-        "fork-point state. Non-file side effects (sent messages, DB changes, "
+        f"{files} Non-file side effects (sent messages, DB changes, "
         "network calls, and other shell command effects) are NOT reverted. "
         "Plan accordingly."
     )
@@ -468,7 +532,7 @@ def render_first_turn_note(
 # ------------------------------------------------------------------ safe revert
 
 
-def _porcelain_paths(porcelain: str) -> list[str]:
+def _porcelain_status(porcelain: str) -> tuple[list[str], list[str]]:
     """Changed paths in porcelain v1 -z: destination, then rename/copy source.
 
     NUL is Git's record boundary; quotes, whitespace and arrows are filename
@@ -476,15 +540,19 @@ def _porcelain_paths(porcelain: str) -> list[str]:
     Refuse malformed output rather than silently omitting a dirty path.
     """
     if not porcelain:
-        return []
+        return [], []
     if not porcelain.endswith("\0"):
         raise ValueError("Unterminated Git status record")
     records = iter(porcelain[:-1].split("\0"))
     paths: list[str] = []
+    ignored: list[str] = []
     for record in records:
         if len(record) < 4 or record[2] != " ":
             raise ValueError("Malformed Git status record")
-        status, path = record[:2], record[3:]
+        status, path = record[:2], _repo_path(record[3:])
+        if status == "!!":
+            ignored.append(path)
+            continue
         if status != "??" and (status == "  " or any(char not in " MTADRCU" for char in status)):
             raise ValueError("Unrecognized Git status")
         paths.append(path)
@@ -492,14 +560,15 @@ def _porcelain_paths(porcelain: str) -> list[str]:
             source = next(records, None)
             if not source:
                 raise ValueError("Missing Git rename/copy source")
+            source = _repo_path(source)
             if "R" in status:
                 paths.append(source)
-    return list(dict.fromkeys(paths))
+    return list(dict.fromkeys(paths)), list(dict.fromkeys(ignored))
 
 
 async def _git_toplevel(working_dir: str) -> str | None:
-    rc, out, _ = await _git(working_dir, "rev-parse", "--show-toplevel")
-    if rc != 0 or not out.strip():
+    rc, out, err = await _git(working_dir, "rev-parse", "--show-toplevel")
+    if rc != 0 or err or not out.strip():
         return None
     return out.removesuffix("\n")
 
@@ -510,11 +579,67 @@ def _norm(path: str, base: str) -> str:
     return os.path.abspath(p)
 
 
+async def _head_entries(top: str, head: str) -> dict[str, tuple[str, str]]:
+    rc, out, err = await _git(top, "ls-tree", "-r", "-t", "-z", "--full-tree", head)
+    if rc or err or (out and not out.endswith("\0")):
+        raise ValueError("HEAD entries could not be read safely")
+    entries: dict[str, tuple[str, str]] = {}
+    for row in out[:-1].split("\0") if out else []:
+        metadata, separator, path = row.partition("\t")
+        fields = metadata.split(" ")
+        if (not separator or len(fields) != 3 or _repo_path(path) != path or path in entries
+                or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", fields[2])
+                or (fields[0], fields[1]) not in {("040000", "tree"), ("100644", "blob"),
+                    ("100755", "blob"), ("120000", "blob"), ("160000", "commit")}):
+            raise ValueError("HEAD entries could not be parsed safely")
+        entries[path] = fields[0], fields[1]
+    return entries
+
+
+def _covered(path: str, covers: list[str]) -> bool:
+    return any(path == cover or path.startswith(cover + "/") for cover in covers)
+
+
+async def _path_baseline_reason(
+    top: str, path: str, entries: dict[str, tuple[str, str]],
+    historical_ignored: list[str] | None, current_ignored: list[str],
+) -> str | None:
+    parts = path.split("/")
+    if ".git" in parts:
+        return "Git metadata is not a restorable file"
+    for length in range(1, len(parts)):
+        ancestor = "/".join(parts[:length])
+        if entries.get(ancestor, (None, None))[0] in {"120000", "160000"}:
+            return "HEAD ancestor is a symlink or submodule"
+        if os.path.islink(os.path.join(top, ancestor)):
+            return "Current parent is a symlink"
+    parent = os.path.dirname(os.path.join(top, path))
+    while not os.path.exists(parent):
+        parent = os.path.dirname(parent)
+    if not os.path.isdir(parent) or await _git_toplevel(parent) != top:
+        return "Path does not belong to the same working tree"
+    if os.path.isdir(os.path.join(top, path)) and not os.path.islink(os.path.join(top, path)):
+        return "Directory is not a supported file baseline"
+    baseline = entries.get(path)
+    if baseline is not None:
+        if baseline[0] in {"100644", "100755", "120000"} and baseline[1] == "blob":
+            return None
+        return "HEAD entry is not a supported file baseline"
+    if _covered(path, current_ignored):
+        return "Currently ignored with no HEAD file baseline"
+    if historical_ignored is None:
+        return "Historical existence observation is unavailable"
+    if _covered(path, historical_ignored):
+        return "Path existed in the historical ignored coverage"
+    return None
+
+
 async def safe_revert_preflight(
     working_dir: str,
     agent_touched_paths: list[str],
     fork_head: str | None,
     fork_clean: bool | None,
+    fork_ignored_baseline: str | None = None,
 ) -> tuple[bool, str | None, list[str]]:
     """The strict 4-check preflight (session-rewind.md §5.6.3), anchored on
     message M's captured git state. Returns (available, refused_reason,
@@ -535,11 +660,13 @@ async def safe_revert_preflight(
         return (False, "Not a git repo", [])
     if not fork_head or fork_head != out.strip():
         return (False, "HEAD has moved since the fork-point", [])
-    rc2, porcelain, _ = await _git(working_dir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    if rc2 != 0:
-        return (False, "Not a git repo", [])
+    rc2, porcelain, err = await _git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+    if rc2 or err:
+        return (False, "Git status could not be read reliably", [])
+    if not await _index_observable(top):
+        return (False, "Git index may hide working-tree changes", [])
     try:
-        dirty_rel = _porcelain_paths(porcelain)
+        dirty_rel, ignored = _porcelain_status(porcelain)
     except ValueError:
         return (False, "Git status could not be parsed safely", [])
     # The classifier supplies exact absolute paths. Other callers may supply
@@ -554,6 +681,19 @@ async def safe_revert_preflight(
         if os.path.commonpath((absolute, top)) != top:
             return (False, "Agent file path is outside the repository", [])
         touched_abs.add(absolute)
+    try:
+        entries = await _head_entries(top, fork_head)
+        historical = decode_ignored_baseline(fork_ignored_baseline) if fork_ignored_baseline is not None else None
+    except (ValueError, TypeError):
+        return (False, "Git file baseline could not be read safely", [])
+    uncovered = []
+    for absolute in sorted(touched_abs):
+        path = os.path.relpath(absolute, top)
+        reason = await _path_baseline_reason(top, path, entries, historical, ignored)
+        if reason:
+            uncovered.append(f"{path}: {reason}")
+    if uncovered:
+        return (False, "No safe fork-point baseline for: " + "; ".join(uncovered), [])
     extra = [p for p in dirty_rel if _norm(p, top) not in touched_abs]
     if extra:
         return (
@@ -571,13 +711,14 @@ async def safe_revert_files(
     fork_head: str | None,
     fork_clean: bool | None,
     fork_id: str,
+    fork_ignored_baseline: str | None = None,
 ) -> dict[str, Any]:
     """Run the §5.6.3 preflight, then (if it passes and there's anything dirty)
     stash + checkout the agent-touched files back to their fork-point state.
     Never rolls back the fork on failure — the outcome is recorded into the
     durable `fork_revert_record`."""
     available, reason, dirty = await safe_revert_preflight(
-        working_dir, agent_touched_paths, fork_head, fork_clean
+        working_dir, agent_touched_paths, fork_head, fork_clean, fork_ignored_baseline
     )
     if not available:
         return {
@@ -618,6 +759,8 @@ async def safe_revert_files(
     deleted_set = set(deleted)
     present = [path for path in dirty if path not in deleted_set or os.path.lexists(os.path.join(top, path))]
     snapshot_oid: str | None = None
+    # Even an unsuccessful stash can already have changed the worktree.
+    result["ran"] = True
     if present:
         # -u also saves untracked files; every path keeps its literal meaning.
         rc, _out, err = await _git(

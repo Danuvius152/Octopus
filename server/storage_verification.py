@@ -65,6 +65,7 @@ def _verify_main_facts(db: sqlite3.Connection) -> None:
 
     from .context_models import ContextState
     from .delegations import _PersistedRound
+    from .fork_helpers import decode_ignored_baseline
     from .session_operations import decode_payload
     from .submission_models import NativeInputEvidence
 
@@ -79,6 +80,11 @@ def _verify_main_facts(db: sqlite3.Connection) -> None:
         raise RuntimeError("Primary database contains inputs outside the current contract")
     if db.execute("SELECT 1 FROM agents WHERE typeof(context_settings_revision)!='integer' OR context_settings_revision<0 LIMIT 1").fetchone():
         raise RuntimeError("Primary database contains an invalid context settings revision")
+    try:
+        for (raw,) in db.execute("SELECT git_ignored_baseline FROM messages WHERE git_ignored_baseline IS NOT NULL"):
+            decode_ignored_baseline(raw)
+    except (ValueError, TypeError):
+        raise RuntimeError("Primary database contains an invalid ignored-path baseline") from None
     try:
         for (raw,) in db.execute("SELECT context_state FROM sessions WHERE context_state IS NOT NULL"):
             ContextState.model_validate_json(raw)

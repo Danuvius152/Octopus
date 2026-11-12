@@ -179,14 +179,21 @@ class ForkingMixin(SessionManagerBase):
                     "status` and `git stash list` for "
                     f"'octopus: pre-fork stash {fork_id}'."
                 )
+                metadata = json.loads(row["fork_metadata"] or "{}")
+                metadata["first_turn_note"] = fork_helpers.render_first_turn_note(
+                    parent_label=row["forked_from_session_id"], n=(row["fork_after_seq"] or 0) + 1,
+                    summary=metadata.get("side_effect_summary", {}), revert_record=rec,
+                )
                 await self.db.update_session_field(
                     fork_id,
                     fork_revert_record=json.dumps(rec),
+                    fork_metadata=json.dumps(metadata),
                     fork_status="ready",
                 )
                 sess = self.sessions.get(fork_id)
                 if sess is not None:
                     sess.fork_revert_record = json.dumps(rec)
+                    sess.fork_metadata = json.dumps(metadata)
                     sess.fork_status = "ready"
                 logger.info(
                     "fork %s: finalized interrupted revert as unknown_post_crash",
@@ -290,7 +297,7 @@ class ForkingMixin(SessionManagerBase):
                 "side_effect_summary": summary,
                 "fork_label": label,
                 "first_turn_note": fork_helpers.render_first_turn_note(
-                    parent_label=source.name, n=M, summary=summary, reverted=False),
+                    parent_label=source.name, n=M, summary=summary),
             }
             candidate = replace(source, id=fork_id, claude_session_id=None,
                                 fork_metadata=json.dumps(metadata), _run=ActiveRun())
@@ -378,15 +385,15 @@ class ForkingMixin(SessionManagerBase):
                     target.get("git_head"),
                     target.get("git_status_clean"),
                     fork_id,
+                    target.get("git_ignored_baseline"),
                 )
                 fork.fork_revert_record = json.dumps(record)
                 await self.db.update_session_field(
                     fork_id, fork_revert_record=fork.fork_revert_record
                 )
                 # Re-render the first-turn note with the real revert outcome.
-                reverted = record["ran"] and record["status"] == "completed"
                 metadata["first_turn_note"] = fork_helpers.render_first_turn_note(
-                    parent_label=source.name, n=M, summary=summary, reverted=reverted
+                    parent_label=source.name, n=M, summary=summary, revert_record=record
                 )
                 fork.fork_metadata = json.dumps(metadata)
                 await self.db.update_session_field(
@@ -745,6 +752,7 @@ class ForkingMixin(SessionManagerBase):
             summary["agent_touched_paths"],
             target.get("git_head"),
             target.get("git_status_clean"),
+            target.get("git_ignored_baseline"),
         )
         return {
             "rewind_to_msg_seq": M,

@@ -184,6 +184,41 @@ and unusual filenames remain visible to status parsing.
 Unknown or mixed ownership refuses revert with a reason while keeping the
 conversation fork usable.
 
+The turn-start owner captures one complete NUL-delimited `git status
+--porcelain=v1 --untracked-files=all --ignored=matching` observation for both
+ordinary input and steer. Only a fully parsed, warning-free successful observation
+can prove ordinary cleanliness. `assume-unchanged`, `skip-worktree` and other
+unobservable index entries prevent a clean proof at capture and refuse current
+execution; the operation never clears those flags to obtain permission.
+
+The same observation records then-existing ignored path coverage in the private
+nullable `messages.git_ignored_baseline` JSON (`version: 1`, `paths`). NULL means
+unknown; a valid empty collection is complete evidence. The full UTF-8 JSON,
+including its structure, must fit 262144 bytes. Exceeding that budget discards
+the entire ignored-path proof while retaining independently reliable HEAD/clean
+facts. This is a persistence budget, not a bound on Git traversal or output
+memory. No file contents or historical ignore rules are saved. Message copying,
+fork-of-fork and restart preserve the original evidence; browser messages omit
+the private field. Evidence exits with the message.
+
+Preview and execution check a baseline for every attributable path, even when
+current ordinary dirty status is empty. An exact HEAD blob with mode 100644,
+100755 or 120000 supplies its original file baseline, including a tracked file
+that now matches ignore rules. Tree/gitlink entries and HEAD symlink/gitlink
+ancestors do not supply file or absence proof. HEAD inspection uses repository
+root coordinates, complete NUL parsing and exact literal path comparison.
+
+Without a supported HEAD entry, original absence requires a clean original
+observation, complete ignored coverage, current same-worktree membership and
+no original coverage of the path itself or an ancestor by path components.
+This permits ordinary untracked files, staged additions and rename targets;
+both rename endpoints still need attribution. Original coverage continues to
+block a symlink later replaced by a directory, a changed ignore rule or a
+force-added file. A current ignored file without HEAD, Git metadata, nested
+worktrees, directories and submodule contents cannot gain absence authority.
+Any unsupported path refuses the entire operation before stash/restore, lists
+the uncovered paths and reasons, and leaves the successor conversation usable.
+
 This preflight attributes paths, not individual byte edits within a file. If
 a human and the Agent both edited the same recognized path, the path comparison
 alone cannot prove which hunks belong to each. More precise snapshots, preview
@@ -213,6 +248,11 @@ saved OID. Legacy `stash@{n}` values remain readable but are unstable historical
 selectors, not identities of today's snapshot. An OID does not guarantee object
 retention after deletion or Git garbage collection.
 
+`fork_revert_record.ran` becomes true when a mutating Git operation starts or
+when preflight proves a completed no-op. It is not a success flag. A failed
+stash lookup or later restore can therefore retain `ran: true`. Failure before
+mutation and refusal retain `ran: false`.
+
 Failure does not erase the successfully created fork or pretend file restoration
 succeeded. This does not roll back commits, send/unsend
 messages, undo database writes, cancel original BG jobs or reverse provider calls.
@@ -230,6 +270,11 @@ not the path-ownership checks above
 The trusted note tells the model which effects occurred after the branch point
 and whether file revert actually completed. The transcript itself remains in
 the user channel. The note is framing, not a new execution authority.
+It consumes the complete durable result. Refusal explains that no file revert
+ran; post-stash failure and `unknown_post_crash` warn that files may already
+have changed and require Git/recovery inspection. Neither is described as an
+unexecuted operation or a rollback. Available snapshot identity and the actual
+failure reason remain in the note.
 
 #### 5.6.5 Persistence before first use
 
@@ -243,7 +288,8 @@ An `initializing` fork is cleaned using its exact saved identity; failed cleanup
 preserves retry responsibility. A crash during `reverting` produces
 `unknown_post_crash` and a usable ready conversation with an explicit inspection
 message. Recovery does not repeat uncertain Git effects or claim the stash/revert
-finished. Rewind borrows the parent's directory, including when the parent is
+finished. It persists and refreshes the same unknown-result first-turn note
+before use, including an already live successor. Rewind borrows the parent's directory, including when the parent is
 itself a full copy under the fork base. Recovery never derives directory
 ownership from that prefix. Only an initializing full-copy row with its matching
 creation receipt may remove its independent directory; cleanup must finish
@@ -257,10 +303,15 @@ Code: [fork lifecycle](../../server/sessions/forking.py),
 [Claude](../../server/harness/claude_code.py) and [Codex](../../server/harness/codex.py).
 Regression entry points: `tests/test_session_fork.py`, `tests/test_fork_helpers.py`,
 `tests/test_fork_ownership.py`, `tests/test_session_fork_installation.py`,
-`tests/test_fork_native_copy.py`, `tests/test_codex_app_server_fork.py` and
+`tests/test_fork_native_copy.py`, `tests/test_codex_app_server_fork.py`,
+`tests/test_rewind_baselines.py`, `tests/test_fork_message_snapshot.py` and
 `web/e2e/fork.spec.ts`. Ownership regressions compare actual user/external file
 bytes after ambiguous paths or failed edits; snapshot regressions interleave
 later stashes and lookup failures without falling back to an old reference.
+The baseline matrix starts at public input/steer with a real Owner, Git and
+SQLite for both offline backends, and compares file bytes, persisted records,
+preview and the actual successor's trusted instructions. Storage publication
+and browser projection regressions cover private evidence retention/exclusion.
 
 Mid-execution rewind, branch merge, dirty-tree snapshots and provider-specific
 undo are outside the current contract. Such changes require their own design

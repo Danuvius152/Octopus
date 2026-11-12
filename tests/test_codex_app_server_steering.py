@@ -441,7 +441,7 @@ async def test_ack_updates_saved_input_notices_while_root_remains_active(native_
     await active_root(native_runtime, tmp_path)
     # Only the steer ACK is late; native initialization has already finished.
     monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", .05 if late else 5)
-    anchor = [("a" * 40, False)]
+    anchor = [("a" * 40, False, None)]
 
     async def capture_anchor(_working_dir):
         return anchor[0]
@@ -458,7 +458,7 @@ async def test_ack_updates_saved_input_notices_while_root_remains_active(native_
     old_page, _ = await database.list_recoverable_submissions(session.id)
     assert old_page[0]["native_inputs"][0]["state"] == "unknown"
     revision = manager.dispatch_snapshot(session.id)["revision"]
-    anchor[0] = ("b" * 40, True)
+    anchor[0] = ("b" * 40, True, None)
     (tmp_path / "native-release-ack").touch()
 
     async def refreshed():

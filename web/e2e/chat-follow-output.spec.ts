@@ -1,7 +1,8 @@
 import { expect, test, type Page, type WebSocketRoute } from "./test";
 import { enterAccountCredentials } from "./current-account";
-import type { Message } from "../src/stores/sessionStore";
+import type { Message, PendingQuestion } from "../src/stores/sessionStore";
 import type { RuntimeMetadata } from "../src/api";
+import type { Locator } from "@playwright/test";
 
 // Chromium headless hides native scrollbars by default. A real thumb drag
 // needs the actual scrollbar, rather than an empty CSS-reserved gutter.
@@ -13,6 +14,20 @@ const identity = (thread: string, item: string): RuntimeMetadata => ({ request_i
 const helper = { card_id: "helper-card", task_id: "helper", native_thread_id: "helper", native_turn_id: "turn",
   runtime_metadata: identity("helper", "item"), status: "running", name: "Helper", description: "Reading", prompt: "", summary: "", steps: [] };
 
+async function trackTop(locator: Locator) {
+  return locator.evaluateHandle((element) => {
+    const top = element.getBoundingClientRect().top;
+    let maximum = 0;
+    let frame = 0;
+    const sample = () => {
+      maximum = element.isConnected ? Math.max(maximum, Math.abs(element.getBoundingClientRect().top - top)) : Infinity;
+      frame = requestAnimationFrame(sample);
+    };
+    frame = requestAnimationFrame(sample);
+    return { stop: () => { cancelAnimationFrame(frame); return maximum; } };
+  });
+}
+
 function scrollbarThumb(element: Element) {
   const viewport = element as HTMLElement;
   const box = viewport.getBoundingClientRect();
@@ -22,7 +37,7 @@ function scrollbarThumb(element: Element) {
     y: box.top + viewport.clientHeight * viewport.scrollTop / viewport.scrollHeight + height / 2, gutter };
 }
 
-async function openChat(page: Page, count = 40) {
+async function openChat(page: Page, count = 40, pending: PendingQuestion[] = []) {
   const session = { id: "follow-output", agent_id: "follow-agent", name: "Following output", backend: "codex",
     status: "running", archived: false, working_dir: "/tmp", created_at: "2026-11-12T00:00:00Z" };
   const messages: Message[] = Array.from({ length: count }, (_, index) => ({
@@ -44,7 +59,7 @@ async function openChat(page: Page, count = 40) {
     };
     else if (path === `/api/sessions/${session.id}`) data = { ...session,
       active_attempt: { request_id: "request", attempt_id: "attempt" },
-      messages, next_message_seq: count + 1, oldest_loaded_seq: 1, has_more_messages: false, pending_questions: [], subagents: [],
+      messages, next_message_seq: count + 1, oldest_loaded_seq: 1, has_more_messages: false, pending_questions: pending, subagents: [],
       dispatch_state: { generation: "follow-service", revision: 1, paused: false, active_request_id: "request", active_operation: "message", items: [] },
     };
     await route.fulfill({ json: data });
@@ -135,23 +150,31 @@ test("continuous and delayed output stays pinned while history reading stays par
   await expect.poll(gap).toBeLessThanOrEqual(2);
 });
 
-test("native card growth and native streaming becoming a saved row keep the bottom visible", async ({ page }) => {
-  const { scroller, gap, send, output } = await openChat(page);
+test("manual helper expansion preserves reading and returning to the bottom follows native output", async ({ page }) => {
+  const { scroller, gap, send, output, settle } = await openChat(page);
   send({ type: "subagent", ...helper, seq: 41 });
   const card = scroller.locator(".subagent-card");
   await expect(card).toHaveCount(1);
   await expect.poll(gap).toBeLessThanOrEqual(2);
   for (let opening = 0; opening < 4; opening++) {
-    await card.locator(".subagent-summary-row").click();
+    const header = card.locator(".subagent-summary-row");
+    await settle();
+    const movement = await trackTop(header);
+    await header.click();
     await expect(card.getByRole("region", { name: "Saved helper details" })).toBeVisible();
     await expect(card.getByText("Helper history was not collected. Viewing it cannot recover missing content.")).toBeVisible();
-    await expect.poll(gap).toBeLessThanOrEqual(2);
+    await settle();
+    expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+    await movement.dispose();
     if (opening < 3) {
       await card.locator(".subagent-summary-row").click();
       await expect(card.getByRole("region", { name: "Saved helper details" })).toHaveCount(0);
       await expect.poll(gap).toBeLessThanOrEqual(2);
     }
   }
+  await scroller.hover({ position: { x: 5, y: 20 } });
+  await page.mouse.wheel(0, 100000);
+  await expect.poll(gap).toBeLessThanOrEqual(2);
   await expect(scroller.locator('[data-item-index="40"] .subagent-card')).toHaveCount(1);
   const height = (await card.boundingBox())!.height;
   send({ type: "assistant_delta", content: output("Helper live"), runtime_metadata: identity("helper", "item") });
@@ -395,6 +418,10 @@ test("scrolling inside tool output preserves main chat following", async ({ page
   await result.locator(".tool-header").click();
   const detail = result.locator(".tool-detail");
   await expect(detail).toBeVisible();
+  // Opening is a reading action. Explicitly return to the main list's bottom
+  // before verifying that navigation consumed by its inner pane leaves it there.
+  await scroller.hover({ position: { x: 5, y: 20 } });
+  await page.mouse.wheel(0, 100000);
   await expect.poll(gap).toBeLessThanOrEqual(2);
   await detail.evaluate((element) => { element.scrollTop = 500; });
   const before = await detail.evaluate((element) => element.scrollTop);
@@ -411,6 +438,141 @@ test("scrolling inside tool output preserves main chat following", async ({ page
   await expect(scroller.getByTestId("streaming-text")).toContainText("After inner scroll line 12");
   await settle();
   await expect.poll(gap).toBeLessThanOrEqual(2);
+});
+
+for (const activation of ["mouse", "keyboard"] as const) {
+test(`expanding a saved tool with ${activation} at the bottom preserves reading through new output`, async ({ page }) => {
+  const { scroller, send, settle, output, gap } = await openChat(page);
+  send({ type: "tool_result", seq: 41, output: Array.from({ length: 100 }, (_, index) => `Reading line ${index}`).join("\n") });
+  const result = scroller.locator(".msg-tool-result");
+  const header = result.locator(".tool-header");
+  await expect(header).toBeVisible();
+  await settle();
+  const movement = await trackTop(header);
+  if (activation === "mouse") await header.click();
+  else { await header.focus(); await page.keyboard.press("Enter"); }
+  await expect(result.locator(".tool-detail")).toBeVisible();
+  await settle();
+  expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+  await movement.dispose();
+  const position = await scroller.evaluate((element) => element.scrollTop);
+  send({ type: "assistant_delta", content: output("While reading tool details") });
+  await expect(scroller.getByTestId("streaming-text")).toContainText("While reading tool details line 12");
+  await settle();
+  expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - position)).toBeLessThanOrEqual(2);
+  await scroller.hover({ position: { x: 5, y: 20 } });
+  await page.mouse.wheel(0, 100000);
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  send({ type: "assistant_delta", content: output("Following after reading tool details") });
+  await expect(scroller.getByTestId("streaming-text")).toContainText("Following after reading tool details line 12");
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+});
+}
+
+test("loading full reply details preserves reading while the response and new output arrive", async ({ page }) => {
+  const { scroller, send, settle, output } = await openChat(page);
+  let release!: () => void;
+  const body = new Promise<void>((resolve) => { release = resolve; });
+  const reference = "/api/sessions/follow-output/messages/41";
+  await page.route(`**${reference}?view=browser`, async (route) => {
+    await body;
+    await route.fulfill({ json: { role: "assistant", type: "text", seq: 41,
+      content: Array.from({ length: 40 }, (_, index) => `Complete reply paragraph ${index}`).join("\n\n") } });
+  });
+  try {
+    send({ type: "assistant_text", seq: 41, content: "Preview of the saved reply", body_state: "preview", detail_ref: reference });
+    const row = scroller.locator('[data-message-key="message:41"]');
+    await expect(row).toContainText("Preview of the saved reply");
+    await settle();
+    const movement = await trackTop(row);
+    await row.getByRole("button", { name: "View full message" }).click();
+    await expect(row.getByRole("status")).toHaveText("Loading full message…");
+    send({ type: "assistant_delta", content: output("While loading details") });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("While loading details line 12");
+    await settle();
+    release();
+    await expect(row).toContainText("Complete reply paragraph 39");
+    await settle();
+    expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+    await movement.dispose();
+  } finally { release(); }
+});
+
+test("collapsing a tool clamps the viewport without restoring following", async ({ page }) => {
+  const { scroller, send, settle, output, gap } = await openChat(page);
+  send({ type: "tool_result", seq: 41, output: Array.from({ length: 100 }, (_, index) => `Detail line ${index}`).join("\n") });
+  const result = scroller.locator(".msg-tool-result");
+  const header = result.locator(".tool-header");
+  await expect(header).toBeVisible();
+  await header.click();
+  await expect(result.locator(".tool-detail")).toBeVisible();
+  await settle();
+  const expandedTop = await scroller.evaluate((element) => element.scrollTop);
+  await scroller.hover({ position: { x: 5, y: 20 } });
+  await page.mouse.wheel(0, 24);
+  await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(expandedTop + 8);
+  await expect.poll(gap).toBeGreaterThan(10);
+  await header.click();
+  await expect(result.locator(".tool-detail")).toHaveCount(0);
+  await settle();
+  const collapsedTop = await scroller.evaluate((element) => element.scrollTop);
+  send({ type: "assistant_delta", content: output("Output after collapse") });
+  await expect(scroller.getByTestId("streaming-text")).toContainText("Output after collapse line 12");
+  await settle();
+  expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - collapsedTop)).toBeLessThanOrEqual(2);
+});
+
+test("a touch tap on bottom text preserves paused reading after collapsing a tool", async ({ page }) => {
+  const { scroller, send, settle, output, gap } = await openChat(page, 1);
+  send({ type: "tool_result", seq: 2, output: "Short tool details" });
+  const result = scroller.locator(".msg-tool-result");
+  const header = result.locator(".tool-header");
+  await header.click();
+  await expect(result.locator(".tool-detail")).toBeVisible();
+  await header.click();
+  await expect(result.locator(".tool-detail")).toHaveCount(0);
+  await settle();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  const touch = await page.context().newCDPSession(page);
+  try {
+    await touch.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+    const text = await scroller.getByText("Saved row 1", { exact: true }).boundingBox();
+    const x = text!.x + text!.width / 2, y = text!.y + text!.height / 2;
+    await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 1 }] });
+    await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    const before = await scroller.evaluate((element) => element.scrollTop);
+    send({ type: "assistant_delta", content: output("Output after a non-navigating tap").repeat(4) });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Output after a non-navigating tap line 12");
+    await settle();
+    expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - before)).toBeLessThanOrEqual(2);
+  } finally { await touch.detach(); }
+});
+
+test("loading an outside-window question pauses following through new output", async ({ page }) => {
+  const question: PendingQuestion = { question_id: "outside", request_id: "request", attempt_id: "attempt",
+    body_state: "preview", message_seq: 0, detail_ref: "/api/sessions/follow-output/messages/0", questions: [] };
+  const { scroller, send, settle, output } = await openChat(page, 40, [question]);
+  let release!: () => void;
+  const body = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/sessions/follow-output/messages/0?view=browser", async (route) => {
+    await body;
+    await route.fulfill({ json: { role: "assistant", type: "question_request", seq: 0, tool_use_id: "outside",
+      tool_input: { question_id: "outside", request_id: "request", attempt_id: "attempt",
+        questions: [{ question: "Read the complete question", options: [{ label: "Continue" }] }] } } });
+  });
+  try {
+    const outside = page.getByLabel("Questions outside the history window");
+    await outside.getByRole("button", { name: "Load full question" }).click();
+    await expect(outside.getByRole("status")).toHaveText("Loading full question…");
+    await settle();
+    const before = await scroller.evaluate((element) => element.scrollTop);
+    send({ type: "assistant_delta", content: output("While loading outside question") });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("While loading outside question line 12");
+    await settle();
+    expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - before)).toBeLessThanOrEqual(2);
+    release();
+    await expect(outside).toContainText("Read the complete question");
+  } finally { release(); }
 });
 
 test("resizing the current viewport retains bottom following without new output", async ({ page }) => {

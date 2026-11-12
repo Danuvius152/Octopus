@@ -159,7 +159,7 @@ async def test_http_and_ws_share_typed_durable_compact_without_alias_or_recovery
             "recovery_of_client_id": "compact-ws"})).json()
         assert recovery["code"] == "recovery_unavailable" and not recovery["accepted"]
     with sqlite3.connect(tmp_path / "product.db") as reader:
-        assert verify_main(reader) == 9
+        assert verify_main(reader) == 10
 
 
 @pytest.mark.parametrize("point", ["admission", "claim", "possible_send"])
@@ -261,7 +261,7 @@ async def test_restart_keeps_original_compact_fact_without_replay(native_runtime
         assert not status["execution"]["recoverable_input"]
         assert restored.dispatch_snapshot(session.id)["items"] == []
         with sqlite3.connect(copy) as reader:
-            assert verify_main(reader) == 9
+            assert verify_main(reader) == 10
     finally:
         await restored.close_session_owners()
         await restored_db.close()

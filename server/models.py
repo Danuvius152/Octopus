@@ -91,7 +91,10 @@ class ForkRevertRecord(BaseModel):
     SessionInfo so the UI can render "files were restored / revert refused".
     """
 
-    ran: bool = False
+    ran: bool = Field(default=False, description=(
+        "A mutating Git operation started, or preflight verified a completed no-op. "
+        "This does not imply success: a failed operation may already have changed files."
+    ))
     files: list[str] = []
     stash_ref: str | None = Field(default=None, description=(
         "New snapshots use a verified full commit OID. Legacy stash@{n} selectors "

@@ -9,7 +9,7 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 9
+CURRENT_VERSION = 10
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -299,9 +299,10 @@ CREATE TABLE messages (
     -- Per-turn git anchor captured when a user message row is written
     -- (session-rewind.md §4 + §5.6.3). Powers the safe-revert preflight.
     git_head TEXT,                          -- `git rev-parse HEAD`; NULL when not a git repo
-    git_status_clean INTEGER,               -- 1 iff `git status --porcelain` was empty
+    git_status_clean INTEGER,               -- reliable ordinary status is clean; no hidden index flags
     runtime_metadata TEXT,
     terminal_request_id TEXT,
+    git_ignored_baseline TEXT,              -- private complete versioned ignored-path observation; NULL unknown
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 

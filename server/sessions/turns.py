@@ -192,6 +192,7 @@ class TurnsMixin(SessionManagerBase):
         *,
         git_head: str | None = None,
         git_status_clean: bool | None = None,
+        git_ignored_baseline: str | None = None,
         sequence: int | None = None,
     ) -> int | None:
         """Persist and return the assigned seq.
@@ -233,6 +234,7 @@ class TurnsMixin(SessionManagerBase):
             attachments=[a.model_dump() for a in msg.attachments] if msg.attachments else None,
             git_head=git_head,
             git_status_clean=git_status_clean,
+            git_ignored_baseline=git_ignored_baseline,
             created_at=msg.created_at,
             runtime_metadata=msg.runtime_metadata.model_dump() if msg.runtime_metadata else None,
         )

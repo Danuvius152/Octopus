@@ -2,7 +2,7 @@
 
 > **Status:** implemented — 现行完整格式、发布期存量核验与有限转换；验证和生产部署分别取证。
 
-The main database uses format **9**, and Wiki uses format **17**. Each database
+The main database uses format **10**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -64,8 +64,7 @@ changes no collection root or Wiki format. Online behavior belongs to the
 [Connector contract](connectors.md#github-identity).
 
 This installation's format-8-to-9 handoff is complete. Its finite helper and
-exclusive source fixtures have retired; the private publisher now verifies only
-the complete current format. Application resource-family checks remain in
+exclusive source fixtures have retired. Application resource-family checks remain in
 read-only preflight, missing-history recovery and offline pre-cutover verification,
 including archived applications and unscoped rows. Conflicts do not authorize
 moving resources. The following records the completed handoff's safety rules,
@@ -111,6 +110,52 @@ responsibilities closed. There is no permanent old-format route. Operator steps
 belong to [local publication](../local-wsl.md#自动发布).
 
 ## Complete record projections
+
+Format 10 appends private nullable `messages.git_ignored_baseline TEXT`. Version-1
+JSON contains the complete then-existing ignored path coverage from the original
+turn-start observation; the full UTF-8 JSON budget is 262144 bytes. NULL means
+unknown, including every historical message at the handoff. An empty collection
+is distinct complete evidence. Complete reads, saved-message copies, rewind
+history and consistent full backups preserve the raw value; ordinary browser
+messages omit it. The current verifier rejects malformed, oversized or
+unsupported evidence without repairing it. Account transfer excludes it with
+chats; there is no new collection root. Permissions and failure semantics belong
+to [safe rewind](session-rewind.md#563-the-one-revert-we-offer-file-edits-via-git).
+
+The finite 9→10 handoff is prepared and verified on isolated stores; production
+conversion and publication have not run as part of this implementation. Its
+private frozen input admits only the complete declared format-9 layout or the
+complete observed format-9 physical layout, plus their fully verified format-10
+results. Per-table mixtures, unknown catalog objects, column orders, integrity
+failures, broken foreign keys and invalid retained facts refuse admission.
+Read-only preflight checks committed WAL and verifies an in-memory conversion
+before original-writer retirement. Application startup still rejects format 9.
+
+Under the publisher's existing writer-retirement, start-mask and offline-lock
+boundary, one `BEGIN IMMEDIATE` repeats admission, adds the nullable column and
+marker 10, then checks the complete candidate, foreign keys and typed row
+multisets of every original column, rowid and sequence before COMMIT. Only NULL
+is initialized; no historical ignored-path observation is fabricated. Confirmed
+rollback retains format 9. Unconfirmed COMMIT/ROLLBACK leaves business closed;
+fresh reentry inspects actual committed facts, converts only a recognized 9 or
+verifies 10 without resetting subsequent writes. Failure retains the original
+credential and recovery material; cleanup does not reopen an uncertain store
+for token writes. A receipt-bearing offline resume needs no new credential
+before storage admission and candidate readiness. Every reentry validates the
+original frozen helper, candidate and settings, then reloads the start mask
+before acquiring the offline owner. Other retained ledgers must also pass
+before candidate start. No old database replaces a newer one. The
+finite input and exclusive fixtures remain until publication, acceptance and
+forward-recovery responsibilities close, then retire together. This is not a
+startup migration route or a permanent chain of old-format support.
+
+Natural-drain timeout preserves the original request identity. A later live,
+unmasked original with freshly admitted storage and a confirmed ready response
+may replace only its own database-confirmed expired maintenance credential.
+A stopping response for the same request instead recovers the original receipt
+without token writes. Unknown handoff state refuses rotation. After candidate
+readiness, an expired credential can likewise retire before notification;
+offline conversion uncertainty never enters either write path.
 
 App Server command `tool_input.output_capture` uses existing message JSON.
 Completed content stores the actual retained output, with command retention

@@ -474,6 +474,7 @@ function ToolUseBlock({
           /* `pr-12`, like every other shape: the hover timestamp lives in
              this corner, and a long tool argument would run under it. */
           className="tool-header flex w-full items-center gap-2 px-3 py-2 pr-12 text-left font-mono text-[12px] transition-colors hover:bg-gray-100"
+          aria-expanded={expanded}
           onClick={() => { if (!expanded) onExpand?.(); setExpanded(!expanded); }}
         >
           <span className="tool-icon text-muted-foreground shrink-0">
@@ -596,6 +597,7 @@ function ToolResultBlock({ message, sessionId, onExpand }: { message: Message; s
         type="button"
         /* `pr-12` — the same reserved corner. */
         className="tool-header w-full flex items-center gap-2 px-3 py-2 pr-12 text-left text-sm hover:bg-accent/50 transition-colors"
+        aria-expanded={expanded}
         onClick={() => { if (!expanded) onExpand?.(); setExpanded(!expanded); }}
       >
         <span className="tool-icon text-muted-foreground shrink-0">

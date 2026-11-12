@@ -589,9 +589,12 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
             async def terminal_sql(sql, parameters=()):
                 nonlocal terminal
                 cursor = await execute(sql, parameters)
-                if sql.startswith("INSERT INTO messages ") and parameters[3] == "result":
-                    assert parameters[-1] == admitted["request_id"]
-                    terminal = json.loads(parameters[4])
+                if sql.startswith("INSERT INTO messages "):
+                    columns = sql.partition("(")[2].partition(")")[0].split(",")
+                    message = dict(zip(map(str.strip, columns), parameters, strict=True))
+                    if message["type"] == "result":
+                        assert message["terminal_request_id"] == admitted["request_id"]
+                        terminal = json.loads(message["content"])
                 return cursor
 
             async def lost_terminal_commit_acknowledgment():
