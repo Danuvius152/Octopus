@@ -145,7 +145,7 @@ export function AgentDelegationRequestCard({
 
   return (
     <div
-      className={`agent-delegation-request inline-flex items-start gap-2 rounded-md border px-2.5 py-1.5 text-xs ${
+      className={`agent-delegation-request inline-flex max-w-full items-start gap-2 rounded-md border px-2.5 py-1.5 text-xs [overflow-wrap:anywhere] ${
         state === "completed"
           ? "border-primary/40 bg-primary/5"
           : state === "running" || (!state && !projection.failed)

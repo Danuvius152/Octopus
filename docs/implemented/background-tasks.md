@@ -14,6 +14,12 @@ manager 在任何 OS 命令执行前登记原启动责任并提交任务行；�
 不继续 spawn。spawn 前及迟到句柄交接仍检查关停和原 work 资格。取消启动等待者
 不能遗失迟到的进程；原启动 owner 继续补偿、登记或清理。
 
+启动方把原补偿 task 或 running 责任登记好后，同步撤销 caller 的取消资格并完成
+有限的 handoff Future。原 work／session 退休即使在交接前捕获 reservation，也只
+等待这个交接事实，再 join 原 cleanup／running；不等待 caller 后续无关工作，
+更不能在同一 caller 内等待自身。等待者取消不能取消 handoff，交接完成也不能
+代替进程、终态存储或返回责任完成。
+
 命令在捕获的会话工作目录中通过 shell 运行，进程使用独立 process group。
 返回 task ID 时正常路径已经取得进程句柄；调用者之后读取任务记录观察结果，
 不等待父回合保持活动，也不把命令作为新的普通会话请求重放。
@@ -38,6 +44,10 @@ stdout、stderr 并发读取，各保留最多 200 KiB 的尾部，超限丢弃�
 | idle／总时限 | `failed`／`idle_timeout` 或 `total_timeout` |
 | 用户／原work取消 | `cancelled`／`user_cancel` 或 `work_cancelled` |
 | 服务关停／外部信号 | `interrupted`／`server_shutdown` 或 `external_signal` |
+| 启动等待失败且没有明确停止原因 | `failed`／`startup_failed` |
+
+启动补偿保留原 reservation 的明确停止原因；单独取消启动 caller 不冒充用户取消
+或服务关停。迟到 spawn 的实际异常沿原错误渠道保留，不用外部等待取消改写它。
 
 ## 结果、退休与返回顺序
 
@@ -45,6 +55,12 @@ shell 和输出结束后先固定原命令结果，再主动对启动时捕获�
 宽限、必要的 KILL 和活跃成员退出确认。shell leader 退出不能证明仍持管道或
 重定向输出的后代已退出。覆盖范围限于捕获的进程组，主动脱离该组的任意后代
 不在保证内。正常收尾不改记取消；结果固定后的取消加入原清理，不重选成功状态。
+
+迟到启动没有正常输出消费者时，由原补偿任务并发消费两条 pipe，直到双 EOF 和
+原 `proc.wait()` 完成；leader 已退出也必须完成该证明，不能先等 wait 再消费
+背压中的输出；该补偿路径尚未启动正常 reader，每条 pipe 仍只有一个消费者。
+进程证明、终态写入均成功后才移除 reservation；写入失败保留原失败
+cleanup，后续退休传播原错误，不以移除引用制造关停成功。
 
 退休确认之后才持久化终态、广播普通完成并向父会话返回。记录、退休或交付失败
 均保留原 owner 和已经固定的结果；后续取消／关停可重入未完成阶段，不重跑命令、

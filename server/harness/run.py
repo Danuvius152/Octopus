@@ -29,10 +29,11 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from ..aio import await_owned_task as _await_owned_task
 from ..aio import complete_cleanup
 from ..config import settings
 from ..diagnostics import DiagnosticStream, diagnostic_text, exception_diagnostic
-from ..process_groups import group_exists, wait_group_exit
+from ..process_groups import drain_process_pipes, group_exists, wait_group_exit
 from ..session_operations import CompactResult
 from ..submission_models import NativeInputEvidence
 from . import assembly
@@ -145,17 +146,6 @@ def _terminate_process_group(proc: asyncio.subprocess.Process, sig: int) -> bool
         return False
 
 
-async def _await_owned_task[T](task: asyncio.Task[T]) -> T:
-    """Leave a captured task running when its waiter is cancelled.
-
-    Its owner retrieves failures with the run's diagnostic context; a shield
-    can send a late exception to the event-loop logger without that context.
-    """
-    if not task.done():
-        await asyncio.wait({task})
-    return task.result()
-
-
 def parse_json_line(line: str) -> dict[str, Any] | None:
     """Parse a JSONL object; the run owns diagnostics and credential masking."""
     try:
@@ -231,7 +221,6 @@ class HarnessRun:
         # not a provider acknowledgment. Reset only before a reused turn.
         self.input_may_have_run = False
         self._spawn_task: asyncio.Task[asyncio.subprocess.Process | None] | None = None
-        self._spawn_cleanup: asyncio.Task[None] | None = None
         self._preparation_task: asyncio.Task[tuple[TurnContext, list[str], dict[str, Any]]] | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._retirement_started = asyncio.Event()
@@ -448,25 +437,6 @@ class HarnessRun:
             # A transport can have spawned the process before returning its
             # handle. Keep that reservation alive until the captured group is
             # reaped; cancellation must not lose the process reference.
-            self._lease_closed = True
-            from ..mcp_identity import revoke_run
-            revoke_run(self.run_lease_id)
-
-            async def reap_aborted_spawn() -> None:
-                try:
-                    abandoned = await spawn
-                    if abandoned is not None:
-                        _terminate_process_group(abandoned, signal.SIGKILL)
-                        await asyncio.wait_for(abandoned.wait(), timeout=4.0)
-                        await wait_group_exit(abandoned.pid, timeout=2.0, after_kill=True)
-                except Exception as error:
-                    logger.error("Harness startup retirement failed provider=%s run=%s error_type=%s\n%s",
-                                 self._profile.backend, self.run_lease_id, type(error).__name__,
-                                 exception_diagnostic(error, secrets=self._diagnostic_secrets))
-                    raise
-                finally:
-                    self._spawn_task = None
-            self._spawn_cleanup = asyncio.create_task(reap_aborted_spawn(), name="harness-startup-cleanup")
             self._begin_retirement()
             raise
         except Exception as error:
@@ -475,21 +445,20 @@ class HarnessRun:
                          type(error).__name__, error.errno if isinstance(error, OSError) else None,
                          int((time.monotonic() - self._started_at) * 1000),
                          exception_diagnostic(error, secrets=self._diagnostic_secrets))
+            self._spawn_task = None  # The original spawn has definitively failed.
             self._begin_retirement()
             raise
-        finally:
-            if spawn.done():
-                self._spawn_task = None
         if process is None:
+            self._spawn_task = None
             self._begin_retirement()
             raise asyncio.CancelledError
         if self._lease_closed or not work_is_open(self.work_id):
-            self._process = process
-            _terminate_process_group(process, signal.SIGKILL)
-            await asyncio.wait_for(process.wait(), timeout=4.0)
-            await wait_group_exit(process.pid, timeout=2.0, after_kill=True)
+            # Only the original retirement adopts this unconsumed handle.
+            # A concurrent stop may already be waiting on the same spawn.
+            self._begin_retirement()
             raise asyncio.CancelledError
         self._process = process
+        self._spawn_task = None
         self._spawn_identity = spawn_identity
         self._stdout_task = asyncio.create_task(
             self._read_stdout(), name=f"{self._profile.backend}-stdout"
@@ -985,18 +954,19 @@ class HarnessRun:
                              self._profile.backend, self.run_lease_id, type(error).__name__,
                              exception_diagnostic(error, secrets=self._diagnostic_secrets))
             self._preparation_task = None
-        if self._spawn_cleanup is not None:
-            await self._spawn_cleanup
-            self._spawn_cleanup = None
-        elif self._spawn_task is not None:
+        if self._spawn_task is not None:
             try:
                 pending = await _await_owned_task(self._spawn_task)
-            except Exception:
+            except Exception as error:
+                # This is the original launch's completed result, not an
+                # inference from an exception class or a missing process field.
+                logger.error("Harness spawn failed during retirement provider=%s run=%s error_type=%s\n%s",
+                             self._profile.backend, self.run_lease_id, type(error).__name__,
+                             self.format_exception(error))
                 pending = None
+            self._spawn_task = None
             if pending is not None and self._process is None:
-                _terminate_process_group(pending, signal.SIGKILL)
-                await pending.wait()
-                await wait_group_exit(pending.pid, timeout=2.0, after_kill=True)
+                self._process = pending
         proc = self._process
         if proc is None:
             await self._record_input_history()
@@ -1009,10 +979,17 @@ class HarnessRun:
         if self._driver.multiplexed and self._question_replies:
             with self._retirement_phase("question_replies", 0.6) as grace:
                 await asyncio.wait(tuple(self._question_replies), timeout=grace)
+        unread = self._stdout_task is None and self._stderr_task is None
+        if unread:
+            # Startup never installed protocol readers. Stop the captured
+            # group immediately; the common pipe drain below owns both pipes.
+            _terminate_process_group(proc, signal.SIGKILL)
+            await wait_group_exit(proc.pid, timeout=2.0, after_kill=True)
         try:
             with self._retirement_phase("protocol_interrupt", 0.5) as grace:
                 async with asyncio.timeout(grace):
-                    await self._driver.interrupt(self)
+                    if not unread:
+                        await self._driver.interrupt(self)
         except Exception as error:
             logger.debug("Harness protocol interrupt failed: %s", self.format_exception(error))
         if not self._driver.multiplexed:
@@ -1029,7 +1006,7 @@ class HarnessRun:
                              self._profile.backend, self.run_lease_id, type(error).__name__,
                              exception_diagnostic(error, secrets=self._diagnostic_secrets))
 
-        if proc.returncode is None:
+        if not unread and proc.returncode is None:
             try:
                 with self._retirement_phase("graceful_exit", 2.0) as grace:
                     await asyncio.wait_for(proc.wait(), timeout=grace)
@@ -1037,7 +1014,7 @@ class HarnessRun:
                 pass
         # The leader's wait and pipe EOF cannot prove its redirected children
         # stopped. Keep the captured group until every writer has retired.
-        if await asyncio.to_thread(group_exists, proc.pid):
+        if not unread and await asyncio.to_thread(group_exists, proc.pid):
             logger.warning("Harness retirement escalation provider=%s run=%s signal=SIGTERM",
                            self._profile.backend, self.run_lease_id)
             _terminate_process_group(proc, signal.SIGTERM)
@@ -1084,11 +1061,7 @@ class HarnessRun:
         # descriptors and the actual process exit before retirement returns.
         with self._retirement_phase("pipe_drain", 2.0) as grace:
             async with asyncio.timeout(grace):
-                for pipe in (proc.stdout, proc.stderr):
-                    if pipe is not None:
-                        while await pipe.read(64 * 1024):
-                            pass
-                await proc.wait()
+                await drain_process_pipes(proc)
 
         logger.info("Harness exit provider=%s run=%s elapsed_ms=%s exit_code=%s",
                     self._profile.backend, self.run_lease_id,

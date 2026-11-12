@@ -10,6 +10,27 @@ from tests.native_app_server import native_runtime as native_runtime
 from tests.session_runtime import wait_dispatch_idle
 
 
+async def test_ask_cell_rules_reach_native_controller_without_rewriting_saved_persona(native_runtime, tmp_path):
+    from server.harness.codex_control import _latest_checkpoint, controller_message
+
+    manager, database, session, _, starts, _ = native_runtime
+    persona = "Only discuss the design and write documentation; do not implement it."
+    await AgentManager(database).update_agent(session.agent_id, user_id=session.user_id, system_prompt=persona)
+    await submit_client_message(manager, session.id, "Discuss the pending decisions", [], "ask-rules", wiki_mode=None)
+    await wait_dispatch_idle(manager, session.id)
+    assert (await submission_status(manager, session.id, "ask-rules"))["outcome"]["status"] == "success"
+    frames = [json.loads(line) for line in (tmp_path / "native-frames.jsonl").read_text().splitlines()]
+    start = next(frame for frame in frames if frame.get("method") == "thread/start")
+    controller = start["params"]["developerInstructions"]
+    assert controller == controller_message(starts[0].system_prompt)
+    assert persona in controller
+    assert "After the model turn containing an ask has ended, do not wait on its old cell id." in controller
+    assert "A cell not found error does not prove whether a question was answered." in controller
+    assert "same model turn" in controller and "functions.wait" in controller
+    assert _latest_checkpoint(str(tmp_path / "native-history.jsonl"), "exact-native-thread") == controller
+    assert (await database.get_agent(session.agent_id))["system_prompt"] == persona
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_unbounded_connection_retry_must_be_effectively_disabled(native_runtime, tmp_path, enabled):
     manager, _, session, _, _, _ = native_runtime

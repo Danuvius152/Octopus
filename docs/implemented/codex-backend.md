@@ -157,6 +157,27 @@ using the same native home without config writes.
 
 ## Controller history cost
 
+Ordinary App Server tool guidance comes from `_OCTOPUS_SYSTEM_PROMPT_CODEX`
+through the selected profile, instruction assembly and controller checkpoint;
+changing a documentation example or saved persona is not this runtime change.
+An ask wrapped in `functions.exec` is waited on only through the running cell
+returned in that same model turn. After that turn ends, a new explicit text
+answer is current input under the original task limits, including discussion
+or documentation-only scope. A unique unambiguous agreement can answer its
+decision group; ambiguous references across groups require clarification.
+
+A cell-not-found response ends that wait attempt: do not retry the old wait,
+reissue the ask, invent an answer or replay business work. It proves neither
+question acceptance nor why the external cell disappeared. If acceptance must
+be established, use the original question/request's saved result; missing data
+is not proof of non-acceptance. Execution termination still closes the original
+question; its deadline does not keep the model turn alive, and new text does not
+reopen the old question or resume its RPC. Necessary clarification is a new
+question. These are tool-use instructions, with no extra question state or
+external-cell recovery registry. Controlled model traces can verify the next
+action under seeded history and cell results; they cannot prove the external
+cell's lifetime, actual closure cause or the original question's stored outcome.
+
 `_latest_checkpoint` scans the active history segment line by line in
 `asyncio.to_thread`; it does not synchronously read the whole file on the event
 loop. Compacted replacement history can still contain a large JSON line.
@@ -463,9 +484,12 @@ Native completion retains its final hash constraints; measurements, question
 requests and legacy consumers retain their required raw data. This is an adapter
 policy, not a global DTO filter.
 
-Details, exports and replay use the actual saved record. Omitted command middles
-are not archived and have no recovery endpoint; the leading notice remains visible
-in ordinary RESULT/replay prefixes. This retention boundary is independent of
+Default full-record reads, exports and replay use the actual saved record,
+including its leading notice. Omitted command middles are not archived and have
+no recovery endpoint. The browser presentation removes one exact leading notice
+only when `tool_result` and `output_capture.state=head_tail` establish its origin;
+that display transformation never changes the saved record. This retention
+boundary is independent of
 [browser previews](frontend-list-reconciliation.md#浏览器有界预览与按需全文).
 Frame/media, pre-bind correlation and event handoff budgets still apply at their
 own boundaries: saved-body reduction cannot repair an earlier frame overrun and

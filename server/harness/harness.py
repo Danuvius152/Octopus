@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from ..aio import await_owned_task
 from ..config import settings
 from ..diagnostics import diagnostic_text, exception_diagnostic
 from .assembly import assemble_turn
@@ -28,7 +29,12 @@ from .launch_limits import LaunchConfigurationError, validate_launch
 from .login import LoginDriver
 from .model_settings import ModelOption, ModelSettings
 from .profile import OneShotContext, RuntimeProfile
-from .run import HarnessRun, RunConfig, _which_with_fallback, prepare_spawn
+from .run import (
+    HarnessRun,
+    RunConfig,
+    _which_with_fallback,
+    prepare_spawn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -302,7 +308,7 @@ class Harness:
             raise HarnessOneshotError("configuration", str(error)) from error
         except FileNotFoundError:
             raise HarnessOneshotError("not_found", f"{self.profile.binary} CLI not found")
-        from ..process_groups import wait_group_exit
+        from ..process_groups import drain_process_pipes, wait_group_exit
         from .run import _terminate_process_group
 
         # The transport may create its process before delivering the handle.
@@ -333,14 +339,18 @@ class Harness:
 
         async def retire_spawn() -> None:
             try:
-                captured = await asyncio.shield(spawn)
-            except (OSError, HarnessOneshotError):
-                # A known launch failure has no process to retire. Private
-                # settings still have this same cleanup owner and must close.
+                captured = await await_owned_task(spawn)
+            except Exception as error:
+                # The original spawn has completed without a process handle.
+                # Classifying that result is independent of its exception type
+                # and does not hide failure of private-settings cleanup below.
+                logger.error("Harness one-shot spawn failed provider=%s error_type=%s\n%s",
+                             self.profile.backend, type(error).__name__,
+                             exception_diagnostic(error, secrets=diagnostic_secrets))
                 captured = None
             if captured is not None:
                 _terminate_process_group(captured, signal.SIGKILL)
-                await captured.wait()
+                await drain_process_pipes(captured)
                 await wait_group_exit(captured.pid, timeout=2.0, after_kill=True)
             if private_settings is not None:
                 private_settings.close()
@@ -377,7 +387,7 @@ class Harness:
                 raise RuntimeError("One-shot process retirement remains unconfirmed") from error
 
         try:
-            proc = await asyncio.shield(spawn)
+            proc = await await_owned_task(spawn)
             if proc is None:
                 raise asyncio.CancelledError
         except FileNotFoundError:

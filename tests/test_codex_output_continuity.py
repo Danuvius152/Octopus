@@ -140,7 +140,9 @@ async def test_large_log_preview_pressure_second_tool_and_committed_final_share_
             assert json.loads(typed_command[key]) == big[key]
         shown = (await client.get(f"/api/sessions/{session.id}?view=browser")).json()["messages"]
         shown_command = next(value for value in shown if value["seq"] == big["seq"])
-        assert shown_command["body_state"] == "inline" and shown_command["content"].startswith(NOTICE)
+        assert shown_command["body_state"] == "inline"
+        assert big["content"].startswith(NOTICE + "\n")
+        assert shown_command["content"] == big["content"].removeprefix(NOTICE + "\n")
     replay = render_replay_history([MessageContent.model_validate(big)])
     assert NOTICE in replay and "root thread=" + ROOT in replay
 

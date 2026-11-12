@@ -183,7 +183,7 @@ async def test_failed_retirement_keeps_its_original_credential_diagnostics_after
         diagnostic = (artifacts / "service.log").read_text()
         assert proof["session_id"] in diagnostic and proof["original_request_id"] in diagnostic
         assert "Traceback (most recent call last)" in diagnostic
-        assert "late OS launch failure while confirming retirement" in diagnostic
+        assert "input history recording failed while confirming retirement" in diagnostic
         assert "environment inspection" in diagnostic
         assert "OSError" in diagnostic and "RuntimeError" in diagnostic
         assert "retiredmarble46originalvalue" not in diagnostic
@@ -221,6 +221,7 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
 
     from server.database import Database
     from server.deps import get_session_manager
+    from server.harness.run import HarnessRun
     from server.routers.sessions import router
     from server.sessions import SessionManager
 
@@ -238,8 +239,8 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
     token = "synthetic-installation-retirement-key-46"
     original_secret = "retiredmarble46originalvalue"
     replacement_secret = "newmarble46replacementvalue"
-    detail = "late OS launch failure while confirming retirement"
-    failure = OSError(errno.E2BIG, f"{detail}; {original_secret}")
+    detail = "input history recording failed while confirming retirement"
+    failure = OSError(errno.EIO, f"{detail}; {original_secret}")
     cause = RuntimeError(f"environment inspection: {original_secret}")
     entered, release = asyncio.Event(), asyncio.Event()
     launched_credentials = []
@@ -261,9 +262,14 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
         (artifacts / "launches.json").write_text(json.dumps(launched_credentials))
         entered.set()
         await release.wait()
-        raise failure from cause
+        raise FileNotFoundError("Original launch definitively refused")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", late_refusal)
+
+    async def failed_history_recording(run):
+        raise failure from cause
+
+    monkeypatch.setattr(HarnessRun, "_record_input_history", failed_history_recording)
     credentials_api.set_db(db)
     async with AsyncClient(transport=ASGITransport(app=application), base_url="http://test",
                            headers={"Authorization": f"Bearer {bearer}"}) as http:
@@ -288,9 +294,9 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
         class Witness(logging.Handler):
             def emit(self, record):
                 proof["failure_pristine"] = (
-                    failure.errno == errno.E2BIG and failure.__cause__ is cause
+                    failure.errno == errno.EIO and failure.__cause__ is cause
                     and original_secret in str(failure) and original_secret in str(cause)
-                    and failure.args == (errno.E2BIG, f"{detail}; {original_secret}")
+                    and failure.args == (errno.EIO, f"{detail}; {original_secret}")
                     and cause.args == (f"environment inspection: {original_secret}",)
                 )
                 (artifacts / "proof.json").write_text(json.dumps(proof))
@@ -319,8 +325,9 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
         (artifacts / "launches.json").write_text(json.dumps(launched_credentials))
         (artifacts / "proof.json").write_text(json.dumps(proof))
         release.set()
-        # The original late spawn error fails the original retirement. No
-        # second failure or manual map/task removal is used to reach exit70.
+        # A definite launch refusal proves no process; the original input
+        # history recording failure still fails retirement. No manual map/task
+        # removal or direct owner failure is used to reach exit70.
         await asyncio.wait_for(asyncio.Event().wait(), 8)
 
 

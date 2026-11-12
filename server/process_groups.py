@@ -11,6 +11,24 @@ import os
 from pathlib import Path
 
 
+async def drain_process_pipes(proc: asyncio.subprocess.Process) -> None:
+    """Join captured pipes and the original wait after normal readers retire.
+
+    Callers retain process-group ownership and signal policy. Each pipe must
+    have no other reader; bounded discard tasks run concurrently and finish
+    before this function returns or raises.
+    """
+    async def discard(pipe: asyncio.StreamReader) -> None:
+        while await pipe.read(64 * 1024):
+            pass
+
+    async with asyncio.TaskGroup() as readers:
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                readers.create_task(discard(pipe))
+        await proc.wait()
+
+
 def group_exists(pgid: int) -> bool:
     try:
         os.killpg(pgid, 0)

@@ -7,16 +7,17 @@ import { presentOutcome } from "../lib/turnOutcome";
 import { applyTranscript } from "../lib/transcript";
 import { useSessionStore } from "../stores/sessionStore";
 import { MessageBubble } from "./MessageBubble";
+import { NativeSubagentDetails } from "./NativeSubagentDetails";
 
 // Python verifies these actual public projections before normalizing long IDs.
-const samples = fixtures as Record<string, { event: unknown; prefix: unknown[]; full?: unknown }>;
+const samples = fixtures as Record<string, { event: unknown; prefix?: unknown[]; full?: unknown; message?: unknown; native?: unknown }>;
 beforeEach(() => useSessionStore.setState(useSessionStore.getInitialState(), true));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it.each(["recovery", "async_question", "missing_final"])("preserves %s semantics after real server minimization", (kind) => {
   const sample = samples[kind];
   expect(decodeWsEvent(sample.event).kind).toBe("event");
-  applyTranscript("sample-session", { messages: sample.prefix, next_message_seq: sample.prefix.length });
+  applyTranscript("sample-session", { messages: sample.prefix, next_message_seq: sample.prefix!.length });
   handleWsMessage(sample.event);
   const messages = useSessionStore.getState().messages["sample-session"];
   const message = messages.at(-1)!;
@@ -32,6 +33,42 @@ it.each(["recovery", "async_question", "missing_final"])("preserves %s semantics
     expect(view.queryByText("Model output was saved.")).not.toBeInTheDocument();
   }
 });
+
+it.each(["command_inline", "command_preview", "command_unavailable"].flatMap((kind) =>
+  ["http", "ws", "native"].map((surface) => ({ kind, surface }))))(
+  "hides only the injected command prefix through real $kind / $surface projections and full reads", async ({ kind, surface }) => {
+    const sample = samples[kind];
+    useSessionStore.setState({ token: "original-account" });
+    const fetcher = vi.fn(async (url: string) => Response.json(url.includes("native-details") ? sample.native : sample.full));
+    vi.stubGlobal("fetch", fetcher);
+    let view;
+    if (surface === "native") {
+      view = render(<NativeSubagentDetails sessionId="sample-session" anchorSeq={0} />);
+      await view.findByText(/Observed helper state/);
+    } else {
+      if (surface === "http") applyTranscript("sample-session", { messages: [sample.message], next_message_seq: 2 });
+      else handleWsMessage(sample.event);
+      const message = useSessionStore.getState().messages["sample-session"].at(-1)!;
+      view = render(<MessageBubble sessionId="sample-session" message={message} />);
+      expect(view.container).not.toHaveTextContent("[输出已缩短：");
+      const header = view.container.querySelector<HTMLButtonElement>(".tool-header");
+      if (header) fireEvent.click(header);
+    }
+    expect(view.container).not.toHaveTextContent("[输出已缩短：");
+    if (kind !== "command_inline") {
+      // Normal tool expansion already starts the read. Native details and
+      // identity notices expose an explicit saved-record button instead.
+      if (surface === "native" || kind === "command_unavailable") {
+        fireEvent.click(await view.findByRole("button", { name: "View full message" }));
+      }
+      await waitFor(() => expect(fetcher).toHaveBeenCalledWith("/api/sessions/sample-session/messages/1?view=browser", expect.anything()));
+    }
+    await waitFor(() => expect(view.container).toHaveTextContent("HEAD"));
+    expect(view.container).toHaveTextContent("TAIL");
+    expect(view.container).toHaveTextContent("[... 中段已省略 ...]");
+    expect(view.container).not.toHaveTextContent("[输出已缩短：");
+  },
+);
 
 it.each(["unavailable_question", "unavailable_small_question"])("expands %s from a real WS notice into a complete readonly question record", async (kind) => {
   const sample = samples[kind];

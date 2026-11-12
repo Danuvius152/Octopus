@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import Any
 from urllib.parse import quote
 
+from .harness.codex_items import COMMAND_OUTPUT_NOTICE
 from .models import (
     BrowserMessageContent,
     BrowserMessagePage,
@@ -139,9 +140,13 @@ def _input_view(controls: dict[str, Any] | None, display: dict[str, Any], kind: 
     return {**shown, **controls}
 
 
-def tool_arguments_view(message: MessageContent) -> MessageContent:
-    """Omit proven native tool wrappers only from disposable browser records."""
+def record_view(message: MessageContent) -> MessageContent:
+    """Derive browser-only text/arguments before spending preview bytes."""
     inputs = message.tool_input
+    capture = inputs.get("output_capture") if inputs else None
+    if (message.type == "tool_result" and isinstance(capture, dict) and capture.get("state") == "head_tail"
+            and isinstance(message.content, str) and message.content.startswith(COMMAND_OUTPUT_NOTICE)):
+        return message.model_copy(update={"content": message.content[len(COMMAND_OUTPUT_NOTICE):]})
     native = message.runtime_metadata.native if message.runtime_metadata else None
     item = inputs.get("native_item") if inputs else None
     if message.type == "tool_use" and inputs and native and native.item_id and isinstance(item, dict) and item.get("id") == native.item_id:
@@ -153,7 +158,7 @@ def tool_arguments_view(message: MessageContent) -> MessageContent:
 
 
 def message_view(session_id: str, message: MessageContent) -> BrowserMessageContent:
-    message = tool_arguments_view(message)
+    message = record_view(message)
     source = message.model_dump(mode="json")
     values = dict(source)
     input_parts = _input_parts(source["tool_input"], message.type)

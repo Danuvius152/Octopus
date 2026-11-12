@@ -2,7 +2,7 @@ import { accountFetch as fetch } from "../lib/accountFetch";
 import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
 import { createResearch } from "../lib/research";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { chatDraft, prefillChatDraft } from "../lib/chatDraft";
 import {
@@ -81,6 +81,19 @@ function isTouchDevice(): boolean {
   );
 }
 
+/** A nested output pane can consume navigation or block scroll chaining. */
+function canScrollChatUp(viewport: HTMLElement | null, target: EventTarget | null): boolean {
+  if (!viewport?.clientHeight || viewport.scrollTop <= 0) return false;
+  let element = target instanceof Element ? target : null;
+  while (element && element !== viewport) {
+    const style = getComputedStyle(element);
+    if (/^(auto|scroll)$/.test(style.overflowY) && element.scrollHeight > element.clientHeight
+      && (element.scrollTop > 0 || style.overscrollBehaviorY !== "auto")) return false;
+    element = element.parentElement;
+  }
+  return element === viewport;
+}
+
 interface Props {
   sendMessage: (
     sessionId: string,
@@ -107,6 +120,12 @@ interface Props {
 }
 
 const EMPTY_QUESTIONS: PendingQuestion[] = [];
+
+// Keep the component type stable as its live contents change. Replacing the
+// Footer component on every delta unmounts it and disrupts size observation.
+function ChatFooter({ context }: { context?: { footer: ReactNode } }) {
+  return context?.footer;
+}
 // Local notices have no persisted seq. Their occurrence identity follows the
 // immutable store message through prepends, without retaining another transcript.
 const localMessageKeys = new WeakMap<Message, string>();
@@ -273,6 +292,50 @@ export function ChatView({
   const virtuoso = useRef<VirtuosoHandle>(null);
   const scroller = useRef<HTMLElement | null>(null);
   const pageAnchor = useRef<{ key: string; offset: number } | null>(null);
+  // Input retires follow intent before queued layout work can overwrite it.
+  // Position alone cannot distinguish native navigation from virtual layout.
+  const following = useRef(true);
+  const followFrame = useRef<number | null>(null);
+  const viewportObserver = useRef<ResizeObserver | null>(null);
+  const lastPosition = useRef({ top: 0, bottom: true });
+  const navigationPointer = useRef<{ id: number; y: number; resume: boolean } | null>(null);
+  const cancelFollow = useCallback(() => {
+    if (followFrame.current !== null) cancelAnimationFrame(followFrame.current);
+    followFrame.current = null;
+  }, []);
+  const pauseFollowing = useCallback(() => {
+    following.current = false;
+    cancelFollow();
+  }, [cancelFollow]);
+  const followMeasuredOutput = useCallback(() => {
+    const viewport = scroller.current;
+    if (!following.current || pageAnchor.current || !viewport?.clientHeight || followFrame.current !== null) return;
+    followFrame.current = requestAnimationFrame(() => {
+      followFrame.current = null;
+      if (scroller.current !== viewport || !following.current || pageAnchor.current || !viewport.clientHeight) return;
+      // Use the actual post-measurement extent, including the live Footer.
+      // One instant write avoids a smooth-scroll retry outliving user intent.
+      virtuoso.current?.scrollTo({ top: viewport.scrollHeight, behavior: "auto" });
+      lastPosition.current = { top: viewport.scrollTop,
+        bottom: viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4 };
+    });
+  }, []);
+  const setScroller = useCallback((element: HTMLElement | Window | null) => {
+    cancelFollow();
+    viewportObserver.current?.disconnect();
+    viewportObserver.current = null;
+    navigationPointer.current = null;
+    scroller.current = element instanceof HTMLElement ? element : null;
+    const viewport = scroller.current;
+    lastPosition.current = { top: viewport?.scrollTop ?? 0,
+      bottom: Boolean(viewport && viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4) };
+    if (scroller.current) {
+      // Virtuoso publishes this ref after layout effects. Attach to the
+      // actual current node, including replacements and hidden-view returns.
+      viewportObserver.current = new ResizeObserver(followMeasuredOutput);
+      viewportObserver.current.observe(scroller.current);
+    }
+  }, [cancelFollow, followMeasuredOutput]);
   const [loadingOlder, setLoadingOlder] = useState(false);
   // Whether the conversation has been parked at its newest message yet. Until
   // it has, "at the top" means nothing: the list mounts at scroll 0 and
@@ -290,16 +353,20 @@ export function ChatView({
     activeSessionId ? Boolean(s.hasMoreMessages[activeSessionId]) : false
   );
   useLayoutEffect(() => {
+    cancelFollow();
+    following.current = true;
+    navigationPointer.current = null;
     pageAnchor.current = null;
     setLoadingOlder(false);
     setParked(false);
     setAtTop(false);
     setOlderStalled(false);
-    return () => { olderRead.current?.cancel(); olderRead.current = null; };
-  }, [activeSessionId, messageWindow]);
+    return () => { cancelFollow(); olderRead.current?.cancel(); olderRead.current = null; };
+  }, [activeSessionId, messageWindow, cancelFollow]);
   const loadOlder = useCallback(() => {
     const sid = activeSessionId;
     if (!sid || olderRead.current?.current()) return;
+    pauseFollowing();
     setLoadingOlder(true);
     const read = observeOlderMessages(sid, () => {
       const viewport = scroller.current?.getBoundingClientRect();
@@ -328,7 +395,7 @@ export function ChatView({
         setOlderStalled(true);
       }
     });
-  }, [activeSessionId]);
+  }, [activeSessionId, pauseFollowing]);
 
   useLayoutEffect(() => {
     const anchor = pageAnchor.current;
@@ -580,7 +647,7 @@ export function ChatView({
     );
   }, [hasOlder, loadingOlder, loadOlder]);
 
-  const footer = useCallback(() => {
+  const footer = useMemo(() => {
     if (!isRunning) return null;
     if (streamingText || nativeStreaming.length) {
       return (
@@ -1550,7 +1617,7 @@ export function ChatView({
 
       <Virtuoso
         ref={virtuoso}
-        scrollerRef={(element) => { scroller.current = element instanceof HTMLElement ? element : null; }}
+        scrollerRef={setScroller}
         key={`${activeSessionId}:${hasMessages}`}
         className="chat-messages flex-1 min-h-0"
         data={chatMessages}
@@ -1564,9 +1631,80 @@ export function ChatView({
           setAtTop(top);
           if (!top) setOlderStalled(false);
         }}
-        followOutput="smooth"
+        onWheelCapture={(event) => {
+          if (event.deltaY >= 0 || event.ctrlKey || !canScrollChatUp(scroller.current, event.target)) return;
+          navigationPointer.current = null;
+          pauseFollowing();
+        }}
+        onKeyDown={(event) => {
+          if (event.defaultPrevented || event.altKey || event.metaKey || event.ctrlKey && event.key !== "Home") return;
+          const up = ["ArrowUp", "PageUp", "Home"].includes(event.key) || event.key === " " && event.shiftKey;
+          if (!up || !canScrollChatUp(scroller.current, event.target)) return;
+          const target = event.target instanceof HTMLElement ? event.target : null;
+          if (target?.isContentEditable || target?.closest("input, textarea, select, [role=textbox]")) return;
+          if (event.key === " " && target?.closest("button, a[href], summary, [role=button]")) return;
+          navigationPointer.current = null;
+          pauseFollowing();
+        }}
+        onPointerDownCapture={(event) => {
+          navigationPointer.current = null;
+          const viewport = scroller.current;
+          if (!viewport || !event.isPrimary) return;
+          if (event.pointerType === "touch" || event.pointerType === "pen") {
+            navigationPointer.current = { id: event.pointerId, y: event.clientY, resume: following.current };
+          } else if (event.button === 0 && event.target === viewport && canScrollChatUp(viewport, viewport)) {
+            const left = viewport.getBoundingClientRect().left + viewport.clientLeft;
+            if (event.clientX < left || event.clientX >= left + viewport.clientWidth) {
+              navigationPointer.current = { id: event.pointerId, y: event.clientY, resume: following.current };
+              pauseFollowing();
+            }
+          }
+        }}
+        onPointerMoveCapture={(event) => {
+          const pointer = navigationPointer.current;
+          if (!pointer || pointer.id !== event.pointerId) return;
+          if (event.pointerType === "mouse") {
+            if (event.clientY !== pointer.y) pointer.resume = false;
+            return;
+          }
+          const up = event.clientY > pointer.y;
+          pointer.y = event.clientY;
+          if (up && canScrollChatUp(scroller.current, event.target)) {
+            pointer.resume = false;
+            pauseFollowing();
+          }
+        }}
+        onPointerUpCapture={(event) => {
+          const pointer = navigationPointer.current;
+          if (!pointer || pointer.id !== event.pointerId) return;
+          navigationPointer.current = null;
+          const viewport = scroller.current;
+          // Native thumb drags may omit pointermove: release coordinates still
+          // distinguish navigation from output growing during an unmoved press.
+          const resume = pointer.resume && event.clientY === pointer.y;
+          if (viewport?.clientHeight && (resume || viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4)) {
+            following.current = true;
+            followMeasuredOutput();
+          }
+        }}
+        onPointerCancelCapture={() => { navigationPointer.current = null; }}
+        onScroll={(event) => {
+          const viewport = event.currentTarget;
+          if (viewport !== scroller.current || !viewport.clientHeight) return;
+          const top = viewport.scrollTop;
+          const bottom = viewport.scrollHeight - viewport.clientHeight - top <= 4;
+          if (!pageAnchor.current && !navigationPointer.current) {
+            // An already queued bottom notification cannot undo new upward
+            // intent. Resume on an observed return, including a small downstep.
+            if (bottom && (!lastPosition.current.bottom || top > lastPosition.current.top)) following.current = true;
+          }
+          lastPosition.current = { top, bottom };
+        }}
+        totalListHeightChanged={followMeasuredOutput}
+        followOutput={false}
         increaseViewportBy={{ top: 400, bottom: 400 }}
-        components={{ Header: olderHeader, Footer: footer }}
+        components={{ Header: olderHeader, Footer: ChatFooter }}
+        context={{ footer }}
       />
 
       <div aria-label="Questions outside the history window" className="max-h-[40vh] shrink-0 overflow-y-auto empty:hidden">

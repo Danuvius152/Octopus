@@ -211,7 +211,7 @@ class AppAgentManager:
         self._release_turn(turn)
 
     @staticmethod
-    def _detach_consumer(turn: _Turn) -> None:
+    def detach_consumer(turn: _Turn) -> None:
         turn.consumer_attached = False
         while not turn.queue.empty():
             turn.queue.get_nowait()
@@ -313,7 +313,7 @@ class AppAgentManager:
     async def ask(self, app_row: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         """Run one turn and wait for the answer (§2 — the JSON delivery)."""
         turn = await self.begin_turn(app_row, **kwargs)
-        self._detach_consumer(turn)
+        self.detach_consumer(turn)
         try:
             await asyncio.wait_for(turn.done.wait(), timeout=ASK_TIMEOUT_SECONDS)
         except TimeoutError:
@@ -376,25 +376,24 @@ class AppAgentManager:
         connection drops mid-answer, then `delta`/`tool`/`question` as they
         arrive, then exactly one terminal `done` or `error`.
         """
-        try:
-            yield {"type": "conversation", "conversation_id": turn.session_id, "request_id": turn.request_id}
-            while True:
-                try:
-                    event = await asyncio.wait_for(
-                        turn.queue.get(), timeout=ASK_TIMEOUT_SECONDS
-                    )
-                except TimeoutError:
-                    yield {
-                        "type": "error",
-                        "message": "This response wait ended. Query the original request for its current result; no operation was repeated.",
-                        **await self._response_wait_recovery(turn),
-                    }
-                    return
-                yield event
-                if event["type"] in ("done", "error"):
-                    return
-        finally:
-            self._detach_consumer(turn)
+        # The HTTP Response owns consumer detachment for its entire ASGI
+        # invocation, including failures before this iterator is ever started.
+        yield {"type": "conversation", "conversation_id": turn.session_id, "request_id": turn.request_id}
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    turn.queue.get(), timeout=ASK_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                yield {
+                    "type": "error",
+                    "message": "This response wait ended. Query the original request for its current result; no operation was repeated.",
+                    **await self._response_wait_recovery(turn),
+                }
+                return
+            yield event
+            if event["type"] in ("done", "error"):
+                return
 
     async def begin_turn(
         self,
@@ -463,7 +462,7 @@ class AppAgentManager:
             if turn.observer is None:
                 self._release_turn(turn)
             else:
-                self._detach_consumer(turn)
+                self.detach_consumer(turn)
             if isinstance(exc, (asyncio.CancelledError, AppAgentError)):
                 raise
             raise AppAgentError(f"could not start the turn: {exc}", status_code=500) from exc

@@ -506,20 +506,21 @@ async def test_closed_work_drains_running_process_after_startup_cleanup_fails(db
         return process
 
     async def fail_startup_recording(task_id, **kwargs):
-        if kwargs.get("status") == "interrupted":
+        if task_id == startup_id and kwargs.get("status") == "cancelled":
             compensation_failed.set()
             raise RuntimeError("startup compensation recording failed")
         return await real_update(task_id, **kwargs)
 
     monkeypatch.setattr(bg_tasks.asyncio, "create_subprocess_exec", delayed_second_spawn)
     monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03)
-    await manager.start_task(session_id="work-cleanup-failure", command="sleep 60",
-                             working_dir=str(tmp_path), owned_context=owned)
+    first = await manager.start_task(session_id="work-cleanup-failure", command="sleep 60",
+                                     working_dir=str(tmp_path), owned_context=owned)
     startup = asyncio.create_task(manager.start_task(session_id="work-cleanup-failure", command="sleep 60",
                                                      working_dir=str(tmp_path), owned_context=owned))
     stopping = delivery_waiter = None
     try:
         await asyncio.wait_for(spawned.wait(), 3)
+        startup_id = next(row.id for row in await manager.list_tasks("work-cleanup-failure") if row.id != first.id)
         startup.cancel()
         await asyncio.gather(startup, return_exceptions=True)
         monkeypatch.setattr(db, "update_bg_task", fail_startup_recording)

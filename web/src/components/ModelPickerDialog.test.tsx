@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { ModelPickerDialog } from "./ModelPickerDialog";
 import { sessions } from "../lib/sessionList";
 import { useSessionStore, type Agent, type CredentialInfo, type SessionInfo } from "../stores/sessionStore";
+import { deferred } from "../test-support/deferred";
 
 const session = {
   id: "session1", name: "Existing", working_dir: "/tmp", created_at: "2026-10-11",
@@ -213,6 +214,7 @@ it("can explicitly use Normal over an agent's Fast default and restore inheritan
   const request = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
   expect(JSON.parse(String(request?.[1].body))).toEqual({ service_tier: "default" });
   const normal = { ...session, service_tier: "default" as const };
+  rerender(<ModelPickerDialog session={normal} open={false} onOpenChange={vi.fn()} />);
   rerender(<ModelPickerDialog session={normal} open onOpenChange={vi.fn()} />);
   fireEvent.change(screen.getByLabelText("Speed"), { target: { value: "" } });
   fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
@@ -267,3 +269,30 @@ it("shows a server rejection and keeps the saved settings", async () => {
   expect(close).not.toHaveBeenCalled();
   expect(useSessionStore.getState().sessions[0].reasoning_effort).toBeNull();
 });
+
+it.each(["account", "service", "connection", "view-return"])(
+  "does not apply an old opening's notice or close after %s changes", async (transition) => {
+    const receipt = deferred<Response>();
+    let saved = false;
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "PATCH") return receipt.promise;
+      if (String(url).endsWith("/api/sessions")) return json([{ ...session, model: saved ? "model-b" : session.model }]);
+      return json(catalog);
+    });
+    const close = vi.fn(), applied = vi.fn();
+    render(<ModelPickerDialog session={session} open onOpenChange={close} onApplied={applied} />);
+    fireEvent.change(screen.getByLabelText("Model name"), { target: { value: "model-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    act(() => {
+      const store = useSessionStore.getState();
+      if (transition === "account") store.setToken("foreign-account");
+      else if (transition === "service") useSessionStore.setState({ dispatchGeneration: "replacement-service" });
+      else if (transition === "connection") sessions.connect({ socket: {}, accountGeneration: store.accountGeneration });
+      else { store.openManage("connectors"); store.showChat(); }
+    });
+    await act(async () => { saved = true; receipt.resolve(json({ ...session, model: "model-b" })); });
+    expect(applied).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(transition === "view-return" ? 1 : 0);
+    if (transition === "account") expect(useSessionStore.getState().sessions).toEqual([]);
+    else await waitFor(() => expect(useSessionStore.getState().sessions[0].model).toBe("model-b"));
+  });

@@ -196,6 +196,18 @@ including a process handle that arrives after its startup waiter is cancelled.
 Shutdown seals admission, joins captured operations and retires their resources;
 it reports incomplete cleanup instead of reusing an unconfirmed slot.
 
+For a late startup handle without normal output pumps, that same retirement
+owner starts concurrent pipe draining before waiting. Pipe backpressure can
+delay the original wait even after leader and group exit. Normal output pumps
+instead retain their EOF window; if it expires, a truncation diagnostic is
+recorded and cancellation is requested, then their actual exit is joined.
+Only after those consumers exit can the shared raw drain take over, confirming
+both pipe EOFs, `proc.wait()` and the original waiter before capacity is released.
+The raw drain discards descriptor-cleanup bytes; it does not reconstruct lost
+log output. A timeout or reader that has not exited retains the original
+instance, references and slot for reentrant retirement. Group exit is never
+gated on successful pipe consumption or mistaken for completion of that work.
+
 Explicit stop, rebuild, delete and forced shutdown seal admission before joining
 the original process and consumers. Process exit is confirmed under the lifecycle
 lock; consumer interruption and cleanup run outside it. A Wiki abort waits only

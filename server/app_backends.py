@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .aio import complete_cleanup, drain_cancelled
+from .aio import await_owned_task, complete_cleanup, drain_cancelled
 from .applications import (
     app_scope_token,
     backend_script,
@@ -35,7 +35,7 @@ from .applications import (
     runtime_dir_for,
 )
 from .config import settings
-from .process_groups import wait_group_exit
+from .process_groups import drain_process_pipes, wait_group_exit
 
 logger = logging.getLogger(__name__)
 
@@ -736,6 +736,13 @@ class BackendSupervisor:
             st._spawn = None
         proc = st.process
         if proc is not None:
+            if not st._readers:
+                # A late startup handle has no normal output pump. Adopt its
+                # pipes before waiting: transport backpressure can delay the
+                # original wait even after the captured group has exited.
+                st._readers = [asyncio.create_task(
+                    drain_process_pipes(proc), name=f"app-{st.app_id}-startup-pipes",
+                )]
             _kill_group(proc, signal.SIGTERM)
             if st._waiter is None or st._waiter.cancelled():
                 st._waiter = asyncio.create_task(proc.wait(), name=f"app-{st.app_id}-process-exit")
@@ -754,12 +761,11 @@ class BackendSupervisor:
                     group_exited = True
                 except TimeoutError:
                     group_exited = False
-            if not process_done or proc.returncode is None or not group_exited:
+            if proc.returncode is None or not group_exited:
                 for task in st._readers:
                     if not task.done() and not task.cancelling():
                         task.cancel()
                 raise RuntimeError(f"Application {st.app_id} process exit unconfirmed")
-            st._waiter.result()
         # Confirmed process exit can precede consumption of buffered output.
         # Give readers their EOF window before requesting cancellation.
         if st._readers:
@@ -778,6 +784,15 @@ class BackendSupervisor:
             st._readers = list(pending)
             if pending:
                 raise RuntimeError(f"Application {st.app_id} output readers did not exit")
+        if proc is not None:
+            # A retired/cancelled pump may leave buffered bytes behind. Group
+            # exit permits single-reader handover; pipe EOF then completes the
+            # original wait, rather than being gated on that wait in advance.
+            async with asyncio.timeout(_TASK_DRAIN_SECONDS):
+                await drain_process_pipes(proc)
+                assert st._waiter is not None
+                await await_owned_task(st._waiter)
+
     def _release_process(self, st: BackendState) -> None:
         # Process, readers and consumers finish before ownership is released.
         st.process = None

@@ -18,7 +18,7 @@ import asyncio
 import json
 import mimetypes
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from importlib.resources import files
 from urllib.parse import unquote, urlencode
 
@@ -565,6 +565,20 @@ def _sse(events) -> AsyncIterator[bytes]:
     return gen()
 
 
+class AppAgentStreamingResponse(StreamingResponse):
+    """The accepted turn's HTTP consumer ends with the full ASGI invocation."""
+
+    def __init__(self, content, *, detach: Callable[[], None], **kwargs):
+        super().__init__(content, **kwargs)
+        self._detach = detach
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._detach()
+
+
 @static_router.post("/apps/{app_id}/agent/chat", include_in_schema=False)
 async def app_agent_chat(
     request: Request, app_id: str, body: AppAgentTurnRequest
@@ -577,12 +591,14 @@ async def app_agent_chat(
     build prompt every application's agent reads.
     """
     row = await _application_for_request(request, app_id)
+    manager = app_agent_manager
     try:
-        turn = await app_agent_manager.begin_turn(row, **body.model_dump())
+        turn = await manager.begin_turn(row, **body.model_dump())
     except AppAgentError as e:
         raise _agent_error(e)
-    return StreamingResponse(
-        _sse(app_agent_manager.stream_turn(turn)),
+    return AppAgentStreamingResponse(
+        _sse(manager.stream_turn(turn)),
+        detach=lambda: manager.detach_consumer(turn),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-store",

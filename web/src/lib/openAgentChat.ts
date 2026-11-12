@@ -13,7 +13,7 @@ const API = window.location.origin;
  * agent's work. Opening the session is also what gives an unpinned agent its
  * temporary place in the sidebar (sidebar-pins.md §5).
  */
-export async function openAgentChat(agentId: string): Promise<void> {
+export async function openAgentChat(agentId: string, foreground: () => boolean): Promise<void> {
   const { sessions, token } = useSessionStore.getState();
   const latest = sessions
     .filter(
@@ -22,21 +22,25 @@ export async function openAgentChat(agentId: string): Promise<void> {
     )
     .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
   if (latest) {
-    await selectSession(latest.id, agentId);
+    if (foreground()) await selectSession(latest.id, agentId);
     return;
   }
   const observation = sessionList.capture();
-  const res = await fetch(`${API}/api/agents/${agentId}/sessions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({}),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const session = (await res.json()) as SessionInfo;
-  const accepted = await sessionList.created(session, observation);
-  if (!accepted || !sessionList.current(observation)) return;
-  await selectSession(session.id, agentId);
+  try {
+    const res = await fetch(`${API}/api/agents/${agentId}/sessions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const session = (await res.json()) as SessionInfo;
+    const accepted = await sessionList.created(session, observation);
+    if (!accepted || !sessionList.current(observation) || !foreground()) return;
+    await selectSession(session.id, agentId);
+  } catch (error) {
+    if (sessionList.current(observation) && foreground()) throw error;
+  }
 }

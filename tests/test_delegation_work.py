@@ -613,9 +613,10 @@ async def test_aborted_start_keeps_process_handle_for_cleanup(work_runtime, monk
         while (await manager.work_test_bg.list_tasks(parent.id))[0].status == "running":
             await asyncio.sleep(0.01)
     retained = await manager.work_test_bg.list_tasks(parent.id)
-    assert len(retained) == 1 and retained[0].status == "interrupted"
+    assert len(retained) == 1 and retained[0].status == "failed"
     saved = await manager.db.get_bg_task(retained[0].id)
-    assert saved["status"] == "interrupted" and saved["completed_at"] is not None
+    assert saved["status"] == "failed" and saved["stop_reason"] == "startup_failed"
+    assert saved["completed_at"] is not None
     assert saved["knowledge_context"] == retained[0].knowledge_context
     from server.knowledge import decode_owned
 

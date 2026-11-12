@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 import { IconEye, IconRestore } from "@tabler/icons-react";
 import {
   useSessionStore,
@@ -26,11 +26,29 @@ interface Props {
 /** Manage page for archived sessions, reached from the account menu. Lists
  * every archived session grouped by its owning agent (they no longer clutter
  * the sidebar). "View" opens it read-only; "Unarchive" brings it back live. */
-export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
+export function ArchivedSessionsDialog(props: Props) {
+  const account = useSessionStore((s) => s.accountGeneration);
+  return props.open ? <ArchiveOpening key={account} {...props} /> : null;
+}
+
+function ArchiveOpening({ open, onOpenChange }: Props) {
   const token = useSessionStore((s) => s.token);
   const agents = useSessionStore((s) => s.agents);
   const archived = useSessionStore((s) => s.archivedSessions);
   const read = useSessionStore((s) => s.sessionRead);
+  const [openingView] = useState(() => useSessionStore.getState().mainView);
+  const foreground = useRef(false);
+  const close = useEffectEvent(() => onOpenChange(false));
+  useEffect(() => {
+    foreground.current = true;
+    const unsubscribe = useSessionStore.subscribe((state) => {
+      if (state.mainView !== openingView && foreground.current) {
+        foreground.current = false;
+        close();
+      }
+    });
+    return () => { foreground.current = false; unsubscribe(); };
+  }, [openingView]);
 
   const headers = {
     "Content-Type": "application/json",
@@ -49,11 +67,13 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   // active session is archived (it's in archivedSessions) and renders the
   // read-only banner + history. Mirrors SessionList's old selectSession.
   const view = async (s: SessionInfo) => {
+    foreground.current = false;
     onOpenChange(false);
     await selectSession(s.id, s.agent_id);
   };
 
   const unarchive = async (s: SessionInfo) => {
+    if (!foreground.current) return;
     const observation = sessionList.capture();
     try {
       const res = await fetch(`${API_URL}/api/sessions/${s.id}/unarchive`, {
@@ -65,7 +85,8 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
         // Dedupe on insert in case a session_unarchived broadcast already
         // landed in the live list.
         const accepted = await sessionList.restored(revived, observation);
-        if (!sessionList.accountCurrent(observation)) return;
+        if (!foreground.current || !sessionList.accountCurrent(observation)) return;
+        foreground.current = false;
         onOpenChange(false);
         if (accepted && sessionList.current(observation)) await selectSession(revived.id, revived.agent_id);
       }
@@ -87,7 +108,10 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   if (orphans.length) groups.push({ agent: null, items: orphans });
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => {
+      if (!next) foreground.current = false;
+      onOpenChange(next);
+    }}>
       <DialogContent className="archived-sessions-dialog max-w-xl">
         {read.error && <p role="alert">Sessions not synchronized: {read.error}</p>}
         <DialogHeader>

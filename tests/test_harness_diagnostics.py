@@ -441,9 +441,13 @@ async def test_cancelled_waiter_keeps_late_failure_diagnostics_with_the_run(
             stopping.cancel()
             await asyncio.gather(stopping, return_exceptions=True)
         release.set()
-        with pytest.raises(OSError) as raised:
+        if stage == "spawn":
             await asyncio.wait_for(run.stop(), 2)
-        assert raised.value is failure
+            assert run.retirement_state == "proven", "A failed original launch has no execution resource to retire."
+        else:
+            with pytest.raises(OSError) as raised:
+                await asyncio.wait_for(run.stop(), 2)
+            assert raised.value is failure
         assert credential not in caplog.text
         assert detail in caplog.text and "Traceback (most recent call last):" in caplog.text
         assert credential in str(failure) and failure.errno == errno.EIO

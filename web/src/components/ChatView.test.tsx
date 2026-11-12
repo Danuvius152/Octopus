@@ -7,6 +7,7 @@ import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { schedules } from "../lib/scheduleList";
 import { sessions } from "../lib/sessionList";
 import commandCasesData from "../../../tests/fixtures/wiki-command-cases.json";
+import { deferred } from "../test-support/deferred";
 
 const commandCases = commandCasesData as { message: string; mode: "read" | "maintain" | null }[];
 
@@ -28,6 +29,51 @@ beforeEach(() => {
   });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+it.each([[200, false], [400, false], [200, true], [400, true]] as const)(
+  "keeps a reopened model draft through real store return (%s, new save already pending: %s)", async (status, newPending) => {
+  useSessionStore.getState().setToken("model-account");
+  const selected = { ...session, model: "original-model", reasoning_effort: null, service_tier: null };
+  useSessionStore.setState({ sessions: [selected], activeSessionId: selected.id, mainView: "chat", dispatchGeneration: "model-service" });
+  const saves: { body: unknown; reply: ReturnType<typeof deferred<Response>> }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      const reply = deferred<Response>();
+      saves.push({ body: JSON.parse(String(init.body)), reply });
+      return reply.promise;
+    }
+    return Response.json({ models: [], reasoning_efforts: ["low", "high"], service_tiers: ["default", "fast"] });
+  }));
+  try {
+    setup();
+    const open = () => fireEvent.click(screen.getByRole("button", { name: "Model, reasoning and speed settings" }));
+    open();
+    fireEvent.change(screen.getByLabelText("Model name"), { target: { value: "old-model" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    expect(saves).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    open();
+    expect(screen.getByLabelText("Model name")).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("Model name"), { target: { value: "new-model" } });
+    if (newPending) fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await act(async () => saves[0].reply.resolve(status === 200
+      ? Response.json({ ...selected, model: "old-model", reasoning_effort: "high" })
+      : Response.json({ detail: "Old opening refusal" }, { status })));
+    expect(useSessionStore.getState().sessions[0]).toMatchObject(status === 200
+      ? { model: "old-model", reasoning_effort: "high" } : { model: "original-model", reasoning_effort: null });
+    expect(screen.getByLabelText("Model name")).toHaveValue("new-model");
+    expect(screen.getByLabelText("Reasoning effort")).toHaveValue("");
+    if (newPending) expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+    else expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();
+    expect(screen.queryByText("Old opening refusal")).toBeNull();
+    expect(useSessionStore.getState().messages[session.id] ?? []).toEqual([]);
+    if (!newPending) fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    expect(saves.map((save) => save.body)).toEqual([{ model: "old-model" }, { model: "new-model" }]);
+    await act(async () => saves[1].reply.resolve(Response.json({ ...selected, model: "new-model", reasoning_effort: "high" })));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(useSessionStore.getState().messages[session.id]).toEqual([expect.objectContaining({ type: "notice", content: expect.stringContaining("new-model") })]);
+  } finally { vi.unstubAllGlobals(); }
+});
 
 it("keeps unsent text until deletion is confirmed and cannot carry it into another session", () => {
   const { input } = setup();

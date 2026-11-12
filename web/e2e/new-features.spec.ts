@@ -321,9 +321,7 @@ test.describe("Windowed transcript", () => {
 
       // Reaching the top is what asks for more, so go there.
       const scroller = page.locator(".chat-messages");
-      await scroller.evaluate((el) => {
-        el.scrollTop = 0;
-      });
+      await scroller.press("Home");
       await expect(page.getByText(BOUNDARY, { exact: true })).toBeInViewport();
       // Hold the HTTP response until the reader's anchor is visible, then
       // verify it survives the prepend rather than racing through both states.
@@ -338,16 +336,14 @@ test.describe("Windowed transcript", () => {
       });
 
       // The message that was on screen is still on screen: prepending 60 items
-      // must not move the view (this is what `firstItemIndex` buys).
+      // must preserve the visible message's stable identity and pixel offset.
       await expect(page.getByText(BOUNDARY, { exact: true })).toBeInViewport();
       // And it is there exactly once — the seam is where a duplicate would land.
       expect(await page.getByText(BOUNDARY, { exact: true }).count()).toBe(1);
       expect(olderRequests).toHaveLength(1);
 
       // The real top is now reachable, and the first message is the first one.
-      await scroller.evaluate((el) => {
-        el.scrollTop = 0;
-      });
+      await scroller.press("Home");
       await expect(page.getByText("msg-0", { exact: true })).toBeInViewport();
       expect(await page.getByText("msg-0", { exact: true }).count()).toBe(1);
     });

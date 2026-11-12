@@ -84,22 +84,22 @@ async def test_eof_timeout_reports_truncation_and_keeps_capacity_until_reader_ex
     ))
     monkeypatch.setattr(app_backends, "MAX_RUNNING", 1)
     monkeypatch.setattr(app_backends, "_TASK_DRAIN_SECONDS", .03)
-    real_read = asyncio.StreamReader.read
+    supervisor = BackendSupervisor()
+    real_pump = supervisor._pump
     release = asyncio.Event()
 
-    async def held_eof(stream, n=-1):
-        raw = await real_read(stream, n)
-        if not raw:
-            try:
-                await release.wait()
-            except asyncio.CancelledError:
-                if not delayed_cancel:
-                    raise
-                await release.wait()
-        return raw
+    async def held_reader(*args):
+        await real_pump(*args)
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            if not delayed_cancel:
+                raise
+            await release.wait()
 
-    monkeypatch.setattr(asyncio.StreamReader, "read", held_eof)
-    supervisor = BackendSupervisor()
+    # Hold the original log consumer after EOF, without also blocking the
+    # subsequent descriptor cleanup once that consumer has retired.
+    monkeypatch.setattr(supervisor, "_pump", held_reader)
     try:
         state = await supervisor.ensure_running("logs", str(tmp_path))
         proc = state.process

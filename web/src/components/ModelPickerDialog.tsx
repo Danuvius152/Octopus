@@ -1,6 +1,6 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
 import { sessions as sessionList } from "../lib/sessionList";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { IconCheck, IconCpu } from "@tabler/icons-react";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { buildModelOptions } from "../lib/modelOptions";
@@ -40,7 +40,8 @@ interface ModelPickerProps {
 }
 
 export function ModelPickerDialog(props: ModelPickerProps) {
-  return <SessionModelPickerDialog key={props.session.id} {...props} />;
+  const account = useSessionStore((s) => s.accountGeneration);
+  return props.open ? <SessionModelPickerDialog key={JSON.stringify([account, props.session.id])} {...props} /> : null;
 }
 
 function SessionModelPickerDialog({ session, open, onOpenChange, onApplied }: ModelPickerProps) {
@@ -49,16 +50,25 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied }: Mo
   const credentials = useSessionStore((s) => s.credentials);
   const sessions = useSessionStore((s) => s.sessions);
   const backendModels = useSessionStore((s) => s.backendModels);
-  const [typed, setTyped] = useState("");
-  const [effort, setEffort] = useState("");
-  const [serviceTier, setServiceTier] = useState("");
-  const [credentialChoice, setCredentialChoice] = useState(session.credential_id ?? "");
+  const [initial] = useState(session);
+  const [typed, setTyped] = useState(initial.model ?? "");
+  const [effort, setEffort] = useState(initial.reasoning_effort ?? "");
+  const [serviceTier, setServiceTier] = useState(initial.service_tier ?? "");
+  const [credentialChoice, setCredentialChoice] = useState(initial.credential_id ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const mounted = useRef(false);
+  const foreground = useRef(false);
+  const retire = useEffectEvent(() => onOpenChange(false));
   useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
+    foreground.current = true;
+    const start = useSessionStore.getState();
+    const unsubscribe = useSessionStore.subscribe((state) => {
+      if (foreground.current && (state.mainView !== start.mainView || state.activeSessionId !== start.activeSessionId)) {
+        foreground.current = false;
+        retire();
+      }
+    });
+    return () => { foreground.current = false; unsubscribe(); };
   }, []);
 
   const agent = agents.find((a) => a.id === session.agent_id) ?? null;
@@ -85,15 +95,6 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied }: Mo
     }] : []),
     { label: "Credential", ...signIn, value: credential?.label || (credentialId ? "Selected credential" : signIn.value) },
   ];
-  useEffect(() => {
-    if (open) {
-      setTyped(session.model ?? "");
-      setEffort(session.reasoning_effort ?? "");
-      setServiceTier(session.service_tier ?? "");
-      setCredentialChoice(session.credential_id ?? "");
-      setError(null);
-    }
-  }, [open, session.id, session.model, session.reasoning_effort, session.service_tier, session.credential_id]);
   const options = useMemo(
     () =>
       buildModelOptions({
@@ -109,13 +110,14 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied }: Mo
   );
 
   const apply = async () => {
+    if (!foreground.current || busy) return;
     const model = typed.trim() || null;
     const reasoning = effort || null;
     const changes: Record<string, string | null> = {};
-    if (model !== (session.model ?? null)) changes.model = model;
-    if (reasoning !== (session.reasoning_effort ?? null)) changes.reasoning_effort = reasoning;
-    if ((serviceTier || null) !== (session.service_tier ?? null)) changes.service_tier = serviceTier || null;
-    if ((credentialChoice || null) !== (session.credential_id ?? null)) changes.credential_id = credentialChoice || null;
+    if (model !== (initial.model ?? null)) changes.model = model;
+    if (reasoning !== (initial.reasoning_effort ?? null)) changes.reasoning_effort = reasoning;
+    if ((serviceTier || null) !== (initial.service_tier ?? null)) changes.service_tier = serviceTier || null;
+    if ((credentialChoice || null) !== (initial.credential_id ?? null)) changes.credential_id = credentialChoice || null;
     const observation = sessionList.capture();
     setBusy(true);
     setError(null);
@@ -139,18 +141,21 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied }: Mo
         model: updated.model, reasoning_effort: updated.reasoning_effort,
         service_tier: updated.service_tier, credential_id: updated.credential_id,
       }, observation);
-      if (!mounted.current || !sessionList.current(observation)) return;
+      if (!foreground.current || !sessionList.current(observation)) return;
       onApplied?.(updated);
       onOpenChange(false);
     } catch (e) {
-      if (mounted.current && sessionList.current(observation)) setError(e instanceof Error ? e.message : "could not change the model");
+      if (foreground.current && sessionList.current(observation)) setError(e instanceof Error ? e.message : "could not change the model");
     } finally {
-      if (mounted.current) setBusy(false);
+      if (foreground.current) setBusy(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => {
+      if (!next) foreground.current = false;
+      onOpenChange(next);
+    }}>
       <DialogContent className="model-picker-dialog max-w-md">
         <DialogHeader>
           <DialogTitle>Model, reasoning and speed</DialogTitle>

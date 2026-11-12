@@ -36,18 +36,19 @@ import signal
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .aio import complete_cleanup, drain_cancelled
+from .aio import await_owned_task, complete_cleanup, drain_cancelled
 from .database import Database
 from .diagnostics import exception_diagnostic, safe_diagnostic
 from .knowledge import OwnedTaskContext, capture, derive, encode
 from .mcp_identity import McpScope, require_live_scope, work_is_open
+from .process_groups import drain_process_pipes
 from .process_groups import group_exists as _group_exists
 from .process_groups import (
     group_has_live_members_after_kill as _group_has_live_members_after_kill,
@@ -226,6 +227,9 @@ class _StartingTask:
     running: _RunningTask | None = None
     owner: asyncio.Task[Any] | None = None
     cleanup: asyncio.Task[None] | None = None
+    # The caller can continue unrelated work after start_task returns/raises.
+    # Retirement joins only registration or compensation handoff, not its life.
+    handoff: asyncio.Future[None] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
 
 
 class BgTaskManager:
@@ -305,9 +309,8 @@ class BgTaskManager:
         for item in starting:
             if item.running is not None:
                 await self._terminate_proc(item.running, reason="server_shutdown")
-        owners = {item.owner for item in starting if item.owner is not None}
-        if owners:
-            await asyncio.wait(owners, timeout=_STARTUP_DRAIN_SECONDS)
+        if starting:
+            await asyncio.wait({item.handoff for item in starting}, timeout=_STARTUP_DRAIN_SECONDS)
         running = list(self._running.values())
         for rt in running:
             await self._terminate_proc(rt, reason="server_shutdown")
@@ -425,6 +428,51 @@ class BgTaskManager:
         reservation = _StartingTask(work_id, session_id, owner=asyncio.current_task())
         self._starting[task_id] = reservation
 
+        def startup_outcome() -> tuple[str, str]:
+            reason = reservation.stop_reason or "startup_failed"
+            status = ("cancelled" if reason in {"user_cancel", "work_cancelled"}
+                      else "interrupted" if reason == "server_shutdown" else "failed")
+            return status, reason
+
+        async def reap_aborted_start(spawn: asyncio.Task[asyncio.subprocess.Process] | None) -> None:
+            diagnostic = ""
+            abandoned = None
+            if spawn is not None:
+                try:
+                    abandoned = await await_owned_task(spawn)
+                except Exception as error:
+                    # Only this completed original launch proves no process was
+                    # created. Its error remains diagnostic, not an exit failure.
+                    diagnostic = exception_diagnostic(error)
+                    logger.error("Background task %s startup failed\n%s", task_id, diagnostic)
+            if abandoned is not None:
+                running = _RunningTask(record, abandoned, limits, started_monotonic)
+                reservation.running = running
+                await self._terminate_proc(running, reason=reservation.stop_reason or "startup_failed")
+                if running.termination is not None:
+                    await await_owned_task(running.termination)
+                if not running.retired:
+                    raise BgTaskError(f"aborted bg startup {task_id} group exit unconfirmed")
+                async with asyncio.timeout(_STARTUP_DRAIN_SECONDS):
+                    await drain_process_pipes(abandoned)
+            status, reason = startup_outcome()
+            assert self._db is not None  # Compensation retains its storage owner.
+            await self._db.update_bg_task(
+                task_id, status=status, completed_at=_now_iso(), stop_reason=reason, stderr=diagnostic,
+            )
+            self._starting.pop(task_id, None)
+
+        def compensate_start(spawn: asyncio.Task[asyncio.subprocess.Process] | None) -> asyncio.Task[None]:
+            # None is supplied only by the pre-OS handler below, before any
+            # spawn was scheduled. Both phases retain terminal-write ownership.
+            cleanup = asyncio.create_task(reap_aborted_start(spawn), name=f"bg-startup-cleanup-{task_id}")
+            reservation.cleanup = cleanup
+            self._cleanup_tasks.add(cleanup)
+            cleanup.add_done_callback(self._cleanup_done)
+            reservation.owner = None
+            reservation.handoff.set_result(None)
+            return cleanup
+
         # Capture and commit ownership before any OS process can execute.
         # A failed/uncertain commit never falls through to process creation.
         try:
@@ -438,15 +486,7 @@ class BgTaskManager:
             if self._shutting_down or reservation.stop_reason or not work_is_open(work_id):
                 raise BgTaskError("Background task admission closed before process launch")
         except BaseException:
-            try:
-                await complete_cleanup(self._db.update_bg_task(
-                    task_id, status="interrupted", completed_at=_now_iso(),
-                    stop_reason=reservation.stop_reason or "startup_failed",
-                ))
-            finally:
-                # No process was launched. Storage failure still propagates;
-                # a reservation without an OS resource must not await itself.
-                self._starting.pop(task_id, None)
+            await await_owned_task(compensate_start(None))
             raise
 
         # Spawn through /bin/sh -c so the model can use shell syntax
@@ -462,44 +502,16 @@ class BgTaskManager:
                 cwd=working_dir,
                 start_new_session=True,  # isolate process group so we can SIGTERM cleanly
             ))
+
         try:
-            proc = await asyncio.shield(spawn)
+            proc = await await_owned_task(spawn)
         except asyncio.CancelledError:
-            # The spawn may already have created an OS process before returning
-            # its handle. Its own task retains ownership until we can reap it.
-            async def reap_aborted_start() -> None:
-                try:
-                    abandoned = await asyncio.shield(spawn)
-                    running = _RunningTask(record, abandoned, limits, started_monotonic)
-                    reservation.running = running
-                    await self._terminate_proc(running, reason=reservation.stop_reason or "server_shutdown")
-                    if running.termination is not None:
-                        await asyncio.shield(running.termination)
-                    waiter = asyncio.create_task(abandoned.wait())
-                    done, _ = await asyncio.wait({waiter}, timeout=_STARTUP_DRAIN_SECONDS)
-                    if not done or abandoned.returncode is None:
-                        waiter.cancel()
-                        raise RuntimeError(f"aborted bg startup {task_id} exit unconfirmed")
-                except Exception:
-                    logger.exception("Failed to reap aborted bg startup %s", task_id)
-                    raise
-                else:
-                    assert self._db is not None  # Startup compensation retains its DB owner.
-                    await self._db.update_bg_task(
-                        task_id, status="interrupted", completed_at=_now_iso(),
-                        stop_reason=reservation.stop_reason or "server_shutdown",
-                    )
-                    self._starting.pop(task_id, None)
-            cleanup = asyncio.create_task(reap_aborted_start(), name=f"bg-startup-cleanup-{task_id}")
-            reservation.cleanup = cleanup
-            self._cleanup_tasks.add(cleanup)
-            cleanup.add_done_callback(self._cleanup_done)
+            # Cancellation only withdraws this observer. Original compensation
+            # owns the pending spawn, group, pipes and terminal commit.
+            compensate_start(spawn)
             raise
         except Exception as e:
-            await self._db.update_bg_task(
-                task_id, status="failed", completed_at=_now_iso(), stop_reason="startup_failed",
-            )
-            self._starting.pop(task_id, None)
+            await await_owned_task(compensate_start(spawn))
             raise BgTaskError(f"failed to spawn bg task: {e}") from e
 
         creation = replace(record)
@@ -511,6 +523,8 @@ class BgTaskManager:
         rt.task = asyncio.create_task(self._run_task(rt), name=f"bg-task-{task_id}")
         rt.task.add_done_callback(self._orchestration_done)
         self._starting.pop(task_id, None)
+        reservation.owner = None
+        reservation.handoff.set_result(None)
         # The process is supervised from spawn, independently of listeners.
         try:
             if reservation.stop_reason or not work_is_open(work_id):
@@ -529,8 +543,16 @@ class BgTaskManager:
         return creation
 
     async def cancel_task(self, task_id: str) -> bool:
-        """Best-effort cancel. Returns True if a live task was signalled,
-        False if the task wasn't running or didn't exist in memory."""
+        """Initiate/join cancellation of an original startup or running task."""
+        starting = self._starting.get(task_id)
+        if starting is not None:
+            starting.stop_reason = starting.stop_reason or "user_cancel"
+            if starting.running is not None:
+                await self._terminate_proc(starting.running, reason="user_cancel")
+            owner = starting.owner
+            if owner is not None and owner is not asyncio.current_task() and not owner.done() and not owner.cancelling():
+                owner.cancel()
+            return True
         rt = self._running.get(task_id)
         if rt is None:
             return False
@@ -563,10 +585,9 @@ class BgTaskManager:
     ) -> None:
         for item in starting:
             item.stop_reason = item.stop_reason or "work_cancelled"
-        owners = {item.owner for item in starting if item.owner is not None}
         # A cancelled request may have handed its not-yet-returned process to
         # compensating cleanup. Keep that exact reservation until handoff ends.
-        await asyncio.gather(*(asyncio.shield(owner) for owner in owners), return_exceptions=True)
+        await asyncio.gather(*(asyncio.shield(item.handoff) for item in starting))
         running.extend(item.running for item in starting if item.running is not None)
         captured = set(running)
         # Stop every captured process before joining. A failed compensation or

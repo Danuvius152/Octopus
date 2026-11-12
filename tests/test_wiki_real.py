@@ -202,8 +202,8 @@ async def test_codex_explicit_wiki_and_native_helper(
         backend, raw, contexts = runs[0]
         assert len(contexts) == 1
         calls = [event for event in raw if event.type == "tool_use" and event.tool_name == "subAgentActivity"
-                 and event.raw["params"]["item"]["kind"] in {"started", "interacted"}]
-        assert [event.raw["params"]["item"]["kind"] for event in calls] == ["started", "interacted"]
+                 and event.tool_input["item"]["kind"] in {"started", "interacted"}]
+        assert [event.tool_input["item"]["kind"] for event in calls] == ["started", "interacted"]
         assert all(event.runtime_metadata["attempt_id"] == contexts[0][1] for event in calls)
         assert len({event.runtime_metadata["tool_call_id"] for event in calls}) == 2
         finished = {event.subagent.card_id: event.subagent for event in raw

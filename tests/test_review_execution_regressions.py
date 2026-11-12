@@ -11,18 +11,20 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from starlette.requests import Request
 
 from server import app_agent as app_agent_mod
 from server import app_backends
 from server.app_agent import AppAgentError
 from server.app_backends import RUNNING, STOPPED, BackendState, BackendSupervisor
-from server.applications import ApplicationError
+from server.applications import ApplicationError, app_scope_token
 from server.config import settings
 from server.harness import Harness
 from server.research import manager as research_mod
 from server.research.leaf import LeafResult
 from server.research.manager import ResearchManager
 from server.research.orchestrator import run_research
+from server.routers import applications as app_routes
 from server.sessions.runtime_types import SessionMailboxFull
 from tests import test_app_agent as app_fixtures
 from tests.test_applications import application_model
@@ -154,7 +156,6 @@ async def test_f20_departed_consumer_keeps_execution_counted_until_completion(
     release.clear()
     entered.clear()
     starts.clear()
-    response = None
     ack = asyncio.Event()
     try:
         if consumer == "timeout":
@@ -162,10 +163,29 @@ async def test_f20_departed_consumer_keeps_execution_counted_until_completion(
                 await aam.ask(row, message="Keep working after the HTTP timeout")
             assert error.value.status_code == 504
         elif consumer == "sse_disconnect":
-            turn = await aam.begin_turn(row, message="Keep working after SSE closes")
-            response = aam.stream_turn(turn)
-            assert (await anext(response))["type"] == "conversation"
-            await response.aclose()
+            monkeypatch.setattr(app_routes, "_manager", am)
+            monkeypatch.setattr(app_routes, "app_agent_manager", aam)
+            scope = {
+                "type": "http", "method": "POST", "path": f"/apps/{row['id']}/agent/chat",
+                "headers": [(b"x-octopus-app-token", app_scope_token(row["id"]).encode())],
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+            }
+            response = await app_routes.app_agent_chat(
+                Request(scope), row["id"], app_routes.AppAgentTurnRequest(message="Keep working after SSE closes"),
+            )
+            first_body = asyncio.Event()
+
+            async def receive():
+                await first_body.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    assert b"event: conversation\n" in message["body"]
+                    first_body.set()
+
+            await asyncio.wait_for(response(scope, receive, send), 5)
+            assert first_body.is_set()
         else:
             if consumer == "admission_cancel":
                 original_start = mgr.start_message
@@ -207,8 +227,6 @@ async def test_f20_departed_consumer_keeps_execution_counted_until_completion(
     finally:
         ack.set()
         release.set()
-        if response is not None:
-            await response.aclose()
         await mgr.drain_turns(timeout=5)
 
 

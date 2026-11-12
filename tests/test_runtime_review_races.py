@@ -820,7 +820,7 @@ async def test_cancelled_background_registration_retains_confirmed_row_without_s
     assert len(registered) == 1
     assert registered[0].session_id == session.id
     assert registered[0].command == shlex.join([sys.executable, "-c", code])
-    assert registered[0].status == "interrupted" and registered[0].stop_reason == "startup_failed"
+    assert registered[0].status == "failed" and registered[0].stop_reason == "startup_failed"
     assert registered[0].exit_code is None
     assert registered[0].stdout == registered[0].stderr == ""
     assert delivered == broadcasts == []

@@ -46,7 +46,9 @@ test(`history prepend keeps the visible row and offset across ${childOnly ? "chi
   await page.locator(".session-item", { hasText: session.name }).click();
   const scroller = page.locator(".chat-messages");
   await expect(scroller.getByText("History row 260", { exact: true })).toBeVisible();
-  await scroller.evaluate((element) => { element.scrollTop = 0; });
+  // Reach history through native navigation, which carries reading intent;
+  // layout-driven position changes deliberately do not retire following.
+  await scroller.press("Home");
   await expect.poll(() => pages.length).toBe(1);
   const anchor = scroller.getByText("History row 200", { exact: true });
   await expect(anchor).toBeVisible();

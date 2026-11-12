@@ -19,7 +19,7 @@ beforeEach(() => {
 afterEach(() => { useSessionStore.getState().setToken(""); vi.unstubAllGlobals(); });
 
 it("does not resurrect an unknown session archived before its creation receipt arrives", async () => {
-  const creating = openAgentChat("agent");
+  const creating = openAgentChat("agent", () => true);
   handleWsMessage({ type: "session_archived", old_session_id: created.id, new_session_id: null });
   post(Response.json(created));
   await flush();
@@ -35,7 +35,7 @@ it("confirms a successful create received after reconnect already read the old l
   const accountGeneration = useSessionStore.getState().accountGeneration;
   const first = { socket: {}, accountGeneration }, second = { socket: {}, accountGeneration };
   sessions.connect(first); await flush(); reads[0](Response.json([])); await flush();
-  const creating = openAgentChat("agent");
+  const creating = openAgentChat("agent", () => true);
   sessions.disconnect(first); sessions.connect(second); await flush();
   reads[1](Response.json([])); await flush();
   post(Response.json(created)); await creating; await flush();
@@ -63,7 +63,7 @@ it.each(["token", "account"] as const)("does not navigate when the %s changes be
     });
   });
   try {
-    const creating = openAgentChat("agent");
+    const creating = openAgentChat("agent", () => true);
     post(Response.json(created));
     await creating;
     expect(useSessionStore.getState().activeSessionId).toBe(foreign.id);

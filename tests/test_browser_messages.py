@@ -1,6 +1,7 @@
 """Owned browser representations and full records share one original transcript."""
 
 import asyncio
+import copy
 import json
 from pathlib import Path
 
@@ -39,13 +40,17 @@ async def test_saved_command_capture_is_independent_of_browser_preview_and_old_r
     shown = (await client.get(f"/api/sessions/{session.id}?view=browser")).json()["messages"][0]
     assert shown["body_state"] == ("inline" if record == "head_tail_inline" else "preview")
     if record != "legacy_preview":
-        assert shown["content"].startswith(notice)
+        assert not shown["content"].startswith(notice)
+        assert shown["content"].startswith("old or new output\n")
     async with connection(manager, client.headers["Authorization"].removeprefix("Bearer ")) as browser:
         await manager._broadcast({"type": "tool_result", "session_id": session.id, "seq": 0,
             "output": body, "tool_input": inputs, "tool_use_id": "original", "runtime_metadata": metadata})
         wire = await frame(browser[1])
     if record != "legacy_preview":
-        assert wire["output"].startswith(notice)
+        assert not wire["output"].startswith(notice)
+    detail = (await client.get(f"/api/sessions/{session.id}/messages/0?view=browser")).json()
+    assert detail["content"] == (body.removeprefix(notice + "\n") if record != "legacy_preview" else body)
+    assert detail["tool_input"] == inputs
     raw = (await client.get(f"/api/sessions/{session.id}/messages/0")).json()
     page = (await client.get(f"/api/sessions/{session.id}/message-export")).json()["messages"][0]
     typed_response = await client.get(f"/api/sessions/{session.id}/transcript-export")
@@ -55,6 +60,108 @@ async def test_saved_command_capture_is_independent_of_browser_preview_and_old_r
         assert json.loads(typed[key]) == expected
     assert ("output_capture" in raw["tool_input"]) == (record != "legacy_preview")
     assert (await db.load_messages(session.id))[0]["tool_input"] == inputs
+
+
+@pytest.mark.parametrize("kind", ["command_inline", "command_preview", "command_unavailable"])
+async def test_command_output_browser_projections_and_full_detail_replay(export_runtime, request, kind):
+    from server.harness.codex_items import item_events
+
+    db, manager, session, client, _, _ = export_runtime
+    native = {"id": "command", "type": "commandExecution", "command": "produce", "status": "completed", "cwd": "/tmp", "commandActions": [],
+        "aggregatedOutput": "HEAD\n" + "saved line\n" * 20_000 + "\nTAIL"}
+    source = item_events("item/completed", {"item": native}).events[0]
+    inputs = copy.deepcopy(source.tool_input)
+    if kind == "command_preview":
+        # A saved extension can push the whole capture out of the preview.
+        inputs["output_capture"]["annotation"] = "saved extension " * 2_000
+    root = "root" if kind != "command_unavailable" else "r" * (128 * 1024)
+    identity = {"request_id": "request", "attempt_id": "attempt", "native": {
+        "thread_id": "child", "turn_id": "child-turn", "root_thread_id": root, "root_turn_id": "root-turn"}}
+    await db.append_message(session.id, 0, "system", "native_subagent", None, runtime_metadata=identity, created_at="2026-11-12T00:00:00Z",
+        tool_input={"task_id": "child", "card_id": "card", "native_thread_id": "child", "native_turn_id": "child-turn", "status": "completed"})
+    await db.append_message(session.id, 1, "tool", "tool_result", source.content, tool_input=inputs,
+        tool_use_id="command", runtime_metadata=identity, created_at="2026-11-12T00:00:00Z")
+    url = f"/api/sessions/{session.id}/messages/1"
+    raw = (await client.get(url)).json()
+    full = (await client.get(url + "?view=browser")).json()
+    assert full == {**raw, "content": source.content.split("\n", 1)[1]}
+    assert full["content"].startswith("HEAD\n") and full["content"].endswith("\nTAIL")
+    assert "[... 中段已省略 ...]" in full["content"]
+    snapshot = (await client.get(f"/api/sessions/{session.id}?view=browser")).json()
+    history = (await client.get(f"/api/sessions/{session.id}/messages?before_seq=2&view=browser")).json()
+    native_page = (await client.get(f"/api/sessions/{session.id}/native-details/0?view=browser")).json()
+    shown = snapshot["messages"][-1]
+    assert shown == history["messages"][-1] == native_page["messages"][-1]
+    if kind == "command_inline":
+        assert shown["body_state"] == "inline" and shown["content"] == full["content"]
+    elif kind == "command_preview":
+        assert shown["body_state"] == "preview" and "output_capture" not in shown["tool_input"]
+        assert shown["content"] == full["content"]
+    else:
+        assert shown["identity_unavailable"]
+    outgoing = {"type": "tool_result", "session_id": session.id, "seq": 1, "output": source.content,
+        "tool_input": inputs, "tool_use_id": "command", "runtime_metadata": identity}
+    original_event = copy.deepcopy(outgoing)
+    async with connection(manager, client.headers["Authorization"].removeprefix("Bearer ")) as browser:
+        await manager._broadcast(outgoing)
+        event = await frame(browser[1])
+    assert outgoing == original_event
+    assert event["type"] == ("browser_unavailable" if kind == "command_unavailable" else "tool_result")
+    if kind != "command_unavailable":
+        assert event["output"] == shown["content"]
+    assert (await client.get(url)).json() == raw
+    assert (await client.get(f"/api/sessions/{session.id}/native-details/0")).json()["messages"][-1] == raw
+
+    def stable(value):
+        if isinstance(value, dict):
+            return {key: stable(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [stable(item) for item in value]
+        return value.replace(session.id, "sample-session").replace(root, "native-root") if isinstance(value, str) else value
+
+    actual = stable({"message": shown, "event": event, "full": full, "native": native_page})
+    samples = json.loads(CONTROL_SAMPLES.read_text())
+    if request.config.getoption("--update-ws-fixtures"):
+        samples[kind] = actual
+        CONTROL_SAMPLES.write_text(json.dumps(samples, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    assert actual == samples[kind]
+
+
+@pytest.mark.parametrize("case", ["second_prefix", "inline", "no_capture", "mcp", "user", "assistant", "embedded", "other_notice", "no_newline"])
+async def test_browser_output_filter_preserves_unproven_text(export_runtime, case):
+    db, manager, session, client, _, _ = export_runtime
+    notice = "[输出已缩短：仅保存收到输出的头尾，中间未归档；以下不是完整日志。]\n"
+    body = notice + "BODY"
+    inputs = {"output_capture": {"state": "head_tail"}}
+    role, kind = "tool", "tool_result"
+    if case == "second_prefix":
+        body = notice + notice + "BODY"
+    elif case == "inline":
+        inputs["output_capture"]["state"] = "inline"
+    elif case in {"no_capture", "mcp"}:
+        inputs = {}
+    elif case in {"user", "assistant"}:
+        role, kind = case, "text"
+    elif case == "embedded":
+        body = "real output\n" + body
+    elif case == "other_notice":
+        body = "[Email content truncated for display.]\nBODY"
+    elif case == "no_newline":
+        body = notice.rstrip("\n")
+    expected = notice + "BODY" if case == "second_prefix" else body
+    tool = "mcp__custom__lookup" if case == "mcp" else None
+    await db.append_message(session.id, 0, role, kind, body, tool_input=inputs, tool_name=tool)
+    base = f"/api/sessions/{session.id}"
+    assert (await client.get(base + "?view=browser")).json()["messages"][0]["content"] == expected
+    assert (await client.get(base + "/messages/0?view=browser")).json()["content"] == expected
+    async with connection(manager, client.headers["Authorization"].removeprefix("Bearer ")) as browser:
+        field = "output" if kind == "tool_result" else "content"
+        event = {"type": kind if kind == "tool_result" else "user_message" if role == "user" else "assistant_text",
+            "session_id": session.id, "seq": 0, field: body, "tool_input": inputs, "tool": tool}
+        await manager._broadcast(event)
+        assert (await frame(browser[1]))[field] == expected
+        assert event[field] == body
+    assert (await client.get(base + "/messages/0")).json()["content"] == body
 
 
 @pytest.mark.parametrize("kind", ["recovery", "async_question", "missing_final", "unavailable_question", "unavailable_small_question"])

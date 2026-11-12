@@ -89,6 +89,8 @@ async def test_shutdown_retains_backend_when_kill_does_not_confirm_exit(tmp_path
     class UnconfirmedProcess:
         pid = 2**30
         returncode = None
+        stdout = None
+        stderr = None
 
         def __init__(self):
             self.exited = asyncio.Event()

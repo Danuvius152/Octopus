@@ -56,7 +56,13 @@ Result-recording conflicts and unconfirmed recording remain explicit errors.
 Their messages direct the caller to inspect the original conversation; they do
 not offer a saving retry or establish that the operation had no effects.
 HTTP timeouts, caller cancellation and SSE disconnection detach only that
-response consumer. The application keeps the original execution in its active
+response consumer. The full SSE Response ASGI invocation owns detachment in
+its `finally`, including failed headers and cancellation before the generator's
+first iteration. Detachment is synchronous and idempotent: it clears queued
+events and prevents later enqueueing, without choosing an execution outcome.
+Generator cleanup alone cannot cover an unstarted body. The original completion
+observer continues independently of response cleanup.
+The application keeps the original execution in its active
 count and conversation list until its receipt and original driver finish,
 including cleanup after a failed SessionOwner. A reusable host may remain alive;
 releasing the ordinary request slot does not require host exit. Admission is serialized per app
@@ -228,6 +234,11 @@ path reported success after losing body text; these cases now require a delivery
 error. Shared completion, notification-failure and held-publication regressions
 also retain ordered business delivery, caller cancellation and diagnostics
 redacted with the original execution's credential context.
+
+`tests/test_app_agent_owner_failure.py` invokes the public route's actual ASGI
+Response through header failure, pre-body cancellation, body failure and normal
+completion. It checks that a departed queue stays empty while the original
+execution remains counted and available through its original result lookup.
 
 ## 9. What this defers
 

@@ -100,12 +100,25 @@ retains native resources and bounded event delivery through confirmed retirement
 Input delivery, committed business outcome, notification and resource exit are
 separate facts under the [execution contract](input-reliability.md#原请求完成与失败交接).
 
+Cancelling a start waiter leaves the original spawn owned by the original
+retirement task. Only that spawn's completed result can establish a definite
+launch failure without a child; a pending or cancelled spawn is not such proof.
+A late handle can arrive after its leader has exited while descendants or
+buffered output still retain the pipes. Retirement therefore confirms the
+captured group's exit, both pipe EOFs and the original process wait. Original
+protocol readers finish before the shared raw drain takes over each pipe;
+that drain consumes stdout/stderr concurrently in 64 KiB chunks without
+accumulating their discarded output. Business output and diagnostic collection
+remain with the original readers. Missing input-history or private-settings
+cleanup still fails retirement even when process resources are proven absent.
+
 One-shot calls are owned by their original registry Harness. Before the first
 possible suspension it registers the caller and resource operation, retaining
 the original spawn, process-group retirement and private-settings cleanup.
 A public timeout, repeated cancellation or a finished waiter does not prove
 retirement. A late spawn is joined by that same operation; only confirmed group
-exit and private-settings cleanup release its installation drain blocker.
+exit, pipe/wait completion and private-settings cleanup release its installation
+drain blocker.
 Confirmed launch failure without a child still closes private settings. Failed
 exit or cleanup proof retains the blocker and causes shutdown to report failure.
 Installation quiesce closes admission synchronously; shutdown joins the original

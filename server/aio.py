@@ -31,6 +31,17 @@ import anyio
 logger = logging.getLogger(__name__)
 
 
+async def await_owned_task[T](task: asyncio.Task[T]) -> T:
+    """Withdraw a cancelled observer without cancelling the captured operation.
+
+    The resource owner retrieves the original result and diagnostic; a shield
+    can otherwise report a late exception through the event-loop logger.
+    """
+    if not task.done():
+        await asyncio.wait({task})
+    return task.result()
+
+
 async def drain_cancelled(task: asyncio.Task | None, what: str) -> None:
     """Cancel `task` if it is still running, then await it.
 

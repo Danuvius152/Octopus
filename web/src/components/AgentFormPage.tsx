@@ -316,11 +316,20 @@ function AgentFormInstance({
   };
 
   const chat = async (agent: Agent) => {
+    let foreground = isCurrent() && useSessionStore.getState().pageTab === "all";
+    const current = () => foreground && isCurrent() && useSessionStore.getState().pageTab === "all";
+    // Page/tab departures retire this action even if the user returns before
+    // its receipt arrives. The clicked Agent is separate from the edit target.
+    const unsubscribe = useSessionStore.subscribe(() => {
+      if (!current()) { foreground = false; unsubscribe(); }
+    });
     setError(null);
     try {
-      await openAgentChat(agent.id);
+      await openAgentChat(agent.id, current);
     } catch (e) {
-      if (isCurrent()) setError(e instanceof Error ? e.message : "Failed to open a session");
+      if (current()) setError(e instanceof Error ? e.message : "Failed to open a session");
+    } finally {
+      unsubscribe();
     }
   };
 

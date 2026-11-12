@@ -18,13 +18,12 @@ afterEach(cleanup);
 const nativeRuntime = (item_id: string) => ({ request_id: "request", attempt_id: "attempt", native: {
   thread_id: "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn", item_id } });
 
-it("keeps the unarchived-middle notice in collapsed and expanded command results", () => {
+it("keeps literal output text without saved capture evidence in collapsed and expanded results", () => {
   const notice = "[输出已缩短：仅保存收到输出的头尾，中间未归档；以下不是完整日志。]";
   const content = notice + "\nHEAD\n" + "saved line\n".repeat(50) + "\n[... 中段已省略 ...]\nTAIL";
   const view = render(<MessageBubble sessionId="bounded-command" message={{ role: "tool", type: "tool_result",
     content, tool_use_id: "command", runtime_metadata: nativeRuntime("command"), tool_input: {
-      native_item: { id: "command", type: "commandExecution", status: "completed", exitCode: 0 },
-      output_capture: { state: "head_tail", received_chars: 100000, omitted_chars: 99400 } } }} />);
+      native_item: { id: "command", type: "commandExecution", status: "completed", exitCode: 0 } } }} />);
   expect(view.container).toHaveTextContent(notice);
   fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
   expect(view.container).toHaveTextContent(notice);

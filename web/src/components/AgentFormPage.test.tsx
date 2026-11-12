@@ -875,6 +875,57 @@ describe("AgentFormPage", () => {
     expect(useSessionStore.getState().sessions.some((s) => s.id === "fresh")).toBe(true);
   });
 
+  it.each(["current", "view", "view-return", "tab", "tab-return", "edit", "edit-return", "opening"])(
+    "keeps a created chat's data but limits navigation to its original All page: %s", async (transition) => {
+    const receipt = deferred<Response>();
+    const vera = agent({ id: "ag2", name: "Vera", is_system: false });
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) =>
+      String(url).endsWith("/api/agents/ag2/sessions") && init?.method === "POST"
+        ? receipt.promise : emptyRead(url));
+    mount("ag1", [agent(), vera], "all");
+    fireEvent.click(screen.getAllByRole("button", { name: "Chat" })[1]);
+    act(() => {
+      const store = useSessionStore.getState();
+      if (transition.startsWith("view")) store.openManage("connectors");
+      if (transition === "view-return") useSessionStore.setState({ mainView: "agent-form" });
+      if (transition.startsWith("tab")) store.setPageTab("form");
+      if (transition === "tab-return") store.setPageTab("all");
+      if (transition.startsWith("edit")) useSessionStore.setState({ editingAgentId: "ag2" });
+      if (transition === "edit-return") useSessionStore.setState({ editingAgentId: "ag1" });
+      if (transition === "opening") { store.openAgentForm("ag1"); store.setPageTab("all"); }
+    });
+    const view = useSessionStore.getState().mainView;
+    await act(async () => receipt.resolve(json(session({ id: "late-chat", agent_id: "ag2" }))));
+    await waitFor(() => expect(useSessionStore.getState().sessions.some((s) => s.id === "late-chat")).toBe(true));
+    if (transition === "current") {
+      expect(useSessionStore.getState().mainView).toBe("chat");
+      expect(useSessionStore.getState().activeSessionId).toBe("late-chat");
+    } else {
+      expect(useSessionStore.getState().mainView).toBe(view);
+      expect(useSessionStore.getState().activeSessionId).not.toBe("late-chat");
+    }
+  });
+
+  it("keeps the new All-page error when an old chat failure arrives after a tab round trip", async () => {
+    const old = deferred<Response>();
+    let writes = 0;
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) =>
+      String(url).endsWith("/sessions") && init?.method === "POST"
+        ? ++writes === 1 ? old.promise : json({}, 503) : emptyRead(url));
+    mount("ag1", [agent()], "all");
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    act(() => {
+      useSessionStore.getState().setPageTab("form");
+      useSessionStore.getState().setPageTab("all");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await screen.findByText("HTTP 503");
+    await act(async () => old.resolve(json({}, 500)));
+    expect(screen.getByText("HTTP 503")).toBeVisible();
+    expect(screen.queryByText("HTTP 500")).toBeNull();
+    expect(useSessionStore.getState().mainView).toBe("agent-form");
+  });
+
   it("archives from a row and keeps the page open", async () => {
     const vera = agent({ id: "ag2", name: "Vera", is_system: false });
     fetchMock.mockImplementation(async (url: unknown) => String(url).endsWith("/archive")
