@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from server.cli import (
     build_import_payload,
     build_parser,
@@ -13,13 +15,40 @@ from server.cli import (
 
 
 class TestGetProjectDir:
-    def test_escapes_slashes(self):
+    def test_escapes_slashes(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
         result = get_project_dir("/home/user/my-project")
         assert result == Path.home() / ".claude" / "projects" / "-home-user-my-project"
 
-    def test_root_dir(self):
+    def test_root_dir(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
         result = get_project_dir("/")
         assert result == Path.home() / ".claude" / "projects" / "-"
+
+    @pytest.mark.parametrize("cwd,slug", [
+        ("/home/u/my_proj.空", "-home-u-my-proj--"),
+        ("C:\\work\\a.b_c", "C--work-a-b-c"),
+        ("/repo/" + "a" * 260, "-repo-" + "a" * 260),
+    ])
+    @pytest.mark.parametrize("configured", [False, True])
+    def test_matches_existing_harness_path_rules(self, tmp_path, monkeypatch, cwd, slug, configured):
+        from server.harness.claude_code import _claude_project_dir
+
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        if configured:
+            monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "custom-config"))
+        else:
+            monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        base = tmp_path / "custom-config" if configured else tmp_path / "home" / ".claude"
+        expected = base / "projects" / slug
+        assert get_project_dir(cwd) == expected == _claude_project_dir(cwd)
+
+    def test_omitted_cwd_uses_current_directory(self, tmp_path, monkeypatch):
+        from server.harness.claude_code import _claude_project_dir
+
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "custom-config"))
+        monkeypatch.chdir(tmp_path)
+        assert get_project_dir() == _claude_project_dir(str(tmp_path))
 
 
 class TestDiscoverSessions:

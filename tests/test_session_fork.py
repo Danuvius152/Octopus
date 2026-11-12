@@ -422,6 +422,18 @@ async def test_recover_finalizes_reverting(manager):
 # ------------------------------------------------------------------ persistence
 
 
+@pytest.mark.parametrize("stash_ref", ["stash@{0}", "a" * 40])
+async def test_recovery_reference_survives_storage_and_public_projection(manager, stash_ref):
+    parent = await _seed_parent(manager, backend="codex")
+    record = {"ran": True, "files": ["a.py"], "stash_ref": stash_ref, "status": "completed"}
+    await manager.db.update_session_field(parent.id, fork_revert_record=json.dumps(record))
+    saved = next(row for row in await manager.db.load_sessions() if row["id"] == parent.id)
+    info = sm.fork_info_fields(backend="codex", forked_from_session_id=None,
+                              fork_after_seq=None, fork_metadata=None,
+                              fork_revert_record=saved["fork_revert_record"])
+    assert info["fork_revert_record"] == record
+
+
 @pytest.mark.asyncio
 async def test_fork_metadata_survives_restart(manager, monkeypatch):
     parent = await _seed_parent(manager, backend="codex")
@@ -490,8 +502,12 @@ async def test_fork_with_revert_restores_files(manager, tmp_path, monkeypatch, n
     await manager.db.append_message(session_id=parent.id, seq=1, role="assistant",
                                     type="tool_use", tool_name="Edit",
                                     tool_input={"file_path": str(repo / name)},
-                                    tool_use_id="e1")
-    parent._message_count = 2
+                                    tool_use_id="e1", runtime_metadata={
+                                        "request_id": "r", "attempt_id": "a", "tool_call_id": "edit"})
+    await manager.db.append_message(session_id=parent.id, seq=2, role="tool", type="tool_result",
+                                    content="edited", tool_use_id="e1", is_error=False,
+                                    runtime_metadata={"request_id": "r", "attempt_id": "a", "tool_call_id": "edit"})
+    parent._message_count = 3
     # The agent's edit is now on disk (dirty tree).
     (repo / name).write_text("agent-edited\n")
 

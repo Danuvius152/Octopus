@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..knowledge import require_open
-from ..schedule_ai import validate_run_at
+from ..schedule_ai import interval_trigger, local_timezone, validate_run_at
 from .base import DatabaseBase
 from .transaction import Transaction
 
@@ -31,17 +32,23 @@ class SchedulesMixin(DatabaseBase):
     async def _definition_write(
         self, tx: Transaction, request: AdmittedRequest | None, *,
         run_at: str | None = None, timezone: str | None = None,
+        check_interval: bool = False, interval_seconds: object = None,
     ) -> AsyncIterator[None]:
-        """Keep requesting authority and new once timing valid at admission."""
+        """Keep requesting authority and timing representable at admission."""
+        def validate() -> None:
+            if check_interval:
+                interval_trigger(interval_seconds, now=datetime.now(UTC), tz=timezone or local_timezone())
+            if run_at is not None:
+                validate_run_at(run_at, tz=timezone)
+
         require_open(request)
-        if run_at is not None:
-            validate_run_at(run_at, tz=timezone)
+        validate()
         yield
-        if run_at is not None:
+        if run_at is not None or check_interval:
             # Cursor cleanup can wait too. The final domain decision is made
             # after it, immediately before the transaction issues COMMIT.
             await tx.finish()
-            validate_run_at(run_at, tz=timezone)
+            validate()
         require_open(request)
 
     async def save_schedule(
@@ -70,6 +77,7 @@ class SchedulesMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             async with self._definition_write(
                 tx, request, run_at=run_at if require_future else None, timezone=timezone,
+                check_interval=interval_seconds is not None or not (cron or run_at), interval_seconds=interval_seconds,
             ):
                 await tx.execute(
                     "INSERT INTO schedules (id, agent_id, origin_session_id, name, prompt, "
@@ -212,6 +220,16 @@ class SchedulesMixin(DatabaseBase):
                 return
             if "enabled" in updates:
                 updates["enabled"] = int(updates["enabled"])
+            check_interval, interval_seconds, timezone = False, None, updates.get("timezone")
+            if updates.keys() & {"interval_seconds", "cron", "run_at", "timezone"} or updates.get("enabled"):
+                raw = await tx.fetch_one("SELECT interval_seconds,cron,run_at,timezone FROM schedules WHERE id=?", (schedule_id,))
+                if raw is None:
+                    if expected is not None:
+                        raise ScheduleChangedError("Schedule changed during this edit; reload and retry")
+                    return
+                effective = {**dict(zip(("interval_seconds", "cron", "run_at", "timezone"), raw, strict=True)), **updates}
+                interval_seconds, timezone = effective["interval_seconds"], effective["timezone"]
+                check_interval = interval_seconds is not None or not (effective["cron"] or effective["run_at"])
             set_clause = ", ".join(f"{k} = ?" for k in updates)
             values = list(updates.values()) + [schedule_id]
             # Operational fire timestamps do not change the definition. Every
@@ -222,7 +240,7 @@ class SchedulesMixin(DatabaseBase):
             values.extend(compare.values())
             async with self._definition_write(
                 tx, request, run_at=updates.get("run_at") if require_future else None,
-                timezone=updates.get("timezone"),
+                timezone=timezone, check_interval=check_interval, interval_seconds=interval_seconds,
             ):
                 cursor = await tx.execute(
                     f"UPDATE schedules SET {set_clause} WHERE id = ?" + (f" AND {where}" if where else ""),

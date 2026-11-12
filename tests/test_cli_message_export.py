@@ -11,9 +11,61 @@ from pathlib import Path
 
 import pytest
 
-from server.cli import do_pull
+from server.cli import build_parser, discover_sessions, do_handoff, do_pull
+from server.harness.claude_code import _claude_project_dir
 from tests.accounts import create_account
 from tests.message_export_runtime import export_runtime as export_runtime
+
+
+@pytest.mark.parametrize("root", ["default", "configured", "override"])
+@pytest.mark.parametrize("cwd_kind", ["special", "long"])
+async def test_pull_and_handoff_share_the_harness_native_directory(export_runtime, tmp_path, monkeypatch, capsys, root, cwd_kind):
+    database, _, session, client, args, requests = export_runtime
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    await database.append_message(session.id, 0, "user", "text", "native history")
+    if root == "default":
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "native-config"))
+    cwd = tmp_path / "my.project_空" if cwd_kind == "special" else tmp_path.joinpath(*(["long.dir_空"] * 12))
+    cwd.mkdir(parents=True)
+    args.project_dir = str(tmp_path / "explicit-project") if root == "override" else None
+    if cwd_kind == "special":
+        args.cwd = str(cwd)
+    else:
+        await database.update_session_field(session.id, working_dir=str(cwd))
+        args.cwd = None
+
+    await asyncio.to_thread(do_pull, args)
+    native_dir = _claude_project_dir(str(cwd))
+    project_dir = Path(args.project_dir) if args.project_dir else native_dir
+    expected = project_dir / "export-native.jsonl"
+    assert expected.is_file()
+    assert str(expected) in capsys.readouterr().out
+    assert [row["session_id"] for row in discover_sessions(expected.parent)] == ["export-native"]
+    lines = [json.loads(line) for line in expected.read_text().splitlines()]
+    assert [line["cwd"] for line in lines] == [str(cwd)]
+    if root == "override":
+        assert not native_dir.exists()
+
+    monkeypatch.chdir(cwd)
+    options = ["handoff", "--server", "http://test", f"--token={args.token}"]
+    if args.project_dir:
+        options += ["--project-dir", args.project_dir]
+    if cwd_kind == "special":
+        options += ["--session-id", "export-native"]
+    else:
+        monkeypatch.setattr("builtins.input", lambda _: "1")
+    handoff = build_parser().parse_args(options)
+    await asyncio.to_thread(do_handoff, handoff)
+    output = capsys.readouterr().out
+    assert "Session imported:" in output
+    imported_id = output.split("Session imported: ", 1)[1].splitlines()[0]
+    imported = (await client.get(f"/api/sessions/{imported_id}")).json()
+    assert imported["working_dir"] == str(cwd)
+    assert imported["claude_session_id"] == "export-native"
+    assert [message["content"] for message in imported["messages"]] == ["native history"]
+    assert requests[-1] == "http://test/api/sessions/import"
 
 
 @pytest.mark.parametrize("count", [0, 199, 200, 201, 601])

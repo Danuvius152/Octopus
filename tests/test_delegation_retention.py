@@ -80,7 +80,8 @@ async def test_failed_setup_still_archives_the_unadmitted_child(runtime, monkeyp
             parent_session_id=current.parent_id, agent_name="Worker", request="never admitted",
         )
     rec = current.delegations.list_delegations(current.parent_id)[0]
-    assert rec.state == "failed"
+    assert rec.state == "cancelled"
+    assert rec.error == "Delegation setup ended before child request admission"
     assert current.manager.get_session(rec.delegation_id) is None
     archived = await current.manager.load_archived_session_detail(rec.delegation_id)
     assert archived is not None

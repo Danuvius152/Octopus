@@ -3,6 +3,7 @@ import { handleWsMessage } from "../hooks/useWebSocket";
 import { useSessionStore } from "../stores/sessionStore";
 import { nativeCard, nativeChatMessages, nativeDetailAnchor } from "./nativeOutput";
 import { projectToolCall } from "./toolIdentity";
+import { applyTranscript } from "./transcript";
 
 const identity = (thread: string) => ({ request_id: "r", attempt_id: "a", native: {
   thread_id: thread, turn_id: "t", item_id: "same", root_thread_id: "root", root_turn_id: "t",
@@ -36,9 +37,42 @@ test("a tool-only historical window exposes a saved child reference without inve
   expect(nativeDetailAnchor(messages, card)).toBe(40);
 });
 
-beforeEach(() => useSessionStore.setState({ messages: {}, streamingText: {}, streamingItems: {}, lastAppliedSeq: {} }));
+beforeEach(() => useSessionStore.setState({ messages: {}, streamingText: {}, streamingTextAttempt: {}, streamingItems: {}, lastAppliedSeq: {}, activeAttempts: {} }));
 
-test("interleaved native items clear only their own streaming text and keep the transcript high water", () => {
+test("a completed native item stays closed while other root and child items keep streaming", () => {
+  handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "r", attempt_id: "a" });
+  applyTranscript("s", { messages: [{ role: "assistant", type: "text", seq: 5, content: "Root finished", runtime_metadata: identity("root") }],
+    next_message_seq: 6 });
+  handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Stale root prefix", runtime_metadata: identity("root") });
+  handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Child with reused provider ID", runtime_metadata: identity("child") });
+  handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Following root item", runtime_metadata: {
+    ...identity("root"), native: { ...identity("root").native, item_id: "next" },
+  } });
+  const state = useSessionStore.getState();
+  expect(Object.values(state.streamingItems.s || {}).map((item) => item.content)).toEqual([
+    "Child with reused provider ID", "Following root item",
+  ]);
+  expect(state.messages.s.map((row) => row.seq)).toEqual([5]);
+});
+
+test("identified deltas need an observed attempt while identity-free legacy streaming retains its rules", () => {
+  useSessionStore.setState({ activeAttempts: {}, streamingTextAttempt: {} });
+  handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Unobserved native attempt", runtime_metadata: identity("root") });
+  expect(Object.values(useSessionStore.getState().streamingItems.s || {})).toEqual([]);
+  useSessionStore.getState().setActiveAttempt("s", { request_id: "r", attempt_id: "a" });
+  handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Observed partial", runtime_metadata: identity("root") });
+  useSessionStore.getState().setActiveAttempt("s", null);
+  handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Stale append", runtime_metadata: identity("root") });
+  expect(Object.values(useSessionStore.getState().streamingItems.s || {}).map((item) => item.content)).toEqual(["Observed partial"]);
+  handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Legacy partial" });
+  expect(useSessionStore.getState().streamingText.s).toBe("Legacy partial");
+  handleWsMessage({ type: "assistant_text", session_id: "s", seq: 1, content: "Legacy complete" });
+  expect(useSessionStore.getState().streamingText.s).toBeUndefined();
+  expect(useSessionStore.getState().messages.s[0].content).toBe("Legacy complete");
+});
+
+test("interleaved native items clear only their own streaming text without advancing snapshot coverage", () => {
+  handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "r", attempt_id: "a" });
   handleWsMessage({ type: "assistant_delta", session_id: "s", content: "ROOT", runtime_metadata: identity("root") });
   handleWsMessage({ type: "assistant_delta", session_id: "s", content: "CHILD", runtime_metadata: identity("child") });
   handleWsMessage({ type: "assistant_text", session_id: "s", seq: 11, content: "Child done", runtime_metadata: identity("child") });
@@ -46,7 +80,8 @@ test("interleaved native items clear only their own streaming text and keep the 
   expect(Object.values(store.streamingItems.s).map((value) => value.content)).toEqual(["ROOT"]);
   expect(store.streamingText.s).toBeUndefined();
   expect(store.messages.s[0].runtime_metadata?.native?.thread_id).toBe("child");
-  expect(store.lastAppliedSeq.s).toBe(11);
+  expect(store.lastAppliedSeq.s).toBeUndefined();
+  expect(store.messages.s.map((row) => row.seq)).toEqual([11]);
   handleWsMessage({ type: "assistant_text", session_id: "s", seq: 12, content: "Root done", runtime_metadata: identity("root") });
   expect(Object.values(useSessionStore.getState().streamingItems.s)).toEqual([]);
 });
@@ -99,7 +134,9 @@ test("a snapshot card remains visible when a 200-row tool window excludes its an
 
 test("a new service generation clears partial items from the previous native connection", () => {
   useSessionStore.setState({ dispatchGeneration: "old-service", retiredDispatchGenerations: [], dispatchStates: {} });
+  handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "r", attempt_id: "a" });
   handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Old partial", runtime_metadata: identity("child") });
+  expect(Object.values(useSessionStore.getState().streamingItems.s).map((item) => item.content)).toEqual(["Old partial"]);
   useSessionStore.getState().applyDispatchState("s", { generation: "new-service", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [] });
   expect(useSessionStore.getState().streamingItems).toEqual({});
 });

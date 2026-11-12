@@ -9,6 +9,7 @@ import type { QuestionDraft } from "../lib/questionDrafts";
 import { normalizeMessage, type MessageInput } from "../lib/turnOutcome";
 import { readActiveAttempt, readDispatchState, type ActiveAttempt, type DispatchState } from "../lib/sessionDispatch";
 import { nativeItemKey } from "../lib/nativeOutput";
+import { readAttemptIdentity, sameAttempt, type AttemptIdentity } from "../lib/toolIdentity";
 import { readContextState, type ContextState } from "../lib/sessionContext";
 import type {
   AgentRead as ApiAgentRead,
@@ -340,11 +341,9 @@ interface SessionStore {
     basis: MessagePageBasis,
   ) => MessagePageResult;
 
-  // Per-session WS-event dedup baseline. Set when a snapshot is loaded
-  // (`/api/sessions/{id}` returns `next_message_seq`); the WS handler
-  // drops any event whose `seq <= lastAppliedSeq[sessionId]` so a
-  // reconnect-refetch can't stomp an event that arrived between the
-  // snapshot's SQL and `setMessages` (the original race).
+  // Installed snapshot coverage, never advanced by individual WS rows.
+  // A live maximum cannot prove that an unseen lower seq was published.
+  // The WS reducer also checks identities in the current message window.
   lastAppliedSeq: Record<string, number>;
   setLastAppliedSeq: (sessionId: string, seq: number) => void;
 
@@ -365,9 +364,11 @@ interface SessionStore {
   // `assistant_delta` frames and dropped the moment the completed block
   // arrives. Never persisted, never part of `messages`.
   streamingText: Record<string, string>;
+  // Identity of the current plain-text buffer; retired with that buffer.
+  streamingTextAttempt: Record<string, AttemptIdentity>;
   streamingItems: Record<string, Record<string, StreamingItem>>;
   appendStreamingText: (sessionId: string, chunk: string, metadata?: RuntimeMetadata) => void;
-  clearStreamingText: (sessionId: string) => void;
+  clearStreamingText: (sessionId: string, attempt?: AttemptIdentity) => void;
 
   // Sub-agents running inside the current turn, per session, keyed by the
   // tool call that spawned them (native-subagents.md §4). Live UI state, like
@@ -561,7 +562,7 @@ function dispatchUpdate(s: SessionStore, sessionId: string, snapshot: DispatchSt
   return {
     dispatchGeneration: snapshot.generation,
     ...(changed ? { activeAttempts: {}, executionObservations: {}, closedQuestionIds: {}, pendingQuestions: {},
-      sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingItems: {}, contextStates: {} } : {}),
+      sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingText: {}, streamingTextAttempt: {}, streamingItems: {}, contextStates: {} } : {}),
     retiredDispatchGenerations: changed ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
     // Equal revision confirms content and invalidates earlier read failures.
     dispatchStates: { ...(changed ? {} : s.dispatchStates),
@@ -581,6 +582,17 @@ function settledQuestions(state: SessionStore, sessionId: string, messages: Mess
     closedQuestionIds: { ...state.closedQuestionIds, [sessionId]: closed },
     pendingQuestions: pending.length ? { ...state.pendingQuestions, [sessionId]: pending } : dropKey(state.pendingQuestions, sessionId),
   };
+}
+
+function hasTerminalFor(messages: MessageInput[], identity: AttemptIdentity | undefined): boolean {
+  return Boolean(identity && messages.some((message) =>
+    message.type === "result" && sameAttempt(readAttemptIdentity(message), identity)));
+}
+
+function insertMessage(rows: Message[], message: Message): void {
+  const before = typeof message.seq === "number" ? rows.findIndex((row) =>
+    typeof row.seq === "number" && row.seq > message.seq!) : -1;
+  rows.splice(before < 0 ? rows.length : before, 0, message);
 }
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
@@ -814,7 +826,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     messages: dropKey(s.messages, id), pendingQuestions: dropKey(s.pendingQuestions, id),
     closedQuestionIds: dropKey(s.closedQuestionIds, id), pendingForks: dropKey(s.pendingForks, id),
     questionDrafts: Object.fromEntries(Object.entries(s.questionDrafts).filter(([, draft]) => draft.sessionId !== id)),
-    streamingText: dropKey(s.streamingText, id), streamingItems: dropKey(s.streamingItems, id),
+    streamingText: dropKey(s.streamingText, id), streamingTextAttempt: dropKey(s.streamingTextAttempt, id),
+    streamingItems: dropKey(s.streamingItems, id),
     subagents: dropKey(s.subagents, id), dispatchStates: dropKey(s.dispatchStates, id),
     contextStates: dropKey(s.contextStates, id),
     dispatchUnavailable: dropKey(s.dispatchUnavailable, id), sessionMembership: dropKey(s.sessionMembership, id),
@@ -836,23 +849,33 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   messages: {},
   addMessage: (sessionId, msg) =>
     set((s) => {
+      const current = s.messages[sessionId] || [];
+      if (typeof msg.seq === "number" && current.some((message) => message.seq === msg.seq)) return s;
+      const messages = [...current];
+      insertMessage(messages, normalizeMessage(msg));
       const itemKey = nativeItemKey(msg.runtime_metadata);
+      const identity = readAttemptIdentity(msg);
       // A completed assistant text block supersedes whatever was streaming:
       // drop the buffer in the same update that appends the real message, so
       // the UI never paints both for a frame.
       const streaming =
-        !itemKey && msg.type === "text" && msg.role === "assistant" && s.streamingText[sessionId]
+        (!itemKey && msg.type === "text" && msg.role === "assistant" && s.streamingText[sessionId] &&
+          (!identity || sameAttempt(identity, s.streamingTextAttempt[sessionId]))) ||
+        (msg.type === "result" && sameAttempt(identity, s.streamingTextAttempt[sessionId]))
           ? dropKey(s.streamingText, sessionId)
           : s.streamingText;
       return {
         ...settledQuestions(s, sessionId, [msg]),
         messages: {
           ...s.messages,
-          [sessionId]: [...(s.messages[sessionId] || []), normalizeMessage(msg)],
+          [sessionId]: messages,
         },
         streamingText: streaming,
+        streamingTextAttempt: streaming === s.streamingText ? s.streamingTextAttempt : dropKey(s.streamingTextAttempt, sessionId),
         streamingItems: itemKey && msg.type === "text" ? {
           ...s.streamingItems, [sessionId]: dropKey(s.streamingItems[sessionId] || {}, itemKey),
+        } : msg.type === "result" && identity ? { ...s.streamingItems, [sessionId]: Object.fromEntries(
+          Object.entries(s.streamingItems[sessionId] || {}).filter(([, item]) => !sameAttempt(item.runtime_metadata, identity)))
         } : s.streamingItems,
       };
     }),
@@ -869,10 +892,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       messages: { ...s.messages, [sessionId]: msgs.map(normalizeMessage) },
       // A snapshot reload is authoritative; any half-streamed text it doesn't
       // contain is stale by definition.
-      streamingText: preserveStreaming ? s.streamingText : dropKey(s.streamingText, sessionId),
+      streamingText: preserveStreaming && !hasTerminalFor(msgs, s.streamingTextAttempt[sessionId])
+        ? s.streamingText : dropKey(s.streamingText, sessionId),
+      streamingTextAttempt: preserveStreaming && !hasTerminalFor(msgs, s.streamingTextAttempt[sessionId])
+        ? s.streamingTextAttempt : dropKey(s.streamingTextAttempt, sessionId),
       streamingItems: preserveStreaming || nativeBaseline ? { ...s.streamingItems, [sessionId]: Object.fromEntries(
         Object.entries(s.streamingItems[sessionId] || {}).filter(([key, item]) =>
           (preserveStreaming || item !== nativeBaseline?.[key]) &&
+          !hasTerminalFor(msgs, item.runtime_metadata) &&
           !msgs.some((message) => message.type === "text" && nativeItemKey(message.runtime_metadata) === key)))
       } : dropKey(s.streamingItems, sessionId),
     }; }),
@@ -893,24 +920,35 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           new Set(msgs.map((message) => message.seq)).size !== msgs.length) {
         result = { state: "failed", error: "Invalid history page sequence." }; return cur;
       }
-      const fresh = msgs.filter((message) => message.seq! < basis.beforeSeq).sort((a, b) => a.seq! - b.seq!);
-      if (fresh.length && oldestSeq !== null && oldestSeq !== fresh[0].seq) {
+      const page = msgs.filter((message) => message.seq! < basis.beforeSeq).sort((a, b) => a.seq! - b.seq!);
+      if (page.length && oldestSeq !== null && oldestSeq !== page[0].seq) {
         result = { state: "failed", error: "History page cursor does not match its rows." }; return cur;
       }
-      if (fresh.length === 0 && hasMore) {
+      if (page.length === 0 && hasMore) {
         result = { state: "failed", error: "History page did not extend the window." }; return cur;
       }
+      const messages = [...(cur.messages[sessionId] || [])];
+      const known = new Set(messages.map((message) => message.seq));
+      const fresh = page.filter((message) => !known.has(message.seq));
+      fresh.forEach((message) => insertMessage(messages, normalizeMessage(message)));
       result = { state: "merged", added: fresh.length };
       return {
       ...settledQuestions(cur, sessionId, fresh),
       messages: {
         ...cur.messages,
-        [sessionId]: [...fresh.map(normalizeMessage), ...(cur.messages[sessionId] || [])],
+        [sessionId]: messages,
       },
       oldestSeq: {
         ...cur.oldestSeq,
-        [sessionId]: fresh[0]?.seq ?? cur.oldestSeq[sessionId],
+        [sessionId]: page[0]?.seq ?? cur.oldestSeq[sessionId],
       },
+      streamingText: hasTerminalFor(page, cur.streamingTextAttempt[sessionId]) ? dropKey(cur.streamingText, sessionId) : cur.streamingText,
+      streamingTextAttempt: hasTerminalFor(page, cur.streamingTextAttempt[sessionId])
+        ? dropKey(cur.streamingTextAttempt, sessionId) : cur.streamingTextAttempt,
+      streamingItems: { ...cur.streamingItems, [sessionId]: Object.fromEntries(
+        Object.entries(cur.streamingItems[sessionId] || {}).filter(([key, item]) =>
+          !hasTerminalFor(page, item.runtime_metadata) && !page.some((message) =>
+            message.role === "assistant" && message.type === "text" && nativeItemKey(message.runtime_metadata) === key))) },
       hasMoreMessages: { ...cur.hasMoreMessages, [sessionId]: hasMore },
     }; });
     return result;
@@ -921,10 +959,16 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   // completed block that follows is the real message, and this is only what
   // lets the UI paint before it arrives.
   streamingText: {},
+  streamingTextAttempt: {},
   streamingItems: {},
   appendStreamingText: (sessionId, chunk, metadata) =>
     set((s) => {
       const key = nativeItemKey(metadata);
+      const identity = readAttemptIdentity(metadata);
+      const messages = s.messages[sessionId] || [];
+      if (identity && (hasTerminalFor(messages, identity) || !sameAttempt(identity, s.activeAttempts[sessionId]))) return s;
+      if (key && messages.some((message) => message.role === "assistant" && message.type === "text" &&
+          nativeItemKey(message.runtime_metadata) === key)) return s;
       if (key && metadata) {
         const items = { ...s.streamingItems[sessionId], [key]: { runtime_metadata: metadata,
           content: streamingPreview((s.streamingItems[sessionId]?.[key]?.content || "") + chunk, 16 * 1024) } };
@@ -932,17 +976,29 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         return { streamingItems: { ...s.streamingItems, [sessionId]: items } };
       }
       return {
+      streamingTextAttempt: identity || s.activeAttempts[sessionId]
+        ? { ...s.streamingTextAttempt, [sessionId]: identity || s.activeAttempts[sessionId] }
+        : dropKey(s.streamingTextAttempt, sessionId),
       streamingText: {
         ...s.streamingText,
         [sessionId]: streamingPreview((s.streamingText[sessionId] || "") + chunk, 64 * 1024),
       },
       };
     }),
-  clearStreamingText: (sessionId) =>
+  clearStreamingText: (sessionId, attempt) =>
     set((s) =>
-      s.streamingText[sessionId] === undefined && s.streamingItems[sessionId] === undefined
+      s.streamingText[sessionId] === undefined && s.streamingItems[sessionId] === undefined && s.streamingTextAttempt[sessionId] === undefined
         ? s
-        : { streamingText: dropKey(s.streamingText, sessionId), streamingItems: dropKey(s.streamingItems, sessionId) }
+        : {
+          streamingText: !attempt || sameAttempt(attempt, s.streamingTextAttempt[sessionId])
+            ? dropKey(s.streamingText, sessionId) : s.streamingText,
+          streamingTextAttempt: !attempt || sameAttempt(attempt, s.streamingTextAttempt[sessionId])
+            ? dropKey(s.streamingTextAttempt, sessionId) : s.streamingTextAttempt,
+          streamingItems: !attempt ? dropKey(s.streamingItems, sessionId) : {
+            ...s.streamingItems, [sessionId]: Object.fromEntries(Object.entries(s.streamingItems[sessionId] || {})
+              .filter(([, item]) => !sameAttempt(attempt, item.runtime_metadata))),
+          },
+        }
     ),
 
   subagents: {},

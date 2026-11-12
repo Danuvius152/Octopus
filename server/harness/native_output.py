@@ -14,7 +14,7 @@ from ..models import NativeSource, RuntimeMetadata
 from .events import HarnessEvent, SubagentUpdate
 
 
-def recorded_file_change_paths(message: dict[str, Any]) -> list[str]:
+def recorded_file_change_paths(message: dict[str, Any], *, successful_only: bool = False) -> list[str]:
     """Read saved native patch facts, including a completion without a start.
 
     The wire payload stays in its original tool record. Consumers never infer
@@ -38,6 +38,9 @@ def recorded_file_change_paths(message: dict[str, Any]) -> list[str]:
     if (not isinstance(item, dict) or item.get("type") != "fileChange"
             or (params.get("threadId"), params.get("turnId"), item.get("id"))
             != (native.get("thread_id"), native.get("turn_id"), native.get("item_id"))):
+        return []
+    if successful_only and (message.get("type") != "tool_result" or message.get("is_error")
+                            or item.get("status") != "completed"):
         return []
     changes = item.get("changes")
     if not isinstance(changes, list):

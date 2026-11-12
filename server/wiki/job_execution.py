@@ -219,7 +219,7 @@ def reconcile_cancelled_effects(jobs, captured, *, manager):
 
     # Verification must not run the history writer's implicit recovery of
     # prepared changes. Such a proposal remains uncertain and retained.
-    with WikiHistory(jobs.store).locked(shared=True), registry._account_lock(jobs.user_id), registry.registration_lock(jobs.user_id):
+    with WikiHistory(jobs.store).locked(), registry._account_lock(jobs.user_id), registry.registration_lock(jobs.user_id):
         if registry.config(jobs.user_id) != jobs.registration:
             raise WikiError("Wiki registration changed before cancellation verification", 409)
         job = jobs.get(captured["id"])

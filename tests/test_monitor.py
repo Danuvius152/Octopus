@@ -95,7 +95,7 @@ class TestPersistence:
 class TestTheGmailCase:
     """A connector that fails every day must be one obvious row."""
 
-    async def test_a_persistently_failing_connector_is_visible(self, store, conn):
+    async def test_historical_failure_samples_do_not_invent_a_request_denominator(self, store, conn):
         for day in range(11):
             store.record(Event(
                 kind="connector_call", ok=False, error_code="connector_unavailable",
@@ -109,8 +109,25 @@ class TestTheGmailCase:
         rows = await query.connectors(conn, "30d")
         worst = rows[0]
         assert worst["installation"] == "gmail_e255c1"
-        assert worst["n"] == 11
-        assert (worst["ok_n"] or 0) == 0, "eleven calls, zero successes"
+        assert worst["legacy_failure_samples"] == 11
+        assert worst["n"] == worst["ok_n"] == 0
+        assert worst["success_pct"] is None
+        assert worst["avg_ms"] is None and worst["max_ms"] is None and worst["last_seen"] is None
+
+    async def test_new_unit_is_the_only_source_for_request_statistics(self, store, conn):
+        now = time.time()
+        for ok, ms in ((True, 100), (True, 200), (False, 600)):
+            store.record(Event(kind="connector_call", ok=ok, duration_ms=ms, ts=now - 100,
+                               detail={"installation_id": "mixed", "unit": "logical_resource_v1"}))
+        store.record(Event(kind="connector_call", ok=False, duration_ms=9999, ts=now,
+                           detail={"installation_id": "mixed"}))
+        store.record(Event(kind="connector_call", ok=True, ts=now, detail={"installation_id": "mixed"}))
+        store.record(Event(kind="connector_call", ok=False, duration_ms=8888, ts=now,
+                           detail={"installation_id": "mixed", "unit": "future_unit"}))
+        await store.drain()
+        row, = await query.connectors(conn)
+        assert row == {"installation": "mixed", "n": 3, "ok_n": 2, "success_pct": 66.7,
+                       "avg_ms": 300, "max_ms": 600, "last_seen": now - 100, "legacy_failure_samples": 1}
 
     async def test_errors_report_ranks_by_frequency(self, store, conn):
         for _ in range(5):

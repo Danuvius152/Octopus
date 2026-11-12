@@ -56,6 +56,50 @@ async def test_list_schedules_empty(client):
     assert resp.json() == []
 
 
+@pytest.mark.parametrize("seconds", [2**40, 2**63 - 1, 2**63, 10**100])
+async def test_unrepresentable_interval_is_rejected_before_creating_a_schedule(client, seconds):
+    agent = await session_manager.db.get_system_agent()
+    response = await client.post("/api/schedules", json={
+        "agent_id": agent["id"], "name": "Too distant", "prompt": "Check status", "interval_seconds": seconds,
+    })
+    assert response.status_code == 422
+    assert "interval" in str(response.json()).lower()
+    assert (await client.get("/api/schedules")).json() == []
+
+
+@pytest.mark.parametrize("seconds", [2**40, 2**63])
+async def test_invalid_interval_patch_preserves_the_definition_and_original_trigger(client, seconds):
+    agent = await session_manager.db.get_system_agent()
+    created = await client.post("/api/schedules", json={
+        "agent_id": agent["id"], "name": "Valid", "prompt": "Check status", "interval_seconds": 3600,
+    })
+    identifier = created.json()["id"]
+    before = await session_manager.db.get_schedule_definition(identifier)
+    job = schedules_mod._runner._scheduler.get_job(identifier)
+    next_fire = schedules_mod._runner.next_run_at(identifier)
+    response = await client.patch(f"/api/schedules/{identifier}", json={"interval_seconds": seconds})
+    assert response.status_code == 422
+    assert await session_manager.db.get_schedule_definition(identifier) == before
+    assert schedules_mod._runner._scheduler.get_job(identifier) is job
+    assert schedules_mod._runner.next_run_at(identifier) == next_fire
+
+
+async def test_enabling_a_bad_legacy_interval_keeps_its_disabled_definition(client):
+    agent = await session_manager.db.get_system_agent()
+    created = await client.post("/api/schedules", json={
+        "agent_id": agent["id"], "name": "Paused", "prompt": "Check status", "interval_seconds": 3600,
+    })
+    identifier = created.json()["id"]
+    assert (await client.patch(f"/api/schedules/{identifier}", json={"enabled": False})).status_code == 200
+    async with session_manager.db.transaction(write=True) as tx:
+        await tx.execute("UPDATE schedules SET interval_seconds=? WHERE id=?", (2**40, identifier))
+    before = await session_manager.db.get_schedule_definition(identifier)
+    response = await client.patch(f"/api/schedules/{identifier}", json={"enabled": True})
+    assert response.status_code == 422 and "interval" in str(response.json()).lower()
+    assert await session_manager.db.get_schedule_definition(identifier) == before
+    assert schedules_mod._runner.next_run_at(identifier) is None
+
+
 @pytest.mark.asyncio
 async def test_create_schedule(client):
     session_id = await _create_session(client)

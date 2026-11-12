@@ -89,19 +89,27 @@ a stale steer notice. Full identity, evidence and
 recovery rules belong to the
 [input contract](input-reliability.md#codex-native-input-evidence).
 
-## Live transcript limitation
+## Live transcript ordering
 
-A current UI limitation is separate from delivery evidence: on the Claude
-path the user row is persisted before its asynchronous stdin write, but `steered`
-is published only after that write finishes. Output persisted meanwhile can be
-broadcast first; the WebSocket reducer's maximum-sequence guard can then discard
-the late, lower-sequence input. Refreshing from durable history restores it.
-A missing live row therefore proves neither failed admission nor non-delivery,
-and is not a reason to repeat the input. This interleaving is confirmed for
-Claude, not a claim of a reproduced native Codex failure
-(see [Owner persistence and writer ordering](../../server/sessions/owner_runtime.py#L2204-L2239),
-[late publication](../../server/sessions/owner_runtime.py#L2290-L2295) and
-[the live sequence guard](../../web/src/hooks/useWebSocket.ts#L112-L116)).
+On Claude, the input row commits before its asynchronous stdin write, while
+`steered` is published only after that write finishes. Output persisted meanwhile
+can therefore be broadcast first. The browser accepts an unseen lower seq and
+merges durable rows by seq; seeing N+1 no longer discards N. Snapshot coverage
+and current-window duplicate detection are separate facts. Full merge, streaming
+identity, settled-question and older-page rules belong to the
+[frontend contract](frontend-list-reconciliation.md#实时历史身份与流缓冲).
+
+The original writer and stdout reader remain independent. The fix neither
+publishes `steered` before write confirmation nor pauses stdout to force display
+order. A visible row proves neither provider receipt nor semantic consumption;
+an unknown delivery is not permission to repeat input. Controlled real Claude
+JSONL/driver tests hold stdin with a 1 MiB correction: N is durable and N+1
+published while N is not yet `steered`; releasing the pipe confirms N, while a
+lost drain acknowledgement retains the original unavailable result without a
+`steered` claim. Actual snapshot/broadcast content and identity are compared with
+the shared `steeringReplay.json` fixture, then consumed by the production browser
+reducer. Claude and Codex frontend interleavings are covered offline; this is not
+a claim of a reproduced native Codex stdin failure or a new live-provider result.
 
 ## Output and process lifetime
 

@@ -93,7 +93,11 @@ class ForkRevertRecord(BaseModel):
 
     ran: bool = False
     files: list[str] = []
-    stash_ref: str | None = None
+    stash_ref: str | None = Field(default=None, description=(
+        "New snapshots use a verified full commit OID. Legacy stash@{n} selectors "
+        "are unstable historical references and must not identify today's snapshot. "
+        "An OID does not guarantee retention after deletion or Git garbage collection."
+    ))
     # completed | refused | failed | unknown_post_crash
     status: str
     refused_reason: str | None = None

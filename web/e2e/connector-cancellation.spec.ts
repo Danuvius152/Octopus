@@ -3,6 +3,9 @@ import { test, expect } from "./test";
 
 for (const status of ["cancelled", "success"] as const) {
   test(`OAuth close consumes the authoritative ${status} result`, async ({ page, context }) => {
+    // OAuth is mocked below; keep other workers' dispatch generations from
+    // retiring this operation before the cancellation receipt is exercised.
+    await page.routeWebSocket("**/ws*", () => {});
     let installations: Record<string, unknown>[] = [];
     let confirm!: () => void;
     const confirmation = new Promise<void>((resolve) => { confirm = resolve; });

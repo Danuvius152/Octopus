@@ -7,6 +7,8 @@ the actual pipeline, harness and SQLite with a synthetic provider CLI.
 from __future__ import annotations
 
 import asyncio
+import errno
+import json
 import os
 import signal
 import sqlite3
@@ -180,11 +182,14 @@ def _fake_report(question="q"):
 
 
 @pytest.mark.parametrize("committed", [False, True])
-@pytest.mark.parametrize("material_available", [False, True])
-def test_synthesis_outcome_commit_failure_keeps_storage_fail_stop(tmp_path, committed, material_available):
+@pytest.mark.parametrize(("failure_source", "material_available"), [
+    ("synthesis", False), ("synthesis", True), ("scratch", None),
+])
+def test_research_failure_outcome_commit_failure_keeps_storage_fail_stop(tmp_path, committed, failure_source, material_available):
     program = """
 import asyncio
 import builtins
+import os
 import sys
 from pathlib import Path
 from server.database import Database
@@ -192,6 +197,7 @@ from server.research import orchestrator
 from server.research.leaf import LeafResult
 from server.research.manager import ResearchManager
 from server.session_manager import SessionManager
+from server.workspace import paths_for
 from tests.accounts import create_account
 
 async def main():
@@ -204,6 +210,15 @@ async def main():
     session = await manager.create_session(agent["id"], "Original research")
     research = ResearchManager()
     research.bind(manager, database)
+    if sys.argv[6] == "scratch":
+        root = paths_for(session.user_id).research
+        make_dirs = os.makedirs
+        def refuse_scratch(path, *args, **kwargs):
+            if Path(path) == root:
+                Path(sys.argv[4]).touch()
+                raise PermissionError("controlled scratch refusal before failure commit")
+            return make_dirs(path, *args, **kwargs)
+        os.makedirs = refuse_scratch
     async def reason(*args, prompt, **kwargs):
         return LeafResult(text='["safety"]') if "Decompose" in prompt else LeafResult(text="", error="original synthesis refusal")
     async def search(*args, **kwargs):
@@ -244,7 +259,7 @@ asyncio.run(main())
 """
     path, marker, attempted = tmp_path / "research.db", tmp_path / "terminal-published", tmp_path / "material-attempted"
     result = subprocess.run(
-        [sys.executable, "-c", program, str(path), str(committed), str(marker), str(attempted), str(material_available)],
+        [sys.executable, "-c", program, str(path), str(committed), str(marker), str(attempted), str(material_available), failure_source],
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=5,
     )
     assert result.returncode == 70, result.stderr
@@ -252,10 +267,13 @@ asyncio.run(main())
     with closing(sqlite3.connect(path)) as stored:
         row = stored.execute("SELECT status, completed_at, error FROM research_jobs").fetchone()
     if committed:
-        assert row[0] == "failed" and row[1] and row[2].startswith("Report synthesis failed: original synthesis refusal")
-        if material_available:
+        assert row[0] == "failed" and row[1]
+        if failure_source == "scratch":
+            assert row[2] == "Could not prepare research scratch directory: controlled scratch refusal before failure commit"
+        elif material_available:
             assert row[2] == "Report synthesis failed: original synthesis refusal"
         else:
+            assert row[2].startswith("Report synthesis failed: original synthesis refusal")
             assert "Synthesis diagnostic material unavailable: OSError: diagnostic material unavailable before terminal commit" in row[2]
     else:
         assert row == ("running", None, None)
@@ -991,6 +1009,123 @@ async def test_research_waiting_for_configuration_cannot_admit_after_shutdown(rm
         assert await tx.fetch_one("SELECT id FROM research_jobs") is None
 
 
+@pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+@pytest.mark.parametrize("revoke_after_scope", [False, True])
+async def test_queued_research_passes_original_choices_to_every_leaf(
+    rm, mgr, db, monkeypatch, tmp_path, override, backend, revoke_after_scope,
+):
+    from server.agent_manager import AgentManager
+    from server.codex_login import codex_home_for
+    from server.config import settings
+    from server.crypto import encrypt
+    from server.harness import RunConfig
+    from server.harness import run as run_mod
+    from server.users import UserManager
+    from tests.harness_profiles import process_profile
+
+    session = await _session(mgr, db, backend=backend)
+    native = get_harness(session.backend).profile
+    web_native = get_harness(backend).runtime_profile(RunConfig(transport="exec")) if backend == "codex" else native
+    monkeypatch.setattr(settings, "codex_home_dir", str(tmp_path / "credential-homes"))
+    which = run_mod._which_with_fallback
+    monkeypatch.setattr(run_mod, "_which_with_fallback", lambda binary: sys.executable if binary == "codex" else which(binary))
+    key = await UserManager(db).data_key_for(session.user_id)
+    for identifier in ("agent-original", "agent-replacement", "session-original", "session-replacement"):
+        await db.save_credential(identifier, session.backend, identifier, "api_key", encrypt(identifier, key), "now", user_id=session.user_id)
+        if backend == "codex":
+            home = Path(codex_home_for(identifier))
+            home.mkdir(parents=True)
+            (home / "auth.json").write_text('{"OPENAI_API_KEY":"controlled-offline-auth"}')
+    agents = AgentManager(db)
+    await agents.update_agent(session.agent_id, backend=backend, model="agent-original", reasoning_effort="high",
+                              service_tier="fast" if backend == "codex" else None, credential_id="agent-original")
+    if override:
+        await mgr.update_session_configuration(session.id, {
+            "model": "session-original", "reasoning_effort": "medium", "credential_id": "session-original",
+            "service_tier": "default" if backend == "codex" else None,
+        }, session.user_id)
+    rendered, spawned = [], []
+    spawn = asyncio.create_subprocess_exec
+
+    async def observe_spawn(*args, **kwargs):
+        spawned.append(Path(kwargs["cwd"]).parent.name)
+        return await spawn(*args, **kwargs)
+
+    def reason_argv(context):
+        argv, kwargs = native.build_oneshot_argv(context)
+        rendered.append(("reason", context, argv, kwargs["env"]))
+        return [sys.executable, "-c", 'print(\'["one angle"]\')'], {"cwd": context.working_dir}
+
+    def web_argv(context):
+        if not context.web_research:
+            return native.build_turn_argv(context)  # Pure validation of saved Agent configuration.
+        argv, kwargs = web_native.build_turn_argv(context)
+        rendered.append(("web", context, argv, kwargs["env"]))
+        records = ([{"type": "thread.started", "thread_id": "research-leaf"},
+                    {"type": "item.completed", "item": {"id": "answer", "type": "agent_message", "text": "[]"}},
+                    {"type": "turn.completed", "usage": {}}] if backend == "codex" else
+                   [{"type": "result", "subtype": "success", "result": "[]"}])
+        program = "\n".join(f"print({json.dumps(json.dumps(record))}, flush=True)" for record in records)
+        return [sys.executable, "-c", program], {"cwd": context.working_dir}
+
+    profile = process_profile(web_native, binary=sys.executable, build_oneshot_argv=reason_argv, build_turn_argv=web_argv,
+        parse_oneshot_stdout=lambda output: output, activity_observer=None, prepare_resume=None,
+        select_transport=(lambda profile, transport: profile) if backend == "codex" else None)
+    monkeypatch.setitem(_REGISTRY, backend, Harness(profile))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
+
+    async def accept(*args, **kwargs):
+        return accepted_receipt()
+
+    monkeypatch.setattr(mgr, "start_message", accept)
+    rm._job_sem = asyncio.Semaphore(0)
+    first = await rm.start(session.id, "old job")
+    await agents.update_agent(session.agent_id, model="agent-replacement", reasoning_effort="low",
+                              service_tier="default" if backend == "codex" else None, credential_id="agent-replacement")
+    if override:
+        await mgr.update_session_configuration(session.id, {
+            "model": "session-replacement", "reasoning_effort": "high", "credential_id": "session-replacement",
+            "service_tier": "fast" if backend == "codex" else None,
+        }, session.user_id)
+    second = await rm.start(session.id, "new job")
+
+    async def revoke_at_search(event):
+        if revoke_after_scope and event.get("research_id") == first["id"] and event.get("phase") == "search":
+            await db.update_credential("session-original" if override else "agent-original", needs_reconnect=True)
+
+    mgr.on_broadcast("revoke-research-after-scope", revoke_at_search)
+    rm._job_sem.release()
+    await asyncio.wait_for(rm.wait_for_idle(), 8)
+    for job, selection, effort in (
+        (first, "session-original" if override else "agent-original", "medium" if override else "high"),
+        (second, "session-replacement" if override else "agent-replacement", "high" if override else "low"),
+    ):
+        leaves = [entry for entry in rendered if Path(entry[1].working_dir).parent.name == job["id"]]
+        assert {entry[0] for entry in leaves} == {"web", "reason"}
+        tier = ("default" if override else "fast") if job is first else ("fast" if override else "default")
+        for kind, context, argv, env in leaves:
+            assert (context.model, context.reasoning_effort, context.service_tier) == (selection, effort, tier if backend == "codex" else None)
+            if backend == "codex":
+                assert context.credential.home_dir == codex_home_for(selection) and env["CODEX_HOME"] == codex_home_for(selection)
+                if kind == "web":
+                    assert argv[argv.index("-m") + 1] == selection
+                    assert f'model_reasoning_effort="{effort}"' in argv and f'service_tier="{tier}"' in argv
+                else:
+                    assert argv[argv.index("--model") + 1] == selection
+                    assert argv[argv.index("--effort") + 1] == effort and argv[argv.index("--tier") + 1] == tier
+            else:
+                assert context.credential.secret == selection and env["ANTHROPIC_API_KEY"] == selection
+                assert argv[argv.index("--model") + 1] == selection
+                assert argv[argv.index("--effort") + 1] == effort and env["CLAUDE_CODE_EFFORT_LEVEL"] == effort
+            if kind == "web":
+                assert context.memory_dir is None and context.mcp_servers == [] and context.web_research
+                assert context.working_dir != session.working_dir
+        refused = revoke_after_scope and job is first
+        assert (await db.get_research_job(job["id"]))["status"] == ("failed" if refused else "completed")
+        assert spawned.count(job["id"]) == (1 if refused else 3)
+
+
 def _blocking_research_cli(monkeypatch, tmp_path: Path, *, stage: str) -> Path:
     """Install a synthetic provider at the actual subprocess boundary."""
     pid_file = tmp_path / "research-cli.pid"
@@ -1032,6 +1167,116 @@ def _completed_research_cli(monkeypatch) -> None:
         ),
     )
     monkeypatch.setitem(_REGISTRY, "claude-code", Harness(profile))
+
+
+@pytest.mark.parametrize("boundary", ["root", "cwd"])
+@pytest.mark.parametrize("error_number", [errno.ENOSPC, errno.EACCES])
+async def test_scratch_preparation_failure_retires_without_starting_a_leaf(
+    rm, mgr, db, monkeypatch, boundary, error_number,
+):
+    session = await _session(mgr, db)
+    _completed_research_cli(monkeypatch)
+    root = rm_mod.paths_for(session.user_id).research
+    make_dirs = os.makedirs
+    spawn = asyncio.create_subprocess_exec
+    started = []
+
+    def refuse_scratch(path, *args, **kwargs):
+        target = Path(path)
+        matches = target == root if boundary == "root" else root in target.parents and target.name == "cwd"
+        if matches:
+            raise OSError(error_number, "controlled scratch preparation refusal", str(target))
+        return make_dirs(path, *args, **kwargs)
+
+    async def observe_spawn(*args, **kwargs):
+        started.append(args)
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(os, "makedirs", refuse_scratch)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
+    job = await rm.start(session.id, "A scratch directory cannot be prepared")
+    await asyncio.wait_for(rm.wait_for_idle(), 3)
+    row = await db.get_research_job(job["id"])
+    assert row["status"] == "failed"
+    assert "prepare research scratch directory" in row["error"].lower()
+    assert "controlled scratch preparation refusal" in row["error"]
+    assert started == []
+    assert job["id"] not in rm._tasks and job["id"] not in rm._contexts
+    assert not rm.drain_blockers()
+    await rm.shutdown()
+
+
+@pytest.mark.parametrize("winner", ["failed", "cancelled"])
+async def test_cancellation_and_scratch_failure_select_one_original_outcome(rm, mgr, db, monkeypatch, winner):
+    session = await _session(mgr, db)
+    _completed_research_cli(monkeypatch)
+    root = rm_mod.paths_for(session.user_id).research
+    make_dirs = os.makedirs
+    confirm = db.confirm_research_outcome
+    entered, release = asyncio.Event(), asyncio.Event()
+    published = []
+
+    def refuse_scratch(path, *args, **kwargs):
+        if Path(path) == root:
+            raise OSError(errno.ENOSPC, "scratch failure competing with cancellation")
+        return make_dirs(path, *args, **kwargs)
+
+    async def gate_failure(job_id, status, **kwargs):
+        if status == "failed" and winner == "cancelled":
+            entered.set()
+            await release.wait()
+        outcome = await confirm(job_id, status, **kwargs)
+        if status == "failed" and winner == "failed":
+            entered.set()
+            await release.wait()
+        return outcome
+
+    async def observe(event):
+        if event["type"] == "research_failed":
+            published.append(event)
+
+    monkeypatch.setattr(os, "makedirs", refuse_scratch)
+    monkeypatch.setattr(db, "confirm_research_outcome", gate_failure)
+    mgr.on_broadcast("scratch-outcome-race", observe)
+    job = await rm.start(session.id, "Preserve the original failed or cancelled decision")
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        selected = await rm.cancel(job["id"])
+        assert selected["status"] == winner
+        release.set()
+        await asyncio.wait_for(rm.wait_for_idle(), 3)
+        final = await db.get_research_job(job["id"])
+        assert final["id"] == job["id"] and final["status"] == winner
+        assert final["completed_at"] == selected["completed_at"]
+        assert [(event["research_id"], event["status"]) for event in published] == [(job["id"], winner)]
+        assert job["id"] not in rm._tasks and job["id"] not in rm._contexts
+        assert not rm.drain_blockers()
+    finally:
+        release.set()
+        await rm.shutdown()
+
+
+@pytest.mark.parametrize("error_type", [OSError, RuntimeError])
+async def test_unknown_pipeline_failure_after_scratch_keeps_its_original_owner(rm, mgr, db, monkeypatch, error_type):
+    session = await _session(mgr, db)
+    _completed_research_cli(monkeypatch)
+    failure = error_type("Unclassified pipeline failure after scratch preparation")
+
+    def refuse_oneshot(context):
+        raise failure
+
+    harness = get_harness(session.backend)
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_oneshot_argv=refuse_oneshot))
+    job = await rm.start(session.id, "Do not reinterpret an unknown pipeline failure as preparation")
+    with pytest.raises(error_type) as error:
+        await asyncio.wait_for(rm.wait_for_idle(), 3)
+    assert error.value is failure
+    assert (rm_mod.paths_for(session.user_id).research / job["id"] / "cwd").is_dir()
+    assert (await db.get_research_job(job["id"]))["status"] == "failed"
+    assert job["id"] in rm._tasks and job["id"] in rm._contexts and rm.drain_blockers()
+    with pytest.raises(error_type) as shutdown_error:
+        await rm.shutdown()
+    assert shutdown_error.value is failure
 
 
 async def _cli_pid(pid_file: Path) -> int:
@@ -1194,6 +1439,7 @@ async def test_research_shutdown_reports_web_cli_retirement_failure(
     pid_file = _blocking_research_cli(monkeypatch, tmp_path, stage="web")
     session = await _session(mgr, db)
     job = await rm.start(session.id, "web research")
+    original = rm._tasks[job["id"]]
     pid = await _cli_pid(pid_file)
     killpg = os.killpg
 
@@ -1214,6 +1460,11 @@ async def test_research_shutdown_reports_web_cli_retirement_failure(
         assert (await db.get_research_job(job["id"]))["status"] == (
             "cancelled" if cancel_before_shutdown else "running"
         )
+        assert rm._tasks[job["id"]] is original and job["id"] in rm._contexts
+        assert rm.drain_blockers()
+        with pytest.raises(Exception) as idle_error:
+            await rm.wait_for_idle()
+        assert "Web leaf execution retirement is unconfirmed" in "".join(traceback.format_exception(idle_error.value))
     finally:
         monkeypatch.setattr(os, "killpg", killpg)
         try:

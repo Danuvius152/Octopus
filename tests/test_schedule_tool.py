@@ -112,6 +112,19 @@ async def test_create_rejects_two_recurrences(client):
     assert "exactly one" in resp.json()["detail"]
 
 
+async def test_agent_schedule_surface_rejects_unrepresentable_intervals(client):
+    sid = await _session(client)
+    path = f"/api/sessions/{sid}/schedules"
+    rejected = await client.post(path, json={"prompt": "Check status", "interval_seconds": 2**63})
+    assert rejected.status_code == 422 and (await client.get(path)).json() == []
+    created = await client.post(path, json={"prompt": "Check status", "interval_seconds": 3600})
+    assert created.status_code == 201
+    before = (await client.get(path)).json()
+    rejected = await client.patch(f"{path}/{created.json()['id']}", json={"interval_seconds": 2**40})
+    assert rejected.status_code == 422
+    assert (await client.get(path)).json() == before
+
+
 @pytest.mark.asyncio
 async def test_create_rejects_no_recurrence(client):
     sid = await _session(client)

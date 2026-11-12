@@ -43,6 +43,8 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         samples[event["type"]] = event
 
     manager.on_broadcast("ws-contract", capture)
+    apps = ApplicationManager()
+    apps.bind(manager, db)
     try:
         for event in (
             HarnessEvent(type="text_delta", content="Streaming text"),
@@ -82,8 +84,6 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         await manager.update_session_configuration(session.id, {"model": "context-model"}, user["id"])
 
         await _publish(manager, "agent_updated", agent)
-        apps = ApplicationManager()
-        apps.session_mgr = manager
         await db.save_application(app_id="application", name="Contract application", app_dir=str(tmp_path),
                                   agent_id=agent["id"], user_id=user["id"], created_at="now", updated_at="now")
         await apps._broadcast_application("application_updated", await db.get_application("application"))
@@ -177,4 +177,5 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         assert actual == json.loads(SAMPLES.read_text())
     finally:
         release.set()
+        apps.shutdown()
         await db.close()

@@ -182,6 +182,16 @@ keeps the previous ASCII limit and reserves space for fork-preservation temporar
 names. Invalid UTF-8 names produce an attachment error. Existing account paths,
 attachment identity and download authorization retain their original owners.
 
+The upload route materializes at most `MAX_FILE_BYTES + 1` bytes from the parsed
+upload, regardless of absent or inaccurate size metadata. Storage remains the
+authority for empty-file and size rejection; the extra byte distinguishes an
+oversized upload without reading its remainder. A failed destination write
+removes only that attempt's unpublished file and propagates cleanup failure.
+This bounds route-level materialization, not multipart spooling, network intake
+or an account-wide quota. Authenticated multipart tests cover exact-limit and
+oversized bodies with misleading metadata, read failure, partial write failure
+and a subsequent successful upload.
+
 This validates session directory selection. The local deployment runs trusted
 agents and applications under the host user; it is not an OS sandbox against
 hostile tenants or root. Per-tenant execution isolation would require a separate

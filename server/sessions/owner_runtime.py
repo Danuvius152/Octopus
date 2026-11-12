@@ -1189,7 +1189,8 @@ class OwnerRuntime:
             inputs[execution.request.request_id] = execution.request
             inputs.update((request.request_id, request) for request in
                           session._inline_requests.get(execution.request.request_id, ()))
-        for request_id in tuple(session._request_completions):
+        ended_inputs = tuple(session._request_completions)
+        for request_id in ended_inputs:
             request = inputs.get(request_id)
             carrying = None
             if request is None:
@@ -1206,7 +1207,7 @@ class OwnerRuntime:
                     notification_state=self.notification_state(carrying) if carrying is not None else "unavailable",
                     reason="Session owner failed; retained input requires review", owner_ended=True)
             self._finish_observation(request_id, carrying, unavailable=request is None)
-            manager._finish_receipt(session, completion)
+            manager._finish_receipt(session, replace(completion, ended_owner_inputs=ended_inputs))
 
     def _finish_observation(self, request_id: str, execution: Execution | None, *, unavailable: bool = False) -> None:
         observation = self.owner.session._request_observations.pop(request_id, None)

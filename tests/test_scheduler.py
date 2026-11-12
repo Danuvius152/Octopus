@@ -645,7 +645,47 @@ async def test_initialize_retains_and_registers_missed_run_at_schedules(setup):
     assert runner._scheduler.get_job("recurring1") is not None
 
 
-@pytest.mark.parametrize("invalid", ["knowledge", "run_at"])
+async def test_unrepresentable_legacy_interval_is_isolated_while_valid_jobs_start(setup):
+    _manager, db, runner = setup
+    agent = await db.get_system_agent()
+    for identifier in ("bad-interval", "valid-interval"):
+        await save_schedule(db, schedule_id=identifier, agent_id=agent["id"], name=identifier, prompt="Check status",
+                            interval_seconds=3600, created_at="2026-01-01T00:00:00Z")
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE schedules SET interval_seconds=? WHERE id=?", (2**40, "bad-interval"))
+    await runner.initialize(paused=True)
+    invalid = await db.get_schedule_definition("bad-interval")
+    assert not invalid["enabled"] and invalid["invalid_reason"].startswith("invalid_recurrence")
+    assert runner.next_run_at("bad-interval") is None
+    assert (await db.get_schedule_definition("valid-interval"))["enabled"]
+    assert runner.next_run_at("valid-interval") is not None
+
+
+@pytest.mark.parametrize("operation", ["create", "update"])
+async def test_definition_storage_rejects_invalid_interval_before_committing(setup, operation):
+    from server.schedule_ai import ScheduleParseError
+
+    _manager, db, runner = setup
+    agent = await db.get_system_agent()
+    fields = dict(schedule_id="write-boundary", agent_id=agent["id"], name="Check", prompt="Check status",
+                  interval_seconds=3600, created_at="2026-01-01T00:00:00Z")
+    before, job = None, None
+    if operation == "update":
+        await save_schedule(db, **fields)
+        await runner.initialize(paused=True)
+        before = await db.get_schedule_definition(fields["schedule_id"])
+        job = runner._scheduler.get_job(fields["schedule_id"])
+    with pytest.raises(ScheduleParseError, match="interval"):
+        if operation == "create":
+            await save_schedule(db, **{**fields, "interval_seconds": 2**63})
+        else:
+            await runner.update(before, {"interval_seconds": 2**40})
+    assert await db.get_schedule_definition(fields["schedule_id"]) == before
+    assert runner._scheduler.get_job(fields["schedule_id"]) is job
+    assert db.health.cause is None
+
+
+@pytest.mark.parametrize("invalid", ["knowledge", "run_at", "interval"])
 @pytest.mark.parametrize("change", ["none", "edit", "delete"])
 async def test_initial_invalid_definition_does_not_disable_its_replacement(setup, monkeypatch, invalid, change):
     _manager, db, runner = setup
@@ -653,7 +693,10 @@ async def test_initial_invalid_definition_does_not_disable_its_replacement(setup
     await save_schedule(db, schedule_id="invalid", agent_id=agent["id"], name="Original", prompt="check",
                         interval_seconds=3600, created_at="2026-01-01T00:00:00Z")
     valid = await db.get_schedule_definition("invalid")
-    await db.update_schedule("invalid", **({"knowledge_context": None} if invalid == "knowledge" else {"run_at": "bad-time"}))
+    column, value = {"knowledge": ("knowledge_context", None), "run_at": ("run_at", "bad-time"),
+                     "interval": ("interval_seconds", 2**40)}[invalid]
+    async with db.transaction(write=True) as tx:
+        await tx.execute(f"UPDATE schedules SET {column}=? WHERE id=?", (value, "invalid"))
     original = await db.get_schedule_definition("invalid")
     update = db.update_schedule
     observed, release = asyncio.Event(), asyncio.Event()
@@ -671,7 +714,7 @@ async def test_initial_invalid_definition_does_not_disable_its_replacement(setup
         await asyncio.wait_for(observed.wait(), 3)
         if change != "none":
             newer = asyncio.create_task(runner.delete("invalid") if change == "delete" else runner.update(original, {
-                "knowledge_context": valid["knowledge_context"], "run_at": None, "prompt": "Current task",
+                "knowledge_context": valid["knowledge_context"], "run_at": None, "interval_seconds": 3600, "prompt": "Current task",
             }))
             async with asyncio.timeout(3):
                 while True:
@@ -691,7 +734,10 @@ async def test_initial_invalid_definition_does_not_disable_its_replacement(setup
             assert current["invalid_reason"] is None and runner.next_run_at("invalid") is not None
         else:
             assert not current["enabled"] and runner.next_run_at("invalid") is None
-            assert current["invalid_reason"] == ("invalid_run_at" if invalid == "run_at" else "knowledge_contract_missing")
+            if invalid == "interval":
+                assert current["invalid_reason"].startswith("invalid_recurrence")
+            else:
+                assert current["invalid_reason"] == ("invalid_run_at" if invalid == "run_at" else "knowledge_contract_missing")
     finally:
         release.set()
         await asyncio.gather(initialization, *([newer] if newer is not None else []), return_exceptions=True)

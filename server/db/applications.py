@@ -9,10 +9,21 @@ changed.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .base import DatabaseBase
 from .transaction import Transaction
+from .users import owner_is_available
+
+if TYPE_CHECKING:
+    from ..sessions.submission import RequestCompletion
+
+
+_MESSAGE_INPUT = "COALESCE(json_extract(i.payload,'$.operation.kind'),'message')='message'"
+_INPUT_TERMINAL = (
+    "m.session_id=i.session_id AND m.terminal_request_id=COALESCE(i.execution_owner,i.request_id) "
+    "AND (i.execution_owner IS NULL OR i.execution_owner=i.request_id OR i.delivery_state<>'none')"
+)
 
 
 class ApplicationDeleting(ValueError):
@@ -201,6 +212,96 @@ class ApplicationsMixin(DatabaseBase):
                 f"UPDATE applications SET {set_clause} WHERE id = ?",
                 list(updates.values()) + [app_id],
             )
+
+    async def project_application_terminal(
+        self, expected: dict[str, Any], fields: dict[str, Any],
+        *, completion: RequestCompletion | None = None,
+        preparation_failure: bool = False, unavailable_request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Commit an evaluation or preparation diagnostic while it still owns the projection.
+
+        Input admission uses this same writer transaction to set building, so
+        a new input cannot slip between the final check and this projection.
+        Filesystem I/O and backend retirement belong outside this transaction.
+        """
+        async with self.transaction(write=True) as tx:
+            raw = await tx.fetch_one(
+                f"SELECT {self._APPLICATION_COLS} FROM applications WHERE id=?", (expected["id"],),
+            )
+            if raw is None:
+                return None
+            row = self._row_to_application(raw)
+            if (row["deletion"] is not None or any(row[key] != expected[key] for key in (
+                    "user_id", "session_id", "app_dir", "entrypoint"))
+                    or not await owner_is_available(tx, row["user_id"])):
+                return None
+            sid = row["session_id"]
+            binding = await tx.fetch_one("SELECT user_id,app_id FROM sessions WHERE id=?", (sid,))
+            if binding is not None and (binding[0] != row["user_id"] or binding[1] not in {None, row["id"]}):
+                return None
+            latest = await tx.fetch_one(
+                "SELECT i.request_id,COALESCE(i.execution_owner,i.request_id),m.content "
+                "FROM client_submissions i LEFT JOIN messages m ON " + _INPUT_TERMINAL +
+                " WHERE i.session_id=? AND " + _MESSAGE_INPUT +
+                " AND (i.execution_owner IS NULL OR i.execution_owner=i.request_id OR i.delivery_state='none') "
+                "ORDER BY i.rowid DESC LIMIT 1", (sid,),
+            )
+            # A delivered steer belongs to its carrier's admission. Its later
+            # row must not supersede an independently queued execution.
+            if preparation_failure and unavailable_request_id is None and latest is not None:
+                return None  # Admission transfers projection ownership, even before its observer runs.
+            diagnostic_request = unavailable_request_id
+            unavailable_execution = unavailable_request_id
+            ended_inputs: tuple[str, ...] = ()
+            if completion is not None:
+                if (completion.input_request_id != completion.request_id or row["status"] != "building"
+                        or latest is None or latest[1] != completion.request_id):
+                    return None
+                if completion.recording_state == "committed" and completion.outcome is not None:
+                    if latest[2] is None or json.loads(latest[2]) != completion.outcome.model_dump(mode="json"):
+                        return None
+                else:
+                    diagnostic_request = completion.input_request_id
+                    if completion.state == "unavailable":
+                        if completion.ended_owner_inputs:
+                            if completion.input_request_id not in completion.ended_owner_inputs:
+                                return None
+                            # Ended Owner receipts are no longer live work even
+                            # when their saved execution state is still running.
+                            # Do not expand this exact set through carrier links.
+                            ended_inputs = completion.ended_owner_inputs
+                            diagnostic_request = None
+                            unavailable_execution = None
+                        else:
+                            unavailable_execution = completion.request_id
+            if unavailable_request_id is not None and (latest is None or latest[1] != unavailable_request_id):
+                return None
+            active = await tx.fetch_one(
+                "SELECT 1 FROM client_submissions i LEFT JOIN messages m ON " + _INPUT_TERMINAL +
+                " WHERE i.session_id=? AND " + _MESSAGE_INPUT +
+                " AND i.execution_state IN ('pending','running') AND m.terminal_request_id IS NULL "
+                "AND i.request_id NOT IN (SELECT value FROM json_each(?)) "
+                "AND i.request_id IS NOT ? "
+                "AND NOT (? IS NOT NULL AND i.execution_owner IS ? AND i.delivery_state<>'none') LIMIT 1",
+                (sid, json.dumps(ended_inputs), diagnostic_request, unavailable_execution, unavailable_execution),
+            )
+            if active:
+                return None
+            if preparation_failure and (row["status"] not in {"building", "failed"} or any(
+                    row[key] != expected[key] for key in ("status", "error", "updated_at"))):
+                return None
+            if row["status"] == "building" and latest is None and not preparation_failure:
+                return None  # The original creation still owns preparation.
+            updates = {key: value for key, value in fields.items() if key in {
+                "status", "error", "last_built_at", "icon_src", "updated_at",
+            }}
+            if preparation_failure and "session_id" in fields:
+                updates["session_id"] = fields["session_id"]
+            await tx.execute(
+                "UPDATE applications SET " + ", ".join(f"{key}=?" for key in updates) + " WHERE id=?",
+                (*updates.values(), row["id"]),
+            )
+            return {**row, **updates}
 
     async def set_application_pinned(self, app_id: str, pinned: bool) -> None:
         """Put the application in the sidebar (at the bottom) or take it out."""

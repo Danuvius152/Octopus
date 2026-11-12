@@ -81,14 +81,31 @@ async def errors(conn: aiosqlite.Connection, window: str = "7d") -> list[dict[st
 
 
 async def connectors(conn: aiosqlite.Connection, window: str = "7d") -> list[dict[str, Any]]:
-    """Per-connector success rate. The Gmail outage would have been one row here
-    with ok_n = 0 and a growing n (§9 G0)."""
+    """Logical resource samples, with historical failure-only data separate.
+
+    A legacy failure does not tell us how many requests succeeded unobserved.
+    It cannot supply a denominator, duration or last observed resource time.
+    """
     return await _rows(
         conn,
-        "SELECT json_extract(detail, '$.installation_id') installation, "
-        "       COUNT(*) n, SUM(ok) ok_n, MAX(ts) last_seen "
-        "FROM events WHERE kind='connector_call' AND ts >= ? "
-        "GROUP BY installation ORDER BY (COUNT(*) - IFNULL(SUM(ok),0)) DESC",
+        """
+        WITH calls AS (
+            SELECT json_extract(detail, '$.installation_id') installation,
+                   json_extract(detail, '$.unit') unit, ok, duration_ms, ts
+            FROM events WHERE kind='connector_call' AND ts >= ?
+        )
+        SELECT installation,
+               COUNT(CASE WHEN unit='logical_resource_v1' THEN 1 END) n,
+               SUM(CASE WHEN unit='logical_resource_v1' AND ok=1 THEN 1 ELSE 0 END) ok_n,
+               ROUND(100.0 * SUM(CASE WHEN unit='logical_resource_v1' AND ok=1 THEN 1 ELSE 0 END)
+                     / COUNT(CASE WHEN unit='logical_resource_v1' THEN 1 END), 1) success_pct,
+               ROUND(AVG(CASE WHEN unit='logical_resource_v1' THEN duration_ms END), 1) avg_ms,
+               MAX(CASE WHEN unit='logical_resource_v1' THEN duration_ms END) max_ms,
+               MAX(CASE WHEN unit='logical_resource_v1' THEN ts END) last_seen,
+               SUM(CASE WHEN unit IS NULL AND ok=0 THEN 1 ELSE 0 END) legacy_failure_samples
+        FROM calls WHERE unit='logical_resource_v1' OR (unit IS NULL AND ok=0)
+        GROUP BY installation ORDER BY (n - ok_n) DESC, legacy_failure_samples DESC, installation
+        """,
         (_since(window),),
     )
 
@@ -274,6 +291,8 @@ async def overview(conn: aiosqlite.Connection, window: str = "24h") -> dict[str,
     return {
         "window": window,
         "counts": counts,
+        "counts_unit": "event_samples",
+        "connectors": await connectors(conn, window),
         "turns": await turns(conn, window),
         "errors": (await errors(conn, window))[:10],
         "resources": await resources(conn, window),

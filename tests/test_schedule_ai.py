@@ -3,7 +3,7 @@
 The pure helpers are tested directly; the AI path is tested with an injected
 fake runner so no real `claude` CLI is needed."""
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pytest
 
@@ -14,6 +14,7 @@ from server.schedule_ai import (
     describe_cron,
     extract_json,
     format_interval,
+    interval_trigger,
     local_timezone,
     parse_interval_token,
     parse_rigid,
@@ -399,6 +400,39 @@ def test_build_explicit_interval_floor():
     with pytest.raises(ScheduleParseError) as e:
         build_explicit_schedule(prompt="x", interval_seconds=30)
     assert "60" in str(e.value)
+
+
+@pytest.mark.parametrize("seconds", [2**40, 2**63 - 1, 2**63, 10**1000, 60.5, float("inf"), float("nan"), True])
+def test_interval_validation_rejects_unstorable_or_untriggerable_values(seconds):
+    with pytest.raises(ScheduleParseError):
+        build_explicit_schedule(prompt="Check status", interval_seconds=seconds, now=datetime(2026, 1, 1, tzinfo=UTC))
+
+
+@pytest.mark.parametrize("seconds", [60, 60.0, "60", 1_000_000_000, 100_000_000_000])
+def test_representable_intervals_keep_the_existing_range(seconds):
+    parsed = build_explicit_schedule(prompt="Check status", interval_seconds=seconds, now=datetime(2026, 1, 1, tzinfo=UTC))
+    assert parsed.interval_seconds == int(seconds)
+
+
+def test_interval_validates_first_fire_including_timestamp_rounding_and_zone_boundary():
+    trigger = interval_trigger(60, now=datetime(9999, 12, 31, 23, 58, 59, tzinfo=UTC), tz="UTC")
+    assert trigger.get_next_fire_time(None, datetime(9999, 12, 31, 23, 58, 59, tzinfo=UTC)) == datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
+    # Adding the interval is representable; converting the first fire through
+    # APScheduler's float timestamp rounds it into year 10000.
+    with pytest.raises(ScheduleParseError, match="first fire"):
+        interval_trigger(60, now=datetime(9999, 12, 31, 23, 58, 59, 999999, tzinfo=UTC), tz="UTC")
+    with pytest.raises(ScheduleParseError, match="Pacific/Kiritimati"):
+        interval_trigger(60, now=datetime(9999, 12, 31, 9, 59, tzinfo=UTC), tz="Pacific/Kiritimati")
+
+
+@pytest.mark.parametrize("source", ["rigid", "ai"])
+def test_text_schedule_paths_share_interval_validation(source):
+    with pytest.raises(ScheduleParseError):
+        if source == "rigid":
+            parse_rigid(f"{2**40}s Check status")
+        else:
+            validate_parsed({"prompt": "Check status", "recurrence": {"kind": "interval", "interval_seconds": 2**40}},
+                            default_tz="UTC", original_text="a very long interval")
 
 
 def test_build_explicit_cron_keeps_the_expression_and_labels_it():

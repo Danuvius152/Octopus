@@ -5,12 +5,79 @@ import { act, renderHook } from "@testing-library/react";
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
 import { useSessionStore, type Agent, type Application, type SessionInfo } from "../stores/sessionStore";
 
+it("merges an unseen delayed steer before a higher sequence without repeating either row", () => {
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {}, streamingText: {}, streamingItems: {} });
+  const output = { type: "assistant_text", session_id: "late-steer", seq: 4, content: "Output while stdin is blocked" };
+  const steer = { type: "steered", session_id: "late-steer", seq: 3, content: "Saved correction",
+    tool_input: { request_context: { request_id: "inline", source: "human" } } };
+  handleWsMessage(output);
+  handleWsMessage(steer);
+  handleWsMessage(output);
+  handleWsMessage(steer);
+  const rows = useSessionStore.getState().messages["late-steer"];
+  expect(rows.map((row) => [row.seq, row.content])).toEqual([
+    [3, "Saved correction"], [4, "Output while stdin is blocked"],
+  ]);
+  expect(rows[0].tool_input).toEqual(steer.tool_input);
+});
+
+it("retains local command and notice order when the next persisted message arrives", () => {
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "user_message", session_id: "mixed", seq: 0, content: "First" });
+  useSessionStore.getState().addMessage("mixed", { role: "user", type: "text", content: "/research local command" });
+  useSessionStore.getState().addMessage("mixed", { role: "system", type: "notice", content: "Research started" });
+  handleWsMessage({ type: "assistant_text", session_id: "mixed", seq: 1, content: "Following output" });
+  expect(useSessionStore.getState().messages.mixed.map((row) => row.content)).toEqual([
+    "First", "/research local command", "Research started", "Following output",
+  ]);
+});
+
+it.each(["claude-code", "codex"])("keeps the current %s stream when old text and result arrive late", (backend) => {
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {}, streamingText: {}, streamingItems: {}, activeAttempts: {} });
+  const identity = (request_id: string, attempt_id = "attempt") => ({ request_id, attempt_id,
+    ...(backend === "codex" ? { native: { thread_id: "root", root_thread_id: "root", turn_id: "turn",
+      root_turn_id: "turn", item_id: "reused-item" } } : {}),
+  });
+  const source = (request: string) => backend === "claude-code" ? identity(request) : { runtime_metadata: identity(request) };
+  handleWsMessage({ type: "attempt_started", session_id: "streams", request_id: "current", attempt_id: "attempt" });
+  handleWsMessage({ type: "assistant_delta", session_id: "streams", content: "Current partial", ...source("current") });
+  handleWsMessage({ type: "assistant_text", session_id: "streams", seq: 3, content: "Old complete", ...source("old") });
+  const partial = () => backend === "codex"
+    ? Object.values(useSessionStore.getState().streamingItems.streams || {}).map((item) => item.content)
+    : [useSessionStore.getState().streamingText.streams];
+  expect(partial()).toEqual(["Current partial"]);
+  const terminal = { type: "result", session_id: "streams", seq: 4, request_id: "old", attempt_id: "attempt",
+    content: { kind: "outcome", operation: "message", request_id: "old", status: "success" } };
+  handleWsMessage(terminal);
+  handleWsMessage(terminal);
+  expect(partial()).toEqual(["Current partial"]);
+  expect(useSessionStore.getState().activeAttempts.streams).toEqual({ request_id: "current", attempt_id: "attempt" });
+  expect(useSessionStore.getState().messages.streams.map((row) => row.seq)).toEqual([3, 4]);
+  handleWsMessage({ ...terminal, seq: 5, request_id: "current", content: { ...terminal.content, request_id: "current" } });
+  expect(useSessionStore.getState().activeAttempts.streams).toBeUndefined();
+  expect(useSessionStore.getState().streamingText.streams).toBeUndefined();
+  expect(Object.values(useSessionStore.getState().streamingItems.streams || {})).toEqual([]);
+});
+
 it.each(["question_answer", "question_closed"])("retains %s resolution facts from the original notification", (type) => {
   useSessionStore.setState({ messages: {}, pendingQuestions: {}, sessionMembership: {}, sessions: [] });
   const toolInput = { reason: "cancelled", question_resolution: { version: 1, question_id: "form", disposition: type === "question_answer" ? "answered" : "closed",
     source: { kind: "account", user_id: "owner" }, answers: [{ question_index: 0, text: "choice", selected: [] }] } };
   handleWsMessage({ type, session_id: "resolution-session", question_id: "form", content: "choice", message: "closed", tool_input: toolInput });
   expect(useSessionStore.getState().messages["resolution-session"][0].tool_input).toEqual(toolInput);
+});
+
+it.each(["question_answer", "question_closed"])("retains the late request history after %s without reopening its form", (type) => {
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {}, pendingQuestions: {}, closedQuestionIds: {} });
+  handleWsMessage({ type, session_id: "late-question", question_id: "form", seq: 1, content: "A", message: "Closed" });
+  const request = { type: "question_request", session_id: "late-question", question_id: "form", seq: 0,
+    request_id: "request", attempt_id: "attempt", questions: [{ question: "Choose" }] };
+  handleWsMessage(request);
+  handleWsMessage(request);
+  const state = useSessionStore.getState();
+  expect(state.messages["late-question"].map((row) => [row.seq, row.type])).toEqual([[0, "question_request"], [1, type]]);
+  expect(state.pendingQuestions["late-question"] || []).toEqual([]);
+  expect(state.closedQuestionIds["late-question"].form).toBe(true);
 });
 
 it("restores the original session and rejects a delayed archive projection", () => {
@@ -249,15 +316,7 @@ it("preserves recovery progress through reconnect and paged history without endi
   expect(useSessionStore.getState().messages["recovery-test"].some((m) => m.type === "result")).toBe(false);
 });
 
-/** Snapshot-baseline dedup primitive.
- *
- * The full handler is hard to unit-test cleanly because it touches the
- * zustand store + WebSocket lifecycle, but the guard inside it — "is
- * this event's seq already covered by the snapshot we just loaded?" —
- * is the whole bug-fix and is a tiny pure function. Testing it
- * directly is the strongest signal that the dedup works for the race
- * window the seq mechanism is designed to cover.
- */
+/** Snapshot coverage is independent of individually observed live rows. */
 describe("shouldApplyWsEvent", () => {
   it("applies events without seq (ephemeral status/queue updates)", () => {
     expect(shouldApplyWsEvent(undefined, 5)).toBe(true);

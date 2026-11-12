@@ -108,7 +108,7 @@ async def test_202_handoff_protects_capacity_and_drain_until_effect_and_journal_
     assert not (history.state / "external-change.json").exists()
 
 
-@pytest.mark.parametrize("trigger", ["stop", "cancel", "lost-target"])
+@pytest.mark.parametrize("trigger", ["stop", "cancel", "lost-target", "script-deleted", "script-unexecutable"])
 async def test_follower_exit_keeps_original_target_and_never_replays_mutation(bridge, trigger):
     supervisor, row, history = bridge
     directory = Path(row["app_dir"])
@@ -128,6 +128,16 @@ async def test_follower_exit_keeps_original_target_and_never_replays_mutation(br
     try:
         if trigger == "stop":
             await asyncio.wait_for(supervisor.stop(row["id"]), 4)
+        elif trigger.startswith("script-"):
+            script = directory / "start.sh"
+            if trigger == "script-deleted":
+                script.unlink()
+            else:
+                script.chmod(0o600)
+            result = await asyncio.wait_for(supervisor.ensure_running(row["id"], str(directory)), 4)
+            assert result.state == app_backends.ABSENT and not result._uses
+            assert not app_backends._port_accepts(port)
+            assert not app_bridge.drain_blockers()
         elif trigger == "cancel":
             follower.cancel()
         else:

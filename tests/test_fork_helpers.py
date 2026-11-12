@@ -72,7 +72,7 @@ async def test_classify_bins_each_tool_class(db):
     summary = await fh.classify_side_effects(db, "parent", 0)
     paths = {e["path"] for e in summary["file_edits"]}
     assert paths == {"/repo/a.py", "/repo/b.txt"}
-    assert summary["agent_touched_paths"] == ["/repo/a.py", "/repo/b.txt"]
+    assert summary["agent_touched_paths"] == []  # disclosure alone grants no revert authority
     labels = {o["label"] for o in summary["other_tools"]}
     assert "Bash commands" in labels  # the plain pytest run
     assert any("github" in lab for lab in labels)
@@ -93,7 +93,130 @@ async def test_classify_respects_from_seq(db):
                   tool_use_id="e2")
     # Rewinding to M=2 should only see seq >= 2.
     summary = await fh.classify_side_effects(db, "parent", 2)
-    assert summary["agent_touched_paths"] == ["/repo/late.py"]
+    assert summary["file_edits"] == [{"path": "/repo/late.py", "turns": 1}]
+    assert summary["agent_touched_paths"] == []
+
+
+async def test_shell_example_cannot_authorize_reverting_user_file(db, git_repo):
+    await _seed_session(db)
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    path = git_repo / "a.py"
+    path.write_bytes(b"private user edit\n")
+    command = f"printf '%s\\n' 'rm {path}'"
+    subprocess.run(["bash", "-c", command], check=True, capture_output=True)
+    await _append(db, "parent", 0, "assistant", "tool_use", tool_name="Bash",
+                  tool_input={"command": command})
+    summary = await fh.classify_side_effects(db, "parent", 0)
+    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "shell")
+    assert record["status"] == "refused"
+    assert path.read_bytes() == b"private user edit\n"
+
+
+@pytest.mark.parametrize("result", ["success", "error", "started", "legacy", "wrong-attempt", "relative"])
+async def test_only_correlated_successful_file_tools_authorize_revert(db, git_repo, result):
+    await _seed_session(db)
+    path = git_repo / "a.py"
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    path.write_text("agent edit\n")
+    identity = {"request_id": "r", "attempt_id": "a", "tool_call_id": "call"}
+    await _append(db, "parent", 0, "assistant", "tool_use", tool_name="Edit", tool_use_id="reused",
+                  tool_input={"file_path": path.name if result == "relative" else str(path)},
+                  runtime_metadata=None if result == "legacy" else identity)
+    if result != "started":
+        await _append(db, "parent", 1, "tool", "tool_result", tool_use_id="reused", content="done",
+                      is_error=result == "error", runtime_metadata=None if result == "legacy" else
+                      {**identity, "attempt_id": "other" if result == "wrong-attempt" else "a"})
+    # Bash activity does not prohibit a revert that has independent file evidence.
+    await _append(db, "parent", 2, "assistant", "tool_use", tool_name="Bash", tool_input={"command": "pwd"})
+    summary = await fh.classify_side_effects(db, "parent", 0)
+    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "file-tool")
+    assert record["status"] == ("completed" if result == "success" else "refused")
+    assert path.read_text() == ("v1\n" if result == "success" else "agent edit\n")
+
+
+async def _record_claude_protocol(db, frames):
+    from server.harness.claude_code import ClaudeEventParser
+    from server.harness.tool_identity import ToolIdentityTracker
+
+    parser, tracker = ClaudeEventParser(), ToolIdentityTracker()
+    seq = 0
+    for frame in frames:
+        for event in parser.parse(frame).events:
+            tracker.normalize(event, "request", "attempt")
+            await _append(db, "parent", seq, "assistant" if event.type == "tool_use" else "tool", event.type,
+                          tool_name=event.tool_name, tool_use_id=event.tool_use_id, tool_input=event.tool_input,
+                          content=event.content, is_error=event.is_error, runtime_metadata=event.runtime_metadata)
+            seq += 1
+
+
+async def test_symlink_parent_path_cannot_authorize_the_lexical_neighbor(db, git_repo, tmp_path):
+    await _seed_session(db)
+    outside = tmp_path / "outside"
+    (outside / "deep").mkdir(parents=True)
+    (outside / "a.py").write_text("external original\n")
+    (git_repo / "link").symlink_to(outside / "deep", target_is_directory=True)
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-qm", "link baseline")
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    raw_path = str(git_repo / "link" / ".." / "a.py")
+    # POSIX traversal follows link before applying '..'. These are two files.
+    with open(raw_path, "w") as stream:
+        stream.write("agent external edit\n")
+    user_file = git_repo / "a.py"
+    user_file.write_text("private user edit\n")
+    await _record_claude_protocol(db, [
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "edit", "name": "Edit",
+            "input": {"file_path": raw_path}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "edit", "content": "done"}]}},
+    ])
+    summary = await fh.classify_side_effects(db, "parent", 0)
+    assert summary["file_edits"] == [{"path": raw_path, "turns": 1}]
+    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "symlink-parent")
+    assert record["status"] == "refused"
+    assert summary["agent_touched_paths"] == []
+    assert user_file.read_text() == "private user edit\n"
+    assert (outside / "a.py").read_text() == "agent external edit\n"
+
+
+@pytest.mark.parametrize("sequence", ["unique", "overlap-reused", "sequential-reused"])
+async def test_claude_protocol_reused_id_does_not_prove_a_file_result(db, git_repo, sequence):
+    await _seed_session(db)
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    file = git_repo / "a.py"
+    file.write_text("preserve this edit\n")
+    read_id = "read" if sequence == "unique" else "reused"
+    edit_id = "edit" if sequence == "unique" else "reused"
+    read = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": read_id, "name": "Read",
+        "input": {"file_path": str(file)}}]}}
+    edit = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": edit_id, "name": "Edit",
+        "input": {"file_path": str(file)}}]}}
+
+    def result(raw_id, content):
+        return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": raw_id, "content": content}]}}
+
+    frames = [read, edit, result(read_id, "old Read succeeded")] if sequence == "overlap-reused" else [
+        read, result(read_id, "Read succeeded"), edit, result(edit_id, "success without a unique raw identity")]
+    await _record_claude_protocol(db, frames)
+    # Ambiguity before the rewind boundary must still invalidate attribution.
+    summary = await fh.classify_side_effects(db, "parent", 1 if sequence == "overlap-reused" else 2)
+    record = await fh.safe_revert_files(str(git_repo), summary["agent_touched_paths"], head, clean, "reused-id")
+    assert summary["file_edits"] == [{"path": str(file), "turns": 1}]
+    assert record["status"] == ("completed" if sequence == "unique" else "refused")
+    assert file.read_text() == ("v1\n" if sequence == "unique" else "preserve this edit\n")
+
+
+async def test_repository_relative_path_does_not_also_authorize_cwd_path(git_repo):
+    subdir = git_repo / "sub"
+    subdir.mkdir()
+    (subdir / "a.py").write_text("sub original\n")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-qm", "sub baseline")
+    head, clean = await fh.capture_git_anchor(str(subdir))
+    (git_repo / "a.py").write_text("root edit\n")
+    (subdir / "a.py").write_text("sub edit\n")
+    record = await fh.safe_revert_files(str(subdir), ["a.py"], head, clean, "ambiguous")
+    assert record["status"] == "refused"
+    assert (subdir / "a.py").read_text() == "sub edit\n"
 
 
 @pytest.mark.asyncio
@@ -235,7 +358,7 @@ async def test_safe_revert_runs_when_clean_and_head_matches(git_repo):
     )
     assert record["status"] == "completed"
     assert record["ran"] is True
-    assert record["stash_ref"] == "stash@{0}"
+    assert len(record["stash_ref"]) == 40
     assert (git_repo / "a.py").read_text() == "v1\n"  # restored
     # The agent edit is recoverable in a stash.
     out = subprocess.run(["git", "stash", "list"], cwd=git_repo,
@@ -361,7 +484,7 @@ async def test_failed_restore_keeps_original_changes_in_a_named_stash(git_repo, 
     monkeypatch.setattr(fh, "_git", git)
     record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "failed-restore")
     assert record["status"] == "failed" and record["ran"] is False
-    assert record["stash_ref"] == "stash@{0}" and "restore denied" in record["error"]
+    assert len(record["stash_ref"]) == 40 and "restore denied" in record["error"]
     # Recovery does not depend on the failed restore's current tree.
     _git(git_repo, "reset", "--hard", "HEAD")
     _git(git_repo, "stash", "apply", "--index", record["stash_ref"])
@@ -390,6 +513,84 @@ async def test_safe_revert_consumes_real_copy_records(git_repo):
     assert copy.read_text() == "original line\n" * 50
 
 
+async def test_recovery_snapshot_identity_survives_interleaved_and_later_stashes(git_repo, monkeypatch):
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    path = git_repo / "a.py"
+    path.write_text("original agent edit\n")
+    real_git = fh._git
+
+    async def git(cwd, *args, **kwargs):
+        result = await real_git(cwd, *args, **kwargs)
+        if "push" in args:
+            path.write_text("interleaved stash\n")
+            _git(git_repo, "stash", "push", "-m", "another caller")
+        return result
+
+    monkeypatch.setattr(fh, "_git", git)
+    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "stable")
+    assert record["status"] == "completed"
+    path.write_text("later stash\n")
+    _git(git_repo, "stash", "push", "-m", "later")
+    _git(git_repo, "stash", "apply", record["stash_ref"])
+    assert path.read_text() == "original agent edit\n"
+
+
+async def test_unverified_snapshot_never_borrows_an_old_stash_or_restores(git_repo, monkeypatch):
+    path = git_repo / "a.py"
+    path.write_text("old snapshot\n")
+    _git(git_repo, "stash", "push", "-m", "old")
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    _git(git_repo, "rm", "a.py")
+    real_git = fh._git
+
+    async def git(cwd, *args, **kwargs):
+        if "rev-parse" in args and "--verify" in args:
+            return 1, "", "object unavailable"
+        return await real_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(fh, "_git", git)
+    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "unverified")
+    assert record["status"] == "failed" and record["stash_ref"] is None
+    assert not path.exists()  # no explicit restore after identity verification failed
+    assert "snapshot" in record["error"]
+
+
+@pytest.mark.parametrize("lookup", ["failed", "missing", "duplicate"])
+async def test_unidentified_present_snapshot_never_restores_other_paths(git_repo, monkeypatch, lookup):
+    removed = git_repo / "removed.py"
+    removed.write_text("original removed file\n")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-qm", "deletion baseline")
+    present = git_repo / "a.py"
+    present.write_text("unrelated old stash\n")
+    _git(git_repo, "stash", "push", "-m", "old")
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    present.write_text("original agent changes\n")
+    _git(git_repo, "rm", "removed.py")
+    real_git, restores = fh._git, []
+
+    async def git(cwd, *args, **kwargs):
+        if "restore" in args:
+            restores.append(args)
+        result = await real_git(cwd, *args, **kwargs)
+        if args[:2] == ("stash", "list"):
+            if lookup == "failed":
+                return 1, "", "stash lookup denied"
+            lines = result[1].splitlines()
+            return (0, lines[-1] + "\n", "") if lookup == "missing" else (0, result[1] + lines[0] + "\n", "")
+        return result
+
+    monkeypatch.setattr(fh, "_git", git)
+    record = await fh.safe_revert_files(str(git_repo), [str(present), str(removed)], head, clean, "missing-marker")
+    assert record["status"] == "failed" and record["stash_ref"] is None
+    assert "snapshot" in record["error"] and "marker" in record["error"]
+    assert restores == [] and not removed.exists()
+    # Native stash already saved and reset the present path before lookup.
+    assert present.read_text() == "v1\n"
+    saved = subprocess.run(["git", "show", "stash@{0}:a.py"], cwd=git_repo, check=True, capture_output=True, text=True)
+    assert saved.stdout == "original agent changes\n"
+
+
 async def test_copy_source_is_not_itself_a_changed_path(git_repo, monkeypatch):
     head, clean = await fh.capture_git_anchor(str(git_repo))
     copy = git_repo / "copy.py"
@@ -411,7 +612,7 @@ async def test_copy_source_is_not_itself_a_changed_path(git_repo, monkeypatch):
     assert copy.read_text() == "v1\n"
 
 
-@pytest.mark.parametrize("touched", ["cwd", "repo", "absolute"])
+@pytest.mark.parametrize("touched", ["repo", "absolute"])
 async def test_safe_revert_from_a_subdirectory(git_repo, touched):
     subdir = git_repo / "sub"
     subdir.mkdir()

@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconCheck,
   IconCopy,
@@ -34,6 +34,7 @@ const API = `${window.location.origin}/api`;
  * sidebar sections: connection info, account, notifier targets. */
 export function SettingsDialog({ open, onOpenChange, onSignOut }: Props) {
   const token = useSessionStore((s) => s.token);
+  const account = useSessionStore((s) => s.accountGeneration);
   const [copied, setCopied] = useState(false);
 
   const serverUrl =
@@ -135,7 +136,7 @@ export function SettingsDialog({ open, onOpenChange, onSignOut }: Props) {
           </TabsContent>
 
           <TabsContent value="notifications">
-            <NotifierPanel token={token} />
+            <NotifierPanel key={account} token={token} account={account} />
           </TabsContent>
         </Tabs>
       </DialogContent>
@@ -147,18 +148,31 @@ export function SettingsDialog({ open, onOpenChange, onSignOut }: Props) {
 // Notifier panel — list / add / delete webhook targets
 // ---------------------------------------------------------------------------
 
-function NotifierPanel({ token }: { token: string }) {
+function NotifierPanel({ token, account }: { token: string; account: number }) {
   const [items, setItems] = useState<NotifierInfo[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [label, setLabel] = useState("");
   const [url, setUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Refs guard handlers before React commits the pending controls.
+  const pendingDeletes = useRef(new Set<string>());
+  const [deleting, setDeleting] = useState<ReadonlySet<string>>(new Set());
+  const pendingCreate = useRef(false);
+  const [creating, setCreating] = useState(false);
+  // Writes invalidate earlier reads; accepted snapshots also retire old POST rows.
+  const collection = useRef({
+    active: false,
+    revision: 0,
+    observation: {},
+    read: null as { revision: number } | null,
+    confirm: false,
+  });
+  const isCurrent = useCallback(() => {
+    const state = useSessionStore.getState();
+    return collection.current.active && state.accountGeneration === account && state.token === token;
+  }, [account, token]);
 
-  // Memoized so the reference is stable across renders. As a plain object it
-  // was rebuilt every render, which meant fetchItems could not list it as a
-  // dependency without re-firing the effect below on every render — so it was
-  // omitted, and React Compiler then refused to preserve the memoization at
-  // all. Stable identity fixes both.
+  // Stable headers keep local edits from restarting the initial read.
   const headers = useMemo(
     () => ({
       "Content-Type": "application/json",
@@ -167,32 +181,62 @@ function NotifierPanel({ token }: { token: string }) {
     [token]
   );
 
-  const fetchItems = useCallback(async () => {
+  const fetchItems = useCallback(async function readItems() {
+    if (!isCurrent()) return;
+    const owner = collection.current;
+    if (owner.read) {
+      owner.confirm = true;
+      return;
+    }
+    const read = { revision: owner.revision };
+    owner.read = read;
     try {
       const res = await fetch(`${API}/notifiers`, { headers });
-      if (res.ok) setItems(await res.json());
-    } catch {
-      // ignore
+      if (!res.ok) throw new Error(`Server returned ${res.status}.`);
+      const items: NotifierInfo[] = await res.json();
+      if (!isCurrent() || owner.read !== read) return;
+      if (read.revision !== owner.revision) {
+        owner.confirm = true;
+        return;
+      }
+      owner.observation = {};
+      setItems(items);
+    } catch (e) {
+      if (!isCurrent() || owner.read !== read) return;
+      owner.confirm = false;
+      setError((current) => [current, `Unable to load notifier targets: ${String(e)}`].filter(Boolean).join(" "));
+    } finally {
+      if (owner.read === read) {
+        owner.read = null;
+        if (owner.confirm && isCurrent()) {
+          owner.confirm = false;
+          void readItems();
+        }
+      }
     }
-  }, [headers]);
+  }, [headers, isCurrent]);
 
-  // Load-on-mount. The rule is aimed at setState called *synchronously* in
-  // an effect body, which cascades renders; here the only setState is
-  // setItems inside fetchItems, after `await fetch(...)` has resolved. React's
-  // own guidance treats fetching-to-sync-with-an-external-system in an effect
-  // as correct — the lint cannot see through the async boundary to tell the
-  // two cases apart.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchItems();
+    const owner = collection.current;
+    owner.active = true;
+    void fetchItems();
+    return () => {
+      owner.active = false;
+      owner.read = null;
+      owner.confirm = false;
+    };
   }, [fetchItems]);
 
   const create = async () => {
+    if (!isCurrent() || pendingCreate.current) return;
     setError(null);
     if (!label.trim() || !url.trim()) {
       setError("Both label and URL are required.");
       return;
     }
+    pendingCreate.current = true;
+    setCreating(true);
+    const observation = collection.current.observation;
     try {
       const res = await fetch(`${API}/notifiers`, {
         method: "POST",
@@ -203,29 +247,54 @@ function NotifierPanel({ token }: { token: string }) {
           config: { url: url.trim() },
         }),
       });
-      if (!res.ok) {
-        setError(`Server returned ${res.status}.`);
-        return;
-      }
+      if (!res.ok) throw new Error(`Server returned ${res.status}.`);
       const created: NotifierInfo = await res.json();
-      setItems([...items, created]);
+      if (!isCurrent()) return;
+      const owner = collection.current;
+      owner.revision++;
+      // A read or another write may already have observed and removed this ID.
+      if (owner.observation === observation) {
+        setItems((current) => [...current.filter((item) => item.id !== created.id), created]);
+      } else {
+        void fetchItems();
+      }
+      owner.observation = {};
       setLabel("");
       setUrl("");
       setShowForm(false);
     } catch (e) {
+      if (!isCurrent()) return;
       setError(String(e));
+      void fetchItems();
+    } finally {
+      pendingCreate.current = false;
+      if (isCurrent()) setCreating(false);
     }
   };
 
   const remove = async (id: string) => {
+    if (!isCurrent() || pendingDeletes.current.has(id)) return;
+    pendingDeletes.current.add(id);
+    setDeleting(new Set(pendingDeletes.current));
+    setError(null);
     try {
       const res = await fetch(`${API}/notifiers/${id}`, {
         method: "DELETE",
         headers,
       });
-      if (res.ok) setItems(items.filter((n) => n.id !== id));
-    } catch {
-      // ignore
+      if (!isCurrent()) return;
+      if (!res.ok) throw new Error(`Server returned ${res.status}.`);
+      collection.current.revision++;
+      collection.current.observation = {};
+      setItems((current) => current.filter((n) => n.id !== id));
+    } catch (e) {
+      if (!isCurrent()) return;
+      setError(String(e));
+      // A failed response does not prove the server left the target unchanged.
+      void fetchItems();
+    } finally {
+      pendingDeletes.current.delete(id);
+      if (isCurrent()) setDeleting(new Set(pendingDeletes.current));
     }
   };
 
@@ -265,12 +334,17 @@ function NotifierPanel({ token }: { token: string }) {
               className="btn-delete inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
               onClick={() => remove(n.id)}
               title="Delete notifier"
+              disabled={deleting.has(n.id)}
             >
               <IconX size={14} />
             </button>
           </div>
         ))}
       </div>
+
+      {error && (
+        <div role="alert" className="text-xs text-destructive">{error}</div>
+      )}
 
       {!showForm && (
         <Button
@@ -293,6 +367,7 @@ function NotifierPanel({ token }: { token: string }) {
               placeholder="e.g. ntfy.sh / Slack hook"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
+              disabled={creating}
             />
           </div>
           <div className="space-y-1.5">
@@ -302,15 +377,14 @@ function NotifierPanel({ token }: { token: string }) {
               placeholder="https://example.com/hook"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
+              disabled={creating}
             />
           </div>
-          {error && (
-            <div className="text-xs text-destructive">{error}</div>
-          )}
           <div className="flex justify-end gap-2">
             <Button
               variant="ghost"
               size="sm"
+              disabled={creating}
               onClick={() => {
                 setShowForm(false);
                 setError(null);
@@ -322,6 +396,7 @@ function NotifierPanel({ token }: { token: string }) {
               className="btn-notifier-create"
               size="sm"
               onClick={create}
+              disabled={creating}
             >
               Save
             </Button>

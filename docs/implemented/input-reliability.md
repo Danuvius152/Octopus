@@ -180,6 +180,14 @@ publisher。后两者失败不会清掉提交事实、补选另一结果或重�
 Manager 接管原对象的完成与资源责任。`done` 表示已结算，可以是 `done + failed`；
 重启未结算 claim 及未确认 steer 仍为 unknown，主成功不能替它们确认送达。
 
+Owner 故障交接在首次移除完成注册前，一次捕获全部原回执 ID 为不可变 tuple，
+同次交接的每个 `RequestCompletion.ended_owner_inputs` 共用它。它只表达已结束
+Owner 的交接成员，不是持久执行状态或资源退出证明。App 的 unavailable 诊断可
+用其中精确 ID 排除遗留 pending/running；集合外输入仍受原事务门禁，已提交
+outcome／recording_state 不因附带此信息改变，也不授予 hook 或完成时间更新。
+无快照的旧完成路径保留自身／已确认 carrier 关联规则。其消费者边界见
+[应用构建投影](applications.md#4-lifecycle)。
+
 | 接口事实 | 保证与限制 |
 | --- | --- |
 | `SubmissionReceipt.disposition` | 表达是否接纳；取消等待者不撤销已接管工作，重复 delivery 返回原 receipt |

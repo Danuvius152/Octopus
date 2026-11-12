@@ -40,7 +40,7 @@ whether to register, leave suspended or remove the trigger. A late archived-targ
 observation therefore cannot remove the trigger installed by a completed restore.
 
 Temporary Agent archive keeps the enabled definition for restoration. Permanent
-target or knowledge invalidity, including an invalid stored one-shot time,
+target or knowledge invalidity, including an invalid stored recurrence or one-shot time,
 disables only the definition actually checked and records its reason. The
 expected-definition comparison includes Agent and origin session as well as text,
 timing and permission. A conflicting edit or deletion restarts reconciliation
@@ -49,10 +49,13 @@ from the current row instead of disabling or recreating the old definition.
 A registration failure is observed with the original schedule ID and cause;
 the saved definition remains authoritative. There is no automatic business replay
 or compensating create. The [tool contract](schedule-tool.md#6-the-list-moves-while-you-watch)
-describes the actionable error returned to callers and the current upper-bound
-validation gap for intervals. Reloading an enabled interval that APScheduler
-cannot represent can also fail startup; persistence alone does not prove trigger
-registration. The list-change notification is attempted only after successful
+defines whole-second, storage and actual first-fire validation for intervals.
+New timing definitions and re-enabling are checked in the writer transaction;
+registration uses the same constructed interval trigger. Known invalid stored
+recurrences are disabled with `invalid_recurrence` through expected-definition
+CAS, while invalid one-shot times keep `invalid_run_at`. Conflicts reread the
+replacement instead of disabling it. Unknown add-job or storage errors remain
+registration failures, not timing refusals. The list-change notification is attempted only after successful
 reconciliation, so that failure can leave browsers unaware of the saved change.
 
 Shutdown closes new control and fire admission and pauses launches, while already

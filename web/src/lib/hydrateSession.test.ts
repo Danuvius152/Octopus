@@ -2,7 +2,7 @@ import { deferred } from "../test-support/deferred";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useSessionStore, type BgTask, type SubagentRun, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { hydrateSession, loadBgTaskSnapshot, loadResearchSnapshot, loadSessionSnapshots, loadSessionSnapshot, observeSession, observeSessionAuxiliary } from "./hydrateSession";
+import { applySessionSnapshot, hydrateSession, loadBgTaskSnapshot, loadResearchSnapshot, loadSessionSnapshots, loadSessionSnapshot, observeSession, observeSessionAuxiliary } from "./hydrateSession";
 import { selectSession } from "./selectSession";
 
 // Real session details always distinguish a missing attempt from explicit null.
@@ -16,6 +16,33 @@ beforeEach(() => {
   useSessionStore.setState({ token: "test-bearer" });
 });
 afterEach(() => vi.unstubAllGlobals());
+
+it.each(["claude-code", "codex"].flatMap((backend) => [false, true].map((newAttempt) => ({ backend, newAttempt }))))(
+  "an accepted terminal clears only its own $backend buffer (new attempt=$newAttempt)", ({ backend, newAttempt }) => {
+    useSessionStore.getState().applyDispatchState("s", { ...dispatch("stream-service"), active_request_id: "request", active_operation: "message" });
+    handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "request", attempt_id: "old" });
+    const start = useSessionStore.getState();
+    if (newAttempt) handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "request", attempt_id: "new" });
+    const identity = { request_id: "request", attempt_id: newAttempt ? "new" : "old",
+      ...(backend === "codex" ? { native: { thread_id: "root", root_thread_id: "root", turn_id: "turn", root_turn_id: "turn", item_id: "item" } } : {}),
+    };
+    handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Interrupted partial", runtime_metadata: identity });
+    const content = { kind: "outcome", operation: "message", request_id: "request", status: "interrupted" };
+    const terminal = { role: "system", type: "result", seq: 11, content,
+      tool_input: { attempt_context: { request_id: "request", attempt_id: "old" } } };
+    expect(applySessionSnapshot("s", { id: "s", messages: [terminal], next_message_seq: 12, oldest_loaded_seq: 11,
+      dispatch_state: { ...dispatch("stream-service"), revision: 1 }, active_attempt: null }, start)).not.toBeNull();
+    handleWsMessage({ type: "result", session_id: "s", seq: 11, content, request_id: "request", attempt_id: "old" });
+    handleWsMessage({ type: "assistant_delta", session_id: "s", content: " stale", runtime_metadata: { ...identity, attempt_id: "old" } });
+    const state = useSessionStore.getState();
+    const partial = backend === "codex" ? Object.values(state.streamingItems.s || {}).map((item) => item.content)
+      : state.streamingText.s ? [state.streamingText.s] : [];
+    expect(partial).toEqual(newAttempt ? ["Interrupted partial"] : []);
+    expect(state.activeAttempts.s).toEqual(newAttempt ? { request_id: "request", attempt_id: "new" } : undefined);
+    expect(state.messages.s.map((row) => row.seq)).toEqual([11]);
+    expect(state.lastAppliedSeq.s).toBe(11);
+  }
+);
 
 const backgroundTask = (id: string, fields: Partial<BgTask> = {}) => ({ id, session_id: "s", status: "completed", stdout: "",
   delivery_disposition: "unknown", delivery_error: "Old admission error", ...fields } as BgTask);

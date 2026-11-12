@@ -62,6 +62,8 @@ async def run_web_leaf(
     working_dir: str,
     credential: HarnessCredential | None,
     model: str | None,
+    reasoning_effort: str | None = None,
+    service_tier: str | None = None,
     timeout: float = 120.0,
     authorize_spawn: Callable[[], Awaitable[None]] | None = None,
 ) -> LeafResult:
@@ -74,6 +76,8 @@ async def run_web_leaf(
         transport="exec" if getattr(harness, "backend", None) == "codex" else None,
         system_prompt=_LEAF_SYSTEM,
         model=model,
+        reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
         mcp_servers=[],         # [] (not None) = NO servers (None = all defaults)
         tool_allow=None,
         tool_deny=None,
@@ -131,6 +135,8 @@ async def run_reason_leaf(
     credential: HarnessCredential | None,
     model: str | None,
     working_dir: str | None,
+    reasoning_effort: str | None = None,
+    service_tier: str | None = None,
     timeout: float = 90.0,
     authorize_spawn: Callable[[], Awaitable[None]] | None = None,
 ) -> LeafResult:
@@ -138,6 +144,7 @@ async def run_reason_leaf(
     synthesize. Provider errors degrade; cleanup failures propagate."""
     ctx = OneShotContext(
         prompt=prompt, model=model, credential=credential, working_dir=working_dir,
+        reasoning_effort=reasoning_effort, service_tier=service_tier,
         authorize_spawn=authorize_spawn,
     )
     try:

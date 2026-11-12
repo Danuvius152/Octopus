@@ -430,6 +430,14 @@ refusing a backend without one before creating output. The first resume ID and
 working directory remain its codec inputs across pages; `--cwd` and
 `--project-dir` retain their overrides, and a missing resume ID generates one
 local UUID for the whole export. The native ID must be a safe single filename.
+For Claude history, CLI destination selection, discovery and handoff reuse the
+Harness project-directory rule: the configured `CLAUDE_CONFIG_DIR` (otherwise
+`~/.claude`) owns `projects/`, and every character outside `[A-Za-z0-9]` in
+the working directory becomes `-`. An explicit `--project-dir` takes priority;
+otherwise `--cwd`, then the current directory supplies that rule. No extra slug,
+hash, truncation or search fallback is added. Offline export, pull, discovery,
+handoff and authenticated import tests cover special and long directory names;
+they do not establish compatibility with every external Claude CLI version.
 One iterator feeds one codec invocation, retaining its UUID/parent chain across
 page boundaries. Strict sequence order, snapshot identity, cursor progress,
 final source count and highest seq are checked before publication; legal gaps

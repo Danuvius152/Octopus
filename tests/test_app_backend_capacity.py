@@ -49,6 +49,126 @@ async def _wait(predicate):
             await asyncio.sleep(.01)
 
 
+@pytest.mark.parametrize("original", ["absent", "running", "starting"])
+async def test_delayed_rebuild_cannot_retire_a_replacement_backend(tmp_path, short_process_shutdown, original):
+    app = _app(tmp_path, "rebuild", ready=original == "running")
+    supervisor = BackendSupervisor()
+    starting = replacement = None
+    try:
+        if original == "running":
+            await supervisor.ensure_running("rebuild", str(app))
+        elif original == "starting":
+            starting = asyncio.create_task(supervisor.ensure_running("rebuild", str(app)))
+            await _wait(lambda: (app / "started").exists())
+        captured = supervisor.capture_rebuild("rebuild")
+        if original != "absent":
+            await supervisor.stop("rebuild")
+        if starting:
+            await asyncio.gather(starting, return_exceptions=True)
+        (app / "ready").unlink(missing_ok=True)
+        (app / "started").unlink(missing_ok=True)
+        replacement = asyncio.create_task(supervisor.ensure_running("rebuild", str(app)))
+        await _wait(lambda: (app / "started").exists())
+        state = supervisor.get("rebuild")
+        process = state.process
+        await supervisor.on_rebuild("rebuild", str(app), target=captured)
+        assert process.returncode is None and state.process is process and not replacement.done()
+        (app / "ready").touch()
+        assert (await asyncio.wait_for(replacement, 3)).state == RUNNING
+    finally:
+        await supervisor.shutdown()
+        await asyncio.gather(*(task for task in (starting, replacement) if task is not None), return_exceptions=True)
+
+
+async def test_captured_rebuild_cancels_original_blocked_install_without_waiting_for_its_lock(
+    tmp_path, short_process_shutdown,
+):
+    app = _app(tmp_path, "install-rebuild", ready=True)
+    install = app / "install.sh"
+    install.write_text("#!/bin/sh\ntouch installing\nwhile :; do sleep 1; done\n")
+    install.chmod(0o700)
+    supervisor = BackendSupervisor()
+    starting = asyncio.create_task(supervisor.ensure_running("install-rebuild", str(app)))
+    try:
+        await _wait(lambda: (app / "installing").exists())
+        target = supervisor.capture_rebuild("install-rebuild")
+        process = supervisor.get("install-rebuild").process
+        await asyncio.wait_for(supervisor.on_rebuild("install-rebuild", str(app), target=target), 2)
+        assert starting.cancelled() and process.returncode is not None
+        assert not supervisor.get("install-rebuild").installed and not supervisor.drain_blockers()
+    finally:
+        await supervisor.shutdown()
+        await asyncio.gather(starting, return_exceptions=True)
+
+
+async def test_captured_startup_keeps_its_identity_after_becoming_a_running_process(tmp_path, short_process_shutdown):
+    app = _app(tmp_path, "same-startup")
+    supervisor = BackendSupervisor()
+    starting = asyncio.create_task(supervisor.ensure_running("same-startup", str(app)))
+    try:
+        await _wait(lambda: (app / "started").exists())
+        target = supervisor.capture_rebuild("same-startup")
+        (app / "ready").touch()
+        state = await asyncio.wait_for(starting, 3)
+        process = state.process
+        # A quick ensure reuses the same resource rather than changing identity.
+        assert await supervisor.ensure_running("same-startup", str(app)) is state
+        await supervisor.on_rebuild("same-startup", str(app), target=target)
+        assert process.returncode is not None and state.process is None and not state.installed
+    finally:
+        await supervisor.shutdown()
+        await asyncio.gather(starting, return_exceptions=True)
+
+
+@pytest.mark.parametrize("removed", [True, False])
+@pytest.mark.parametrize("active_use", [True, False])
+async def test_invalid_start_script_retires_original_process_readers_and_use(
+    tmp_path, monkeypatch, short_process_shutdown, removed, active_use,
+):
+    monkeypatch.setattr(app_backends, "MAX_RUNNING", 1)
+    app = _app(tmp_path, "invalidated", ready=True)
+    other = _app(tmp_path, "other", ready=True)
+    supervisor = BackendSupervisor()
+    state = await supervisor.ensure_running("invalidated", str(app))
+    process, port, readers = state.process, state.port, state._readers[:]
+    use_started = asyncio.Event()
+
+    async def consumer():
+        use = await supervisor.acquire("invalidated", str(app))
+        use.add_cleanup(use.abort)  # Wiki cleanup also waits for original process exit.
+        use_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await use.finish()
+
+    request = asyncio.create_task(consumer()) if active_use else None
+    script = app / "start.sh"
+    original = script.read_bytes()
+    try:
+        if request:
+            await use_started.wait()
+        if removed:
+            script.unlink()
+        else:
+            script.chmod(0o600)
+        result = await asyncio.wait_for(supervisor.ensure_running("invalidated", str(app)), 3)
+        assert result.state == app_backends.ABSENT
+        assert process.returncode is not None and all(reader.done() for reader in readers)
+        assert not app_backends._port_accepts(port)
+        assert state.process is None and not state._uses and not state.installed
+        assert (await supervisor.ensure_running("other", str(other))).state == RUNNING
+        await supervisor.stop("other")
+        script.write_bytes(original)
+        script.chmod(0o700)
+        restarted = await supervisor.ensure_running("invalidated", str(app))
+        assert restarted.state == RUNNING and restarted.process is not process and restarted.installed
+    finally:
+        await supervisor.shutdown()
+        if request:
+            await asyncio.gather(request, return_exceptions=True)
+
+
 async def test_fifth_proxy_is_unavailable_while_four_real_backends_are_starting(
     tmp_path, monkeypatch, short_process_shutdown,
 ):
@@ -82,6 +202,83 @@ async def test_fifth_proxy_is_unavailable_while_four_real_backends_are_starting(
     finally:
         await supervisor.shutdown()
         await asyncio.gather(*starts, return_exceptions=True)
+
+
+@pytest.mark.parametrize("failure", ["process", "use"])
+async def test_invalid_script_keeps_slot_until_original_retirement_is_confirmed(
+    tmp_path, monkeypatch, short_process_shutdown, failure,
+):
+    monkeypatch.setattr(app_backends, "MAX_RUNNING", 1)
+    monkeypatch.setattr(app_backends, "_TASK_DRAIN_SECONDS", .03)
+    app, other = _app(tmp_path, "app", ready=True), _app(tmp_path, "other", ready=True)
+    supervisor = BackendSupervisor()
+    state = await supervisor.ensure_running("app", str(app))
+    process = state.process
+    real_wait = app_backends.wait_group_exit
+    cleanup_entered, release = asyncio.Event(), asyncio.Event()
+
+    async def unconfirmed(*args, **kwargs):
+        raise TimeoutError("original group exit unknown")
+
+    async def cleanup():
+        cleanup_entered.set()
+        await release.wait()
+
+    use = None
+    if failure == "process":
+        monkeypatch.setattr(app_backends, "wait_group_exit", unconfirmed)
+    else:
+        use = await supervisor.acquire("app", str(app))
+        use.detach()
+        use.add_cleanup(cleanup)
+    (app / "start.sh").chmod(0o600)
+    try:
+        with pytest.raises(RuntimeError, match="unconfirmed"):
+            await supervisor.ensure_running("app", str(app))
+        assert state.process is process and state._retiring and id(state) in supervisor._slots
+        with pytest.raises(BackendCapacityError):
+            await supervisor.ensure_running("other", str(other))
+        if use:
+            assert cleanup_entered.is_set() and not use.retired
+            release.set()
+            await use.finish()
+        monkeypatch.setattr(app_backends, "wait_group_exit", real_wait)
+        await supervisor.stop("app")
+        assert state.process is None and not state._uses and id(state) not in supervisor._slots
+    finally:
+        release.set()
+        monkeypatch.setattr(app_backends, "wait_group_exit", real_wait)
+        await supervisor.shutdown()
+
+
+async def test_cancelled_invalid_script_observer_preserves_retirement_and_restored_script(
+    tmp_path, monkeypatch, short_process_shutdown,
+):
+    monkeypatch.setattr(app_backends, "_TERM_TIMEOUT_SECONDS", 3)
+    app = _app(tmp_path, "app", ready=True, hold_stop=True)
+    supervisor = BackendSupervisor()
+    state = await supervisor.ensure_running("app", str(app))
+    process = state.process
+    script = app / "start.sh"
+    script.chmod(0o600)
+    observer = asyncio.create_task(supervisor.ensure_running("app", str(app)))
+    try:
+        await _wait((app / "stopping").exists)
+        retirement = state._retirement
+        observer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+        assert retirement is state._retirement and not retirement.done() and state._retiring
+        script.chmod(0o700)
+        (app / "retire").touch()
+        await asyncio.wait_for(asyncio.shield(retirement), 3)
+        assert process.returncode is not None and not state.installed
+        restarted = await supervisor.ensure_running("app", str(app))
+        assert restarted.state == RUNNING and restarted.process is not process
+    finally:
+        (app / "retire").touch()
+        await supervisor.shutdown()
+        await asyncio.gather(observer, return_exceptions=True)
 
 
 @pytest.mark.parametrize("failure", ["spawn", "exit", "timeout"])

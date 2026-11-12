@@ -159,7 +159,12 @@ def save_upload(
     # is enough to recover the file (we glob for `<id>__*`).
     on_disk_name = prefix + sanitized
     dest = session_dir(session_id, user_id=user_id) / on_disk_name
-    dest.write_bytes(content)
+    try:
+        dest.write_bytes(content)
+    except BaseException:
+        # A failed write can have created part of this unpublished attachment.
+        dest.unlink(missing_ok=True)
+        raise
 
     return AttachmentRecord(
         id=attachment_id,

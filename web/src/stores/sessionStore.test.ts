@@ -9,6 +9,7 @@ describe("sessionStore", () => {
     for (let i = 0; i < 10; i++) store.appendStreamingText("legacy", chunk);
     const metadata = { request_id: "request", attempt_id: "attempt", native: {
       thread_id: "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn", item_id: "item" } };
+    store.setActiveAttempt("native", { request_id: "request", attempt_id: "attempt" });
     for (let i = 0; i < 100; i++) store.appendStreamingText("native", chunk, {
       ...metadata, native: { ...metadata.native, item_id: `item-${i}` } });
     const state = useSessionStore.getState();

@@ -1,15 +1,16 @@
 """Public tools retain uncertain effects without replaying provider writes."""
 
 import asyncio
+import base64
 from datetime import UTC, datetime
 from email.utils import format_datetime
-from types import SimpleNamespace
 
 import httpx
-import httpx._api
 import pytest
 
 from server.mcp_servers.connectors import _shared, custom, github, gmail
+from tests.connector_runtime import clock as clock
+from tests.connector_runtime import provider_transport as provider_transport
 
 WRITES = [
     (github.create_issue, {"repo": "owner/project", "title": "Original issue"}),
@@ -24,61 +25,6 @@ WRITES = [
 ]
 
 READS = [github.list_repos, gmail.list_labels, lambda: custom.request("GET", "/items")]
-
-
-@pytest.fixture
-def clock(monkeypatch):
-    class Clock:
-        now = 0.0
-
-        def __init__(self):
-            self.waits = []
-
-        def monotonic(self):
-            return self.now
-
-        def time(self):
-            return 1_700_000_000 + self.now
-
-        async def sleep(self, delay):
-            self.waits.append(delay)
-            self.now += delay
-
-    clock = Clock()
-    monkeypatch.setattr(_shared, "time", clock)
-    monkeypatch.setattr(github, "time", clock)
-    monkeypatch.setattr(_shared, "asyncio", SimpleNamespace(sleep=clock.sleep, timeout=asyncio.timeout))
-    return clock
-
-
-@pytest.fixture
-def provider_transport(monkeypatch):
-    """Only replace host/provider HTTP; token resolution and policy stay real."""
-    monkeypatch.setenv("OCTOPUS_API_BASE", "http://host.invalid")
-    monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "host-token")
-    monkeypatch.setenv("OCTOPUS_INSTALLATION_ID", "installation-original")
-    original_sync, original_async = httpx.Client, httpx.AsyncClient
-
-    def install(handler):
-        def route(request):
-            if request.url.host == "host.invalid":
-                if request.url.path.endswith("/token"):
-                    return httpx.Response(200, json={
-                        "access_token": "provider-token", "grant_stamp": "original-grant",
-                        "api_base": "https://custom.invalid/v1",
-                    })
-                assert request.url.path.endswith("/mark-needs-reconnect")
-                assert request.content == b'{"grant_stamp":"original-grant"}'
-                return httpx.Response(200, json={"disposition": "applied"})
-            assert request.headers["Authorization"] == "Bearer provider-token"
-            return handler(request)
-
-        transport = httpx.MockTransport(route)
-        monkeypatch.setattr(httpx, "Client", lambda **kw: original_sync(**{**kw, "transport": transport}))
-        monkeypatch.setattr(httpx._api, "Client", httpx.Client)
-        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original_async(**{**kw, "transport": transport}))
-
-    return install
 
 
 @pytest.mark.parametrize("tool,arguments", WRITES, ids=[
@@ -97,6 +43,63 @@ async def test_committed_write_with_503_is_not_replayed(provider_transport, tool
     assert "outcome_unknown" in output
     assert "Original" in output or "original" in output
     assert "Check" in output or "check" in output
+
+
+@pytest.mark.parametrize("path,encoded", [
+    ("README.md", b"README.md"),
+    ("目录/space #?%.txt", b"%E7%9B%AE%E5%BD%95/space%20%23%3F%25.txt"),
+    ("dir/%2F-%2e%2e.txt", b"dir/%252F-%252e%252e.txt"),
+    ("%2e%2e/file", b"%252e%252e/file"),
+])
+async def test_github_file_keeps_raw_filename_and_ref_meaning(provider_transport, path, encoded):
+    requests = []
+    ref = "feature/中 #?%+&"
+
+    def resource(request):
+        requests.append(request)
+        assert request.url.host == "api.github.com"
+        assert request.url.raw_path.split(b"?", 1)[0] == b"/repos/owner/re.po-s_1/contents/" + encoded
+        assert dict(request.url.params) == {"ref": ref}
+        assert request.url.query == b"ref=feature%2F%E4%B8%AD+%23%3F%25%2B%26"
+        return httpx.Response(200, json={"encoding": "base64", "content": base64.b64encode(b"correct resource").decode()})
+
+    provider_transport(resource)
+    assert await github.get_file(repo="owner/re.po-s_1", path=path, ref=ref) == "correct resource"
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("repo,path", [
+    ("", "file"), ("owner", "file"), ("/name", "file"),
+    ("owner/", "file"), ("owner/name/extra", "file"),
+    ("./name", "file"), ("owner/..", "file"),
+    ("owner/name", "/absolute"), ("owner/name", "//host/file"),
+    ("owner/name", "."), ("owner/name", ".."),
+    ("owner/name", "./file"), ("owner/name", "src/../file"),
+    ("owner/name", "src/./file"), ("owner/name", "src//file"),
+    ("owner/name", "src/"),
+])
+async def test_github_file_rejects_ambiguous_inputs_without_requesting_a_resource(provider_transport, repo, path):
+    requests = []
+
+    def resource(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    provider_transport(resource)
+    result = await github.get_file(repo=repo, path=path)
+    assert result.startswith("Error:") and ("repo" in result or "path" in result)
+    assert requests == []
+
+
+@pytest.mark.parametrize("path", ["", "src"])
+async def test_github_file_keeps_root_and_directory_listings(provider_transport, path):
+    def resource(request):
+        assert request.url.raw_path == b"/repos/owner/name/contents/" + path.encode()
+        return httpx.Response(200, json=[{"name": "child.txt", "type": "file"}])
+
+    provider_transport(resource)
+    result = await github.get_file(repo="owner/name", path=path)
+    assert '"name": "child.txt"' in result and '"type": "file"' in result
 
 
 @pytest.mark.parametrize("status", [401, 302, 400, 403, 404, 422])

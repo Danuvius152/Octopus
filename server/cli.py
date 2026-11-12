@@ -16,10 +16,9 @@ from pathlib import Path
 
 def get_project_dir(cwd: str | None = None) -> Path:
     """Return the Claude Code project directory for the given (or current) cwd."""
-    if cwd is None:
-        cwd = str(Path.cwd())
-    escaped = cwd.replace("/", "-").replace("\\", "-")
-    return Path.home() / ".claude" / "projects" / escaped
+    from .harness.claude_code import _claude_project_dir
+
+    return _claude_project_dir(cwd if cwd is not None else str(Path.cwd()))
 
 
 def discover_sessions(project_dir: Path) -> list[dict]:
@@ -446,10 +445,11 @@ def do_monitor(args) -> None:
             if args.report == "overview":
                 data = await query.overview(conn, args.since)
                 print(f"Octopus — last {data['window']}\n")
-                _table("activity", data["counts"])
+                _table("event samples", data["counts"])
+                _table("connectors — logical resource requests", data["connectors"])
                 _table("turns", data["turns"])
                 _table("Codex effective output TPS (including reasoning)", data["codex"])
-                _table("top errors", data["errors"])
+                _table("top error event samples", data["errors"])
                 _table("resources", data["resources"])
                 return 0
             fn = query.REPORTS.get(args.report)
@@ -459,7 +459,7 @@ def do_monitor(args) -> None:
                 return 2
             rows = await fn(conn, args.since)
             print(f"{args.report} — last {args.since}\n")
-            _table(args.report, rows)
+            _table("connectors — logical resource requests" if args.report == "connectors" else args.report, rows)
             return 0
         finally:
             await conn.close()

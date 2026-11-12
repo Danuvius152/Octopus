@@ -404,6 +404,51 @@ async def test_native_patch_is_attributed_before_real_rewind_file_restore(native
         assert not destination.exists()
 
 
+@pytest.mark.parametrize("phase,status,path_kind", [
+    ("started", "inProgress", "absolute"), ("completed", "failed", "absolute"),
+    ("completed", "declined", "absolute"), ("completed", "completed", "relative"),
+    ("completed", "completed", "parent"),
+])
+async def test_unproven_native_patch_discloses_without_authorizing_revert(native_runtime, tmp_path, phase, status, path_kind):
+    manager, _, parent, mode, _, _ = native_runtime
+    repo = tmp_path / "git-work"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    file = repo / "a.py"
+    file.write_text("original\n")
+    if path_kind == "parent":
+        outside = tmp_path / "outside"
+        (outside / "deep").mkdir(parents=True)
+        (repo / "link").symlink_to(outside / "deep", target_is_directory=True)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "Initial state")
+    parent = await manager.create_session(parent.agent_id, "Unproven patch", str(repo), backend="codex")
+    mode[0] = "control_output"
+    receipt = await manager.start_message(parent.id, "Try a patch")
+    await until(lambda: parent._run.backend is not None and parent._run.backend.active_turn is not None)
+    file.write_text("preserve this edit\n")
+    path = file.name if path_kind == "relative" else str(file)
+    if path_kind == "parent":
+        path = str(repo / "link" / ".." / "a.py")
+        Path(path).write_text("agent external edit\n")
+    inject(tmp_path, {"method": f"item/{phase}", "params": {
+        "threadId": ROOT, "turnId": "turn-1", "item": {
+            "id": "patch", "type": "fileChange", "status": status,
+            "changes": [{"path": path, "kind": {"type": "update"}, "diff": "+edit"}]}}}, terminal())
+    await asyncio.wait_for(receipt.wait(), 4)
+    preview = await manager.fork_preview(parent.id, 0, user_id=parent.user_id)
+    assert preview["side_effect_summary"]["file_edits"]
+    assert preview["side_effect_summary"]["agent_touched_paths"] == []
+    assert not preview["revert"]["available"]
+    branch = await manager.fork_session(parent.id, 0, revert_files=True, user_id=parent.user_id)
+    assert json.loads(branch.fork_revert_record)["status"] == "refused"
+    assert file.read_text() == "preserve this edit\n"
+    if path_kind == "parent":
+        assert Path(path).read_text() == "agent external edit\n"
+
+
 async def test_native_patch_never_authorizes_reverting_unrelated_user_edits(native_runtime, tmp_path):
     manager, _, parent, mode, _, _ = native_runtime
     repo = tmp_path / "git-work"

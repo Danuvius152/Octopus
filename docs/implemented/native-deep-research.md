@@ -151,17 +151,14 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   `interrupted`; v1 does NOT resume mid-pipeline.
 
 Before admitting a job, Research captures the session overrides and Agent defaults
-through SessionManager's short configuration boundary, resolving the actual model
-and credential ID into the job's private request value. Capacity waits, credential
-resolution and model execution occur outside that lock. A queued job therefore
-keeps its admitted choice when defaults change; a later job sees the new defaults.
-This capture does not yet carry selected reasoning effort or service tier into
-execution: the manager passes only `model` to the orchestrator, and both web and
-reasoning leaves construct their run contexts without those two controls. They
-therefore retain runtime defaults rather than the selected effort/tier
-(see [manager invocation](../../server/research/manager.py#L362-L378),
-[pipeline arguments](../../server/research/orchestrator.py#L89-L120) and
-[leaf configuration](../../server/research/leaf.py#L58-L152)).
+through SessionManager's short configuration boundary, resolving the effective
+model, credential ID, reasoning effort and service tier into the job's detached
+request value. Capacity waits, credential resolution and model execution occur
+outside that lock. The manager passes these choices through the orchestrator to
+both web `RunConfig` and reasoning `OneShotContext`; it does not re-sample defaults
+between leaves. A queued job keeps its admitted choices when defaults change,
+and a later job sees the new defaults. These are execution selections, not a
+cached authorization grant or a promise that every provider supports each value.
 Every leaf spawn rechecks current account, credential and execution authority;
 revocation ends the original job rather than switching it to another credential.
 After configuration waiting, admission rechecks shutdown synchronously before
@@ -246,14 +243,23 @@ shutdown; an unexpected control failure or cancellation remains visible as
 unconfirmed cleanup. `test_research_manager.py` exercises real UPDATE/COMMIT
 barriers, repeated cancellation, shutdown/rejoin and original subprocess exit.
 
-A known preparation gap remains before any leaf starts: an `OSError` creating
-the per-job scratch directory follows the generic failure handler, which can
-commit `failed` and then re-raise. The registry retains that exceptional task and
-its context, so drain/shutdown cannot complete even though no leaf was launched.
-This is not proof of an unretired subprocess; it is the current classification
-limitation (see [scratch preparation and failure handling](../../server/research/manager.py#L350-L422)
-and [exceptional-task retention](../../server/research/manager.py#L135-L155)).
-It does not authorize clearing genuinely unknown retirement or storage failures.
+Before any leaf starts, an `OSError` from preparing the per-job directory or its
+scratch cwd becomes the existing `ResearchError`. The original guarded terminal
+transaction settles failed, or preserves cancellation if it won first. After
+confirmed settlement the normal task/context registration retires; idle, drain
+and shutdown do not retain an exceptional owner for a job that spawned no leaf.
+Only those directory operations have this classification. An unexpected pipeline
+exception, uncertain database commit or genuine leaf retirement failure keeps
+its original diagnostic and ownership/fail-stop boundary; a failed row alone
+does not authorize deleting the blocker.
+
+`test_research_manager.py` covers real directory ENOSPC/EACCES, zero-spawn failure,
+cancellation and commit barriers, and pipeline/retirement failure contrasts.
+Controlled Claude and Codex processes also observe actual web/reason contexts
+and rendered argv while capacity is held and defaults change. They cover Agent
+defaults, Session overrides and current credential revocation between leaves.
+These offline checks prove propagation and authorization boundaries, not a new
+live-provider capability result.
 
 A web leaf needs a successful provider terminal. Parseable text followed by
 EOF without that terminal remains diagnostic material and supplies neither

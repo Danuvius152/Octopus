@@ -259,6 +259,9 @@ class BackendState:
     _retirement: asyncio.Task[None] | None = field(default=None, repr=False)
     _process_retirement: asyncio.Task[None] | None = field(default=None, repr=False)
     _rebuild_dir: str | None = field(default=None, repr=False)
+    # One install/start/process lifecycle, retained through its retirement.
+    # Temporary operation/spawn tasks cannot identify it after startup exits.
+    _resource_identity: object | None = field(default=None, repr=False)
 
     def public(self) -> dict[str, Any]:
         return {
@@ -273,6 +276,12 @@ class BackendState:
             "log_tail": (["[earlier output omitted from display]", *list(self.log)[1:]]
                          if self._log_truncated else list(self.log)),
         }
+
+
+@dataclass(frozen=True)
+class BackendRebuildTarget:
+    state: BackendState
+    identity: object
 
 
 class BackendSupervisor:
@@ -502,35 +511,46 @@ class BackendSupervisor:
         if st._retiring:
             raise BackendCapacityError("Application backend is retiring")
         st.last_used = time.monotonic()
-
-        if backend_script(app_dir, "start.sh") is None:
-            st.state = ABSENT
-            return st
+        resource_identity = object()
 
         async with st._admission:
             while True:
+                retirement = None
                 async with st.lock:
                     if st._retiring:
                         raise BackendCapacityError("Application backend is retiring")
                     if self._shutting_down or app_id in self._blocked_apps:
                         raise RuntimeError("Application backend supervisor is shutting down")
-                    if st._uses and (st.process is None or st.process.returncode is not None):
-                        raise BackendCapacityError("Original application requests have not retired")
-                    st._operation = asyncio.current_task()
-                    try:
-                        result = await self._ensure_running(st)
-                        if result is not None:
-                            return result
-                    except BaseException:
-                        await complete_cleanup(self._stop_state(st))
-                        raise
-                    finally:
-                        st._operation = None
+                    if backend_script(app_dir, "start.sh") is None:
+                        if st.process is not None or st._readers or st._spawn is not None or st._uses or id(st) in self._slots:
+                            retirement = self._begin_retirement(st, rebuild_dir=app_dir)
+                        else:
+                            st.state = ABSENT
+                            st.installed = False
+                            return st
+                    else:
+                        if st._uses and (st.process is None or st.process.returncode is not None):
+                            raise BackendCapacityError("Original application requests have not retired")
+                        st._operation = asyncio.current_task()
+                        try:
+                            result = await self._ensure_running(st, resource_identity)
+                            if result is not None:
+                                return result
+                        except BaseException:
+                            await complete_cleanup(self._stop_state(st))
+                            raise
+                        finally:
+                            st._operation = None
+                if retirement is not None:
+                    # The original owner outlives this observer. Process exit
+                    # precedes use cleanup, and neither waits under st.lock.
+                    await self._join_retirement(retirement)
+                    continue  # Recheck a script that may have been restored.
                 # Never hold A's lifecycle lock while stopping B. A different
                 # app may take the freed slot, so recheck under A's lock.
                 await self._evict_one()
 
-    async def _ensure_running(self, st: BackendState) -> BackendState | None:
+    async def _ensure_running(self, st: BackendState, resource_identity: object) -> BackendState | None:
         if st.state == RUNNING and st.process and st.process.returncode is None:
             return st
         if (
@@ -540,6 +560,7 @@ class BackendSupervisor:
         ):
             return st  # don't retry a crash in a tight loop
 
+        st._resource_identity = resource_identity
         if st.process is not None or st._readers or st._spawn is not None:
             await self._stop_state(st)
 
@@ -768,11 +789,21 @@ class BackendSupervisor:
         if st.state not in (FAILED, ABSENT):
             st.state = STOPPED
 
-    async def on_rebuild(self, app_id: str, app_dir: str) -> None:
+    def capture_rebuild(self, app_id: str) -> BackendRebuildTarget | None:
+        st = self._backends.get(app_id)
+        if st is None or st._resource_identity is None:
+            return None
+        return BackendRebuildTarget(st, st._resource_identity)
+
+    async def on_rebuild(self, app_id: str, app_dir: str, *, target: BackendRebuildTarget | None) -> None:
         """A build turn rewrote the code; the running process is still executing
         the old one, and its dependencies may have changed."""
-        st = self._backends.get(app_id)
-        if st is None:
+        if target is None:
+            return
+        st = target.state
+        # No await between the identity check and sealing admission. Waiting
+        # for st.lock first would let an installation run for its full timeout.
+        if self._backends.get(app_id) is not st or st._resource_identity is not target.identity:
             return
         await complete_cleanup(self._join_retirement(self._begin_retirement(st, rebuild_dir=app_dir)))
 

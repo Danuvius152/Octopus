@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import re
+from collections import Counter
 from typing import Any
+from uuid import uuid4
 
 from .harness.native_output import recorded_file_change_paths
 from .models import MessageContent, MessageRole
@@ -155,6 +157,18 @@ def _bash_write_targets(command: str) -> list[str]:
 _BG_TASK_ID_RE = re.compile(r"bg task[ `]+([0-9a-fA-F]{6,})")
 
 
+def _absolute_file_effect_path(path: Any) -> str | None:
+    """Accept one saved path meaning without reconstructing its old filesystem.
+
+    A producer may have followed a symlink before '..'; normpath would grant
+    authority over a different file. Without that execution fact, disclose only.
+    """
+    if (not isinstance(path, str) or not os.path.isabs(path) or "\0" in path
+            or ".." in path.split(os.sep)):
+        return None
+    return os.path.normpath(path)
+
+
 def _parse_bg_task_id(content: Any) -> str | None:
     """Pull the `task_id` the `mcp__bg__run` tool returns out of a tool_result
     row's content (it's surfaced as plain text: ``Started bg task `<id>` …``)."""
@@ -176,11 +190,20 @@ async def classify_side_effects(db, parent_id: str, from_seq: int) -> dict[str, 
     summary the popover renders + the agent-touched path set the revert
     preflight needs."""
     messages = await db.load_messages(parent_id)
+    # Canonical IDs preserve normal correlation, but a producer raw ID reused
+    # within one attempt cannot identify which invocation a late result ended.
+    # Count the whole saved attempt, including starts before the rewind point.
+    raw_calls = Counter(
+        ((m.get("runtime_metadata") or {}).get("request_id"),
+         (m.get("runtime_metadata") or {}).get("attempt_id"), m.get("tool_use_id"))
+        for m in messages if m["type"] == "tool_use"
+    )
     rows = [m for m in messages if m["seq"] >= from_seq]
     pairs = pair_tool_records(rows)
     starts = {result: start for start, result in pairs.items()}
 
     file_turns: dict[str, set[int]] = {}
+    touched_paths: set[str] = set()
     bash_count = 0
     bg_tool_use_indices: list[int] = []
     mcp_counts: dict[str, int] = {}
@@ -192,6 +215,9 @@ async def classify_side_effects(db, parent_id: str, from_seq: int) -> dict[str, 
             seq = rows[starts.get(index, index)]["seq"]
             for native_path in native_paths:
                 file_turns.setdefault(native_path, set()).add(seq)
+            for raw_path in recorded_file_change_paths(m, successful_only=True):
+                if (absolute := _absolute_file_effect_path(raw_path)) is not None:
+                    touched_paths.add(absolute)
             continue
         if m["type"] != "tool_use":
             continue
@@ -202,6 +228,20 @@ async def classify_side_effects(db, parent_id: str, from_seq: int) -> dict[str, 
             path = ti.get("file_path") or ti.get("notebook_path") or ti.get("path")
             if path:
                 file_turns.setdefault(path, set()).add(seq)
+                result = rows[pairs[index]] if index in pairs else None
+                identity = m.get("runtime_metadata") or {}
+                result_identity = (result or {}).get("runtime_metadata") or {}
+                keys = ("request_id", "attempt_id", "tool_call_id")
+                raw_key = (identity.get("request_id"), identity.get("attempt_id"), m.get("tool_use_id"))
+                absolute = _absolute_file_effect_path(path)
+                if (absolute is not None
+                        and result is not None and not result.get("is_error")
+                        and m.get("tool_use_id") and m["tool_use_id"] == result.get("tool_use_id")
+                        and raw_calls[raw_key] == 1
+                        and all(identity.get(key) and identity[key] == result_identity.get(key) for key in keys)):
+                    # Historical relative tool arguments have no saved cwd/base.
+                    # Keep them in disclosure without inventing execution facts.
+                    touched_paths.add(absolute)
         elif name == "Bash":
             cmd = ti.get("command") or ""
             targets = _bash_write_targets(cmd)
@@ -265,7 +305,7 @@ async def classify_side_effects(db, parent_id: str, from_seq: int) -> dict[str, 
         "file_edits": file_edits,
         "bg_tasks": bg_tasks,
         "other_tools": other_tools,
-        "agent_touched_paths": sorted(file_turns.keys()),
+        "agent_touched_paths": sorted(touched_paths),
         "counts": {
             "total": total,
             "file_edits": len(file_edits),
@@ -466,7 +506,8 @@ async def _git_toplevel(working_dir: str) -> str | None:
 
 def _norm(path: str, base: str) -> str:
     p = path if os.path.isabs(path) else os.path.join(base, path)
-    return os.path.realpath(p)
+    # Git tracks the directory entry itself, including a symlink, not its target.
+    return os.path.abspath(p)
 
 
 async def safe_revert_preflight(
@@ -501,16 +542,18 @@ async def safe_revert_preflight(
         dirty_rel = _porcelain_paths(porcelain)
     except ValueError:
         return (False, "Git status could not be parsed safely", [])
-    # Dirty porcelain paths are repo-top-relative; agent-touched paths may be
-    # absolute, cwd-relative, or repo-relative. Normalize each touched path
-    # against BOTH the working_dir (the agent's cwd) and the repo top so a
-    # working_dir that's a subdir of the repo doesn't cause a false refusal
-    # (Vera review SHOULD-FIX #3). Absolute paths ignore the base.
+    # The classifier supplies exact absolute paths. Other callers may supply
+    # explicitly repository-relative paths; cwd is never a second interpretation.
     touched_abs: set[str] = set()
     for p in agent_touched_paths:
-        touched_abs.add(_norm(p, working_dir))
-        if not os.path.isabs(p):
-            touched_abs.add(_norm(p, top))
+        if not isinstance(p, str) or not p or "\0" in p:
+            return (False, "Agent file path is invalid", [])
+        if ".." in p.split(os.sep):
+            return (False, "Agent file path has ambiguous parent traversal", [])
+        absolute = _norm(p, top)
+        if os.path.commonpath((absolute, top)) != top:
+            return (False, "Agent file path is outside the repository", [])
+        touched_abs.add(absolute)
     extra = [p for p in dirty_rel if _norm(p, top) not in touched_abs]
     if extra:
         return (
@@ -556,7 +599,7 @@ async def safe_revert_files(
             "error": None,
         }
     top = await _git_toplevel(working_dir) or working_dir
-    stash_msg = f"octopus: pre-fork stash {fork_id}"
+    stash_msg = f"octopus: pre-fork stash {fork_id} {uuid4().hex}"
     result: dict[str, Any] = {
         "ran": False, "files": dirty, "stash_ref": None, "status": "failed",
         "refused_reason": None, "error": None,
@@ -574,6 +617,7 @@ async def safe_revert_files(
     deleted = removed[:-1].split("\0") if removed else []
     deleted_set = set(deleted)
     present = [path for path in dirty if path not in deleted_set or os.path.lexists(os.path.join(top, path))]
+    snapshot_oid: str | None = None
     if present:
         # -u also saves untracked files; every path keeps its literal meaning.
         rc, _out, err = await _git(
@@ -584,13 +628,30 @@ async def safe_revert_files(
         # index and working-tree snapshot without widening the mutation scope.
         rc, commit, err = await _git(top, "stash", "create", stash_msg)
         if rc == 0 and commit.strip():
-            rc, _out, err = await _git(top, "stash", "store", "-m", stash_msg, commit.strip())
+            snapshot_oid = commit.strip()
+            rc, _out, err = await _git(top, "stash", "store", "-m", stash_msg, snapshot_oid)
         elif rc == 0:
             rc, err = -1, "Git did not produce a deletion snapshot"
     if rc != 0:
         result["error"] = f"git stash failed: {err.strip()[:500]}"
         return result
-    result["stash_ref"] = "stash@{0}"
+    if snapshot_oid is None:
+        rc, entries, err = await _git(top, "stash", "list", "--format=%H%x00%gs")
+        matches = [oid for line in entries.splitlines()
+                   if "\0" in line for oid, subject in [line.split("\0", 1)]
+                   if subject == stash_msg or subject.endswith(": " + stash_msg)]
+        if rc != 0 or len(matches) != 1:
+            result["error"] = f"Created snapshot could not be identified uniquely; inspect stash marker {stash_msg}: {err.strip()}"
+            return result
+        snapshot_oid = matches[0]
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", snapshot_oid):
+        result["error"] = f"Created snapshot has an invalid object identity; inspect stash marker {stash_msg}"
+        return result
+    rc, verified, err = await _git(top, "rev-parse", "--verify", f"{snapshot_oid}^{{commit}}")
+    if rc != 0 or verified.strip() != snapshot_oid:
+        result["error"] = f"Created snapshot identity could not be verified; inspect stash marker {stash_msg}: {err.strip()}"
+        return result
+    result["stash_ref"] = snapshot_oid
     if deleted:
         rc, _out, err = await _git(
             top, "--literal-pathspecs", "restore", f"--source={fork_head}",

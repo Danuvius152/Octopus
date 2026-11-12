@@ -4683,7 +4683,10 @@ export interface components {
              * @default []
              */
             files: string[];
-            /** Stash Ref */
+            /**
+             * Stash Ref
+             * @description New snapshots use a verified full commit OID. Legacy stash@{n} selectors are unstable historical references and must not identify today's snapshot. An OID does not guarantee retention after deletion or Git garbage collection.
+             */
             stash_ref?: string | null;
             /** Status */
             status: string;

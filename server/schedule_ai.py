@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from .harness import HarnessCredential, HarnessOneshotError, OneShotContext
 
@@ -350,11 +351,10 @@ def build_explicit_schedule(
 
     if given == ["interval_seconds"]:
         seconds = _coerce_int(interval_seconds)
-        if seconds is None or seconds < MIN_INTERVAL_SECONDS:
-            raise ScheduleParseError(
-                f"`interval_seconds` must be a whole number of seconds, "
-                f"at least {MIN_INTERVAL_SECONDS}."
-            )
+        # Intervals have no wall-clock zone. Use the same host zone as the
+        # Runner, rather than validating in a browser zone we do not retain.
+        interval_trigger(seconds, now=now or datetime.now(UTC), tz=local_timezone())
+        assert seconds is not None
         return ParsedSchedule(
             name=label,
             prompt=prompt,
@@ -397,6 +397,24 @@ def build_explicit_schedule(
         recurrence_label=f"Once on {when:%Y-%m-%d} at {when:%H:%M}",
         run_at=when.isoformat(),
     )
+
+
+def interval_trigger(seconds: object, *, now: datetime, tz: str) -> IntervalTrigger:
+    """Validate storage and the actual trigger's first fire, then return it."""
+    value = _coerce_int(seconds)
+    if value is None or value < MIN_INTERVAL_SECONDS:
+        raise ScheduleParseError(f"`interval_seconds` must be a whole number of seconds, at least {MIN_INTERVAL_SECONDS}.")
+    if value > 2**63 - 1:
+        raise ScheduleParseError("`interval_seconds` is outside the SQLite signed 64-bit range.")
+    zone = ZoneInfo(resolve_timezone(tz))
+    try:
+        reference = now.astimezone(zone) if now.tzinfo else now.replace(tzinfo=zone)
+        trigger = IntervalTrigger(seconds=value, start_date=reference + timedelta(seconds=value), timezone=zone)
+        if trigger.get_next_fire_time(None, reference) is None:
+            raise ValueError("no first fire")
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ScheduleParseError(f"`interval_seconds` cannot produce a representable first fire in {tz}: {exc}") from exc
+    return trigger
 
 
 def validate_run_at(
@@ -444,7 +462,10 @@ def parse_interval_token(token: str) -> int | None:
     m = _INTERVAL_RE.match(token.strip())
     if not m:
         return None
-    n = int(m.group(1))
+    try:
+        n = int(m.group(1))
+    except ValueError as exc:
+        raise ScheduleParseError("Interval number is too large.") from exc
     if n <= 0:
         return None
     return n * _UNIT_MULT[(m.group(2) or "m").lower()]
@@ -465,14 +486,7 @@ def parse_rigid(text: str) -> ParsedSchedule | None:
     prompt = m.group(2).strip()
     if not prompt:
         return None
-    return ParsedSchedule(
-        name=derive_name(prompt),
-        prompt=prompt,
-        interval_seconds=seconds,
-        cron=None,
-        timezone=None,
-        recurrence_label=f"Every {format_interval(seconds)}",
-    )
+    return build_explicit_schedule(prompt=prompt, interval_seconds=seconds)
 
 
 # --------------------------------------------------------------------------- #
@@ -533,9 +547,12 @@ def _coerce_int(value: object) -> int | None:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        return int(value)
+        return int(value) if value.is_integer() else None
     if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
     return None
 
 

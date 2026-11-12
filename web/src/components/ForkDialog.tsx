@@ -1,6 +1,6 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
 import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { IconGitFork, IconX } from "@tabler/icons-react";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 // Which user-role messages the user never typed (bg-task results, delegation
@@ -214,6 +214,25 @@ export function ForkDialog({
   const [label, setLabel] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const foreground = useRef<{ active: boolean } | null>(null);
+  const closeOnLeave = useEffectEvent(() => onClose());
+  useLayoutEffect(() => {
+    const lifetime = { active: true };
+    foreground.current = lifetime;
+    const check = (state: ReturnType<typeof useSessionStore.getState>) => {
+      if (lifetime.active && (state.activeSessionId !== sessionId || state.mainView !== "chat")) {
+        lifetime.active = false;
+        closeOnLeave();
+      }
+    };
+    const unsubscribe = useSessionStore.subscribe(check);
+    check(useSessionStore.getState());
+    return () => { lifetime.active = false; unsubscribe(); };
+  }, [sessionId]);
+  const close = () => {
+    if (foreground.current) foreground.current.active = false;
+    onClose();
+  };
 
   // Load the user-message list for the picker (skipped visually when
   // initialSeq is set, but still useful for the row labels).
@@ -280,8 +299,10 @@ export function ForkDialog({
   }, [selectedSeq, sessionId, headers]);
 
   const createFork = async () => {
-    if (selectedSeq === null || !preview) return;
+    const lifetime = foreground.current;
+    if (selectedSeq === null || !preview || !lifetime?.active || creating) return;
     const observation = sessionList.capture();
+    const ownsDialog = () => lifetime.active && foreground.current === lifetime && sessionList.accountCurrent(observation);
     setCreating(true);
     setError(null);
     try {
@@ -296,20 +317,18 @@ export function ForkDialog({
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        setError(
-          body?.detail?.message ?? body?.detail?.reason ?? "Fork failed."
-        );
+        if (ownsDialog()) setError(body?.detail?.message ?? body?.detail?.reason ?? "Fork failed.");
         return;
       }
       const fork: SessionInfo = await res.json();
       const applied = await sessionList.created(fork, observation, sessionId);
-      if (!sessionList.accountCurrent(observation)) return;
+      if (!ownsDialog()) return;
+      close();
       if (applied && sessionList.current(observation)) onForked(fork, observation);
-      onClose();
     } catch {
-      setError("Fork failed.");
+      if (ownsDialog()) setError("Fork failed.");
     } finally {
-      setCreating(false);
+      if (ownsDialog()) setCreating(false);
     }
   };
 
@@ -318,7 +337,7 @@ export function ForkDialog({
   return (
     <div
       className="fork-dialog-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      onClick={onClose}
+      onClick={close}
     >
       <div
         className="fork-dialog w-full max-w-md rounded-xl border-[0.7px] border-border bg-background p-5 shadow-xl"
@@ -332,7 +351,7 @@ export function ForkDialog({
           </h3>
           <button
             type="button"
-            onClick={onClose}
+            onClick={close}
             className="text-muted-foreground hover:text-foreground"
             aria-label="Close"
           >
@@ -392,7 +411,7 @@ export function ForkDialog({
         )}
 
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" size="sm" onClick={onClose}>
+          <Button variant="ghost" size="sm" onClick={close}>
             Cancel
           </Button>
           {inConfirm && (

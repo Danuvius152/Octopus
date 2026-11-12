@@ -8,11 +8,14 @@ file paths and prepends an `<attachments>` header to the prompt.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import sys
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.datastructures import UploadFile
 
 from server import deps
 from server.attachments import (
@@ -182,6 +185,77 @@ def test_upload_does_not_follow_a_session_directory_symlink(attachments_root, st
 # ---------------------------------------------------------------------------
 # HTTP endpoints
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("length", [0, 1, 128, 129, 1024])
+@pytest.mark.parametrize("declared_size", [None, 1, 1024])
+async def test_upload_bounds_actual_materialization(client, account_user_id, monkeypatch, length, declared_size):
+    from server import attachments as storage
+    from server.routers import attachments
+
+    agent = await session_manager.db.get_system_agent(account_user_id)
+    created = await client.post("/api/sessions", json={"agent_id": agent["id"], "name": "Bounded upload"})
+    assert created.status_code == 201
+    sid = created.json()["id"]
+    monkeypatch.setattr(attachments, "MAX_FILE_BYTES", 128)
+    monkeypatch.setattr(storage, "MAX_FILE_BYTES", 128)
+    read = UploadFile.read
+    reads = []
+
+    async def counted(upload, size=-1):
+        upload.size = declared_size
+        value = await read(upload, size)
+        reads.append((size, len(value)))
+        return value
+
+    monkeypatch.setattr(UploadFile, "read", counted)
+    content = b"x" * length
+    uploaded = await client.post(f"/api/sessions/{sid}/attachments", files={"file": ("bounded.txt", content, "text/plain")})
+    assert reads and all(0 <= size <= 129 for size, _ in reads)
+    assert sum(count for _, count in reads) <= 129
+    if 0 < length <= 128:
+        assert uploaded.status_code == 201
+        meta = uploaded.json()
+        assert meta["size"] == length
+        assert get_path(sid, meta["id"], user_id=account_user_id).read_bytes() == content
+        downloaded = await client.get(f"/api/sessions/{sid}/attachments/{meta['id']}")
+        assert downloaded.status_code == 200 and downloaded.content == content
+    else:
+        assert uploaded.status_code == (400 if length == 0 else 413)
+        assert not (paths_for(account_user_id).attachments / sid).exists()
+
+
+@pytest.mark.parametrize("failure", ["read", "save"])
+async def test_failed_upload_leaves_no_partial_file(client, account_user_id, monkeypatch, failure):
+    agent = await session_manager.db.get_system_agent(account_user_id)
+    created = await client.post("/api/sessions", json={"agent_id": agent["id"], "name": "Failed upload"})
+    sid = created.json()["id"]
+    destination = paths_for(account_user_id).attachments / sid
+    write_bytes = Path.write_bytes
+
+    async def fail_read(upload, size=-1):
+        raise OSError(errno.EIO, "Upload read failed")
+
+    def partial_write(path, content):
+        if path.parent == destination:
+            write_bytes(path, content[:3])
+            raise OSError(errno.ENOSPC, "Upload write failed")
+        return write_bytes(path, content)
+
+    with monkeypatch.context() as faults:
+        if failure == "read":
+            faults.setattr(UploadFile, "read", fail_read)
+        else:
+            faults.setattr(Path, "write_bytes", partial_write)
+        with pytest.raises(OSError, match=f"Upload {failure if failure == 'read' else 'write'} failed"):
+            await client.post(f"/api/sessions/{sid}/attachments", files={"file": ("failed.txt", b"complete payload", "text/plain")})
+    assert not destination.exists() or list(destination.iterdir()) == []
+
+    retried = await client.post(f"/api/sessions/{sid}/attachments", files={"file": ("retry.txt", b"complete payload", "text/plain")})
+    assert retried.status_code == 201
+    stored = get_path(sid, retried.json()["id"], user_id=account_user_id)
+    assert stored.read_bytes() == b"complete payload"
+    assert list(destination.iterdir()) == [stored]
 
 
 @pytest.mark.asyncio

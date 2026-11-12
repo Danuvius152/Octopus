@@ -72,10 +72,9 @@ async def upload_attachment(
     owner_id = session.user_id
     assert owner_id is not None
 
-    # Read fully into memory: the cap is small (25 MB) and the storage
-    # module needs the bytes for size + write. Streaming to disk first
-    # would complicate the size-check error path.
-    content = await file.read()
+    # Bound route materialization independently of the declared size. The extra
+    # byte distinguishes an exact-limit upload from an oversized one.
+    content = await file.read(MAX_FILE_BYTES + 1)
     if len(content) > MAX_FILE_BYTES:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,

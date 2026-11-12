@@ -420,24 +420,15 @@ async def test_slow_old_build_completion_cannot_finish_the_next_build(notificati
     rebuild = backend_supervisor.on_rebuild
     rebuilds = []
 
-    async def hold_first_rebuild(app_id, app_dir):
-        await rebuild(app_id, app_dir)
+    async def hold_first_rebuild(app_id, app_dir, *, target):
+        await rebuild(app_id, app_dir, target=target)
         rebuilds.append(app_id)
         if len(rebuilds) == 1:
             entered.set()
             await release.wait()
+            old_finished.set()
 
     monkeypatch.setattr(backend_supervisor, "on_rebuild", hold_first_rebuild)
-    register = runtime.manager.on_request_complete
-
-    def observe_completion(key, callback):
-        async def consumed(session_id, completion):
-            await callback(session_id, completion)
-            if len(rebuilds) == 1:
-                old_finished.set()
-        register(key, consumed)
-
-    monkeypatch.setattr(runtime.manager, "on_request_complete", observe_completion)
     applications = ApplicationManager()
     applications.bind(runtime.manager, runtime.manager.db)
     agent = await AgentManager(runtime.manager.db).create_agent(name="Build order", backend="codex", user_id=runtime.parent.user_id)

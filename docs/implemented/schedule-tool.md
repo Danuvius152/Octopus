@@ -14,8 +14,8 @@ call instead of a tool call plus a second CLI process, a second parse and a
 second way to fail. Both paths supply candidates to `build_explicit_schedule`:
 the AI adapter `validate_parsed` checks the declared kind and passes all
 recurrence fields through, including conflicting ones. The shared validator
-checks the prompt, exactly one recurrence, minimum interval, five cron fields,
-timezone and one-time future rule. Shared creation also validates internal
+checks the prompt, exactly one recurrence, representable interval, five cron
+fields, timezone and one-time future rule. Shared creation also validates internal
 candidates; no model output is an already-admitted definition. Errors explain
 what the caller should pass:
 
@@ -190,13 +190,23 @@ that an earlier execution retired. The
 [Runner contract](scheduled-runs.md#definition-controls-and-shutdown) owns the
 ordering and shutdown boundary.
 
-Interval validation currently enforces an integer and the 60-second floor, but
-not APScheduler/datetime's representable upper bound. A sufficiently large
-interval can pass validation and commit before trigger construction fails;
-startup can fail again when reloading that enabled definition. This is a current
-validation gap, not proof that every accepted recurrence is runnable. Preserve
-the returned identity and inspect/correct the saved definition rather than
-creating a replacement blindly.
+Intervals require whole seconds, a 60-second minimum and a value representable
+in SQLite's signed 64-bit integer. The shared `interval_trigger` also constructs
+the actual APScheduler trigger and checks its first fire through datetime,
+timezone and timestamp conversion; there is no separate business-year ceiling.
+The rigid parser, AI candidates, explicit creation and timing edits use this
+same validation. Interval validation and registration both use the existing host
+timezone source; an interval does not acquire a new wall-clock zone contract.
+
+The definition transaction repeats interval validation before and after the SQL
+and cursor cleanup, including re-enabling an invalid stored interval. Refusal
+rolls back without replacing the previous definition or trigger. Disabling,
+quarantining and operational run timestamps do not require making an invalid
+recurrence runnable first. The Runner registers the returned trigger instead of
+reconstructing a second formula. On reload, a known invalid recurrence is
+isolated by the original expected-definition CAS; conflict rereads protect a
+replacement definition. Unexpected storage/registration failures retain their
+separate unconfirmed result rather than being disguised as bad user timing.
 
 ## 7. On by default
 
@@ -218,8 +228,10 @@ explicitly in their agent configuration.
   against the live runner, and that every mutation broadcasts.
 * **The recurrence validator** (`test_schedule_ai.py`) — host-timezone
   resolution, an unknown zone refused, `describe_cron` on the shapes it
-  claims and `None` on the ones it doesn't, the interval floor, a past
-  `run_at`, a naive `run_at` read in the schedule's zone.
+  claims and `None` on the ones it doesn't, whole-second/storage/first-fire
+  interval boundaries, rigid and AI rejection, a past `run_at`, and a naive
+  `run_at` read in the schedule's zone. Route/Runner tests also preserve the
+  old definition on rejection and exercise edit/delete during quarantine CAS.
 * **A real model, both harnesses** (`test_schedule_mcp_real.py`) — the only
   test that settles the actual question. Claude is asked for "every weekday
   at 9am" and the resulting cron has to fire Mon-Fri at 09:00 (asserted by

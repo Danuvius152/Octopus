@@ -15,6 +15,7 @@ import { applications, type ListEventSource } from "../lib/applicationList";
 import { refreshWikiJobs } from "../lib/wikiJobs";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { useSessionStore } from "../stores/sessionStore";
+import { readAttemptIdentity, sameAttempt } from "../lib/toolIdentity";
 
 const WS_PROTOCOL = window.location.protocol === "https:" ? "wss:" : "ws:";
 const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws`;
@@ -64,7 +65,6 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
     addMessage: addMessageRaw,
     applyDispatchState,
     addPendingQuestion,
-    setLastAppliedSeq,
     lastAppliedSeq,
     appendStreamingText,
     clearStreamingText,
@@ -105,15 +105,15 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       ...msg,
       body_state: msg.body_state ?? data.body_state, detail_ref: msg.detail_ref ?? data.detail_ref,
       identity_unavailable: msg.identity_unavailable ?? data.identity_unavailable,
-      runtime_metadata: msg.runtime_metadata ?? data.runtime_metadata,
+      runtime_metadata: msg.runtime_metadata ?? data.runtime_metadata ?? readAttemptIdentity(data),
       seq: msg.seq ?? seq ?? undefined,
       created_at: msg.created_at ?? data.created_at ?? undefined,
     });
   if (seq !== null && sessionId) {
-    if (!shouldApplyWsEvent(seq, lastAppliedSeq[sessionId])) {
+    if (!shouldApplyWsEvent(seq, lastAppliedSeq[sessionId]) ||
+        getState().messages[sessionId]?.some((message) => message.seq === seq)) {
       return; // already in snapshot; ignore to avoid duplicate
     }
-    setLastAppliedSeq(sessionId, seq);
   }
 
   switch (data.type) {
@@ -142,7 +142,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       break;
 
     case "recording_failed":
-      clearStreamingText(sessionId);
+      clearStreamingText(sessionId, readAttemptIdentity(data));
       applyDispatchState(sessionId, data.dispatch_state);
       addMessage(sessionId, { role: "system", type: "notice", content: data.message ?? "Result recording could not be confirmed. Inspect the recorded messages in this conversation." });
       break;
@@ -159,7 +159,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
     // Partial text, still being written. `addMessage` drops the buffer when
     // the completed block lands, so there's nothing to clear here.
     case "assistant_delta":
-      appendStreamingText(sessionId, data.content, (data.runtime_metadata ?? undefined));
+      appendStreamingText(sessionId, data.content, data.runtime_metadata ?? readAttemptIdentity(data));
       break;
 
     // A schedule was created, changed or deleted — by this browser, another
@@ -237,7 +237,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
 
     case "question_request": {
       const questionId = data.question_id;
-      if (getState().closedQuestionIds[sessionId]?.[questionId]) break;
+      if (seq === null && getState().closedQuestionIds[sessionId]?.[questionId]) break;
       const questions = (data.questions) || [];
       addMessage(sessionId, {
         role: "assistant",
@@ -301,18 +301,20 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       addMessage(sessionId, { role: "system", type: "recovery", content: data.content ?? data.message });
       break;
 
-    case "result":
-      if (getState().activeAttempts[sessionId]?.request_id === data.request_id) getState().setActiveAttempt(sessionId, null);
+    case "result": {
+      const identity = readAttemptIdentity(data);
+      if (sameAttempt(getState().activeAttempts[sessionId], identity) ||
+          !identity && getState().activeAttempts[sessionId]?.request_id === data.request_id) getState().setActiveAttempt(sessionId, null);
       // A turn can end with no completed text block at all — an interrupt, a
       // failure, or a turn that only ran tools. Whatever was streaming is not
       // going to be superseded by a real message, so drop it here.
-      clearStreamingText(sessionId);
+      if (!identity) clearStreamingText(sessionId);
       addMessage(sessionId, {
         role: "system",
         type: "result",
         content: data.content ?? data.message,
         is_error: data.is_error,
-        tool_input: data.tool_input ?? undefined,
+        tool_input: identity ? { ...data.tool_input, attempt_context: identity } : data.tool_input ?? undefined,
         cost: data.cost ?? undefined,
         session_id: data.claude_session_id ?? undefined,
       });
@@ -320,6 +322,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         void modelCredentials.authenticationExpired();
       }
       break;
+    }
 
     // A message handed to the turn already running, rather than queued behind
     // it. Rendered immediately so you can see it landed mid-turn.
@@ -349,7 +352,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       break;
 
     case "error":
-      clearStreamingText(sessionId);
+      clearStreamingText(sessionId, readAttemptIdentity(data));
       addMessage(sessionId || "__global", {
         role: "system",
         type: "error",

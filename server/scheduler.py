@@ -5,6 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfoNotFoundError
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.jobstores.base import JobLookupError
@@ -14,7 +15,12 @@ from apscheduler.triggers.date import DateTrigger
 
 from .knowledge import RequestingWorkClosedError, decode_context
 from .models import SessionStatus
-from .schedule_ai import ScheduleParseError, cron_trigger
+from .schedule_ai import (
+    ScheduleParseError,
+    cron_trigger,
+    interval_trigger,
+    local_timezone,
+)
 from .schedule_targets import ScheduleTargetError, resolve_schedule_target
 
 if TYPE_CHECKING:
@@ -118,12 +124,15 @@ class ScheduleRunner:
             # cron_trigger, not CronTrigger.from_crontab: crontab counts
             # day-of-week from Sunday and APScheduler from Monday
             # (schedule_ai._crontab_dow_field).
-            trigger = cron_trigger(row["cron"], row.get("timezone") or "UTC")
+            try:
+                trigger = cron_trigger(row["cron"], row.get("timezone") or "UTC")
+            except (ValueError, ZoneInfoNotFoundError) as exc:
+                raise ScheduleParseError(f"Invalid stored cron: {exc}") from exc
             self._scheduler.add_job(self._fire, trigger, **common)
         else:
-            self._scheduler.add_job(
-                self._fire, "interval", seconds=row["interval_seconds"], **common
-            )
+            trigger = interval_trigger(row["interval_seconds"], now=datetime.now(UTC),
+                                       tz=row.get("timezone") or local_timezone())
+            self._scheduler.add_job(self._fire, trigger, **common)
 
     async def _fire(self, schedule_id: str) -> None:
         """Run the schedule's prompt for this fire.
@@ -416,8 +425,12 @@ class ScheduleRunner:
                 except ValueError:
                     reason = "invalid_run_at"
             if reason is None:
-                self._add_job(current, not_before=not_before)
-                return
+                try:
+                    self._add_job(current, not_before=not_before)
+                except ScheduleParseError as exc:
+                    reason = f"invalid_recurrence: {exc}"
+                else:
+                    return
             if reason == "agent_archived":
                 return
             try:

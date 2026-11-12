@@ -111,11 +111,14 @@ original request ID and an explicit unavailable diagnostic. It retains the
 resources and does not replay the input. Missing input is not proof that Submit
 was never handed off. Unconfirmed admission
 keeps App/session/request identity in a failed diagnostic without replay or
-deleting possible execution resources. The original late completion can still
-settle it. Failure projection rechecks the App/session and current input under
-the existing coordination; it cannot overwrite a committed result or another
-admitted build. Authoritative storage distrust retains the shared fail-stop
-boundary.
+deleting possible execution resources. An admitted input with a live completion
+keeps projection authority instead of taking this diagnostic path. Failure
+projection rechecks the App/session and current input in the writer transaction.
+Known unaccepted preparation failure can project only before any message input
+has been admitted, including an input whose terminal committed but whose App
+observer is delayed. Cleanup diagnostics must still match the original status,
+error and update stamp. They cannot overwrite another admitted build.
+Authoritative storage distrust retains the shared fail-stop boundary.
 
 `ApplicationManager` observes each original request
 completion through `SessionManager.on_request_complete`, including direct
@@ -128,12 +131,31 @@ leave the build permanently building. The shared ownership and completion
 rules are in the [original completion contract](input-reliability.md#原请求完成与失败交接);
 deployment is verified separately.
 
-This completion ordering does not cover the separate metadata PATCH path:
-changing `entrypoint` calls `_evaluate` immediately, even during an active build.
-It can project `ready`/`failed` and update `last_built_at` before that writer has
-completed. Until this path is coordinated with build completion, neither the
-projected status nor that timestamp alone proves writer retirement. See
-[`update_application` and `_evaluate`](../../server/applications.py).
+New message admission into the exact current builder sets `building` and clears
+the previous error in the same SQLite transaction as the input. Direct chat and
+paused queued input use that boundary too. Duplicate input, compact, another
+builder or a rolled-back admission does not manufacture a new build. Creation
+still has its distinct preparation phase; request_build has no pre-admission
+status write or stale-status restore.
+
+Metadata PATCH uses the App's existing effect owner and rechecks account,
+deletion and builder binding. Changing `entrypoint` while work is admitted may
+save metadata, but cannot project a terminal state or advance `last_built_at`.
+The narrow terminal transaction checks the same owner/binding/entrypoint, latest
+independent message and pending/running inputs against their actual committed
+terminal associations. It compares a committed completion's exact outcome;
+carried steer completions do not evaluate again or grant another backend hook.
+Only an eligible artifact evaluation can update build time and grant that hook.
+The timestamp remains a build projection, not backend health or deployment proof.
+
+An unavailable or recording-failed completion instead saves an explicit failure
+diagnostic without build time or hook. When the original Owner has ended, its
+shared immutable `ended_owner_inputs` snapshot allows unavailable diagnostics to
+ignore exactly those leftover inputs within the same session, including queued
+and carried members. Snapshot-external work still blocks an old diagnostic;
+carrier links do not expand that set. The snapshot changes neither committed
+outcomes nor persistent input state. This distinction lets a failed Owner's
+latest input converge instead of remaining `building` indefinitely.
 
 For App Server, completion follows the bound root and its original resource
 retirement. A remaining helper partial neither proves a valid app nor forces a
@@ -141,11 +163,16 @@ build failure. The entrypoint check still decides the artifact status, including
 a usable artifact written before root failure or Stop. This consumer reads no
 final-answer string and adds no result-text query.
 
-The broadcast subscriber only derives running progress from current execution.
-Per-session projection updates coordinate without holding that coordination
-across subscriber callbacks; after awaited backend rebuild work, the consumer
-checks that it still represents the original request. Thus a late old running
-frame or old completion cannot overwrite the next build's status.
+Queued, dispatch and message-running notifications read the current committed
+App projection; they do not write `building` from delayed progress. Dispatch
+also announces idle preparation before attachment/Git waits; empty dispatch
+changes do not create build notices. Each App's notification owner serializes
+updated/deleted delivery and rereads the current row after awaited subscribers.
+It holds no App projection lock across subscribers, so reentrant new input or
+delete can complete and the final notification reflects their newer fact.
+Backend retirement is separately owned and does not delay notification; an old
+terminal snapshot is not retained across its hook wait. Captured resource
+identity and retirement rules are in [backend lifecycle](application-backends.md#6-lifecycle).
 
 Each transition broadcasts `application_created` / `application_updated` /
 `application_deleted` over the same WS bus every client already listens to, so
@@ -160,6 +187,11 @@ accepted input with a live pending completion from an Owner ending just after
 admission commits, and completes another build while the original empty-session
 cleanup waits. Existing projection-only model
 fixtures do not stand in for input-admission proof.
+The same tests cover direct-chat commit before receipt registration, metadata
+during building, rejected/duplicate/compact input, primary plus delivered steer,
+failed Owner with queued input and steer, snapshot-external admissions, blocked
+hooks and reentrant/slow subscribers. They assert final consumer state as well
+as database state; a correct row alone does not prove notification ordering.
 
 ## 5. REST surface
 

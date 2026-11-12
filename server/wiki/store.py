@@ -159,7 +159,9 @@ def vault_read(function):
                 if error.status != 503 or function.__name__ not in {"search", "documents"}:
                     raise
         history = WikiHistory(self)
-        with history.locked(shared=function.__name__ != "refresh"):
+        # Graph reads a live center and read_snapshot repairs its index.
+        # Only catalog projections can retain a shared lock after synchronization.
+        with history.locked(shared=function.__name__ in {"search", "documents"}):
             try:
                 return function(self, *args, **kwargs)
             except ObservationUnavailable:

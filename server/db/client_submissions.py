@@ -283,6 +283,14 @@ class ClientSubmissionsMixin(DatabaseBase):
                  "pending", now, now, recovery_of),
             )
             created = cursor.rowcount == 1
+            if created and decode_payload(payload)["operation"]["kind"] == "message":
+                await tx.execute(
+                    "UPDATE applications SET status='building',error=NULL,updated_at=? "
+                    "WHERE session_id=? AND deletion IS NULL AND EXISTS ("
+                    "SELECT 1 FROM sessions s WHERE s.id=applications.session_id "
+                    "AND s.user_id IS applications.user_id AND (s.app_id IS NULL OR s.app_id=applications.id))",
+                    (now, session_id),
+                )
             row = await self._get_client_submission(tx, session_id, client_id)
             assert row is not None
             if schedule is not None:

@@ -1,6 +1,27 @@
 import type { RuntimeMetadata, ToolReceipt } from "../api";
 import type { Message } from "../stores/sessionStore";
 
+export type AttemptIdentity = Pick<RuntimeMetadata, "request_id" | "attempt_id">;
+
+/** WS envelopes and persisted rows carry the same attempt in different fields. */
+export function readAttemptIdentity(value: unknown): AttemptIdentity | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const row = value as Record<string, unknown>;
+  const input = row.tool_input as Record<string, unknown> | null | undefined;
+  for (const candidate of [row.runtime_metadata, value, input?.attempt_context]) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const identity = candidate as Record<string, unknown>;
+    if (typeof identity.request_id === "string" && identity.request_id &&
+        typeof identity.attempt_id === "string" && identity.attempt_id) {
+      return { request_id: identity.request_id, attempt_id: identity.attempt_id };
+    }
+  }
+}
+
+export function sameAttempt(a: AttemptIdentity | undefined, b: AttemptIdentity | undefined): boolean {
+  return Boolean(a && b && a.request_id === b.request_id && a.attempt_id === b.attempt_id);
+}
+
 export function readRuntimeMetadata(value: unknown): RuntimeMetadata | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const data = value as RuntimeMetadata;

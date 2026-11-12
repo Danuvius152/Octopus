@@ -248,10 +248,14 @@ export function applySessionSnapshot(
   advanceOnly = false,
 ): { needsExecutionConfirmation: boolean } | null {
   if (typeof detail.id === "string" && detail.id !== sessionId) return null;
+  const live = useSessionStore.getState();
   const applied = applyDispatchSnapshot(sessionId, detail, start, advanceOnly);
   if (!applied) return null;
   advanceOnly ||= applied.needsExecutionConfirmation;
-  applyTranscript(sessionId, detail, start.streamingItems[sessionId] || {});
+  const transcriptApplied = applyTranscript(sessionId, detail, start.streamingItems[sessionId] || {},
+    live.streamingText[sessionId] !== start.streamingText[sessionId] ||
+    live.streamingTextAttempt[sessionId] !== start.streamingTextAttempt[sessionId]);
+  advanceOnly ||= !transcriptApplied;
   const store = useSessionStore.getState();
   const snapshotMessages = (detail.messages as { seq?: number }[]) || [];
   if (typeof detail.context_generation === "string" && "context_state" in detail) {

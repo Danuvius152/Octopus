@@ -7,6 +7,12 @@ import { useSessionStore } from "../stores/sessionStore";
 
 beforeEach(() => useSessionStore.setState(useSessionStore.getInitialState(), true));
 
+it.each(["stash@{0}", "a".repeat(40)])("preserves recovery reference %s without resolving a moving selector", (stash_ref) => {
+  const event = { ...producers.session_unarchived, session: { ...producers.session_unarchived.session,
+    fork_revert_record: { ran: true, files: ["a.py"], stash_ref, status: "completed", refused_reason: null, error: null } } };
+  expect(decodeWsEvent(event)).toMatchObject({ kind: "event", event: { session: { fork_revert_record: { stash_ref } } } });
+});
+
 // test_ws_contract.py runs the Python constructors and checks this same file;
 // the Owner's structured outcome has its independent recordingReplay producer.
 it.each(Object.entries(producers))("decodes the real %s producer with additive fields", (type, event) => {

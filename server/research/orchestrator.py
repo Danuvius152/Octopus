@@ -92,6 +92,8 @@ async def run_research(
     harness: Any = None,
     credential: Any = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
+    service_tier: str | None = None,
     working_dir: str,
     limits: ResearchLimits | None = None,
     on_progress: ProgressCallback | None = None,
@@ -111,12 +113,14 @@ async def run_research(
             return await run_web_leaf(
                 harness, prompt=p, working_dir=working_dir, credential=credential,
                 model=model, timeout=limits.leaf_timeout, authorize_spawn=authorize_spawn,
+                reasoning_effort=reasoning_effort, service_tier=service_tier,
             )
     if reason is None:
         async def reason(p: str) -> LeafResult:  # noqa: E306
             return await run_reason_leaf(
                 harness, prompt=p, credential=credential, model=model,
                 working_dir=working_dir, timeout=limits.reason_timeout, authorize_spawn=authorize_spawn,
+                reasoning_effort=reasoning_effort, service_tier=service_tier,
             )
 
     async def _emit(phase: str, detail: str, **counts: int) -> None:

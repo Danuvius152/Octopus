@@ -43,7 +43,6 @@ from .application_resources import data_dir_for as data_dir_for
 from .application_resources import runtime_dir_for as runtime_dir_for
 from .config import settings
 from .crypto import is_sha256_hexdigest
-from .models import SessionStatus
 from .sessions.runtime_types import SessionAdmissionClosed
 from .sessions.submission import RequestCompletion
 from .workspace import paths_for
@@ -320,6 +319,9 @@ class ApplicationManager:
         # Projection writers and finite application effects share per-App
         # coordination. No result or application status is copied into this map.
         self._build_updates: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        # One notification owner per App. It rereads after subscribers return,
+        # so a slow or reentrant subscriber cannot finish on an obsolete row.
+        self._publications: dict[str, asyncio.Task[None]] = {}
         self._deletions: dict[str, tuple[bool, asyncio.Task[None]]] = {}
         # Allocation commits a row before releasing this lock; deletion keeps
         # the row's resource claim until all removals and row deletion finish.
@@ -632,10 +634,8 @@ class ApplicationManager:
                 return row
             if row["status"] != STATUS_BUILDING:
                 return row  # A committed completion already owns this result.
-            if session is not None and self.session_mgr is not None and self.session_mgr.session_is_executing(session):
-                if request_id is None or not self._completion_is_current(session.id, request_id):
-                    return row  # Another admitted input owns the projection.
             message = f"failed to prepare the build session: {error}"
+            unavailable_request_id = None
             if request_id is not None and not known_unaccepted:
                 message = f"Build admission is unconfirmed (request {request_id}); inspect the original session. {error}"
             if request_id is not None and session is not None:
@@ -649,11 +649,16 @@ class ApplicationManager:
                         if completion is None or completion.state != "unavailable":
                             return row  # Original completion keeps its projection authority.
                         known_unaccepted = False
+                        unavailable_request_id = request_id
                         message = f"Build input was accepted (request {request_id}), but its completion is unavailable; inspect the original session. {error}"
             fields = {"status": STATUS_FAILED, "error": message, "updated_at": _now()}
             if session is not None:
                 fields["session_id"] = session.id
-            await db.update_application(app_id, **fields)
+            projected = await db.project_application_terminal(
+                row, fields, preparation_failure=True, unavailable_request_id=unavailable_request_id,
+            )
+            if projected is None:
+                return await self.get_application(app_id)
         if known_unaccepted and session is not None:
             assert self.session_mgr is not None
             cleanup_error = None
@@ -669,9 +674,9 @@ class ApplicationManager:
                     row = await self.get_application(app_id)
                     if row["session_id"] == session.id and row.get("deletion") is None:
                         if removed:
-                            await db.update_application(app_id, session_id=None)
+                            await db.project_application_terminal(row, {"session_id": None}, preparation_failure=True)
                         elif all(row[key] == fields[key] for key in ("status", "error", "updated_at")):
-                            await db.update_application(app_id, error=cleanup_error)
+                            await db.project_application_terminal(row, {"error": cleanup_error}, preparation_failure=True)
         return await self.get_application(app_id)
 
     async def _publish_creation(self, kind: str, row: dict[str, Any]) -> None:
@@ -761,42 +766,38 @@ class ApplicationManager:
                 entrypoint=row["entrypoint"],
             )
 
-        async def restore() -> None:
-            await db.update_application(app_id, status=row["status"], error=row["error"], updated_at=_now())
-
-        try:
-            await db.update_application(app_id, status=STATUS_BUILDING, error=None, updated_at=_now())
-            updated = await db.get_application(app_id)
-        except asyncio.CancelledError:
-            # No command has been submitted at this point.
-            await complete_cleanup(restore())
-            raise
-
         async def admit() -> None:
             try:
                 assert self.session_mgr is not None
                 receipt = await self.session_mgr.start_message(session.id, body, source="application")
             except ValueError as exc:
-                await restore()
                 raise ApplicationError(f"The build did not start: {exc}", status_code=409) from exc
             if not receipt.accepted:
-                await restore()
                 raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
 
         # Owner admission does not await its publisher or completion consumers.
         await complete_cleanup(admit())
-        assert updated is not None  # written immediately above
-        return updated
+        return await self.get_application(app_id, user_id)
 
     # ----------------------------------------------------------------- update
 
     async def update_application(
         self, app_id: str, user_id: str | None = None, **fields: Any
     ) -> dict[str, Any]:
+        row = await self.get_application(app_id, user_id)
+
+        async def update() -> dict[str, Any]:
+            return await self._update_application(app_id, **fields)
+
+        updated = await self.run_effect(app_id, row["user_id"], update)
+        await self._broadcast_application("application_updated", updated)
+        return updated
+
+    async def _update_application(self, app_id: str, **fields: Any) -> dict[str, Any]:
         """Rename / re-icon / repoint the entrypoint. The directory never
         moves — `app_dir` is the identity of the files on disk."""
         db = self._require_db()
-        row = await self.get_application(app_id, user_id)
+        row = await self.get_application(app_id)
         updates: dict[str, Any] = {}
 
         if "name" in fields and fields["name"] is not None:
@@ -832,7 +833,6 @@ class ApplicationManager:
         if "entrypoint" in updates:
             await self._evaluate(app_id, broadcast=False)
         updated = await db.get_application(app_id)
-        await self._broadcast_application("application_updated", updated)
         assert updated is not None  # written immediately above
         return updated
 
@@ -1051,7 +1051,7 @@ class ApplicationManager:
 
     async def _evaluate(
         self, app_id: str, *, error: str | None = None, broadcast: bool = True,
-        request_id: str | None = None,
+        completion: RequestCompletion | None = None,
     ) -> dict[str, Any] | None:
         """Derive terminal status from the filesystem: the entrypoint exists →
         `ready`, it doesn't → `failed`. `error` is the turn-level failure
@@ -1061,6 +1061,9 @@ class ApplicationManager:
         row = await db.get_application(app_id)
         if row is None or row.get("deletion") is not None:
             return None
+        from .app_backends import backend_supervisor
+
+        target = backend_supervisor.capture_rebuild(app_id)
         built = self.is_built(row)
         if built:
             fields = {
@@ -1087,63 +1090,49 @@ class ApplicationManager:
         except Exception:
             logger.exception("icon discovery failed for application %s", app_id)
 
+        fields["updated_at"] = _now()
+        updated = await db.project_application_terminal(row, fields, completion=completion)
+        if updated is None:
+            return None
+
         # A build turn rewrote the code, so a backend still running is running
         # the old one, and its dependencies may have changed
         # (application-backends.md §6).
-        try:
-            from .app_backends import backend_supervisor
+        async def retire_backend() -> None:
+            try:
+                await backend_supervisor.on_rebuild(app_id, row["app_dir"], target=target)
+            except Exception:
+                logger.exception("failed restarting backend for application %s", app_id)
 
-            await backend_supervisor.on_rebuild(app_id, row["app_dir"])
-        except Exception:
-            logger.exception("failed restarting backend for application %s", app_id)
+        assert self.session_mgr is not None
+        self.session_mgr._own_task(asyncio.create_task(retire_backend(), name=f"application-rebuild-{app_id}"))
 
-        if request_id is not None and not self._completion_is_current(row["session_id"], request_id):
-            return None
-        fields["updated_at"] = _now()
-        await db.update_application(app_id, **fields)
-        updated = await db.get_application(app_id)
         if broadcast:
             await self._broadcast_application("application_updated", updated)
         return updated
 
     async def _on_broadcast(self, msg: dict[str, Any]) -> None:
-        """Progress can mark a build running; only completion ends it."""
+        """Publish committed admission; delayed progress never writes state."""
         sid = msg.get("session_id")
         if not sid or self.db is None:
             return
-        if msg.get("type") != "status" or msg.get("status") != "running" or msg.get("operation") != "message":
+        if msg.get("type") not in {"queued", "dispatch_state"} and not (
+                msg.get("type") == "status" and msg.get("status") == "running" and msg.get("operation") == "message"):
             return
-        updates = []
+        if msg.get("type") in {"queued", "dispatch_state"}:
+            dispatch = msg.get("dispatch_state") or {}
+            if dispatch.get("active_operation") != "message" and not any(
+                    item.get("operation") == "message" for item in dispatch.get("items", [])):
+                return  # Empty dispatch changes do not announce a new build.
         rows = await self.db.get_applications_for_session(sid)
         for candidate in rows:
-            async with self._build_updates.setdefault(candidate["id"], asyncio.Lock()):
-                row = await self.db.get_application(candidate["id"])
-                if row is None or row.get("deletion") is not None or row["session_id"] != sid:
-                    continue
-                session = self.session_mgr.get_session(sid) if self.session_mgr is not None else None
-                # Progress can outlive its writer and completion. Read the
-                # current execution projection instead of replaying running.
-                if (session is None or self.session_mgr is None or session.status is not SessionStatus.running
-                        or self.session_mgr.dispatch_snapshot(sid)["paused"]
-                        or self.session_mgr.dispatch_snapshot(sid)["active_operation"] != "message"):
-                    continue
-                if row["status"] != STATUS_BUILDING:
-                    await self.db.update_application(row["id"], status=STATUS_BUILDING, updated_at=_now())
-                    updates.append(await self.db.get_application(row["id"]))
-        for updated in updates:
-            await self._broadcast_application("application_updated", updated)
-
-    def _completion_is_current(self, session_id: str, request_id: str) -> bool:
-        assert self.session_mgr is not None
-        if self.session_mgr.get_session(session_id) is None:
-            return True
-        dispatch = self.session_mgr.dispatch_snapshot(session_id)
-        return (not any(item["operation"] == "message" for item in dispatch["items"])
-                and (dispatch["active_operation"] != "message" or dispatch["active_request_id"] == request_id))
+            if candidate.get("deletion") is None and candidate["session_id"] == sid and candidate["status"] == STATUS_BUILDING:
+                await self._broadcast_application("application_updated", candidate)
 
     async def _on_completion(self, session_id: str, completion: RequestCompletion) -> None:
         """Also observe direct chat in the build session when publication fails."""
-        if self.db is None or self.session_mgr is None or completion.operation != "message":
+        if (self.db is None or self.session_mgr is None or completion.operation != "message"
+                or completion.input_request_id != completion.request_id):
             return
         updates = []
         rows = await self.db.get_applications_for_session(session_id)
@@ -1152,20 +1141,19 @@ class ApplicationManager:
                 row = await self.db.get_application(candidate["id"])
                 if row is None or row.get("deletion") is not None or row["session_id"] != session_id:
                     continue
-                if not self._completion_is_current(session_id, completion.request_id):
-                    continue
                 if completion.recording_state != "committed" or completion.outcome is None:
-                    await self.db.update_application(
-                        row["id"], status=STATUS_FAILED,
-                        error=completion.reason or f"The build has no confirmed result ({completion.state}).",
-                        updated_at=_now(),
+                    updated = await self.db.project_application_terminal(
+                        row, {"status": STATUS_FAILED,
+                              "error": completion.reason or f"The build has no confirmed result ({completion.state}).",
+                              "updated_at": _now()}, completion=completion,
                     )
-                    updates.append(await self.db.get_application(row["id"]))
+                    if updated is not None:
+                        updates.append(updated)
                 else:
                     outcome = completion.outcome
                     updated = await self._evaluate(row["id"], error=(
                         outcome.message or "The build turn ended with an error."
-                    ) if outcome.status != "success" else None, broadcast=False, request_id=completion.request_id)
+                    ) if outcome.status != "success" else None, broadcast=False, completion=completion)
                     if updated is not None:
                         updates.append(updated)
         # A subscriber may submit more build work. It never holds the
@@ -1315,6 +1303,38 @@ class ApplicationManager:
     # -------------------------------------------------------------- broadcast
 
     async def _broadcast_application(self, kind: str, row: dict[str, Any] | None) -> None:
+        if self.session_mgr is None or row is None:
+            return
+        if kind not in {"application_updated", "application_deleted"}:
+            await self._deliver_application(kind, row)
+            return
+        app_id = row["id"]
+        if app_id in self._publications:
+            return  # The original publisher rereads after this subscriber.
+
+        async def publish() -> None:
+            try:
+                current = await self._require_db().get_application(app_id)
+                last_row = row
+                while True:
+                    if current is None:
+                        await self._deliver_application("application_deleted", last_row)
+                    else:
+                        last_row = current
+                        await self._deliver_application("application_updated", current)
+                    latest = await self._require_db().get_application(app_id)
+                    if latest == current:
+                        break
+                    current = latest
+            finally:
+                self._publications.pop(app_id, None)
+
+        task = asyncio.create_task(publish(), name=f"application-publish-{app_id}")
+        self._publications[app_id] = task
+        self.session_mgr._own_task(task)
+        await asyncio.shield(task)
+
+    async def _deliver_application(self, kind: str, row: dict[str, Any]) -> None:
         """Push a row change to every WS client. No `session_id` key: these are
         global events (the sidebar shows applications regardless of which
         session is open), and the client's snapshot-dedup only applies to

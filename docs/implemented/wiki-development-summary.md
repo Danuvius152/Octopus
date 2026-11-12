@@ -139,6 +139,15 @@ Registry 的 `using` 在业务锁外准备 Store，保留原代次使用权；`r
 路由的 `access` 只承担读取任务解析和 owner-only 入口检查；写入及发布权限由上述
 受保护领域操作核验，不保留第二套路由写权限开关。
 
+History 的重入记录同时保存锁模式：EX 内借用 SH 不降级，原 EX 可继续写；SH
+不能满足 EX 请求，也不能在其内部接入转交的外部 EX，均明确拒绝。同步及可能
+修复索引的 `graph`、`read_snapshot`、`refresh` 使用 EX；只有同步完成后的
+`search`、`documents` 目录投影可使用 SH。取消效果核验也使用 EX，但仍不运行
+写入器的隐式 prepared 恢复。这样事件接纳、文件观察、索引更新和 inbox 确认不会
+在共享锁中交错，删除后同路径重建保留新的文档身份；读取成功不代表可提前确认
+尚未应用的事件。`test_wiki_read_locking.py` 以两个真实 graph 调用及实际 inbox
+payload／已应用水位验证，并保留 EX→SH→EX 和非法锁升级对照。
+
 `maintenance_admission` 接管 maintain、maintain-batch、curate 的资源取得和提交
 策略；短事务仍由原 jobs/grants/selection 实现提交 job、grant、别名、订阅和选择
 证据。批量共同核对当前 revision、观察与范围，一项失效整批不接纳。commit 失败

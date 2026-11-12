@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { MonitorPage } from "./MonitorPage";
 import { useSessionStore } from "../stores/sessionStore";
@@ -73,6 +73,30 @@ afterEach(() => {
 });
 
 describe("MonitorPage", () => {
+  it("separates logical resource requests from historical failure samples", async () => {
+    vi.stubGlobal("fetch", mockFetch(overview({
+      connectors: [
+        { installation: "mixed-connector", n: 3, ok_n: 2, success_pct: 66.7,
+          avg_ms: 300, max_ms: 600, last_seen: 1758800000, legacy_failure_samples: 11 },
+        { installation: "legacy-only", n: 0, ok_n: 0, success_pct: null,
+          avg_ms: null, max_ms: null, last_seen: null, legacy_failure_samples: 7 },
+      ],
+    })));
+    render(<MonitorPage />);
+    await waitFor(() => expect(screen.getByText("mixed-connector")).toBeTruthy());
+    const mixed = screen.getByText("mixed-connector").closest("tr")!;
+    expect(within(mixed).getByText("66.7%")).toBeTruthy();
+    expect(within(mixed).getByText("300ms")).toBeTruthy();
+    expect(within(mixed).getByText("11")).toBeTruthy();
+    const legacy = screen.getByText("legacy-only").closest("tr")!;
+    expect(within(legacy).queryByText("0.0%")).toBeNull();
+    expect(within(legacy).getAllByText("—")).toHaveLength(4);
+    expect(screen.getByText("Connector logical resource requests")).toBeTruthy();
+    expect(screen.getByText("legacy failure samples")).toBeTruthy();
+    expect(screen.getByText("event samples")).toBeTruthy();
+    expect(screen.getByText(/Historical failure samples do not enter/)).toBeTruthy();
+  });
+
   it("shows the turn count and the window in the header", async () => {
     vi.stubGlobal("fetch", mockFetch(overview()));
     render(<MonitorPage />);
@@ -109,7 +133,7 @@ describe("MonitorPage", () => {
     );
     render(<MonitorPage />);
     await waitFor(() =>
-      expect(screen.getAllByText(/Nothing recorded in this window/).length).toBe(11)
+      expect(screen.getAllByText(/Nothing recorded in this window/).length).toBe(12)
     );
   });
 

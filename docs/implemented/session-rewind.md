@@ -46,6 +46,12 @@ an explicit label changes its name, otherwise it retains the parent's name.
 The parent is archived after successful branch creation. A rewind shares its
 working directory; full-copy `/fork` leaves the parent open and copies the tree.
 
+The browser confirms successful creation in the session list even after the
+original dialog has ended. Entering the result requires that opening's surviving
+foreground intent as well as a current observation; leaving and returning does
+not restore it. Dialog identity, draft protection and cross-connection confirmation
+follow the [frontend list contract](frontend-list-reconciliation.md).
+
 For an application development session, shared rewind retains its exact
 application ownership in both SQLite and the installed successor. Admission
 and application deletion are ordered by the insertion transaction, including
@@ -151,14 +157,22 @@ Rewinding changes model context; external effects remain. The classifier examine
 the selected user turn and every later turn. It groups known file-edit paths,
 reads live BG status through the task identities in matching tool results, and
 discloses other tool activity as non-reversible. Shell write recognition is
-best-effort disclosure, not an exhaustive audit of every effect.
+best-effort disclosure, not an exhaustive audit of every effect. Disclosure is
+not revert authority: `file_edits` can include attempted, failed or uncertain
+edits, while `agent_touched_paths` contains only confirmed attributable paths.
 
 #### 5.6.3 The one revert we offer: file edits via git
 
 Revert requires a Git repository, a known clean tree at the selected message,
 unchanged HEAD, safely parsed current status, and no dirty paths outside those
-attributed to the agent. Paths are normalized against cwd and repository root;
-rename source/destination and unusual filenames cannot disappear in parsing.
+attributed to the agent. Historical tool arguments require one saved path
+meaning: only absolute paths without parent traversal can grant authority.
+Relative paths without a recorded base, and paths containing `..`, remain
+disclosure only; resolving today's symlinks cannot reconstruct their execution.
+Preflight's explicit relative arguments mean repository-relative only, never
+both cwd-relative and repository-relative. Git paths identify directory entries,
+including symlinks, rather than their current targets. Both rename endpoints
+and unusual filenames remain visible to status parsing.
 Unknown or mixed ownership refuses revert with a reason while keeping the
 conversation fork usable.
 
@@ -169,16 +183,30 @@ and same-file attribution remain in
 [history and recovery](../plans/session-history-and-recovery.md); known paths
 must not be described as complete per-edit provenance.
 
-Explicit native `fileChange` paths feed this same preflight, including both
-rename endpoints and a complete item with no preceding start. The Harness
-decoder checks the saved producer kind and original native item association;
-an MCP result containing similar JSON supplies no file attribution. Matching
-start/result observations count once. Known patch paths do not authorize
-reverting unrelated human edits or imply that external effects were rolled back.
+Claude edit authorization requires a non-error result paired by the original
+request, attempt and canonical tool call. Its raw call ID must match and have
+exactly one start in that saved attempt, including starts before the rewind
+boundary. Reused IDs cannot turn an unrelated late success into edit proof.
+Native `fileChange` authorization instead requires a non-error `completed` item
+and its full saved producer/native association; a complete item without a start
+is sufficient. Started, failed or declined patches remain disclosure only. An
+MCP result containing similar JSON supplies no attribution. Matching start/result
+observations count once. These checks do not authorize unrelated human edits or
+claim that external effects were rolled back.
 
 The operation stashes before restoring attributable files and records its outcome
-in `fork_revert_record`. Failure does not erase the successfully created fork or
-pretend file restoration succeeded. This does not roll back commits, send/unsend
+in `fork_revert_record`. Each snapshot has a unique marker. The operation finds
+exactly that stash commit, or retains the OID returned by `stash create`, and
+verifies the full commit OID before saving `stash_ref` or continuing explicit
+restore. Failed, missing or ambiguous lookup stops this path; it never borrows
+an earlier stash. Stashing itself may already have changed the worktree, so a
+failed lookup is not a rollback claim. Later stash pushes do not change the
+saved OID. Legacy `stash@{n}` values remain readable but are unstable historical
+selectors, not identities of today's snapshot. An OID does not guarantee object
+retention after deletion or Git garbage collection.
+
+Failure does not erase the successfully created fork or pretend file restoration
+succeeded. This does not roll back commits, send/unsend
 messages, undo database writes, cancel original BG jobs or reverse provider calls.
 
 The shared Git helper still has an execution-retirement gap: timeout kills only
@@ -221,7 +249,10 @@ Code: [fork lifecycle](../../server/sessions/forking.py),
 [Claude](../../server/harness/claude_code.py) and [Codex](../../server/harness/codex.py).
 Regression entry points: `tests/test_session_fork.py`, `tests/test_fork_helpers.py`,
 `tests/test_fork_ownership.py`, `tests/test_session_fork_installation.py`,
-`tests/test_fork_native_copy.py` and `web/e2e/fork.spec.ts`.
+`tests/test_fork_native_copy.py`, `tests/test_codex_app_server_fork.py` and
+`web/e2e/fork.spec.ts`. Ownership regressions compare actual user/external file
+bytes after ambiguous paths or failed edits; snapshot regressions interleave
+later stashes and lookup failures without falling back to an old reference.
 
 Mid-execution rewind, branch merge, dirty-tree snapshots and provider-specific
 undo are outside the current contract. Such changes require their own design

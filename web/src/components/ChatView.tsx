@@ -142,7 +142,16 @@ export function ChatView({
   const setInput = useCallback((text: string) => textDraft.edit(text), [textDraft]);
   useEffect(() => () => textDraft.clearConsumed(), [textDraft]);
   const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const archiveObservers = useRef(new Set<() => void>());
+  useEffect(() => {
+    mounted.current = true;
+    const observers = archiveObservers.current;
+    return () => {
+      mounted.current = false;
+      for (const stop of observers) stop();
+      observers.clear();
+    };
+  }, []);
   const [restoredInput, setRestoredInput] = useState<{ sessionId: string; clientId: string } | null>(null);
   const [restoredQuestion, setRestoredQuestion] = useState<{ sessionId: string; key: string } | null>(null);
   const [requiredAttachmentCount, setRequiredAttachmentCount] = useState(0);
@@ -157,9 +166,12 @@ export function ChatView({
     compactDraft?: { accountGeneration: number; revision: number; version: number };
   }[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
-  // Fork dialog (session-rewind.md §6.1-6.2). `null` = closed; `{}` = the
-  // /fork picker; `{ seq }` = the per-message "Fork from here" confirm step.
-  const [forkDialog, setForkDialog] = useState<{ seq?: number } | null>(null);
+  // The opening owns its target even while a list confirmation replaces rows.
+  // No seq opens the /rewind picker; seq opens the per-message confirm step.
+  const forkDialogSequence = useRef(0);
+  const [forkDialog, setForkDialog] = useState<{
+    instance: number; sessionId: string; parentName: string; account: number; seq?: number;
+  } | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   // Slash-command autocomplete: which item is highlighted, and whether the
   // user dismissed the menu with Esc (re-opens as soon as they type again).
@@ -449,7 +461,8 @@ export function ChatView({
           sessionId={activeSessionId ?? ""}
           agentName={activeAgent?.name}
           agentAvatar={activeAgent?.avatar}
-          onFork={(seq) => setForkDialog({ seq })}
+          onFork={(seq) => { if (activeSessionId) setForkDialog({ sessionId: activeSessionId,
+            instance: ++forkDialogSequence.current, parentName: activeSession?.name || "Session", account: accountGeneration, seq }); }}
           onRestoreInput={restoreRejectedInput}
           restoreInputDisabled={input.length > 0 || pendingAttachments.length > 0}
         />
@@ -457,6 +470,8 @@ export function ChatView({
     },
     [
       activeSessionId,
+      activeSession?.name,
+      accountGeneration,
       answerQuestion,
       snoozeQuestion,
       pendingQuestions,
@@ -812,7 +827,14 @@ export function ChatView({
     // empty chat under the same sidebar entry.
     if (trimmed.toLowerCase() === "/archive") {
       setInput("");
-      const observation = sessionList.capture();
+      const start = useSessionStore.getState();
+      const observation = sessionList.capture(start);
+      let foreground = start.activeSessionId === activeSessionId && start.mainView === "chat";
+      const unsubscribe = useSessionStore.subscribe((state) => {
+        if (state.activeSessionId !== activeSessionId || state.mainView !== "chat") foreground = false;
+      });
+      const stop = () => { foreground = false; unsubscribe(); };
+      archiveObservers.current.add(stop);
       try {
         const token = useSessionStore.getState().token;
         const res = await fetch(
@@ -833,9 +855,12 @@ export function ChatView({
         if (!accepted || !sessionList.current(observation)) return;
         // The archived session is going away — drop any deferred /fork for it.
         cancelFork(activeSessionId);
-        await selectSession(fresh.id, fresh.agent_id);
+        if (foreground) await selectSession(fresh.id, fresh.agent_id);
       } catch {
         // A selected replacement exposes any snapshot acquisition failure.
+      } finally {
+        stop();
+        archiveObservers.current.delete(stop);
       }
       return;
     }
@@ -904,7 +929,8 @@ export function ChatView({
     // is still a "fork"/branch internally; only the command name is /rewind.)
     if (trimmed.toLowerCase() === "/rewind") {
       setInput("");
-      setForkDialog({});
+      setForkDialog({ instance: ++forkDialogSequence.current, sessionId: activeSessionId,
+        parentName: activeSession?.name || "Session", account: accountGeneration });
       return;
     }
 
@@ -1493,12 +1519,13 @@ export function ChatView({
         />
       )}
 
-      {forkDialog && activeSession && (
+      {forkDialog && forkDialog.account === accountGeneration && (
         <ForkDialog
-          sessionId={activeSession.id}
-          parentName={activeSession.name || "Session"}
+          key={forkDialog.instance}
+          sessionId={forkDialog.sessionId}
+          parentName={forkDialog.parentName}
           initialSeq={forkDialog.seq}
-          onClose={() => setForkDialog(null)}
+          onClose={() => setForkDialog((current) => current === forkDialog ? null : current)}
           onForked={handleForked}
         />
       )}

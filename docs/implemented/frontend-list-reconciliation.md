@@ -111,6 +111,33 @@ ConnectorsPage 首读、SidebarAgents、OAuth 轮询成功及取消撞成功后�
 忽略迟到响应，不自动重试。页面卸载不退休共享列表读取，也不丢弃同账户有效
 删除回执。列表观察取消不代表远端业务被取消；OAuth 视图及原登录收尾另有责任。
 
+## 通知目标集合
+
+Settings 的通知面板拥有本实例的一份目标集合。POST 成功按 ID 合并当前集合，
+DELETE 成功按 ID 从当前集合移除；均使用 functional 更新，两个独立删除不会
+把彼此删掉的行带回。创建全局、删除按 ID 在发请求前同步登记 pending；重复
+点击不能越过尚未提交到 React 的 disabled 状态，其他 ID 的删除仍可并行。
+
+面板最多一个有效 GET，用读取对象身份同时保护响应头、body 接纳和 finally。
+重叠确认合并为一个待读标记。读取捕获成功 mutation revision；期间有成功写入
+便丢弃整份快照并执行合并后的确认。错误保留当前集合，结束本轮自动读取；
+不会因失败自发循环，也不重试未知结果的写操作。
+
+成功 GET 和成功 mutation 都替换局部 observation 身份。POST 开始时捕获该
+身份，回执只在其未变时合并返回行；有竞争则保留成功结论，跳过旧行并安排
+确认 GET。这覆盖 POST 已落盘但 body 迟到，GET 先展示新行、DELETE 后来成功
+删除它的顺序，也覆盖 DELETE 404 后确认 GET 已证明缺席的情况。单独比较
+成功写入 revision 无法保护后一种顺序。无需逐 ID 墓碑或第二份权威集合。
+
+创建或删除失败显示面板级错误并安排确认 GET；表单关闭时也可见，确认成功
+不清掉原 mutation 错误。失败响应不能证明服务器没有生效。面板卸载使旧读取
+和写回执退休；账户代次 key 重建实例，异步出口另外实时核对账户和 token，
+拦住 React 清理前的微任务。旧 finally 只结束原操作，不能影响新账户的表单、
+集合或 pending。这里没有跨面板、跨浏览器的服务端版本协议。
+
+真实 `SettingsDialog.test.tsx` 固定并发删除、旧 GET、迟到 POST、204／404 删除、
+失败确认及账户切换的响应头/body 顺序，验证最终行、可见错误和控件可用性。
+
 ## 模型凭据列表
 
 `web/src/lib/modelCredentials.ts` 拥有 `refresh()`、`remove(id)`、
@@ -531,8 +558,24 @@ archived 或选中 ID 缺失时，保留这次待确认 ID，合并到既有 inc
 确认中合并。读取确认归档后不再用原操作基线重复写入列表。换账户/token 或
 dispose 后旧回执不补读；未知 ID 的归档事件同样阻止迟到创建复活该行。
 `ForkDialog` 拥有 rewind 成功回执的列表确认，`ChatView` 回调只切换视图和加载
-转录。跨连接成功仍关闭原账户的确认弹窗，并补读包含归档的列表，让父会话历史
-保持可打开；当前范围已确认分支时才导航，换账户/token 后旧回执没有副作用。
+转录。跨连接成功仍关闭原账户中尚未退休的原确认弹窗，并补读包含归档的列表，
+让父会话历史保持可打开；当前范围已确认分支且原动作仍有前台资格时才导航。
+换账户/token 后旧回执没有副作用。
+
+Archive 每次动作与 Rewind 每个弹窗实例分别拥有局部前台生命周期。组件同步订阅
+当前会话和主视图；离开原会话或聊天主视图后资格单调退休，A→B→A 及视图往返
+都不恢复。Rewind 离开时立即结束原弹窗，用户返回后须重新打开，避免保留无资格
+提交或无法收尾的忙碌表单。关闭、卸载及实例或 session 变化同样退休原实例；
+Archive 在卸载或请求结束时释放订阅，Rewind 在实例清理时释放订阅。
+
+弹窗打开记录固定原账户、session、消息序号及实例编号，不能用当前选中会话重新
+解释旧消息序号；每次打开都有独立表单，原关闭回调只能结束自己的打开记录。
+列表补读暂时缺少父行不会另建原弹窗。账户、连接与服务 observation 另行判断
+结果适用性，前台退休不取消服务端工作，也不阻止有效成功先经列表协调接纳。
+确认结束后重新检查原资格：仍有效时沿 `selectSession` 进入结果并按该会话规则
+采用预填；失效动作不导航、不关闭新弹窗、不写新表单或草稿。旧失败也不能修改
+新实例；当前失败释放自己的忙碌状态并保留可重试表单。
+
 创建与恢复入口异步返回“可导航”的确认结果。同一范围的回执若撞上列表变化，
 沿现有合并补读等待一次不再 stale 的已接纳快照，保留创建后的导航意图；并发
 写回执造成的后续失效也必须确认。若目标已归档/删除、读取失败或原范围退休，
@@ -618,17 +661,41 @@ BG/Research 每个 id 对应一次执行，终态不因另一份 running/pending
 任务使用新 id。两个请求共享 running baseline 时，无论返回顺序，另一份快照的
 对象变化都不能遮住合法 completed。
 
-transcript 沿持久 seq、历史窗口与 WS 去重合并；详情合并保留已接纳的新消息与新问题。
-这里不保证任意广播乱序都能合并：[WS 序号守卫](../../web/src/hooks/useWebSocket.ts)
-把实时收到的 seq 也推进到 `lastAppliedSeq`，随后到达的较低 seq 会被丢弃，即使该行
-从未显示。已确认的 Claude 插话交错、历史恢复与不可自动重发的边界归
-[插话合同](inline-steering.md#live-transcript-limitation)；这仍是未修复的发布/消费缺口。
+### 实时历史身份与流缓冲
+
+持久 seq 是会话内消息身份；`lastAppliedSeq` 只记录实际安装的权威快照覆盖，
+不再由实时 WS 最大 seq 推进。WS 在事件 switch 前按覆盖和当前窗口已有 seq
+去重，store 的直接写入也幂等。未见的低 seq 可补入：在第一个更高的持久 seq
+之前定位插入，其余按普通追加处理，不全数组排序而移动已有无 seq 本地命令／通知。
+这保护历史与控制效果两个入口，不新增全局已见集合或持久 ledger。
+
+快照保留高于其实际读行 high 的 WS 行；低于已安装覆盖的旧历史投影被拒绝，
+不能降低窗口／游标或重建旧辅助投影。只有连续前缀才沿用旧游标，服务器 high
+仍取实际读到的行，不使用尚未填满的分配器水位。真实 Claude 背压及投递未知的
+边界见[插话顺序](inline-steering.md#live-transcript-ordering)。
+
+`readAttemptIdentity` 统一读取 WS envelope、`runtime_metadata` 与持久
+`tool_input.attempt_context`。带身份 delta 必须精确匹配当前 request/attempt，
+没有 active attempt 不自动放行。已接纳的同 attempt terminal 阻止旧 delta；
+已完成 native text 只终结其精确 `nativeItemKey`，同 attempt 的其他 item、复用
+provider item ID 的 root/child 保持独立。无身份兼容事件保留原规则。
+
+`streamingTextAttempt` 只记录当前 plain buffer 的归属，不能在快照清除 active
+之后再用当前 active 反推。它随 buffer、forget、账户和服务换代退休，不构成第二
+套执行事实。text/result、快照及分页按原身份清理 plain/native 缓冲；已接纳的
+terminal 优先于读取前 buffer baseline 的保留规则，即使没有完整 text。旧 text／
+result 可以补历史但不清新 attempt 的流。历史投影不会重放实时 switch。
+
 关闭问题不能复活；被较新成功详情替代的旧读取不再重建问题或 active attempt。
 接纳可靠 `question_answer` 或 `question_closed` 历史时，在同一次 store 提交内
 写入消息、联合关闭事实并过滤当前可答集合。旧读取仍可贡献这类历史，不整表
 替换 pending；同 seq WS 的正常去重不延后关闭，其他新问题与未发送草稿保留。
 问题结算本身不证明模型已经收到答案，投递与草稿继续由原输入协议处理。
 原生任务以 `tool_call_id` 归属原任务，委派以 `delegation_id + work_id` 归属原轮次。
+迟到的持久 question_request 可进入历史，pending 仍受原 closed 身份过滤；无 seq
+的已关闭临时通知继续忽略。`useWebSocket`、`transcript`、`hydrateSession`、
+`nativeOutput`、`recordingReplay` 和 store 回归覆盖乱序、重连、同请求不同 attempt、
+快照 terminal、新旧 item 和本地临时行；真实 QuestionLifecycle 消费者保留兼容对照。
 同一子会话的下一 work 可以运行，不能按子会话设置全局终态最大值。
 
 Zustand 仍持有唯一任务状态。不可变记录上的弱引用标记只证明 WS/本地权威更新，
@@ -844,6 +911,11 @@ header、选项标签和说明；不把已经关闭的问题恢复为可提交�
 让它的 has_more=false 关闭当前缺口。WS 尾部追加及保留同一连续范围的数组替换
 保持窗口身份，不能无条件丢弃可用旧页。合并、过期、不需要、已有在途与失败
 分别返回；取消只释放原读取的入口，迟到回调不能释放后继读取。
+
+分页推进依据页面实际覆盖的范围，新增数只统计真正插入的行。重叠页可以新增
+零行但仍合法推进游标；不能把已有行再 prepend 一次，也不能因零新增拒绝前进。
+当前窗口和原 observation 已退休的页仍整页拒绝。页中已接纳的原 terminal／完整
+native text 也执行同一身份清理，而不重放实时控制事件。
 
 ChatView 在接纳前捕获第一个可见项的稳定身份和像素偏移，重组后按该身份及
 实际 DOM 位置恢复，不再以总行数差补偿。持久消息使用 seq，原生卡片使用原

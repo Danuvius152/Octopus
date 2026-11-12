@@ -9,7 +9,7 @@ test("opens Monitor, renders recorded metrics and refetches another window", asy
   await expect(page.locator(".agent-list-header h2")).toHaveText("Agents");
   await page.locator("button.btn-manage-monitor").click();
   await expect(page.getByText(/last 24h/)).toBeVisible();
-  for (const title of ["activity", "turns", "top errors", "resources"]) {
+  for (const title of ["event samples", "Connector logical resource requests", "turns", "top error event samples", "resources"]) {
     await expect(page.getByText(title, { exact: true })).toBeVisible();
   }
   // The HTTP hook timed the requests this page made to load itself.

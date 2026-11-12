@@ -353,20 +353,67 @@ would silently vary across supported Python versions. The narrow dependency
 reuses the existing grammar and accepts comments/quoted IDs rather than splitting
 on spaces or angle brackets. It adds no provider retry or compatibility state.
 
-## Current limitations
+## GitHub file paths
 
-GitHub `get_file` currently interpolates the repository path into a URL without
-encoding each path segment. Names containing `#`, `?` or literal percent escapes
-can be interpreted as URL syntax rather than the requested filename. A failed
-lookup is not proof that such a file is absent; this remains a tool limitation
-in [the GitHub adapter](../../server/mcp_servers/connectors/github.py).
+`get_file` validates the original repository as two nonempty, non-dot segments
+and the original path as repository-relative segments without empty or dot
+components. An entirely empty path still lists the repository root. Each segment
+is then percent-encoded separately; separators remain structural, while spaces,
+Unicode, `#`, `?` and literal percent signs name the requested file. Input is
+not URL-decoded first: literal `%2F` and `%2e%2e` remain filename text. `ref` is
+a separate query parameter and retains its branch/tag/commit meaning. Other
+GitHub tools and the authorization/retry policy above retain their own behavior.
 
-Connector monitoring is incomplete: the shared adapter emits `connector_call`
-for token/authentication failures, but has no successful resource-call producer.
-The monitor's call totals and success rate therefore do not describe all provider
-requests and cannot establish connector health. This is separate from the
-operation results and retry rules above; see [the event hook](../../server/mcp_servers/connectors/_shared.py)
-and [its query](../../server/monitor/query.py).
+## Logical resource monitoring
+
+Each built-in provider wrapper captures installation, session and monotonic
+start time before token preparation. It emits one final `connector_call` sample
+with `unit=logical_resource_v1` after token preparation, all internal HTTP
+attempts/body reads and the resource projection needed by the tool. Gmail's
+list/detail and reply-metadata/create calls are separate resources, even within
+one MCP tool. Token success and intermediate authentication/retry failures do
+not emit additional samples. Local input rejection before a resource attempt
+does not manufacture a resource sample; configured API preparation failure does.
+
+Success requires decoding the fields actually consumed, including list
+references, base64/MIME data and conditional reply fields. Explicit reply `to`
+does not require an inferred original recipient. An explicit subject conflict
+is local input rejection after a successful metadata GET, with no POST sample.
+Pure formatting and truncation stay outside this boundary; custom's legitimate
+text fallback, including text starting with `Error`, remains a success.
+
+Expected failures have finite codes: token, auth, configuration, http, budget,
+retry_exhausted, transport, json_decode, resource_decode, cancelled and internal.
+HTTP rejection, insufficient wait budget and exhausted safe attempts are distinct.
+Expected parse failures use a narrow decode exception; unrelated programming
+errors propagate and record internal. Cancellation records cancelled and
+propagates. A successful write response that cannot be decoded still preserves
+the operation/check and unknown-effect instructions above; it never triggers a
+write replay. Cancellation likewise does not prove external effects were undone.
+
+`server/monitor/query.py:connectors` owns aggregation for report, overview, CLI
+and Monitor. `n`, `ok_n`, success rate, duration and `last_seen` use only the exact
+new unit. Unitless historical failure samples remain separately visible as
+`legacy_failure_samples`; no historical successes or logical request totals are
+inferred. A legacy-only connector retains its row with zero new requests and
+unknown rate, duration and resource timestamp. New-unit timestamps cannot be
+advanced by later legacy events. Overview counts and mixed error rankings remain
+event samples, with matching API/CLI/page labels, rather than resource totals.
+
+Metrics retain the existing bounded, lossy best-effort queue and event storage;
+recording failure cannot change a tool result or replay a resource request.
+Samples contain identities, elapsed time, outcome and error category, without
+tokens, callback URLs, request bodies or resource content. They describe retained
+observations rather than a complete availability audit. No DDL, new persistent
+root or compensation worker is introduced; storage and account-portability
+ownership remain unchanged.
+
+`test_connector_metrics.py` joins real provider wrappers, token HTTP,
+MetricsStore/query, authenticated API and CLI with controlled provider transport.
+It covers recovered success, retries/budgets, malformed write responses,
+resource decoding, cancellation and storage faults. `MonitorPage.test.tsx`
+checks new/legacy presentation, and browser Monitor coverage consumes the same
+headings and report. These checks do not establish current external-provider access.
 
 ## Navigation and verification
 

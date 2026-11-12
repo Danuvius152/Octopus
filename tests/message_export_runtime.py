@@ -36,7 +36,7 @@ async def export_runtime(tmp_path, monkeypatch):
             def urlopen(request, **kwargs):
                 requests.append(request.full_url)
                 response = asyncio.run_coroutine_threadsafe(
-                    client.request(request.method, request.full_url, headers=dict(request.header_items())), loop,
+                    client.request(request.method, request.full_url, headers=dict(request.header_items()), content=request.data), loop,
                 ).result(timeout=5)
                 if response.is_error:
                     raise urllib.error.HTTPError(request.full_url, response.status_code, response.reason_phrase,

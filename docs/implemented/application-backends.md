@@ -139,13 +139,26 @@ atomically on its event loop before spawn; only confirmed spawn failure or
 retirement of the original process group, output readers and request cleanup releases it.
 Dependency installation does not consume a backend slot.
 
-Current exception: if a running app's `start.sh` disappears or loses its executable
-bit, a later `ensure_running` marks the state `absent` before retiring the existing
-process. The slot and handle can remain live, while idle reaping and LRU eviction
-only select `running` states. `absent` therefore does not prove process retirement;
-explicit stop/rebuild/shutdown must still join that original lifecycle. The
-implementation is in [the supervisor](../../server/app_backends.py); do not use
-script removal as a stop operation.
+If `start.sh` disappears or loses its executable bit, `ensure_running` checks it
+inside admission/lifecycle coordination. Retained process, spawn, readers, uses
+or a slot transfer to the existing retirement owner before reporting `absent`.
+Process/group and reader retirement precede request-use cleanup outside the
+lifecycle lock; only confirmed cleanup releases the slot. Observer cancellation
+does not cancel that owner, and failure retains its resources and capacity claim.
+After the join, script validity is checked again: a restored script can start,
+while a still-absent script clears the installation fact. Script removal itself
+is not a stop API. Real backend and Wiki 202-follower regressions cover removal,
+chmod, active uses, uncertain cleanup, cancellation and restoration.
+
+Build evaluation captures an opaque identity for the existing install/start/
+process lifecycle before committing its projection. Only a successful conditional
+projection grants the rebuild hook. The identity survives that startup and its
+retirement; RUNNING reuse does not replace it. A new accepted resource lifecycle
+does. The hook compares identity and seals retirement without an intervening
+await, then joins the original retirement owner outside App coordination. It can
+cancel a blocked installation promptly and cannot retire a replacement startup
+or process. Capturing no resource is a no-op, not permission to look up one later.
+This identity is process-local and grants neither build outcome nor input authority.
 
 Before reading a body, `BackendSupervisor.acquire` selects and registers the
 original port/process without an intervening await. The same `BackendUse`

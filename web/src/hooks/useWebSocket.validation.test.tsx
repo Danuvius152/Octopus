@@ -18,7 +18,8 @@ it("rejects malformed and unknown high-sequence frames before changing the snaps
   expect(useSessionStore.getState().lastAppliedSeq.s).toBeUndefined();
   expect(useSessionStore.getState().messages.s).toBeUndefined();
   handleWsMessage({ type: "assistant_text", session_id: "s", seq: 10, content: "Valid original output", future: true });
-  expect(useSessionStore.getState().lastAppliedSeq.s).toBe(10);
+  expect(useSessionStore.getState().lastAppliedSeq.s).toBeUndefined();
+  expect(useSessionStore.getState().messages.s.map((row) => row.seq)).toEqual([10]);
   expect(useSessionStore.getState().messages.s[0].content).toBe("Valid original output");
 });
 
@@ -35,7 +36,8 @@ it.each([
   handleWsMessage({ ...event, session_id: "s", seq: 10 });
   expect(useSessionStore.getState()).toBe(before);
   handleWsMessage({ ...recording.event, session_id: "s", seq: 10 });
-  expect(useSessionStore.getState().lastAppliedSeq.s).toBe(10);
+  expect(useSessionStore.getState().lastAppliedSeq.s).toBeUndefined();
+  expect(useSessionStore.getState().messages.s.map((row) => row.seq)).toEqual([10]);
   expect(useSessionStore.getState().messages.s[0].outcome?.status).toBe("success");
 });
 

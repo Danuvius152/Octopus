@@ -80,8 +80,11 @@ class WikiHistory:
         """The app bridge transfers its already-held exclusive flock to a worker."""
         if handle.closed:
             raise RuntimeError("The external vault lock has already been released")
-        held: set[str] = getattr(_owners, "held", set())
-        _owners.held = held | {str(self.state.resolve())}
+        held: dict[str, bool] = getattr(_owners, "held", {})
+        key = str(self.state.resolve())
+        if held.get(key):
+            raise RuntimeError("An exclusive vault lock cannot be transferred inside a shared lock")
+        _owners.held = held | {key: False}
         try:
             yield
         finally:
@@ -94,14 +97,16 @@ class WikiHistory:
 
     @contextlib.contextmanager
     def _locked(self, *, shared=False):
-        held: set[str] = getattr(_owners, "held", set())
+        held: dict[str, bool] = getattr(_owners, "held", {})
         key = str(self.state.resolve())
         if key in held:
+            if held[key] and not shared:
+                raise RuntimeError("An exclusive vault lock is required; shared lock upgrades are forbidden")
             yield
             return
         with (self.state / "vault.lock").open("a+b") as handle:
             fcntl.flock(handle, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
-            _owners.held = held | {key}
+            _owners.held = held | {key: shared}
             try:
                 yield
             finally:

@@ -14,10 +14,13 @@ import json
 import logging
 import math
 import time
-from collections.abc import Callable
+from asyncio import CancelledError
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -32,6 +35,97 @@ logger = logging.getLogger(__name__)
 MAX_RESULT_BYTES = 32 * 1024
 _HTTP_TIMEOUT = 10.0
 RESOURCE_CALL_BUDGET_SECONDS = 30.0
+
+FailureCode = Literal[
+    "token", "auth", "configuration", "http", "budget", "retry_exhausted",
+    "transport", "json_decode", "resource_decode", "cancelled", "internal",
+]
+
+
+@dataclass(frozen=True)
+class RequestFailure:
+    message: str
+    code: FailureCode
+
+
+class ResourceDecodeError(ValueError):
+    """A provider resource cannot supply the fields this call needs."""
+
+
+def object_data(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ResourceDecodeError("expected a resource object")
+    return value
+
+
+def array_data(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        raise ResourceDecodeError("expected a resource array")
+    return value
+
+
+def text_data(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ResourceDecodeError("expected resource text")
+    return value
+
+
+def decode_response(
+    response: httpx.Response, project: Callable[[Any], Any], *, provider: str,
+) -> tuple[Any, RequestFailure | None]:
+    """Accept JSON and the resource projection together, with finite failures.
+
+    Wrappers still own the original write's operation and reconciliation hint.
+    Unexpected decoder exceptions propagate to the resource finalizer.
+    """
+    try:
+        data = response.json() if response.content else {}
+    except ValueError:
+        return {}, RequestFailure(f"Invalid {provider} JSON response", "json_decode")
+    try:
+        return project(data), None
+    except ResourceDecodeError as error:
+        return {}, RequestFailure(f"Invalid {provider} resource response: {error}", "resource_decode")
+
+
+@dataclass
+class ResourceResult:
+    # A wrapper must explicitly accept a fully decoded result. An unexpected
+    # exception still propagates, with one failed sample rather than success.
+    error_code: FailureCode | None = "internal"
+
+
+@contextmanager
+def logical_resource(ctx: ConnectorContext) -> Iterator[ResourceResult]:
+    """One lossy terminal sample, including token preparation and decoding."""
+    from ...mcp_identity import current_scope
+
+    installation = ctx.installation_id
+    scope = current_scope()
+    session = scope.session_id if scope else None
+    start = time.monotonic()
+    result = ResourceResult()
+    try:
+        yield result
+    except CancelledError:
+        result.error_code = "cancelled"
+        raise
+    except Exception:
+        result.error_code = "internal"
+        raise
+    finally:
+        try:
+            from ...monitor import Event, record
+
+            record(Event(
+                kind="connector_call", session_id=session,
+                duration_ms=(time.monotonic() - start) * 1000,
+                ok=result.error_code is None, error_code=result.error_code,
+                detail={"installation_id": installation, "unit": "logical_resource_v1"},
+            ))
+        except Exception:
+            # Telemetry must never change the result or replay a resource call.
+            logger.debug("connector metric dropped", exc_info=True)
 
 
 def request_failure(reason: str, *, retry_safe: bool, operation: str, check: str) -> str:
@@ -90,7 +184,7 @@ async def request_with_retry(
     method: str, url: str, *, retry_safe: bool, operation: str, check: str,
     delay_for_response: Callable[[httpx.Response, int], float | None] = retry_delay,
     **kwargs: Any,
-) -> tuple[httpx.Response | None, str | None]:
+) -> tuple[httpx.Response | None, RequestFailure | None]:
     """One resource budget includes response bodies, all attempts and backoff.
 
     Host token/rejection callbacks retain their separate existing timeout. Use
@@ -98,6 +192,7 @@ async def request_with_retry(
     """
     deadline = time.monotonic() + RESOURCE_CALL_BUDGET_SECONDS
     reason = f"resource call budget ({RESOURCE_CALL_BUDGET_SECONDS:g}s) exhausted"
+    code: FailureCode = "budget"
     try:
         async with asyncio.timeout(RESOURCE_CALL_BUDGET_SECONDS):
             async with httpx.AsyncClient(follow_redirects=False) as client:
@@ -112,6 +207,7 @@ async def request_with_retry(
                     limited = response.status_code in {403, 429}
                     reason = f"{'rate_limited' if limited else 'upstream_unavailable'}: HTTP {response.status_code}; retry delay at least {delay:g}s"
                     if not retry_safe:
+                        code = "http"
                         break
                     remaining = deadline - time.monotonic()
                     if delay >= remaining:
@@ -119,6 +215,7 @@ async def request_with_retry(
                         break
                     if attempt == 2:
                         reason += "; three attempts exhausted"
+                        code = "retry_exhausted"
                         break
                     await asyncio.sleep(delay)
                     if time.monotonic() >= deadline:
@@ -126,11 +223,13 @@ async def request_with_retry(
                         break
     except TimeoutError:
         reason = f"resource call budget ({RESOURCE_CALL_BUDGET_SECONDS:g}s) exhausted"
+        code = "budget"
     except httpx.HTTPError as error:
         # Preserve the old direct-failure behavior for transport errors. An
         # unsafe write may already have taken effect before any such error.
         reason = f"request failed: {error}"
-    return None, request_failure(reason, retry_safe=retry_safe, operation=operation, check=check)
+        code = "transport"
+    return None, RequestFailure(request_failure(reason, retry_safe=retry_safe, operation=operation, check=check), code)
 
 
 class ConnectorContext:
@@ -180,8 +279,6 @@ class ConnectorContext:
             raise ConnectorTokenError("Connector token service is temporarily unavailable", kind="temporary", code="transport") from e
         if r.status_code != 200:
             logger.warning("token fetch HTTP %s", r.status_code)
-            _record_connector(self.installation_id, ok=False,
-                              error_code=f"token_http_{r.status_code}")
             try:
                 detail = r.json().get("detail")
             except (ValueError, AttributeError):
@@ -223,7 +320,6 @@ class ConnectorContext:
         return None
 
     def rejection_message(self, info: dict[str, Any]) -> str:
-        _record_connector(self.installation_id, ok=False, error_code="auth_rejected")
         disposition = self.mark_needs_reconnect(info["grant_stamp"])
         if disposition == "applied":
             return "Error: the API rejected the current connector authorization. Ask the user to reconnect it in Octopus."
@@ -238,26 +334,6 @@ def token_failure_message(error: ConnectorTokenError) -> str:
     if error.kind == "reconnect":
         return f"Error: {error}. Ask the user to reconnect this connector in Octopus."
     return f"Error: connector token {error.kind} ({error.code}): {error}"
-
-
-def _record_connector(installation_id, *, ok: bool, error_code: str | None = None,
-                      duration_ms: float | None = None) -> None:
-    """Count a connector call. This is the hook the Gmail outage needed: the
-    connector was unavailable for eleven consecutive days, a schedule failed on
-    each of them, and nothing anywhere recorded the repetition
-    (polish-2026-09.md §9 G0)."""
-    from ...mcp_identity import current_scope
-    from ...monitor import Event, record
-
-    scope = current_scope()
-    record(Event(
-        kind="connector_call",
-        session_id=scope.session_id if scope else None,
-        duration_ms=duration_ms,
-        ok=ok,
-        error_code=error_code,
-        detail={"installation_id": installation_id},
-    ))
 
 
 def truncate(text: str, cap: int = MAX_RESULT_BYTES) -> str:

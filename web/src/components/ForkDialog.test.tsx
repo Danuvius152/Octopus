@@ -107,7 +107,7 @@ describe("ForkConfirmView", () => {
 
 it.each(["current", "reconnect", "token", "account"])("handles a successful rewind in the %s scope", async (scope) => {
   useSessionStore.getState().setToken("fork-account");
-  useSessionStore.setState({ dispatchGeneration: "service" });
+  useSessionStore.setState({ dispatchGeneration: "service", activeSessionId: "parent", mainView: "chat" });
   const parent = { id: "parent", name: "Parent", archived: false, status: "idle" } as SessionInfo;
   const fork = { ...parent, id: "fork", forked_from_session_id: parent.id };
   const accountGeneration = useSessionStore.getState().accountGeneration;
@@ -135,6 +135,7 @@ it.each(["current", "reconnect", "token", "account"])("handles a successful rewi
     if (scope === "account") useSessionStore.setState({ accountGeneration: accountGeneration + 1 });
     if (scope === "token" || scope === "account") useSessionStore.setState({ sessions: [foreign] });
   });
+  const closesBeforeReceipt = onClose.mock.calls.length;
   await act(async () => { saved = true; finish(Response.json(fork)); });
   if (scope === "current" || scope === "reconnect") {
     await waitFor(() => expect(useSessionStore.getState().sessions).toEqual([fork]));
@@ -142,7 +143,7 @@ it.each(["current", "reconnect", "token", "account"])("handles a successful rewi
     expect(onClose).toHaveBeenCalledOnce();
   } else {
     expect(useSessionStore.getState().sessions).toEqual([foreign]);
-    expect(onClose).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(closesBeforeReceipt);
   }
   expect(onForked).toHaveBeenCalledTimes(scope === "current" ? 1 : 0);
   expect(fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/api/sessions"))).toHaveLength(scope === "reconnect" ? 3 : 1);

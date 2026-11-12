@@ -708,6 +708,13 @@ class DelegationManager:
         parent_name = (parent_agent or {}).get("name") or "another agent"
         self._require_caller(scope, parent_session_id, parent_work_id)
 
+        composed = self._compose_initial_prompt(
+            parent_name=parent_name,
+            parent_session_id=parent.id,
+            request=request,
+            files=files or [],
+            working_dir=parent.working_dir,
+        )
         child_backend = (target.get("backend") or "claude-code")
         child_name = f"{target['name']} ← {parent_name}"
         child = await self.session_mgr.create_session(
@@ -766,33 +773,14 @@ class DelegationManager:
             await abandon_setup()
             raise
 
-        composed = self._compose_initial_prompt(
-            parent_name=parent_name,
-            parent_session_id=parent.id,
-            request=request,
-            files=files or [],
-            working_dir=parent.working_dir,
-        )
         try:
             receipt = await self.session_mgr.start_message(
                 child.id, composed, source="delegation", work_id=rec.work_id,
                 knowledge_context=owned_context.execution,
             )
-        except ValueError as exc:
-            # Surface as failure on the record so the parent still
-            # gets a terminal injection rather than a phantom run.
-            logger.exception(
-                "Failed to start child session %s for delegation", child.id
-            )
-            await self._save_round(
-                rec, state="failed", error=f"failed to start child session: {exc}",
-                finished_at=datetime.now(UTC).isoformat(),
-            )
-            await self.session_mgr.auto_archive_scheduled_session(child.id)
-            await self._inject_terminal(rec)
-            raise DelegationError(
-                f"failed to start delegation: {exc}", status_code=500
-            ) from exc
+        except (SessionAdmissionClosed, SessionAdmissionBusy, SessionMailboxFull, AdmissionIntegrityError) as exc:
+            await abandon_setup()
+            raise DelegationError(str(exc), status_code=409) from exc
         if not receipt.accepted:
             await self._save_round(
                 rec, state="cancelled", error="Child request suppressed: admission is closed",
@@ -1289,16 +1277,18 @@ class DelegationManager:
                 )
                 try:
                     resolved = resolved.resolve()
-                except OSError:
+                    # Unlike exists(), stat keeps symlink loops and other
+                    # resolution failures distinct from a missing reference.
+                    resolved.stat()
+                except FileNotFoundError:
+                    lines.append(f"- {resolved}  (not found)")
+                except (OSError, RuntimeError):
                     # Path resolution failed (e.g. permission error
                     # walking a symlink); surface the raw form so the
                     # child still sees what the parent meant.
                     lines.append(f"- {raw}  (could not resolve)")
-                    continue
-                if resolved.exists():
-                    lines.append(f"- {resolved}")
                 else:
-                    lines.append(f"- {resolved}  (not found)")
+                    lines.append(f"- {resolved}")
         return "\n".join(lines)
 
     # ----------------------------------------------- broadcast → injection

@@ -17,18 +17,20 @@ export function applyTranscript(
   sessionId: string,
   data: Record<string, unknown>,
   nativeBaseline?: Record<string, StreamingItem>,
-): void {
+  preserveStreaming = false,
+): boolean {
   const store = useSessionStore.getState();
   if (data.transcript_integrity === "duplicate_seq") {
     store.setMessages(sessionId, []);
     store.setMessageWindow(sessionId, null, false);
     sessions.patch(sessionId, { transcript_integrity: "duplicate_seq" });
-    return;
+    return false;
   }
   const messages = (data.messages as MessageInput[]) || [];
   const snapshotHigh = typeof data.next_message_seq === "number"
     ? data.next_message_seq - 1 : Math.max(-1, ...messages.map((m) => m.seq ?? -1));
   const currentHigh = store.lastAppliedSeq[sessionId] ?? -1;
+  if (snapshotHigh < currentHigh) return false;
   const oldest = typeof data.oldest_loaded_seq === "number" ? data.oldest_loaded_seq : null;
   const currentOldest = store.oldestSeq[sessionId];
   const current = store.messages[sessionId] ?? [];
@@ -46,7 +48,8 @@ export function applyTranscript(
   const sequenced = new Map(merged.filter((m) => typeof m.seq === "number").map((m) => [m.seq!, m]));
   const rows = [...sequenced.values()].sort((a, b) => a.seq! - b.seq!);
   rows.push(...messages.filter((m) => typeof m.seq !== "number"));
-  store.setMessages(sessionId, rows, currentHigh >= snapshotHigh && Boolean(
+  const liveHigh = Math.max(-1, ...current.map((message) => message.seq ?? -1));
+  store.setMessages(sessionId, rows, preserveStreaming || liveHigh >= snapshotHigh && Boolean(
     store.streamingText[sessionId] || Object.keys(store.streamingItems[sessionId] || {}).length), nativeBaseline);
   store.setMessageWindow(
     sessionId,
@@ -55,9 +58,8 @@ export function applyTranscript(
   );
   // Any WS event at or below the snapshot's high-water mark is already in the
   // messages above, so the handler must drop it rather than render it twice.
-  if (typeof data.next_message_seq === "number") {
-    store.setLastAppliedSeq(sessionId, (data.next_message_seq as number) - 1);
-  }
+  store.setLastAppliedSeq(sessionId, snapshotHigh);
+  return true;
 }
 
 export type OlderMessagesResult = MessagePageResult | { state: "unneeded" | "in_flight" };

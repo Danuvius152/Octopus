@@ -137,7 +137,7 @@ async def test_control_closes_admission_and_retires_original_request(proxy, phas
         if control == "delete":
             supervisor.close_application("a")
         if control == "rebuild":
-            stopping = asyncio.create_task(supervisor.on_rebuild("a", str(directory)))
+            stopping = asyncio.create_task(supervisor.on_rebuild("a", str(directory), target=supervisor.capture_rebuild("a")))
         elif control == "shutdown":
             stopping = asyncio.create_task(supervisor.shutdown())
         else:

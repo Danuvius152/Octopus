@@ -244,6 +244,8 @@ class ResearchManager:
             raise ResearchError(str(error), status_code=error.status_code) from error
         selected = model_settings.effective_settings(configured, agent)
         configured.model = selected["model"]
+        configured.reasoning_effort = selected["reasoning_effort"]
+        configured.service_tier = selected["service_tier"]
         configured.credential_id = selected["credential_id"]
         # Configuration capture can wait. Admission and registration below are
         # synchronous, so shutdown cannot miss a job admitted after its snapshot.
@@ -365,14 +367,19 @@ class ResearchManager:
                 # working_dir — a web/reasoning leaf has no reason to read the
                 # user's repo, and this keeps the read-only-sandbox/denylist
                 # leaves from touching real files (Vera review).
-                scratch = os.path.join(_research_dir(session.user_id), job_id, "cwd")
-                os.makedirs(scratch, exist_ok=True)
+                try:
+                    scratch = os.path.join(_research_dir(session.user_id), job_id, "cwd")
+                    os.makedirs(scratch, exist_ok=True)
+                except OSError as error:
+                    raise ResearchError(f"Could not prepare research scratch directory: {error}", status_code=500) from error
                 async with asyncio.timeout(settings.research_job_timeout_seconds):
                     report = await run_research(
                         question,
                         harness=harness,
                         credential=credential,
                         model=session.model,
+                        reasoning_effort=session.reasoning_effort,
+                        service_tier=session.service_tier,
                         working_dir=scratch,
                         limits=ResearchLimits(),
                         on_progress=on_progress,

@@ -151,6 +151,15 @@ there is no global row factory or storage format change.
 
 ## Publication boundary
 
+`ForkRevertRecord.stash_ref` keeps its existing nullable string representation.
+New recovery snapshots store a verified full commit OID; legacy `stash@{n}`
+selectors remain unchanged and must not be reinterpreted as stable identities.
+The OID is stable across later stash pushes, but does not guarantee retention
+after object deletion or garbage collection. There is no schema conversion,
+new backup root or historical backfill. Existing session JSON, API projection
+and complete backup retain the original value. Creation, verification and
+uncertain effects belong to [safe rewind](session-rewind.md#563-the-one-revert-we-offer-file-edits-via-git).
+
 Question resolution uses the existing nullable message `tool_input` JSON:
 `question_resolution.version=1` carries original form/execution association,
 disposition, structured answers and trusted provenance. This additive message

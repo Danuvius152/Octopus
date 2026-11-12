@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from server.mcp_servers.connectors import gmail
-from tests.test_connector_write_safety import provider_transport as provider_transport
+from tests.connector_runtime import provider_transport as provider_transport
 
 
 def parent_message():

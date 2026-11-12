@@ -724,6 +724,296 @@ def application_model(manager, monkeypatch, *, entrypoint_exists, starts_path=No
     return entered, release, starts
 
 
+async def test_entrypoint_patch_during_active_build_preserves_building(am, db, mgr, monkeypatch):
+    from server.app_backends import backend_supervisor
+
+    entered, release, starts = application_model(mgr, monkeypatch, entrypoint_exists=True)
+    hooks = []
+
+    async def rebuilt(*args, **kwargs):
+        hooks.append(args)
+
+    monkeypatch.setattr(backend_supervisor, "on_rebuild", rebuilt)
+    row = await _create_app(am, db)
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        updated = await am.update_application(row["id"], row["user_id"], entrypoint="index.html")
+        assert updated["status"] == "building" and updated["last_built_at"] is None
+        assert hooks == []
+    finally:
+        release.set()
+        await mgr.await_session_execution(row["session_id"], timeout=2)
+
+
+async def test_entrypoint_patch_during_creation_keeps_preparation_with_original_owner(am, db, mgr, monkeypatch):
+    from server.app_backends import backend_supervisor
+
+    entered, release, _ = application_model(mgr, monkeypatch, entrypoint_exists=True)
+    patches, hooks = [], []
+
+    async def rebuilt(*args, **kwargs):
+        hooks.append(args)
+
+    async def patch_created(event):
+        if event.get("type") == "application_created":
+            row = event["application"]
+            Path(row["app_dir"], "index.html").write_text("<p>Prepared files</p>")
+            patches.append(await am.update_application(row["id"], entrypoint="index.html"))
+            assert hooks == []
+
+    monkeypatch.setattr(backend_supervisor, "on_rebuild", rebuilt)
+    mgr.on_broadcast("patch-app-preparation", patch_created)
+    row = await _create_app(am, db)
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert len(patches) == 1 and patches[0]["status"] == "building" and patches[0]["last_built_at"] is None
+    finally:
+        release.set()
+        await mgr.await_session_execution(row["session_id"], timeout=2)
+        mgr.remove_broadcast("patch-app-preparation")
+
+
+async def test_idle_direct_chat_publishes_building_while_preparing_input(am, db, mgr, monkeypatch):
+    from server import fork_helpers
+
+    entered, release, starts = application_model(mgr, monkeypatch, entrypoint_exists=True)
+    ready, building = asyncio.Event(), asyncio.Event()
+
+    async def observe(event):
+        if event.get("type") == "application_updated":
+            (ready if event["application"]["status"] == "ready" else building).set()
+
+    mgr.on_broadcast("preparing-app-notice", observe)
+    row = await _create_app(am, db)
+    await asyncio.wait_for(entered.wait(), 2)
+    release.set()
+    await asyncio.wait_for(ready.wait(), 2)
+    await mgr.await_session_execution(row["session_id"], timeout=2)
+    preparing, proceed = asyncio.Event(), asyncio.Event()
+    anchor = fork_helpers.capture_git_anchor
+
+    async def hold_prepare(*args, **kwargs):
+        preparing.set()
+        await proceed.wait()
+        return await anchor(*args, **kwargs)
+
+    building.clear()
+    monkeypatch.setattr(fork_helpers, "capture_git_anchor", hold_prepare)
+    try:
+        assert (await mgr.start_message(row["session_id"], "Build after preparation", source="human")).accepted
+        await asyncio.wait_for(preparing.wait(), 2)
+        await asyncio.wait_for(building.wait(), 2)
+        assert len(starts) == 1
+        patched = await am.update_application(row["id"], entrypoint="index.html")
+        assert patched["status"] == "building"
+    finally:
+        proceed.set()
+        await mgr.interrupt(row["session_id"])
+        mgr.remove_broadcast("preparing-app-notice")
+
+
+@pytest.mark.parametrize("paused", [False, True])
+async def test_direct_chat_acceptance_projects_building_before_memory_handoff(am, db, mgr, monkeypatch, paused):
+    entered, release, _ = application_model(mgr, monkeypatch, entrypoint_exists=True)
+    ready, building = asyncio.Event(), asyncio.Event()
+
+    async def observe(event):
+        if event.get("type") == "application_updated":
+            status = event["application"]["status"]
+            if status == "ready":
+                ready.set()
+            if status == "building":
+                building.set()
+
+    mgr.on_broadcast("atomic-app-input", observe)
+    row = await _create_app(am, db)
+    await asyncio.wait_for(entered.wait(), 2)
+    release.set()
+    await asyncio.wait_for(ready.wait(), 2)
+    await mgr.await_session_execution(row["session_id"], timeout=2)
+    previous = await am.get_application(row["id"])
+    if paused:
+        await mgr.interrupt(row["session_id"])
+    building.clear()
+    committed, handoff = asyncio.Event(), asyncio.Event()
+    admit = db.admit_client_submission
+
+    async def hold_after_commit(*args, **kwargs):
+        result = await admit(*args, **kwargs)
+        committed.set()
+        await handoff.wait()
+        return result
+
+    monkeypatch.setattr(db, "admit_client_submission", hold_after_commit)
+    submitted = asyncio.create_task(mgr.start_message(row["session_id"], "Another build", source="bg"))
+    try:
+        await asyncio.wait_for(committed.wait(), 2)
+        current = await am.get_application(row["id"])
+        assert current["status"] == "building" and current["error"] is None
+        assert current["last_built_at"] == previous["last_built_at"]
+        assert mgr.dispatch_snapshot(row["session_id"])["items"] == []
+        patched = await am.update_application(row["id"], entrypoint="index.html")
+        assert patched["status"] == "building" and patched["last_built_at"] == previous["last_built_at"]
+        handoff.set()
+        assert (await asyncio.wait_for(submitted, 2)).accepted
+        await asyncio.wait_for(building.wait(), 2)
+        if paused:
+            assert mgr.dispatch_snapshot(row["session_id"])["paused"]
+            assert (await am.get_application(row["id"]))["status"] == "building"
+    finally:
+        handoff.set()
+        await asyncio.wait_for(submitted, 2)
+        await mgr.interrupt(row["session_id"])
+        mgr.remove_broadcast("atomic-app-input")
+
+
+async def test_old_and_carried_completions_cannot_repeat_backend_retirement(am, db, mgr, monkeypatch):
+    from dataclasses import replace
+
+    from server.app_backends import backend_supervisor
+
+    entered, release, _ = application_model(mgr, monkeypatch, entrypoint_exists=True)
+    completed = asyncio.get_running_loop().create_future()
+    projected = asyncio.Event()
+    hooks = []
+
+    async def capture(sid, completion):
+        if not completed.done():
+            completed.set_result(completion)
+
+    async def rebuilt(*args, **kwargs):
+        hooks.append(args)
+
+    async def observe(event):
+        if event.get("type") == "application_updated" and event["application"]["status"] == "ready":
+            projected.set()
+
+    mgr.on_request_complete("capture-app-completion", capture)
+    mgr.on_broadcast("observe-app-completion", observe)
+    monkeypatch.setattr(backend_supervisor, "on_rebuild", rebuilt)
+    row = await _create_app(am, db)
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        release.set()
+        completion = await asyncio.wait_for(completed, 2)
+        await asyncio.wait_for(projected.wait(), 2)
+        assert len(hooks) == 1
+        await am._on_completion(row["session_id"], replace(completion, input_request_id="carried-steer"))
+        await am._on_completion(row["session_id"], completion)
+        assert len(hooks) == 1
+    finally:
+        release.set()
+        await mgr.await_session_execution(row["session_id"], timeout=2)
+        mgr.remove_request_complete("capture-app-completion")
+        mgr.remove_broadcast("observe-app-completion")
+
+
+@pytest.mark.parametrize("input_first", [True, False])
+async def test_completion_and_new_input_are_ordered_by_the_store(am, db, mgr, monkeypatch, input_first):
+    from server.app_backends import backend_supervisor
+
+    entered, release, _ = application_model(mgr, monkeypatch, entrypoint_exists=True)
+    evaluating, proceed, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    project = db.project_application_terminal
+    hooks, notices = [], []
+
+    async def hold_projection(*args, **kwargs):
+        if input_first:
+            evaluating.set()
+            await proceed.wait()
+        result = await project(*args, **kwargs)
+        if not input_first:
+            evaluating.set()
+            await proceed.wait()
+        finished.set()
+        return result
+
+    async def rebuilt(*args, **kwargs):
+        hooks.append(args)
+
+    async def observe(event):
+        if event.get("type") == "application_updated":
+            notices.append(event["application"]["status"])
+
+    mgr.on_broadcast("ordered-app-projection", observe)
+    monkeypatch.setattr(db, "project_application_terminal", hold_projection)
+    monkeypatch.setattr(backend_supervisor, "on_rebuild", rebuilt)
+    row = await _create_app(am, db)
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        release.set()
+        await asyncio.wait_for(evaluating.wait(), 2)
+        await mgr.await_session_execution(row["session_id"], timeout=2)
+        await mgr.interrupt(row["session_id"])
+        receipt = await mgr.start_message(row["session_id"], "Later queued build", source="bg")
+        assert receipt.accepted
+        assert (await am.get_application(row["id"]))["status"] == "building"
+        proceed.set()
+        await asyncio.wait_for(finished.wait(), 2)
+        # Wait for this consumer's publication without executing the queue.
+        async with asyncio.timeout(2):
+            while any(task.get_name().startswith("request-completion-") and not task.done()
+                      for task in mgr._owned_tasks):
+                await asyncio.sleep(0)
+        current = await am.get_application(row["id"])
+        assert current["status"] == "building"
+        assert bool(current["last_built_at"]) is (not input_first)
+        assert len(hooks) == (0 if input_first else 1)
+        assert notices[-1] == "building"
+    finally:
+        release.set()
+        proceed.set()
+        await mgr.interrupt(row["session_id"])
+        mgr.remove_broadcast("ordered-app-projection")
+
+
+async def test_waiting_application_subscriber_finishes_on_current_building(am, db, mgr, monkeypatch):
+    entered, release, _ = application_model(mgr, monkeypatch, entrypoint_exists=True)
+    ready = asyncio.Event()
+
+    async def initial(event):
+        if event.get("type") == "application_updated" and event["application"]["status"] == "ready":
+            ready.set()
+
+    mgr.on_broadcast("initial-app-ready", initial)
+    row = await _create_app(am, db)
+    await asyncio.wait_for(entered.wait(), 2)
+    release.set()
+    await asyncio.wait_for(ready.wait(), 2)
+    await mgr.await_session_execution(row["session_id"], timeout=2)
+    await mgr.interrupt(row["session_id"])
+    subscriber_entered, subscriber_release, queued_notice = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    notices = []
+
+    async def waiting_subscriber(event):
+        if event.get("type") == "queued":
+            queued_notice.set()
+        if event.get("type") != "application_updated":
+            return
+        status = event["application"]["status"]
+        if status == "ready":
+            subscriber_entered.set()
+            await subscriber_release.wait()
+        notices.append(status)
+
+    mgr.on_broadcast("waiting-app-subscriber", waiting_subscriber)
+    patched = asyncio.create_task(am.update_application(row["id"], entrypoint="index.html"))
+    try:
+        await asyncio.wait_for(subscriber_entered.wait(), 2)
+        assert (await mgr.start_message(row["session_id"], "Later queued build", source="bg")).accepted
+        assert (await am.get_application(row["id"]))["status"] == "building"
+        # Let the original session publisher deliver its admission notice.
+        await asyncio.wait_for(queued_notice.wait(), 2)
+        subscriber_release.set()
+        await asyncio.wait_for(patched, 2)
+        assert notices[-1] == "building"
+    finally:
+        subscriber_release.set()
+        await asyncio.gather(patched, return_exceptions=True)
+        mgr.remove_broadcast("initial-app-ready")
+        mgr.remove_broadcast("waiting-app-subscriber")
+
+
 async def _application_commit_child(tmp_path, tmp_path_factory, monkeypatch):
     artifacts = tmp_path_factory.getbasetemp().parent
     monkeypatch.setattr(settings, "applications_dir", str(artifacts / "applications"))
@@ -762,7 +1052,7 @@ async def _application_commit_child(tmp_path, tmp_path_factory, monkeypatch):
     async def observe(event):
         if event.get("type") == "result":
             (artifacts / "result-published").touch()
-        if event.get("type") == "application_updated":
+        if event.get("type") == "application_updated" and event["application"]["status"] != "building":
             (artifacts / "application-updated").touch()
 
     monkeypatch.setattr(db.conn, "execute", terminal_sql)
@@ -789,7 +1079,7 @@ async def test_committed_build_result_derives_status_once(am, db, mgr, monkeypat
     async def observe(event):
         if event.get("type") == "result" and not terminal.done():
             terminal.set_result(event)
-        if event.get("type") == "application_updated":
+        if event.get("type") == "application_updated" and event["application"]["status"] != "building":
             updates.append(event)
             application_updated.set()
 
@@ -829,7 +1119,7 @@ async def test_conflicting_build_outcome_reports_domain_error_without_retrying_s
     async def observe(event):
         if event.get("type") == "recording_failed" and not conflict.done():
             conflict.set_result(event)
-        if event.get("type") == "application_updated":
+        if event.get("type") == "application_updated" and event["application"]["status"] != "building":
             updates.append(event)
             application_updated.set()
 
@@ -2178,7 +2468,7 @@ async def test_current_reopen_preserves_a_missing_discovered_icon(tmp_path):
         await db.close()
 
 
-async def test_evaluate_discovers_and_clears_the_icon(am, db, sent):
+async def test_evaluate_discovers_and_clears_the_icon(am, db, mgr, sent, models):
     """The icon refreshes on every evaluation: it appears when the agent writes
     one, and clears when the file is removed — without ever touching the emoji
     a user typed."""
@@ -2187,7 +2477,7 @@ async def test_evaluate_discovers_and_clears_the_icon(am, db, sent):
     Path(app_dir, "index.html").write_text("<html></html>")
     Path(app_dir, "icon.svg").write_text("<svg/>")
 
-    await am._evaluate(app["id"], broadcast=False)
+    await models.emit(mgr, {"type": "result", "session_id": app["session_id"]})
     assert (await db.get_application(app["id"]))["icon_src"] == "icon.svg"
 
     # Agent removes it in a later build → the record must not keep pointing at
@@ -2197,14 +2487,14 @@ async def test_evaluate_discovers_and_clears_the_icon(am, db, sent):
     assert (await db.get_application(app["id"]))["icon_src"] is None
 
 
-async def test_discovered_icon_never_overwrites_a_user_emoji(am, db, sent):
+async def test_discovered_icon_never_overwrites_a_user_emoji(am, db, mgr, sent, models):
     """`icon` is the user's; `icon_src` is the app's. A rebuild touches only
     the second."""
     app = await _create_app(am, db, name="Emoji Keeper", icon="💠")
     Path(app["app_dir"], "index.html").write_text("<html></html>")
     Path(app["app_dir"], "icon.svg").write_text("<svg/>")
 
-    await am._evaluate(app["id"], broadcast=False)
+    await models.emit(mgr, {"type": "result", "session_id": app["session_id"]})
     row = await db.get_application(app["id"])
     assert row["icon"] == "💠"          # untouched
     assert row["icon_src"] == "icon.svg"  # and the file was still found

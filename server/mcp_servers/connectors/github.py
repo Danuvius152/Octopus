@@ -15,8 +15,10 @@ import logging
 import math
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -30,11 +32,17 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from server.mcp_servers.connectors._shared import (  # noqa: E402
     ConnectorContext,
     ConnectorTokenError,
+    ResourceDecodeError,
+    array_data,
+    decode_response,
+    logical_resource,
+    object_data,
     request_failure,
     request_with_retry,
     response_failure,
     retry_after,
     retry_delay,
+    text_data,
     to_text,
     token_failure_message,
     truncate,
@@ -81,52 +89,55 @@ def _github_retry_delay(response: httpx.Response, attempt: int) -> float | None:
 
 async def _gh(
     method: str, path: str, *, retry_safe: bool = False,
-    operation: str = "", check: str = "Check the original GitHub resource.", **kw: Any,
+    operation: str = "", check: str = "Check the original GitHub resource.",
+    decode: Callable[[Any], Any], **kw: Any,
 ) -> tuple[Any, str | None]:
-    """Authenticated GitHub call. Returns (parsed_body, None) on success or
-    ({}, error_message) on failure — the error string is itself a fine tool
-    result.
+    """Return a fully projected resource or an explicit tool error.
 
-    The failure body is an empty dict rather than None on purpose. Every
-    caller returns early on a non-None error, so the two are interchangeable
-    for correct code — but with None, a caller that forgot the `if err:` guard
-    raised AttributeError deep inside a tool, while an empty dict degrades to
-    an empty result. It also lets the return type drop the `| None`, so a
-    type checker stops reporting the 20-odd `data.get(...)` calls that are
-    already guarded."""
-    try:
-        info = await asyncio.to_thread(ctx.token_info)
-    except ConnectorTokenError as token_error:
-        return {}, token_failure_message(token_error)
-    headers = {**_GH_HEADERS, "Authorization": f"Bearer {info['access_token']}"}
-    url = path if path.startswith("http") else f"{_API}{path}"
-    operation = operation or f"{method} {url}"
-    r, error = await request_with_retry(
-        method, url, retry_safe=retry_safe, operation=operation,
-        check=check, delay_for_response=_github_retry_delay, headers=headers, **kw,
-    )
-    if error:
-        return {}, error
-    assert r is not None
-    if r.status_code == 401:
-        authorization = await asyncio.to_thread(ctx.rejection_message, info)
-        return {}, "Error: rejected: " + authorization.removeprefix("Error: ")
-    error = response_failure(
-        r, retry_safe=retry_safe, operation=operation, check=check,
-        rejected_statuses=frozenset({400, 403, 404, 422}),
-    )
-    if error:
-        return {}, error
-    try:
-        return (r.json() if r.content else {}), None
-    except ValueError:
-        return {}, request_failure("Invalid GitHub JSON response", retry_safe=retry_safe, operation=operation, check=check)
+    The callback owns fallible resource parsing; tool-level formatting follows
+    the single terminal sample and cannot mark malformed input as success.
+    """
+    with logical_resource(ctx) as result:
+        try:
+            info = await asyncio.to_thread(ctx.token_info)
+        except ConnectorTokenError as token_error:
+            result.error_code = "token"
+            return {}, token_failure_message(token_error)
+        headers = {**_GH_HEADERS, "Authorization": f"Bearer {info['access_token']}"}
+        url = path if path.startswith("http") else f"{_API}{path}"
+        operation = operation or f"{method} {url}"
+        r, failure = await request_with_retry(
+            method, url, retry_safe=retry_safe, operation=operation,
+            check=check, delay_for_response=_github_retry_delay, headers=headers, **kw,
+        )
+        if failure:
+            result.error_code = failure.code
+            return {}, failure.message
+        assert r is not None
+        if r.status_code == 401:
+            result.error_code = "auth"
+            authorization = await asyncio.to_thread(ctx.rejection_message, info)
+            return {}, "Error: rejected: " + authorization.removeprefix("Error: ")
+        error = response_failure(
+            r, retry_safe=retry_safe, operation=operation, check=check,
+            rejected_statuses=frozenset({400, 403, 404, 422}),
+        )
+        if error:
+            result.error_code = "http"
+            return {}, error
+        data, failure = decode_response(r, decode, provider="GitHub")
+        if failure:
+            result.error_code = failure.code
+            return {}, request_failure(failure.message, retry_safe=retry_safe, operation=operation, check=check)
+        result.error_code = None
+        return data, None
 
 
-def _issue_brief(it: dict) -> dict:
+def _issue_brief(value: Any) -> dict:
+    it = object_data(value)
     repo = ""
     if it.get("repository_url"):
-        repo = it["repository_url"].split("/repos/", 1)[-1]
+        repo = text_data(it["repository_url"]).split("/repos/", 1)[-1]
     return {
         "repo": repo,
         "number": it.get("number"),
@@ -137,59 +148,84 @@ def _issue_brief(it: dict) -> dict:
     }
 
 
+def _issues(value: Any) -> dict:
+    data = object_data(value)
+    return {"total": data.get("total_count"), "items": [_issue_brief(it) for it in array_data(data.get("items", []))]}
+
+
 @mcp.tool(name="search_issues")
 async def search_issues(query: str, limit: int = 20) -> str:
     """Search issues and pull requests with GitHub search syntax
     (e.g. 'repo:owner/name is:open label:bug'). Returns brief matches."""
     data, err = await _gh(
-        "GET", "/search/issues", retry_safe=True, params={"q": query, "per_page": min(limit, 50)}
+        "GET", "/search/issues", retry_safe=True, decode=_issues, params={"q": query, "per_page": min(limit, 50)}
     )
     if err:
         return err
-    items = [_issue_brief(it) for it in data.get("items", [])]
-    return truncate(to_text({"total": data.get("total_count"), "items": items}))
+    return truncate(to_text(data))
+
+
+def _issue(value: Any) -> Any:
+    data = object_data(value)
+    return {
+        "number": data.get("number"),
+        "title": data.get("title"),
+        "state": data.get("state"),
+        "author": object_data(data.get("user") or {}).get("login"),
+        "labels": [object_data(lbl).get("name") for lbl in array_data(data.get("labels", []))],
+        "comments": data.get("comments"),
+        "url": data.get("html_url"),
+        "body": data.get("body") or "",
+    }
 
 
 @mcp.tool(name="get_issue")
 async def get_issue(repo: str, number: int) -> str:
     """Full issue: title, state, author, labels, and body. `repo` is
     'owner/name'."""
-    data, err = await _gh("GET", f"/repos/{repo}/issues/{number}", retry_safe=True)
+    data, err = await _gh("GET", f"/repos/{repo}/issues/{number}", retry_safe=True, decode=_issue)
     if err:
         return err
-    out = {
+    return truncate(to_text(data))
+
+
+def _pr(value: Any) -> Any:
+    data = object_data(value)
+    return {
         "number": data.get("number"),
         "title": data.get("title"),
         "state": data.get("state"),
-        "author": (data.get("user") or {}).get("login"),
-        "labels": [lbl.get("name") for lbl in data.get("labels", [])],
-        "comments": data.get("comments"),
+        "merged": data.get("merged"),
+        "draft": data.get("draft"),
+        "head": object_data(data.get("head") or {}).get("ref"),
+        "base": object_data(data.get("base") or {}).get("ref"),
+        "author": object_data(data.get("user") or {}).get("login"),
         "url": data.get("html_url"),
         "body": data.get("body") or "",
     }
-    return truncate(to_text(out))
 
 
 @mcp.tool(name="get_pr")
 async def get_pr(repo: str, number: int) -> str:
     """Full pull request: title, state, head→base branches, merge state,
     and body. `repo` is 'owner/name'."""
-    data, err = await _gh("GET", f"/repos/{repo}/pulls/{number}", retry_safe=True)
+    data, err = await _gh("GET", f"/repos/{repo}/pulls/{number}", retry_safe=True, decode=_pr)
     if err:
         return err
-    out = {
-        "number": data.get("number"),
-        "title": data.get("title"),
-        "state": data.get("state"),
-        "merged": data.get("merged"),
-        "draft": data.get("draft"),
-        "head": (data.get("head") or {}).get("ref"),
-        "base": (data.get("base") or {}).get("ref"),
-        "author": (data.get("user") or {}).get("login"),
-        "url": data.get("html_url"),
-        "body": data.get("body") or "",
-    }
-    return truncate(to_text(out))
+    return truncate(to_text(data))
+
+
+def _repos(value: Any) -> Any:
+    data = value
+    return [
+        {
+            "full_name": r.get("full_name"),
+            "private": r.get("private"),
+            "description": r.get("description"),
+            "url": r.get("html_url"),
+        }
+        for r in map(object_data, array_data(data))
+    ]
 
 
 @mcp.tool(name="list_repos")
@@ -198,40 +234,56 @@ async def list_repos(limit: int = 30) -> str:
     data, err = await _gh(
         "GET",
         "/user/repos",
-        retry_safe=True,
+        retry_safe=True, decode=_repos,
         params={"per_page": min(limit, 100), "sort": "updated"},
     )
     if err:
         return err
-    repos = [
-        {
-            "full_name": r.get("full_name"),
-            "private": r.get("private"),
-            "description": r.get("description"),
-            "url": r.get("html_url"),
-        }
-        for r in data
-    ]
-    return truncate(to_text(repos))
+    return truncate(to_text(data))
+
+
+def _file_content(data: Any) -> Any:
+    if isinstance(data, list):
+        return [{"name": e.get("name"), "type": e.get("type")} for e in map(object_data, data)]
+    data = object_data(data)
+    if data.get("encoding") == "base64" and data.get("content") is not None:
+        try:
+            return base64.b64decode(data["content"]).decode("utf-8", "replace")
+        except (ValueError, TypeError) as error:
+            raise ResourceDecodeError(f"could not decode file: {error}") from error
+    return data
 
 
 @mcp.tool(name="get_file")
 async def get_file(repo: str, path: str, ref: str | None = None) -> str:
-    """Read a file's text from a repo. `repo` is 'owner/name'; `ref` is an
-    optional branch/tag/sha."""
+    """Read a file's text from a repo. `repo` is 'owner/name'; `path` is a raw
+    repository-relative path (empty lists the root); `ref` is a branch/tag/sha."""
+    repo_parts = repo.split("/")
+    if len(repo_parts) != 2 or any(part in {"", ".", ".."} for part in repo_parts):
+        return "Error: repo must be owner/name with two nonempty segments and no dot segments."
+    path_parts = path.split("/")
+    if path and any(part in {"", ".", ".."} for part in path_parts):
+        return "Error: path must be repository-relative with no empty or dot segments."
+    encoded_repo = "/".join(quote(part, safe="") for part in repo_parts)
+    encoded_path = "/".join(quote(part, safe="") for part in path_parts)
     params = {"ref": ref} if ref else None
-    data, err = await _gh("GET", f"/repos/{repo}/contents/{path}", retry_safe=True, params=params)
+    data, err = await _gh("GET", f"/repos/{encoded_repo}/contents/{encoded_path}", retry_safe=True, decode=_file_content, params=params)
     if err:
         return err
-    if isinstance(data, list):  # a directory
-        return truncate(to_text([{"name": e.get("name"), "type": e.get("type")} for e in data]))
-    if data.get("encoding") == "base64" and data.get("content") is not None:
-        try:
-            text = base64.b64decode(data["content"]).decode("utf-8", "replace")
-        except Exception as e:  # binary or malformed
-            return f"Error: could not decode {path}: {e}"
-        return truncate(text)
     return truncate(to_text(data))
+
+
+def _code_hits(value: Any) -> Any:
+    data = object_data(value)
+    hits = [
+        {
+            "repo": object_data(it.get("repository") or {}).get("full_name"),
+            "path": it.get("path"),
+            "url": it.get("html_url"),
+        }
+        for it in map(object_data, array_data(data.get("items", [])))
+    ]
+    return {"total": data.get("total_count"), "items": hits}
 
 
 @mcp.tool(name="search_code")
@@ -239,19 +291,11 @@ async def search_code(query: str, limit: int = 20) -> str:
     """Search code with GitHub code-search syntax (e.g. 'addEventListener
     repo:owner/name'). Returns matching file paths."""
     data, err = await _gh(
-        "GET", "/search/code", retry_safe=True, params={"q": query, "per_page": min(limit, 50)}
+        "GET", "/search/code", retry_safe=True, decode=_code_hits, params={"q": query, "per_page": min(limit, 50)}
     )
     if err:
         return err
-    hits = [
-        {
-            "repo": (it.get("repository") or {}).get("full_name"),
-            "path": it.get("path"),
-            "url": it.get("html_url"),
-        }
-        for it in data.get("items", [])
-    ]
-    return truncate(to_text({"total": data.get("total_count"), "items": hits}))
+    return truncate(to_text(data))
 
 
 @mcp.tool(name="create_issue")
@@ -259,15 +303,13 @@ async def create_issue(repo: str, title: str, body: str = "") -> str:
     """Open a new issue. This WRITES to GitHub — explain what you're filing
     before calling. `repo` is 'owner/name'."""
     data, err = await _gh(
-        "POST", f"/repos/{repo}/issues", json={"title": title, "body": body},
+        "POST", f"/repos/{repo}/issues", decode=lambda value: {"created": True, "number": object_data(value).get("number"), "url": value.get("html_url")}, json={"title": title, "body": body},
         operation=f"create_issue repo={repo!r} title={title!r}",
         check=f"Check issues in https://github.com/{repo}/issues for the original title and body.",
     )
     if err:
         return err
-    return to_text(
-        {"created": True, "number": data.get("number"), "url": data.get("html_url")}
-    )
+    return to_text(data)
 
 
 @mcp.tool(name="comment")
@@ -275,13 +317,13 @@ async def comment(repo: str, number: int, body: str) -> str:
     """Comment on an issue or PR. This WRITES to GitHub. `repo` is
     'owner/name'; `number` is the issue/PR number."""
     data, err = await _gh(
-        "POST", f"/repos/{repo}/issues/{number}/comments", json={"body": body},
+        "POST", f"/repos/{repo}/issues/{number}/comments", decode=lambda value: {"created": True, "url": object_data(value).get("html_url")}, json={"body": body},
         operation=f"comment repo={repo!r} number={number} body={body!r}",
         check=f"Check comments on https://github.com/{repo}/issues/{number} for the original text.",
     )
     if err:
         return err
-    return to_text({"created": True, "url": data.get("html_url")})
+    return to_text(data)
 
 
 if __name__ == "__main__":

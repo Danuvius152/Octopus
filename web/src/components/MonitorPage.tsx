@@ -16,6 +16,7 @@ type Overview = {
   turns: Row[];
   errors: Row[];
   resources: Row[];
+  connectors?: Row[];
   codex?: Row[];
   codex_turns?: Row[];
   codex_runs?: Row[];
@@ -59,7 +60,7 @@ function heading(key: string): string {
 function cell(key: string, value: string | number | null): string {
   if (value === null || value === undefined) return "—";
   if (key.endsWith("_tps") && typeof value === "number") return `${value.toFixed(2)} tok/s`;
-  if (key === "coverage_pct" && typeof value === "number") return `${value.toFixed(1)}%`;
+  if ((key === "coverage_pct" || key === "success_pct") && typeof value === "number") return `${value.toFixed(1)}%`;
   if ((key === "last_seen" || key === "latest_at") && typeof value === "number") {
     return new Date(value * 1000).toLocaleString([], {
       month: "short",
@@ -80,7 +81,7 @@ function cell(key: string, value: string | number | null): string {
 
 /** One report as a table. Empty says so, because a blank panel reads as
  *  "nothing wrong" when it means "nothing recorded". */
-function Table({ title, rows }: { title: string; rows: Row[] }) {
+function Table({ title, rows, headings = {} }: { title: string; rows: Row[]; headings?: Record<string, string> }) {
   if (!rows?.length) {
     return (
       <section className="mb-6">
@@ -103,7 +104,7 @@ function Table({ title, rows }: { title: string; rows: Row[] }) {
             <tr className="border-b border-gray-200 bg-gray-50 text-left">
               {cols.map((c) => (
                 <th key={c} className="px-3 py-1.5 font-medium text-gray-700">
-                  {heading(c)}
+                  {headings[c] ?? heading(c)}
                 </th>
               ))}
             </tr>
@@ -276,9 +277,18 @@ export function MonitorPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
               <p className="mb-4 text-xs text-gray-500">Only phases entered by the Harness appear, with their actual timeout and elapsed time.</p>
             </details>
             {!!data.codex_anomalies?.length && <Table title="Unaccepted native execution usage" rows={data.codex_anomalies} />}
-            <Table title="activity" rows={data.counts} />
+            <Table title="Connector logical resource requests" rows={data.connectors ?? []} headings={{
+              n: "requests", ok_n: "successful", success_pct: "success rate",
+              avg_ms: "avg elapsed", max_ms: "max elapsed", last_seen: "last resource sample",
+            }} />
+            <p className="mb-4 text-xs text-gray-500">
+              Each resource includes token preparation, retries and decoding. Historical failure samples do not enter
+              request totals or success rates. Without measured requests the success rate is unknown.
+              Collection can drop samples; these rates describe observed requests.
+            </p>
+            <Table title="event samples" rows={data.counts} />
             <Table title="turns" rows={data.turns} />
-            <Table title="top errors" rows={data.errors} />
+            <Table title="top error event samples" rows={data.errors} />
             <Table title="resources" rows={data.resources} />
             <p className="text-xs text-gray-500">
               Anything not shown here is a query away —{" "}

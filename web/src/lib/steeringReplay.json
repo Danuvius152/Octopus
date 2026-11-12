@@ -1,0 +1,21 @@
+{
+  "initial": {
+    "messages": [
+      { "role": "user", "type": "text", "seq": 0, "content": "First" },
+      { "role": "assistant", "type": "text", "seq": 1, "content": "Ready", "runtime_metadata": { "request_id": "stdin-original", "attempt_id": "original-attempt" } }
+    ],
+    "next_message_seq": 2
+  },
+  "during": {
+    "messages": [
+      { "role": "user", "type": "text", "seq": 0, "content": "First" },
+      { "role": "assistant", "type": "text", "seq": 1, "content": "Ready", "runtime_metadata": { "request_id": "stdin-original", "attempt_id": "original-attempt" } },
+      { "role": "user", "type": "text", "seq": 2, "content": "Saved correction" },
+      { "role": "assistant", "type": "text", "seq": 3, "content": "Output while stdin is blocked", "runtime_metadata": { "request_id": "stdin-original", "attempt_id": "original-attempt" } }
+    ],
+    "next_message_seq": 4
+  },
+  "delta": { "type": "assistant_delta", "session_id": "stdin-order", "content": "Output partial", "request_id": "stdin-original", "attempt_id": "original-attempt" },
+  "output": { "type": "assistant_text", "session_id": "stdin-order", "seq": 3, "content": "Output while stdin is blocked", "request_id": "stdin-original", "attempt_id": "original-attempt" },
+  "steer": { "type": "steered", "session_id": "stdin-order", "seq": 2, "content": "Saved correction" }
+}

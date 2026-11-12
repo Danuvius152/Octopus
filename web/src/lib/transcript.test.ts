@@ -20,6 +20,22 @@ const loadOlderMessages = (sessionId: string) => observeOlderMessages(sessionId)
  * are pinned here, because in the browser they look like ordinary scrolling.
  */
 describe("applyTranscript", () => {
+  it("keeps an installed window when an older snapshot arrives after out-of-order live rows", () => {
+    applyTranscript("s1", { messages: [msg(10), msg(11)], oldest_loaded_seq: 10,
+      next_message_seq: 12, has_more_messages: true });
+    handleWsMessage({ type: "user_message", session_id: "s1", seq: 13, content: "newer" });
+    handleWsMessage({ type: "steered", session_id: "s1", seq: 12, content: "late" });
+    const window = useSessionStore.getState().messageWindows.s1;
+    applyTranscript("s1", { messages: [msg(4), msg(5)], oldest_loaded_seq: 4,
+      next_message_seq: 6, has_more_messages: false });
+    const state = useSessionStore.getState();
+    expect(state.messages.s1.map((row) => row.seq)).toEqual([10, 11, 12, 13]);
+    expect(state.lastAppliedSeq.s1).toBe(11);
+    expect(state.messageWindows.s1).toBe(window);
+    expect(state.oldestSeq.s1).toBe(10);
+    expect(state.hasMoreMessages.s1).toBe(true);
+  });
+
   it.each([11, 200, 201])("replaces a disconnected prefix before tail window %i", (oldest) => {
     applyTranscript("s1", { messages: Array.from({ length: 11 }, (_, seq) => msg(seq)),
       oldest_loaded_seq: 0, next_message_seq: 11, has_more_messages: false });
@@ -49,7 +65,7 @@ describe("applyTranscript", () => {
     handleWsMessage({ type: "result", session_id: "s1", seq: 1, terminal: true,
       content: { kind: "outcome", operation: "message", request_id: "reserved", status: "success" } });
     expect(useSessionStore.getState().messages.s1.map((row) => row.seq)).toEqual([0, 1]);
-    expect(useSessionStore.getState().lastAppliedSeq.s1).toBe(1);
+    expect(useSessionStore.getState().lastAppliedSeq.s1).toBe(0);
   });
 
   it("quarantines ambiguous history instead of silently deduplicating its rows", () => {
@@ -67,7 +83,9 @@ describe("applyTranscript", () => {
       hasMoreMessages: {},
       lastAppliedSeq: {},
       streamingText: {},
+      streamingTextAttempt: {},
       streamingItems: {},
+      activeAttempts: {},
     });
   });
 
@@ -105,7 +123,7 @@ describe("applyTranscript", () => {
     const state = useSessionStore.getState();
     expect(state.messages.s1.map((m) => m.seq)).toEqual([10, 11, 12]);
     expect(state.messages.s1[2].tool_input).toEqual({ request_context: { request_id: "human-12", source: "human" } });
-    expect(state.lastAppliedSeq.s1).toBe(12);
+    expect(state.lastAppliedSeq.s1).toBe(11);
     expect(state.streamingText.s1).toBe("new answer in progress");
     expect(state.oldestSeq.s1).toBe(10);
   });
@@ -118,6 +136,7 @@ describe("applyTranscript", () => {
   });
 
   it("retains root and child native-only deltas that arrive during an older snapshot read", () => {
+    handleWsMessage({ type: "attempt_started", session_id: "s1", request_id: "r", attempt_id: "a" });
     const baseline = useSessionStore.getState().streamingItems.s1 || {};
     const identity = (thread: string) => ({ request_id: "r", attempt_id: "a", native: {
       thread_id: thread, turn_id: "t", item_id: "same", root_thread_id: "root", root_turn_id: "t" } });
@@ -163,6 +182,24 @@ describe("loadOlderMessages", () => {
     expect(s.oldestSeq.s1).toBe(8);
     expect(s.hasMoreMessages.s1).toBe(true);
     vi.unstubAllGlobals();
+  });
+
+  it("advances an overlapping page with zero new rows without duplicating its live prefix", async () => {
+    let respond!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; })));
+    try {
+      const reading = loadOlderMessages("s1");
+      handleWsMessage({ type: "user_message", session_id: "s1", seq: 9, content: "msg-9" });
+      handleWsMessage({ type: "user_message", session_id: "s1", seq: 8, content: "msg-8" });
+      respond(Response.json({ messages: [msg(8), msg(9)], oldest_loaded_seq: 8, has_more_messages: true }));
+      expect(await reading).toEqual({ state: "merged", added: 0 });
+      const state = useSessionStore.getState();
+      expect(state.messages.s1.map((row) => row.seq)).toEqual([8, 9, 10, 11]);
+      expect(state.oldestSeq.s1).toBe(8);
+      expect(state.hasMoreMessages.s1).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("never renders a message twice when a page overlaps", async () => {

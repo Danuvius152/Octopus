@@ -30,6 +30,24 @@ formatting also resolves file paths with I/O; it is not a shared pure formatter.
 Keep these rules in their existing entry points rather than introducing another
 validator/formatter service that callers must coordinate.
 
+Initial prompt/reference preparation finishes before creating a child, publishing
+its round or registering parent responsibility. File resolution uses `resolve`
+and `stat`: missing files retain a not-found annotation; symlink loops,
+permissions and other resolution failures retain a could-not-resolve annotation,
+including the RuntimeError form on older supported Python versions. A preparation
+failure cannot leave a running round that never submitted input.
+
+After setup publication, only typed `SessionAdmissionClosed`,
+`SessionAdmissionBusy`, `SessionMailboxFull` or `AdmissionIntegrityError` proves
+the initial input was refused and invokes the existing setup withdrawal/empty
+child cleanup. A plain ValueError, connection failure or lost receipt remains
+unknown even with an empty in-memory queue; a durable input may already exist.
+It retains the original round, command and child responsibility instead of
+claiming no execution, injecting a false failure or replaying. Follow-up keeps
+its separate original CAS and rollback rules. Real filesystem and durable
+admission interleavings are covered by `test_delegation_restart_admission.py`
+alongside the existing command and nested-parent withdrawal tests.
+
 Initial and explicit follow-up inputs carry the same runtime delegation protocol
 from `server/delegations.py`. It asks for core evidence and a self-contained final
 reply when the original work completes, including necessary owned-descendant

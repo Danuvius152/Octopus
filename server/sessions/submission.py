@@ -25,6 +25,9 @@ class RequestCompletion:
     reason: str | None = None
     notification_state: Literal["delivered", "failed", "unavailable"] = "delivered"
     operation: OperationKind = "message"
+    # Exact receipt membership captured by the original Owner's failure handoff.
+    # This proves neither a business outcome nor resource retirement.
+    ended_owner_inputs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
