@@ -15,6 +15,48 @@ from tests.websocket_client import connection, frame
 CONTROL_SAMPLES = Path(__file__).parents[1] / "web/src/lib/browserProjectionReplay.json"
 
 
+@pytest.mark.parametrize("record", ["head_tail_inline", "head_tail_preview", "legacy_preview"])
+async def test_saved_command_capture_is_independent_of_browser_preview_and_old_records(export_runtime, record):
+    from server.harness.codex_items import item_events
+    from server.models import RuntimeMetadata
+
+    db, manager, session, client, _, _ = export_runtime
+    notice = "[输出已缩短：仅保存收到输出的头尾，中间未归档；以下不是完整日志。]"
+    native = {"id": "original", "type": "commandExecution", "command": "produce", "cwd": "/tmp",
+        "commandActions": [], "status": "completed", "aggregatedOutput": "old or new output\n" * 20_000}
+    if record == "legacy_preview":
+        body, inputs = native["aggregatedOutput"], {"native_item": native}
+    else:
+        if record == "head_tail_preview":
+            native["annotation"] = "Received extra metadata " * 10_000
+        value = item_events("item/completed", {"item": native}).events[0]
+        body, inputs = value.content, value.tool_input
+    metadata = {"request_id": "request", "attempt_id": "attempt", "native": {
+        "thread_id": "root", "turn_id": "turn", "root_thread_id": "root", "root_turn_id": "turn", "item_id": "original"}}
+    metadata = RuntimeMetadata.model_validate(metadata).model_dump()
+    await db.append_message(session.id, 0, "tool", "tool_result", body, tool_input=inputs,
+        tool_use_id="original", runtime_metadata=metadata)
+    shown = (await client.get(f"/api/sessions/{session.id}?view=browser")).json()["messages"][0]
+    assert shown["body_state"] == ("inline" if record == "head_tail_inline" else "preview")
+    if record != "legacy_preview":
+        assert shown["content"].startswith(notice)
+    async with connection(manager, client.headers["Authorization"].removeprefix("Bearer ")) as browser:
+        await manager._broadcast({"type": "tool_result", "session_id": session.id, "seq": 0,
+            "output": body, "tool_input": inputs, "tool_use_id": "original", "runtime_metadata": metadata})
+        wire = await frame(browser[1])
+    if record != "legacy_preview":
+        assert wire["output"].startswith(notice)
+    raw = (await client.get(f"/api/sessions/{session.id}/messages/0")).json()
+    page = (await client.get(f"/api/sessions/{session.id}/message-export")).json()["messages"][0]
+    typed_response = await client.get(f"/api/sessions/{session.id}/transcript-export")
+    typed = json.loads(typed_response.text.strip())
+    for key, expected in (("content", body), ("tool_input", inputs), ("runtime_metadata", metadata)):
+        assert raw[key] == page[key] == expected
+        assert json.loads(typed[key]) == expected
+    assert ("output_capture" in raw["tool_input"]) == (record != "legacy_preview")
+    assert (await db.load_messages(session.id))[0]["tool_input"] == inputs
+
+
 @pytest.mark.parametrize("kind", ["recovery", "async_question", "missing_final", "unavailable_question", "unavailable_small_question"])
 async def test_minimal_public_projection_preserves_controls_for_browser_replay(export_runtime, request, kind):
     db, manager, session, client, _, _ = export_runtime

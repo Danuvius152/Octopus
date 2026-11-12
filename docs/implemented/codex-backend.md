@@ -392,7 +392,8 @@ frames exercise blocking/idle suspension in the controlled native protocol tests
 
 Native item conversion is a pure boundary in `codex_items.py`; it does not rename
 fields into the legacy exec parser or own execution. Complete items retain their
-native fields and source. MCP `failed` remains failure even with a nonempty result
+native facts and source, with ordinary command output saved under the bounded
+[command retention contract](#saved-command-output). MCP `failed` remains failure even with a nonempty result
 and null error; command status and exit evidence, declined file changes and
 interrupted collaboration remain distinct. Complete empty text/reasoning is valid.
 The original submission owns user input, so native confirmation does not add a
@@ -416,6 +417,60 @@ it cannot settle a later turn of that child. Root success can coexist with resid
 interruption after proven retirement. The
 [native output contract](native-subagents.md) owns work identities, display
 windows, bounded caches and late-item semantics.
+
+## Saved command output
+
+Only validated App Server `commandExecution.aggregatedOutput` uses a bounded
+saved body. Completed `content` is its sole retained text; both started and
+completed `tool_input.native_item` omit `aggregatedOutput` using new dictionaries,
+while preserving the other received fields. Started parameters keep the original
+command. Completed `tool_input.output_capture` describes retention:
+
+| state | Saved content and counts |
+| --- | --- |
+| `absent` | No output field was received; empty content, no invented lengths. |
+| `null` | The field was explicitly null; empty content, no invented lengths. |
+| `inline` | The received string is unchanged; `received_chars` is its Python character count and `omitted_chars` is zero, including a real empty string. |
+| `head_tail` | Only the head and tail are retained; counts describe the received string and the omitted original characters. |
+
+The complete ASCII JSON string for `content`, including quotes, escaping,
+retention notice and separator, has an 8192-byte budget. A string that fits stays
+unchanged. Otherwise the fixed notice
+`[输出已缩短：仅保存收到输出的头尾，中间未归档；以下不是完整日志。]` plus a newline
+precedes the head; the separator is a newline, `[... 中段已省略 ...]`, and a newline.
+After subtracting these fixed costs and the one pair of quotes, the remaining
+payload budget is split equally, with the remainder assigned to the tail. Each
+edge is the longest original character-boundary prefix or suffix that fits its
+share. Notices do not count as received characters. Inputs over 8190 characters
+cannot fit inline; edge searches serialize only budget-bounded slices and handle
+an empty tail explicitly, avoiding repeated full-output serialization.
+
+Complete original field/status validation, root/child association and full item
+fingerprints precede this lossy projection. Different middles remain conflicts
+even when the saved edges match; existing timestamp/default/null fingerprint
+equivalences remain. NativeOutput still observes complete original parameters.
+Retention does not alter status, nonzero exit code, failure, cwd, actions, process
+identity, duration or provenance, and adds no success defaults. `inline` describes
+what Octopus received, not whether the provider supplied a full process log.
+The model's native tool result, input parameters and native resume history are
+unchanged. Assistant text/final, MCP results/receipts and file-change canonical
+records keep their existing full-body and authority contracts.
+
+App Server ordinary items, deltas, root results, provider errors and child
+terminal errors carry their existing normalized content, status, error details,
+retry/generation facts and source without a redundant whole-frame `raw` copy.
+Native completion retains its final hash constraints; measurements, question
+requests and legacy consumers retain their required raw data. This is an adapter
+policy, not a global DTO filter.
+
+Details, exports and replay use the actual saved record. Omitted command middles
+are not archived and have no recovery endpoint; the leading notice remains visible
+in ordinary RESULT/replay prefixes. This retention boundary is independent of
+[browser previews](frontend-list-reconciliation.md#浏览器有界预览与按需全文).
+Frame/media, pre-bind correlation and event handoff budgets still apply at their
+own boundaries: saved-body reduction cannot repair an earlier frame overrun and
+does not establish an RSS bound. Storage and old-record preservation belong to
+[current storage](current-storage-format.md#complete-record-projections).
 
 ## Native generated images
 

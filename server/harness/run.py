@@ -1139,7 +1139,20 @@ class HarnessRun:
         """Read the Owner's existing clocks without creating another deadline."""
         self._observation_clock = clock
 
+    def _event_fits(self, size: int, *, preview: bool = False) -> bool:
+        return (len(self._event_queue) < _EVENT_BUFFER_COUNT
+                and (not self._event_queue and not preview or self._event_bytes + size <= _EVENT_BUFFER_BYTES))
+
     async def _emit(self, event: HarnessEvent) -> None:
+        # Admission updates the queue and its ledger atomically. Give ready
+        # consumers a turn only after that decision, including early returns.
+        try:
+            await self._admit_event(event)
+        finally:
+            if self._driver.multiplexed:
+                await asyncio.sleep(0)
+
+    async def _admit_event(self, event: HarnessEvent) -> None:
         if self._stream_closed:
             return
         if event.type == "result":
@@ -1153,28 +1166,32 @@ class HarnessRun:
         size = sum(len(part) for part in json.JSONEncoder(
             ensure_ascii=True, default=vars,
         ).iterencode(event))
-        while not self._stream_closed:
-            if (len(self._event_queue) < _EVENT_BUFFER_COUNT
-                    and (not self._event_queue or self._event_bytes + size <= _EVENT_BUFFER_BYTES)):
-                self._event_queue.append((event, size))
-                self._event_bytes += size
-                self._event_changed.set()
-                return
-            if self._driver.multiplexed:
-                if event.type == "text_delta" and self._event_queue:
-                    older, old_size = self._event_queue[-1]
-                    if older.type == "text_delta" and older.runtime_metadata == event.runtime_metadata:
-                        combined = (older.content or "") + (event.content or "")
-                        extra = len(json.dumps(event.content or "", ensure_ascii=True))
-                        if self._event_bytes + extra <= _EVENT_BUFFER_BYTES:
-                            older.content, older.raw = combined, None
-                            self._event_queue[-1] = older, old_size + extra
-                            self._event_bytes += extra
-                            return
-                self.fail_stream("native_output_overflow", "Necessary native output exceeded the bounded handoff capacity")
-                return
-            self._event_changed.clear()
-            await self._event_changed.wait()
+        if self._driver.multiplexed:
+            preview = event.type == "text_delta"
+            if not self._event_fits(size, preview=preview):
+                if preview:
+                    return
+                # Reclaim disposable previews once, atomically, preserving
+                # every necessary event's original order and charged size.
+                retained: deque[tuple[HarnessEvent, int]] = deque()
+                for queued, charged in self._event_queue:
+                    if queued.type == "text_delta":
+                        self._event_bytes -= charged
+                    else:
+                        retained.append((queued, charged))
+                self._event_queue = retained
+                if not self._event_fits(size):
+                    self.fail_stream("native_output_overflow", "Necessary native output exceeded the bounded handoff capacity")
+                    return
+        else:
+            while not self._stream_closed and not self._event_fits(size):
+                self._event_changed.clear()
+                await self._event_changed.wait()
+        if self._stream_closed:
+            return
+        self._event_queue.append((event, size))
+        self._event_bytes += size
+        self._event_changed.set()
 
     def fail_stream(self, code: str, detail: str, *, context: dict[str, Any] | None = None) -> None:
         """One reliable failure slot outside the bounded accepted prefix.
@@ -1354,6 +1371,11 @@ class HarnessRun:
                     self._note_protocol_issue("parser_exception", line, error=error)
                     if self._driver.multiplexed:
                         self.fail_stream("native_protocol_failed", self.format_exception(error))
+                finally:
+                    # RPCs, ignored notifications and diagnostic-only frames
+                    # can emit no events, including an already-buffered burst.
+                    if self._driver.multiplexed:
+                        await asyncio.sleep(0)
         except asyncio.CancelledError:
             raise
         except Exception as error:

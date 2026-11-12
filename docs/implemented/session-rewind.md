@@ -88,6 +88,14 @@ attachment ownership remain enforced throughout.
 
 ### 5.3.2 History replay and first-turn state
 
+Replay renders actual saved command records within its existing per-line limit.
+New App Server head/tail records begin with an explicit notice that the middle
+was not archived, so even a replay prefix retains that meaning. Replay cannot
+restore the omitted middle, infer completeness for old records without capture,
+or substitute for the provider's native resume history. User/assistant and
+root/child source semantics are unchanged; see
+[command retention](codex-backend.md#saved-command-output).
+
 Before wrapping an input, the Owner reads the committed continuation identity,
 replay flag and metadata together. The first input includes the copied transcript
 and its input observations, new instruction, Wiki and attachment augmentation.

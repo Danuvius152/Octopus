@@ -112,6 +112,16 @@ belong to [local publication](../local-wsl.md#自动发布).
 
 ## Complete record projections
 
+App Server command `tool_input.output_capture` uses existing message JSON.
+Completed content stores the actual retained output, with command retention
+semantics owned by [Codex](codex-backend.md#saved-command-output). This adds no DDL,
+format marker, startup conversion, backfill, body store or storage root. Complete
+reads, both message exports, message copies and consistent full backups preserve
+the saved JSON and provenance. Old records without capture remain unchanged;
+missing metadata establishes no full-log guarantee, and historical body copies
+are not removed. Account archives continue to exclude chats under the existing
+[portability scope](../backup-and-migrate.md#account-export-and-import).
+
 Format 8 adds nullable `sessions.context_state` JSON and
 `agents.context_settings_revision INTEGER NOT NULL DEFAULT 0`. The typed
 ContextState verifier checks complete retained facts; Agent revisions must be

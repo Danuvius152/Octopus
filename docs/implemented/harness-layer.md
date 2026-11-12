@@ -238,15 +238,40 @@ before collection closes. One write lock serializes complete control and
 business frames. Native question replies use that lock's final eligibility
 check, after all prior awaits; see [question ownership](codex-backend.md#native-question-control).
 
-The native event handoff has a 256-event / 1 MiB serialized payload budget,
-allowing one complete oversized event into an empty queue under the native line
-limit. Only adjacent compatible item deltas can coalesce. Capacity exhaustion
-freezes admission and starts the original retirement task immediately. A failure
-slot outside the saturated queue preserves the accepted prefix and prevents a
-successful result from hiding output loss. After confirmed retirement, stream
+The native event handoff uses one deque with a 256-event / 1 MiB serialized
+payload budget. Streaming ASCII JSON accounting includes every final event field,
+including content and any retained raw data. Identity normalization precedes
+admission; queued fields do not change, and reclamation/dequeue subtract the
+original charged size. This is a payload budget rather than an RSS bound.
+
+Only multiplexed `text_delta` is disposable: it is admitted when both limits
+allow it and otherwise omitted, including a single oversized delta in an empty
+queue. A necessary event that already fits leaves queued previews alone. When it
+does not fit, Run synchronously removes all queued deltas in one stable pass and
+rechecks capacity, preserving the order and source of every necessary event.
+There is no tail concatenation or incremental string-growth accounting. One legal
+oversized necessary event may still occupy an empty queue under the native line
+limit; further necessary events cannot expand the budget indefinitely. Complete
+text/final, tools, questions, control and structured receipts are necessary.
+
+Each multiplexed admission decision yields only after its queue/count changes
+are complete, including omitted previews, failed admission and the independent
+root-result slot. The stdout reader also yields after each frame's processing or
+error handling, so RPC/control responses, ignored/duplicate notifications,
+pre-bind buffering and diagnostics with no display event cannot starve ready
+tasks. Neither point waits for display capacity; event-level yielding also covers
+one bind releasing a whole buffered batch. A yield proves no database commit,
+publication or process exit and does not revoke the captured finite prefix.
+
+Necessary capacity exhaustion still freezes admission and starts the original
+retirement task immediately. A failure slot outside the saturated queue preserves
+the accepted prefix and prevents a successful result from hiding output loss;
+ordinary command retention and omitted previews create no recording issue.
+Provider terminal facts remain separate. After confirmed retirement, stream
 delivery reconciles final helper observations from the same bounded projection;
-no extra output or completion ledger is created. Legacy Claude delivery retains
-its existing backpressure and held-process idle behavior.
+no extra output/completion ledger, replacement attempt or automatic rerun is
+created. Legacy Claude and Codex exec delivery retain their existing backpressure
+and raw consumers; Claude's held-process idle behavior is unchanged.
 
 Question/control handoffs have their own finite count and byte limits. A blocked
 presentation publisher cannot hide original question admission or delay terminal
@@ -413,6 +438,12 @@ the raw `transcript-export` audit stream, which preserves storage rows, includin
 duplicate sequences. Each export page checks the current account/session binding
 in the same short SQLite transaction as its read, for live and archived sessions.
 Missing and foreign sessions both return 404.
+
+Complete means the actual saved record. Both exports preserve command
+`tool_input.output_capture`, content and provenance; a `head_tail` record does not
+contain an archived middle to restore. Older records without capture keep their
+saved bodies and metadata, with no inferred completeness or backfill. See
+[command retention](codex-backend.md#saved-command-output).
 
 The first transaction captures the backend, native resume ID and working directory,
 the maximum committed `messages.id` (`through_id`), `expected_count`, `max_seq`

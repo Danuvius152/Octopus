@@ -815,8 +815,15 @@ Research、BG 和精确 work 的委派卡片均检查取消 HTTP 状态并显示
 
 浏览器 WS 订阅和显式 `view=browser` 的会话 detail、历史、native-details 出口
 生成可丢弃的展示投影。默认 HTTP 完整表示、持久消息、原生审计、内部 bus、App
-流与 LiveReply、fork 和 typed 导出继续使用完整原文；投影不原地改写这些来源。
+流与 LiveReply、fork 和 typed 导出继续使用实际保存的完整记录；投影不原地改写这些来源。
 首屏和重连仍通过 HTTP 读取 snapshot，不通过 WS 发送完整历史。
+
+App Server 命令的 `output_capture.state=head_tail` 表示保存时已永久省略中段；
+`body_state=preview` 表示浏览器再次缩小这份记录，两者独立，head_tail 也可 inline。
+详情只补回已保存记录，不恢复未归档中段。固定前置说明沿已有 RESULT 折叠、展开
+和常规预览前缀显示，不新增专用 capture 界面。无 capture 的旧记录仍按原序列
+读取、复制和导出，不补造完整性保证；原生身份过大时仍沿原 notice/详情合同。
+命令保存预算与四态由 [Codex 合同](codex-backend.md#saved-command-output)维护。
 
 实际 UTF-8 JSON 编码限制为单条消息 64 KiB、含 envelope 的 WS 事件 256 KiB、
 HTTP 消息数组 2 MiB（含数组括号和逗号）。根会话/历史返回最新连续后缀，原生

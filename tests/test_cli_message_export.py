@@ -27,7 +27,16 @@ async def test_pull_and_handoff_share_the_harness_native_directory(export_runtim
         monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     else:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "native-config"))
-    cwd = tmp_path / "my.project_空" if cwd_kind == "special" else tmp_path.joinpath(*(["long.dir_空"] * 12))
+    if cwd_kind == "special":
+        cwd = tmp_path / "my.project_空"
+    else:
+        segments = 12
+        if root != "override":
+            # The native cwd encoding is one ASCII filename. Exercise a long
+            # legal name regardless of the isolated runner's temporary prefix.
+            segments = (os.pathconf(tmp_path, "PC_NAME_MAX") - len(str(tmp_path))) // len("/long.dir_空")
+            assert segments > 0, "Temporary prefix leaves no room for a native project name"
+        cwd = tmp_path.joinpath(*(["long.dir_空"] * segments))
     cwd.mkdir(parents=True)
     args.project_dir = str(tmp_path / "explicit-project") if root == "override" else None
     if cwd_kind == "special":

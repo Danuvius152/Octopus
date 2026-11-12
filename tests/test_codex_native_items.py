@@ -68,7 +68,8 @@ async def test_complete_duplicates_compare_payload_facts_with_optional_defaults(
     receipt = await start_output(native_runtime)
     original = {"id": "command", "type": "commandExecution", "command": "true", "cwd": "/tmp",
                 "commandActions": [], "status": "completed", "startedAtMs": 1}
-    duplicate = {**original, "startedAtMs": 2, "completedAtMs": 3, "source": "agent", "exitCode": None}
+    duplicate = {**original, "startedAtMs": 2, "completedAtMs": 3, "source": "agent", "exitCode": None,
+                 "aggregatedOutput": None}
     inject(tmp_path, native_item(original), native_item(duplicate), terminal())
     await wait_dispatch_idle(manager, session.id)
     result = await database.read_session_result(session.id, receipt["request_id"])
@@ -97,7 +98,12 @@ async def test_unsuccessful_native_tool_does_not_look_successful_or_fail_the_roo
     await wait_dispatch_idle(manager, session.id)
     rows = [row for row in await database.load_messages(session.id) if row["type"] == "tool_result"]
     assert len(rows) == 1 and rows[0]["is_error"]
-    assert rows[0]["tool_input"]["native_item"] == payload
+    assert rows[0]["tool_input"]["native_item"] == {key: value for key, value in payload.items() if key != "aggregatedOutput"}
+    if payload["type"] == "commandExecution":
+        assert rows[0]["content"] == payload["aggregatedOutput"]
+        assert rows[0]["tool_input"]["output_capture"] == {
+            "state": "inline", "received_chars": len(payload["aggregatedOutput"]), "omitted_chars": 0,
+        }
     if payload["type"] == "mcpToolCall":
         assert rows[0]["content"] == "Business failure body"
     assert rows[0]["runtime_metadata"]["native"]["item_id"] == "call"
@@ -119,7 +125,11 @@ async def test_empty_reasoning_and_command_metadata_survive_recording(native_run
     await wait_dispatch_idle(manager, session.id)
     rows = await database.load_messages(session.id)
     assert next(row for row in rows if row["type"] == "thinking")["tool_input"]["native_item"] == reasoning
-    assert next(row for row in rows if row["type"] == "tool_result")["tool_input"]["native_item"] == command
+    result = next(row for row in rows if row["type"] == "tool_result")
+    assert result["tool_input"]["native_item"] == {key: value for key, value in command.items() if key != "aggregatedOutput"}
+    assert result["content"] == "" and result["tool_input"]["output_capture"] == {
+        "state": "inline", "received_chars": 0, "omitted_chars": 0,
+    }
 
 
 @pytest.mark.parametrize("kind", ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall"])
@@ -128,7 +138,8 @@ async def test_missing_or_unknown_native_tool_status_cannot_become_success(nativ
     manager, database, session, _, starts, _ = native_runtime
     receipt = await start_output(native_runtime)
     payload = {"id": "invalid", "type": kind, "command": "true", "tool": "lookup", "server": "example",
-               "changes": [], "arguments": {}, **({"status": status} if status is not None else {})}
+               "cwd": "/tmp", "commandActions": [], "receiverThreadIds": [], "senderThreadId": ROOT,
+               "agentsStates": {}, "changes": [], "arguments": {}, **({"status": status} if status is not None else {})}
     inject(tmp_path, item(ROOT, "turn-1", "prefix", "Valid prefix"), native_item(payload), terminal())
     await wait_dispatch_idle(manager, session.id)
     result = await database.read_session_result(session.id, receipt["request_id"])

@@ -44,6 +44,7 @@ from .codex_items import (
     item_events,
     item_fingerprint,
     observation_frame,
+    validate_item,
 )
 from .codex_rpc import NativeProtocolError, NativeRpcError, RpcConnection
 from .codex_rpc import encode_frame as _encode_frame
@@ -996,7 +997,7 @@ class AppServerDriver(RunDriver):
                 and (params.get("item") or {}).get("type") == "userMessage"):
             # Correlation cannot promote malformed content into durable input
             # acceptance. Validate before either start or steer proof is saved.
-            item_events(obj["method"], params)
+            validate_item(params["item"])
             client_id = params["item"].get("clientId")
             for rpc_id, evidence in self._steers.items():
                 if client_id == evidence.input_id:
@@ -1137,7 +1138,7 @@ class AppServerDriver(RunDriver):
             candidate = params.get("item")
             if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str) or not candidate["id"]:
                 raise NativeProtocolError("Native item has no identity")
-            item_events(method, params)
+            validate_item(candidate)
         if not self._output.accepts(params.get("threadId"), params.get("turn") or {}):
             raise NativeProtocolError("Native output has no original root/child association")
         observer = self._metrics_observer(params["threadId"])
@@ -1263,7 +1264,7 @@ class AppServerDriver(RunDriver):
             error = params["error"]
             return ParseOutput(events=[HarnessEvent(type="error", content=error.get("message"),
                 error_code="native_provider_retry" if params["willRetry"] else "native_provider_error" if root else "native_child_error",
-                error_details={**error, "willRetry": params["willRetry"], "connection_generation": self._rpc.generation}, raw=obj)],
+                error_details={**error, "willRetry": params["willRetry"], "connection_generation": self._rpc.generation})],
                 activity=bool(params["willRetry"] and not self._terminal and self._output
                     and isinstance(turn_id, str) and self._output.active_turn(params["threadId"], turn_id)
                     and self._io and self._io.question_admission_open))
@@ -1272,7 +1273,7 @@ class AppServerDriver(RunDriver):
                 error = (params.get("turn") or {}).get("error")
                 if error:
                     return ParseOutput(events=[HarnessEvent(type="error", content=error.get("message"),
-                        error_code="native_child_error", error_details=error, raw=obj)], activity=False)
+                        error_code="native_child_error", error_details=error)], activity=False)
                 return ParseOutput()
             turn = params["turn"]
             status = turn.get("status")
@@ -1297,15 +1298,12 @@ class AppServerDriver(RunDriver):
             return ParseOutput(events=[HarnessEvent(type="result", session_id=self._input.thread_id,
                 is_error=status != "completed", error_code=None if status == "completed" else
                     _provider_error_code(turn.get("error") or {}) if status == "failed" else "native_turn_interrupted",
-                content=(turn.get("error") or {}).get("message"), error_details=turn.get("error"), raw=obj)])
+                content=(turn.get("error") or {}).get("message"), error_details=turn.get("error"))])
         if method == "item/agentMessage/delta":
-            return ParseOutput(events=[HarnessEvent(type="text_delta", content=params.get("delta", ""), raw=obj)],
+            return ParseOutput(events=[HarnessEvent(type="text_delta", content=params.get("delta", ""))],
                                activity=bool(params.get("delta")))
         if method in {"item/started", "item/completed"}:
-            output = item_events(method, params)
-            for event in output.events:
-                event.raw = obj
-            return output
+            return item_events(method, params)
         return ParseOutput(activity=method.startswith(("turn/", "item/")))
 
     def _constrain_summary(self, turn: dict[str, Any]) -> None:
