@@ -5397,6 +5397,28 @@ export interface components {
             /** Created At */
             created_at: string;
         };
+        /** NotifierRefreshUnconfirmed */
+        NotifierRefreshUnconfirmed: {
+            /**
+             * Code
+             * @default notifier_refresh_unconfirmed
+             * @constant
+             */
+            code: "notifier_refresh_unconfirmed";
+            /** Notifier Id */
+            notifier_id: string;
+            /**
+             * Committed
+             * @default true
+             * @constant
+             */
+            committed: true;
+            /**
+             * Detail
+             * @default Notifier was saved, but runtime refresh is unconfirmed.
+             */
+            detail: string;
+        };
         /**
          * NotifierType
          * @enum {string}
@@ -12871,6 +12893,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotifierRefreshUnconfirmed"];
                 };
             };
         };

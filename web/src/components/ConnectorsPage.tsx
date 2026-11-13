@@ -1,13 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { IconArrowLeft, IconBolt, IconPlus, IconX } from "@tabler/icons-react";
-import {
-  createCustomConnector,
-  fetchCatalog,
-  getOAuthClient,
-  setOAuthClient,
-} from "../api/connectors";
+import { getOAuthClient } from "../api/connectors";
 import { useSessionStore } from "../stores/sessionStore";
 import { connectorInstallations } from "../lib/connectorInstallations";
+import { connectorCatalog } from "../lib/connectorCatalog";
 import { ConnectorOAuthOperation, type ConnectorOAuthFlow } from "../lib/connectorOAuth";
 import { PageHeader } from "./PageHeader";
 import { Button } from "./ui/button";
@@ -24,6 +20,7 @@ import { Label } from "./ui/label";
 type View = "catalog" | "setup" | "custom";
 type FormInstance = {
   accountGeneration: number;
+  token: string;
   clientIdEdited: boolean;
   saving: boolean;
 };
@@ -46,7 +43,8 @@ export function ConnectorsPage({
   const token = useSessionStore((s) => s.token);
   const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const catalog = useSessionStore((s) => s.connectorCatalog);
-  const setCatalog = useSessionStore((s) => s.setConnectorCatalog);
+  const catalogRead = useSessionStore((s) => s.connectorCatalogRead);
+  const [catalogNotice, setCatalogNotice] = useState<string | null>(null);
   const installations = useSessionStore((s) => s.connectorInstallations);
   const installationRead = useSessionStore((s) => s.connectorRead);
   const [installationError, setInstallationError] = useState<string | null>(null);
@@ -83,17 +81,16 @@ export function ConnectorsPage({
   const browserRedirect = `${window.location.origin}${REDIRECT_PATH}`;
   const setupEntry = catalog.find((c) => c.kind === setupKind);
 
-  const refreshCatalog = () => fetchCatalog(token).then(setCatalog).catch(() => {});
-
   useEffect(() => {
     if (formInstance.current && !currentForm(formInstance.current)) {
       resetDialog();
       setOpen(false);
     }
     if (!token) return;
-    refreshCatalog();
+    void connectorCatalog.refresh();
     void connectorInstallations.refresh();
     setInstallationError(null);
+    setCatalogNotice(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, accountGeneration]);
 
@@ -103,10 +100,11 @@ export function ConnectorsPage({
   }, []);
 
   const currentForm = (instance: FormInstance) => formInstance.current === instance
-    && useSessionStore.getState().accountGeneration === instance.accountGeneration;
+    && useSessionStore.getState().accountGeneration === instance.accountGeneration
+    && useSessionStore.getState().token === instance.token;
 
   const beginForm = (): FormInstance => {
-    const instance = { accountGeneration, clientIdEdited: false, saving: false };
+    const instance = { accountGeneration, token, clientIdEdited: false, saving: false };
     formInstance.current = instance;
     setBusy(false);
     setFormError(null);
@@ -170,8 +168,7 @@ export function ConnectorsPage({
     setFormError(null);
     try {
       await write();
-      await refreshCatalog();
-      if (currentForm(instance)) resetDialog();
+      if (currentForm(instance)) { setCatalogNotice("Connector saved."); resetDialog(); }
     } catch (e) {
       if (currentForm(instance)) setFormError((e as Error).message);
     } finally {
@@ -181,13 +178,13 @@ export function ConnectorsPage({
   };
 
   const saveSetup = () =>
-    saveForm(() => setOAuthClient(token, setupKind, clientId.trim(), clientSecret.trim()));
+    saveForm(() => connectorCatalog.configure(setupKind, clientId.trim(), clientSecret.trim()));
 
   // --- add a custom connector ---------------------------------------------
 
   const saveCustom = () =>
     saveForm(() =>
-      createCustomConnector(token, {
+      connectorCatalog.create({
         kind: custom.kind.trim(),
         display_name: custom.display_name.trim() || custom.kind.trim(),
         authorize_url: custom.authorize_url.trim(),
@@ -204,11 +201,11 @@ export function ConnectorsPage({
     const original = useSessionStore.getState();
     setInstallationError(null);
     try {
-      await connectorInstallations.removeCustomDefinition(kind);
-      if (useSessionStore.getState().accountGeneration !== original.accountGeneration) return;
-      await refreshCatalog();
+      await connectorCatalog.remove(kind);
+      if (useSessionStore.getState().accountGeneration !== original.accountGeneration || useSessionStore.getState().token !== original.token) return;
+      setCatalogNotice("Connector removed.");
     } catch (error) {
-      if (useSessionStore.getState().accountGeneration === original.accountGeneration) {
+      if (useSessionStore.getState().accountGeneration === original.accountGeneration && useSessionStore.getState().token === original.token) {
         setInstallationError(`Could not remove connector definition: ${(error as Error).message}`);
       }
     }
@@ -287,6 +284,11 @@ export function ConnectorsPage({
       />
 
       <div className="page-body">
+        {!open && catalogNotice && <p role="status" className="mb-3 text-sm">{catalogNotice}</p>}
+        {!open && catalogRead.error && <p role="alert" className="mb-3 text-sm text-destructive">
+          Catalog not synchronized: {catalogRead.error}
+          <button className="ml-2 underline" onClick={() => void connectorCatalog.refresh()}>Refresh catalog</button>
+        </p>}
         {!open && installationError && <p role="alert" className="mb-3 text-sm text-destructive">{installationError}</p>}
         {installationRead.error && <p role="alert" className="mb-3 text-sm text-destructive">
           Connections not synchronized: {installationRead.error}
@@ -384,7 +386,10 @@ export function ConnectorsPage({
 
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="connector-catalog">
+          {catalogNotice && <p role="status" className="text-sm">{catalogNotice}</p>}
+          {catalogRead.error && <p role="alert" className="text-sm text-destructive">Catalog not synchronized: {catalogRead.error}</p>}
           {installationError && <p role="alert" className="text-sm text-destructive">{installationError}</p>}
+          <Button size="sm" variant="outline" disabled={catalogRead.loading} onClick={() => void connectorCatalog.refresh()}>Refresh catalog</Button>
           {view === "catalog" && (
             <>
               <DialogHeader>

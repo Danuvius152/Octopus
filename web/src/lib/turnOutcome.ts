@@ -76,37 +76,33 @@ export function normalizeMessage(message: MessageInput): Message {
 }
 
 /** Read-only presentation of the recorded conclusion; native status never reclassifies it. */
-export function presentOutcome(message: Message, transcript: readonly Message[] = []) {
+export function presentOutcome(message: Message) {
   const outcome = normalizeMessage(message).outcome!;
   const labels = { success: "Done", failed: "Failed", interrupted: "Interrupted", unknown: "Ended · outcome not recorded" };
-  const answer = outcome.final_answer, refs = answer?.message_seqs;
-  const context = record(message.tool_input?.attempt_context);
-  const rows = new Map(transcript.map((row) => [row.seq, row]));
-  const saved = typeof message.seq === "number" && typeof answer?.thread_id === "string" && answer.thread_id.length > 0
-    && typeof answer.turn_id === "string" && answer.turn_id.length > 0 && Array.isArray(refs) && refs.length > 0
-    && context.request_id === outcome.request_id && typeof context.attempt_id === "string" && context.attempt_id.length > 0
-    && refs.every((seq, index) => {
-      const row = rows.get(seq), metadata = row?.runtime_metadata, native = metadata?.native;
-      return Number.isSafeInteger(seq) && seq >= 0 && seq < message.seq! && (index === 0 || seq > refs[index - 1])
-          && row?.role === "assistant" && row.type === "text" && typeof row.content === "string"
-          && metadata?.request_id === outcome.request_id && metadata?.attempt_id === context.attempt_id
-          && native?.thread_id === answer.thread_id && native.root_thread_id === answer.thread_id
-          && native.turn_id === answer.turn_id && native.root_turn_id === answer.turn_id
-          && Boolean(native.item_id) && native.phase === "final_answer";
-    }) && !outcome.recording_issues?.native_final_missing;
   const compactLabel = outcome.status === "success" ? outcome.compact?.effect === "not_applied" ? "No compaction needed" : "Context compacted"
     : outcome.status === "interrupted" ? "Compaction interrupted" : outcome.status === "unknown" ? "Compaction result unknown" : "Compaction failed";
   const compactReason = outcome.compact?.reason;
   const compactNote = outcome.compact?.effect === "applied" ? "Native history was compacted. Chat messages are preserved."
     : outcome.compact?.effect === "unknown" ? "Native history changes could not be confirmed. This operation will not be replayed automatically."
     : undefined;
+  // Use the owner's canonical wording for known completed-root gaps so the
+  // same primary cause appears once. An unrelated failure never hides a gap.
+  let recordingNote: string | undefined;
+  if (outcome.recording_integrity === "incomplete") {
+    if (outcome.recording_issues?.native_final_missing) {
+      recordingNote = outcome.native_status === "completed"
+        ? "The model turn completed, but declared final output was not confirmed in the saved transcript."
+        : "A declared final answer is missing from the saved transcript.";
+    } else if (outcome.native_status === "completed") {
+      recordingNote = outcome.recording_issues?.native_collection_incomplete
+        ? "The model turn completed, but required tool results were not confirmed."
+        : "The model turn completed, but required protocol records could not be validated.";
+    } else recordingNote = "Completion records are incomplete.";
+  }
+  const primary = [outcome.message, recordingNote && !outcome.message?.includes(recordingNote) ? recordingNote : undefined]
+    .filter(Boolean).join(" ");
   return { outcome, label: outcome.operation === "compact" ? compactLabel : labels[outcome.status],
-    primary: outcome.operation === "compact" ? [outcome.message,
+    primary: outcome.operation === "compact" ? [primary,
       compactReason && !outcome.message?.includes(compactReason) ? compactReason : undefined,
-      compactNote].filter(Boolean).join(" ") : outcome.message,
-    recoveries: Object.values(outcome.recovery).reduce((sum, count) => sum + count, 0),
-    outputSaved: saved,
-    recordingNote: outcome.recording_integrity === "incomplete"
-      ? outcome.recording_issues?.native_final_missing ? "A declared final answer is missing from the saved transcript."
-        : "Completion records are incomplete; the original gaps remain available below." : undefined };
+      compactNote].filter(Boolean).join(" ") : primary };
 }

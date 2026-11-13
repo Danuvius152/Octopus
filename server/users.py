@@ -427,7 +427,11 @@ class UserManager:
         await self.db.touch_token(token_digest(token), at=_now())
 
     async def revoke_token(self, token: str) -> None:
-        await self.db.revoke_token(token_digest(token), at=_now())
+        await self.revoke_token_hash(token_digest(token))
+
+    async def revoke_token_hash(self, token_hash: str) -> None:
+        """Revoke the credential captured by account authentication."""
+        await self.db.revoke_token(token_hash, at=_now())
 
     # -- invites ------------------------------------------------------------
 

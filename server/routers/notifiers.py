@@ -7,12 +7,14 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 
 from ..auth import verify_token
 from ..deps import ScopeUser
 from ..models import (
     CreateNotifierRequest,
     NotifierInfo,
+    NotifierRefreshUnconfirmed,
     UpdateNotifierRequest,
 )
 from ..notifiers import notifier_manager
@@ -85,7 +87,10 @@ async def create_notifier(
     )
 
 
-@router.patch("/{notifier_id}", response_model=NotifierInfo)
+@router.patch(
+    "/{notifier_id}", response_model=NotifierInfo,
+    responses={503: {"model": NotifierRefreshUnconfirmed}},
+)
 async def update_notifier(
     notifier_id: str,
     req: UpdateNotifierRequest,
@@ -93,10 +98,6 @@ async def update_notifier(
     _: str = Depends(verify_token),
 ):
     db = _require_db()
-    rows = await db.load_notifiers(user_id)
-    existing = next((r for r in rows if r["id"] == notifier_id), None)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="notifier not found")
     updates: dict = {}
     if req.label is not None:
         updates["label"] = req.label
@@ -104,12 +105,18 @@ async def update_notifier(
         updates["config"] = req.config
     if req.enabled is not None:
         updates["enabled"] = req.enabled
+    updated = await db.update_notifier(notifier_id, user_id=user_id, **updates)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="notifier not found")
     if updates:
-        await db.update_notifier(notifier_id, **updates)
-        await notifier_manager.load()
-    rows = await db.load_notifiers(user_id)
-    updated = next((r for r in rows if r["id"] == notifier_id), None)
-    assert updated is not None
+        try:
+            await notifier_manager.load()
+        except Exception:
+            # Storage fail-stop exits through the shared boundary. A normal
+            # reload error can report this confirmed write while health permits.
+            db.health.require_healthy()
+            logger.exception("Notifier %s committed but runtime refresh failed", notifier_id)
+            return JSONResponse(status_code=503, content=NotifierRefreshUnconfirmed(notifier_id=notifier_id).model_dump())
     return _row_to_info(updated)
 
 

@@ -174,7 +174,7 @@ describe("archive replacement settings", () => {
   ])("uses the server's settings, including explicit inheritance: %j", (settings) => {
     handleWsMessage({ ...event, ...settings });
     const store = useSessionStore.getState();
-    expect(store.activeSessionId).toBe(event.new_session_id);
+    expect(store.activeSessionId).toBe(old.id);
     expect(store.sessions).toEqual([expect.objectContaining({ id: event.new_session_id, ...settings })]);
     expect(store.archivedSessions).toEqual([expect.objectContaining({ ...old, archived: true })]);
   });
@@ -217,13 +217,18 @@ it("applies the nested server dispatch frame for an idle Stop and a remote Resum
   expect(useSessionStore.getState().dispatchStates["idle-stop"]).toEqual(resumed);
 });
 
-it("loads the replacement session's actual queue after an archive broadcast", async () => {
-  useSessionStore.setState({ token: "archive-test", activeSessionId: "archived-old", dispatchStates: {}, dispatchUnavailable: {},
+it("preserves the replacement session's actual queue after an archive broadcast", async () => {
+  useSessionStore.getState().setToken("archive-test");
+  useSessionStore.setState({ activeSessionId: "archived-old", dispatchStates: {}, dispatchUnavailable: {},
     sessions: [{ id: "archived-old", name: "Archived" } as SessionInfo] });
   const dispatch = { generation: "archive-service", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] };
-  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "archive-replacement", messages: [], dispatch_state: dispatch, active_attempt: null })));
+  useSessionStore.setState({ dispatchStates: { "archive-replacement": dispatch } });
+  const fetcher = vi.fn();
+  vi.stubGlobal("fetch", fetcher);
   handleWsMessage({ type: "session_archived", old_session_id: "archived-old", new_session_id: "archive-replacement", name: "Archived" });
-  await vi.waitFor(() => expect(useSessionStore.getState().dispatchStates["archive-replacement"]).toEqual(dispatch));
+  expect(useSessionStore.getState().dispatchStates["archive-replacement"]).toEqual(dispatch);
+  expect(useSessionStore.getState().activeSessionId).toBe("archived-old");
+  expect(fetcher).not.toHaveBeenCalled();
   vi.unstubAllGlobals();
 });
 

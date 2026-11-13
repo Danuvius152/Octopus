@@ -22,6 +22,17 @@ cookie. `CurrentUser` requires an active account bearer and returns the account;
 `ScopeUser` returns its ID and also accepts an authorized signed MCP scope.
 Malformed/revoked tokens and disabled accounts remain refused.
 
+Account authentication selects the bearer once, in header → query → App-cookie
+order, and binds the resolved account to that bearer's digest. A selected invalid
+bearer fails authentication without trying a lower-priority source. `CurrentUser`
+projects the account from this same result; logout and self-service password
+change consume its credential digest instead of re-reading the header. Logout
+returns 204 only after revocation commits, leaving other device tokens valid.
+Password change preserves this actual current credential while revoking the
+account's other tokens. App and MCP capabilities cannot authenticate these
+account-only operations. Server acceptance of an explicitly supplied App cookie
+does not change its browser Path or make a browser send an `/apps` cookie to `/api`.
+
 This request-dependency override does not replace `verify_token` /
 `resolve_principal` or runtime-owner authorization: those retain the account
 service bound at startup. A runtime scope still needs its signature, live
@@ -150,6 +161,28 @@ The existing memory-mutation owner keeps database and directory work ordered;
 this is not a database/filesystem atomic transaction. `tests/test_tenant_isolation.py`
 checks both the real HTTP and business entries, retained memory and event audience;
 Agent API and memory regressions cover legitimate deletion and existing guards.
+
+Notifier PATCH checks target ownership inside one short database transaction
+using the admitted account scope. A nonempty update captures its own returned row under the same
+account-scoped UPDATE and returns it only after COMMIT succeeds. A concurrent
+later PATCH or DELETE does not replace that receipt with another row or a
+post-commit existence assertion. Missing and foreign targets both return 404.
+Empty or all-null updates perform only the scoped existence read and do not
+reload the runtime manager. Internal calls with `user_id=None` retain their
+existing unscoped meaning.
+
+After a nonempty commit, the route separately reloads the notifier manager;
+neither reload I/O nor HTTP response handling extends the write transaction.
+A normal reload exception returns HTTP 503 with
+`code="notifier_refresh_unconfirmed"`, the original `notifier_id`,
+`committed=true` and a detail explaining that saving succeeded but runtime
+refresh is unconfirmed. It logs the original exception and does not undo or
+repeat the write. COMMIT or reload storage-authority failures retain the shared
+database fail-stop boundary rather than becoming this ordinary 503. A commit
+receipt, runtime refresh and external notification delivery remain separate facts.
+Real HTTP/SQLite regressions in `tests/test_notifier_routes.py` cover receipt
+ordering and account scope; `tests/test_notifier_storage_failure.py` injects
+SQLite failures at COMMIT and at the subsequent reload read in isolated processes.
 
 Known limits remain explicit.
 `schedules_changed` is a global empty invalidation notification; account-scoped

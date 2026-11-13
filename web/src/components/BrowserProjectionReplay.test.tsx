@@ -3,7 +3,6 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import fixtures from "../lib/browserProjectionReplay.json";
 import { decodeWsEvent } from "../lib/wsEvents";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { presentOutcome } from "../lib/turnOutcome";
 import { applyTranscript } from "../lib/transcript";
 import { useSessionStore } from "../stores/sessionStore";
 import { MessageBubble } from "./MessageBubble";
@@ -26,10 +25,13 @@ it.each(["recovery", "async_question", "missing_final"])("preserves %s semantics
   if (kind === "recovery") expect(view.getByText("Recovering · attempt 1/2")).toBeVisible();
   else if (kind === "async_question") expect(view.getByRole("region", { name: "Question for you" })).toBeVisible();
   else {
-    // This same original final row would prove saved output without the flag.
-    expect(presentOutcome({ ...message, outcome: { ...message.outcome!, recording_issues: {} } }, messages).outputSaved).toBe(true);
-    fireEvent.click(view.getByText("Completion details"));
-    expect(view.getByText("A declared final answer is missing from the saved transcript.")).toBeVisible();
+    expect(message.outcome).toMatchObject({ final_answer: {
+      thread_id: "native-root", turn_id: "turn", message_seqs: [0],
+    }, recording_issues: { native_final_missing: 1 } });
+    expect(messages[0]).toMatchObject({ seq: 0, role: "assistant", content: "Saved final candidate",
+      runtime_metadata: { request_id: "request", attempt_id: "attempt", native: { phase: "final_answer" } } });
+    expect(view.getByText(/A declared final answer is missing from the saved transcript\./)).toBeVisible();
+    expect(view.queryByText("Completion details")).not.toBeInTheDocument();
     expect(view.queryByText("Model output was saved.")).not.toBeInTheDocument();
   }
 });

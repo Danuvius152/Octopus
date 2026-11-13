@@ -20,7 +20,7 @@ from ..auth import verify_token
 from ..config import settings
 from ..deps import (
     AdminUser,
-    CurrentUser,
+    AuthenticatedAccount,
     ScopeUser,
     UserMgr,
 )
@@ -39,7 +39,7 @@ from ..models import (
     UserInfo,
     WorkspaceInfo,
 )
-from ..users import UserError, token_digest
+from ..users import UserError
 from ..workspace import normalise_root, paths_for
 
 logger = logging.getLogger(__name__)
@@ -165,16 +165,14 @@ async def register(req: RegisterRequest, users: UserMgr) -> LoginResponse:
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(request: Request, users: UserMgr, _user: CurrentUser) -> None:
+async def logout(users: UserMgr, authentication: AuthenticatedAccount) -> None:
     """Revoke the bearer this request came with — this device only."""
-    auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "):
-        await users.revoke_token(auth[7:].strip())
+    await users.revoke_token_hash(authentication.token_hash)
 
 
 @router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
 async def change_password(
-    req: PasswordChangeRequest, request: Request, users: UserMgr, user: CurrentUser
+    req: PasswordChangeRequest, users: UserMgr, authentication: AuthenticatedAccount,
 ) -> None:
     """Change your own password, which signs your other devices out.
 
@@ -183,16 +181,16 @@ async def change_password(
     to take the account over.
     """
     try:
-        verified_user = await users.authenticate(user["username"], req.current_password)
+        verified_user = await users.authenticate(authentication.user["username"], req.current_password)
     except UserError as e:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Current password is wrong"
         ) from e
 
-    auth = request.headers.get("authorization") or ""
-    keep = token_digest(auth[7:].strip()) if auth.lower().startswith("bearer ") else None
     try:
-        await users.change_own_password(verified_user, req.new_password, keep_token_hash=keep)
+        await users.change_own_password(
+            verified_user, req.new_password, keep_token_hash=authentication.token_hash,
+        )
     except UserError as e:
         raise HTTPException(e.status_code, e.message) from e
 

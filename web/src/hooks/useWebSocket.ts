@@ -14,7 +14,7 @@ import { modelCredentials } from "../lib/modelCredentials";
 import { applications, type ListEventSource } from "../lib/applicationList";
 import { refreshWikiJobs } from "../lib/wikiJobs";
 import type { WikiMessageMode } from "../lib/wikiComposer";
-import { useSessionStore } from "../stores/sessionStore";
+import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { readAttemptIdentity, sameAttempt } from "../lib/toolIdentity";
 
 const WS_PROTOCOL = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -527,9 +527,8 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
     }
 
     case "session_archived": {
-      // Another client (or this tab's archive POST) hid the old
-      // session and replaced it with new_session_id. Update the
-      // sessions list + swap active if this tab was on the old one.
+      // Publish archive facts only. The initiating HTTP interaction owns
+      // navigation; another tab retains its current foreground and history.
       const oldId = data.old_session_id;
       // null = the session was hidden with no replacement (a scheduler-origin
       // session auto-archiving on idle, or an agent being archived).
@@ -541,12 +540,10 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         service_tier: data.service_tier ?? null,
       };
       const store = getState();
-      const prev = store.sessions.find((s) => s.id === oldId);
-      const next = store.sessions.filter((s) => s.id !== oldId).map((s) =>
-        s.id === newId ? { ...s, ...settings } : s
-      );
-      if (newId && !next.some((s) => s.id === newId)) {
-        next.push({
+      const rows = [...store.sessions, ...store.archivedSessions];
+      const prev = rows.find((s) => s.id === oldId);
+      const known = rows.find((s) => s.id === newId);
+      const replacement: SessionInfo | undefined = !newId ? undefined : known ? { ...known, ...settings } : {
           id: newId,
           name,
           working_dir: prev?.working_dir ?? "",
@@ -569,24 +566,8 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
           compact_unavailable_reason: "No resumable native history is available to compact.",
           fork_is_full_copy: false,
           archived: false,
-        });
-      }
-      sessionList.archive(oldId);
-      if (newId) {
-        const replacement = next.find((row) => row.id === newId);
-        if (replacement) sessionList.row(replacement);
-      }
-      // Keep the archived session resolvable (so e.g. a fork's now-archived
-      // parent renders its name in the fork banner instead of "(deleted
-      // session)", and its "open parent" link works).
-      if (store.activeSessionId === oldId) {
-        store.setActiveSessionId(newId);
-        if (newId) {
-          store.setMessages(newId, []);
-          store.setPendingQuestions(newId, []);
-          void loadSessionSnapshots(newId).catch(() => {});
-        }
-      }
+        };
+      sessionList.archive(oldId, undefined, replacement);
       break;
     }
     case "session_forked": {

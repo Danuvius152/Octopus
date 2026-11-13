@@ -302,6 +302,8 @@ interface SessionStore {
 
   sessions: SessionInfo[];
   sessionRead: ListReadState;
+  // Explicit, account-local archive relationships; SessionList owns updates.
+  sessionSuccessors: Record<string, string>;
   setSessions: (s: SessionInfo[]) => void;
   updateSessionStatus: (id: string, status: SessionStatus) => void;
 
@@ -356,7 +358,7 @@ interface SessionStore {
   // Connector catalog and installations (connectors.md). AgentFormPage owns
   // its enablement draft, backed by the agent connector routes.
   connectorCatalog: ConnectorCatalogEntry[];
-  setConnectorCatalog: (c: ConnectorCatalogEntry[]) => void;
+  connectorCatalogRead: ListReadState;
   connectorInstallations: ConnectorInstallationInfo[];
   connectorRead: ListReadState;
 
@@ -800,6 +802,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   sessions: [],
   sessionRead: unreadList(),
+  sessionSuccessors: {},
   setSessions: (sessions) => set({ sessions }),
   archivedSessions: [],
   setArchivedSessions: (archivedSessions) => set({ archivedSessions }),
@@ -1046,7 +1049,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   credentialRead: unreadList(),
 
   connectorCatalog: [],
-  setConnectorCatalog: (connectorCatalog) => set({ connectorCatalog }),
+  connectorCatalogRead: unreadList(),
   connectorInstallations: [],
   connectorRead: unreadList(),
 

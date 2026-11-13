@@ -16,12 +16,14 @@ from httpx import ASGITransport, AsyncClient
 
 from server import deps
 from server.agent_manager import AgentManager
+from server.applications import app_scope_token
 from server.database import Database
 from server.main import app
+from server.mcp_identity import mint
 from server.routers import agents as agents_router
 from server.routers import auth as auth_router
 from server.session_manager import session_manager
-from server.users import UserManager
+from server.users import UserManager, token_digest
 
 
 @pytest.fixture
@@ -55,6 +57,15 @@ async def client(tmp_path, monkeypatch):
 
 def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _credential(source: str, token: str) -> dict:
+    # Explicit server-side cookie admission, independent of browser cookie Path.
+    return {
+        "query": {"params": {"token": token}},
+        "header": {"headers": _bearer(token)},
+        "cookie": {"headers": {"Cookie": f"octopus_app_token={token}"}},
+    }[source]
 
 
 async def test_concurrent_password_changes_accept_only_one_old_password_proof(client):
@@ -268,23 +279,61 @@ async def test_login_rechecks_password_proof_when_committing_token(client, monke
 
 
 @pytest.mark.asyncio
-async def test_logout_revokes_only_this_device(client):
+@pytest.mark.parametrize("source", ["query", "header", "cookie"])
+async def test_logout_revokes_only_this_device(client, source):
     c, users, _db = client
     user = await users.create_user(username="archer", password="password1")
     here = await users.issue_token(user["id"])
     elsewhere = await users.issue_token(user["id"])
 
-    assert (
-        await c.post("/api/auth/logout", headers=_bearer(here))
-    ).status_code == 204
+    assert (await c.post("/api/auth/logout", **_credential(source, here))).status_code == 204
     assert (await c.get("/api/auth/identity", headers=_bearer(here))).status_code == 401
     assert (
         await c.get("/api/auth/identity", headers=_bearer(elsewhere))
     ).status_code == 200
 
 
+@pytest.mark.parametrize("source", ["header", "query", "cookie"])
+async def test_logout_waits_for_revocation_commit_before_acknowledging(client, monkeypatch, source):
+    c, users, db = client
+    user = await users.create_user(username="archer", password="password1")
+    token = await users.issue_token(user["id"])
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute, commit = db.conn.execute, db.conn.commit
+    revoking = False
+
+    async def observed_execute(sql, parameters=()):
+        nonlocal revoking
+        cursor = await execute(sql, parameters)
+        if "UPDATE auth_tokens SET revoked_at" in sql:
+            revoking = True
+        return cursor
+
+    async def gated_commit():
+        if revoking:
+            entered.set()
+            await release.wait()
+        await commit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db.conn, "execute", observed_execute)
+        patch.setattr(db.conn, "commit", gated_commit)
+        pending = asyncio.create_task(c.post("/api/auth/logout", **_credential(source, token)))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            assert not pending.done()
+            release.set()
+            response = await pending
+        finally:
+            release.set()
+            await asyncio.gather(pending, return_exceptions=True)
+    assert response.status_code == 204
+    assert (await c.get("/api/auth/identity", headers=_bearer(token))).status_code == 401
+
+
 @pytest.mark.asyncio
-async def test_changing_a_password_needs_the_current_one(client):
+@pytest.mark.parametrize("source", ["query", "header", "cookie"])
+async def test_changing_a_password_needs_the_current_one(client, source):
     """An authenticated request is not enough: a bearer left on a shared
     machine must not be able to take the account over."""
     c, users, _db = client
@@ -294,15 +343,16 @@ async def test_changing_a_password_needs_the_current_one(client):
     wrong = await c.post(
         "/api/auth/password",
         json={"current_password": "nope", "new_password": "a-new-password"},
-        headers=_bearer(token),
+        **_credential(source, token),
     )
     assert wrong.status_code == 403
+    assert (await c.get("/api/auth/identity", headers=_bearer(token))).status_code == 200
 
     elsewhere = await users.issue_token(user["id"])
     ok = await c.post(
         "/api/auth/password",
         json={"current_password": "password1", "new_password": "a-new-password"},
-        headers=_bearer(token),
+        **_credential(source, token),
     )
     assert ok.status_code == 204
     # The tab that changed it stays in; the password really changed.
@@ -316,6 +366,75 @@ async def test_changing_a_password_needs_the_current_one(client):
             "/api/auth/login", json={"username": "archer", "password": "a-new-password"}
         )
     ).status_code == 200
+
+
+@pytest.mark.parametrize("operation", ["logout", "password"])
+@pytest.mark.parametrize("with_header", [True, False])
+async def test_credential_changes_use_the_highest_priority_presented_source(client, operation, with_header):
+    c, users, _db = client
+    user = await users.create_user(username="archer", password="password1")
+    header, query, cookie, elsewhere = [await users.issue_token(user["id"]) for _ in range(4)]
+    headers = {"Cookie": f"octopus_app_token={cookie}"}
+    if with_header:
+        headers.update(_bearer(header))
+    selected = header if with_header else query
+    payload = {"current_password": "password1", "new_password": "changed-password"}
+    response = await c.post(
+        f"/api/auth/{operation}", headers=headers, params={"token": query},
+        json=payload if operation == "password" else None,
+    )
+    assert response.status_code == 204 and response.content == b""
+    for token in (header, query, cookie, elsewhere):
+        remains_valid = token != selected if operation == "logout" else token == selected
+        identity = await c.get("/api/auth/identity", headers=_bearer(token))
+        assert identity.status_code == (200 if remains_valid else 401)
+
+
+@pytest.mark.parametrize("operation", ["logout", "password"])
+@pytest.mark.parametrize("source", ["header", "query", "cookie"])
+@pytest.mark.parametrize("refusal", ["invalid", "expired", "revoked", "disabled", "mcp", "app"])
+async def test_credential_changes_refuse_bad_selected_credentials_without_fallback(client, operation, source, refusal):
+    c, users, db = client
+    owner = await users.create_user(username="owner", password="password1")
+    peer = await users.create_user(username="peer", password="password1")
+    selected = await users.issue_token(owner["id"])
+    valid = await users.issue_token(peer["id"])
+    if refusal == "invalid":
+        selected = "invalid-account-token"
+    elif refusal == "expired":
+        async with db.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE auth_tokens SET expires_at = ? WHERE token_hash = ?",
+                ("2000-01-01T00:00:00+00:00", token_digest(selected)),
+            )
+    elif refusal == "revoked":
+        await users.revoke_token(selected)
+    elif refusal == "disabled":
+        await users.set_disabled(owner["id"], True)
+    elif refusal == "mcp":
+        selected = mint("account-only-refusal", user_id=owner["id"])
+        # This scope is accepted by the runtime-aware identity route.
+        assert (await c.get("/api/auth/identity", headers=_bearer(selected))).status_code == 200
+    else:
+        selected = app_scope_token("owned-app")
+
+    headers = {"Cookie": f"octopus_app_token={selected if source == 'cookie' else valid}"}
+    params = {}
+    if source == "header":
+        headers.update(_bearer(selected))
+        params["token"] = valid
+    elif source == "query":
+        params["token"] = selected
+    response = await c.post(
+        f"/api/auth/{operation}", headers=headers, params=params,
+        json={"current_password": "password1", "new_password": "changed-password"},
+    )
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid token"}
+    assert (await c.get("/api/auth/identity", headers=_bearer(valid))).status_code == 200
+    assert (await c.post("/api/auth/login", json={
+        "username": "peer", "password": "password1",
+    })).status_code == 200
 
 
 # ---------------------------------------------------------------------------

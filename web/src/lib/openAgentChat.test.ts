@@ -27,8 +27,16 @@ it("does not resurrect an unknown session archived before its creation receipt a
   expect(useSessionStore.getState().activeSessionId).not.toBe(created.id);
   expect(reads).toHaveLength(1);
   reads[0](Response.json([])); await flush();
+  // The sparse broadcast starts an inclusive read before POST completes.
+  // Its snapshot can predate that receipt, so creation waits for the owner's
+  // coalesced confirmation instead of trusting the first missing row.
+  expect(reads).toHaveLength(2);
+  const archived = { ...created, archived: true };
+  reads[1](Response.json([archived]));
   await creating;
   expect(useSessionStore.getState().sessions).toEqual([]);
+  expect(useSessionStore.getState().archivedSessions).toEqual([archived]);
+  expect(useSessionStore.getState().activeSessionId).not.toBe(created.id);
 });
 
 it("confirms a successful create received after reconnect already read the old list", async () => {

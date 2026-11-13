@@ -1,4 +1,4 @@
-import { deleteCustomConnector, deleteInstallation, fetchInstallations } from "../api/connectors";
+import { deleteInstallation, fetchInstallations } from "../api/connectors";
 import type { ConnectorInstallationInfo } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
 import { unreadList, type ListReadState, type RefreshResult } from "./listState";
@@ -82,9 +82,15 @@ class ConnectorInstallations {
     await deleteInstallation(account.token, id);
     this.removed(account, (row) => row.id === id);
   }
-  async removeCustomDefinition(kind: string): Promise<void> {
-    const account = useSessionStore.getState();
-    await deleteCustomConnector(account.token, kind);
+  definitionRemoved(kind: string, account: Account, replaced = false): void {
+    if (replaced) {
+      // A recreated definition can already own new installations. Confirm
+      // current facts without applying the old definition's cascade locally.
+      if (!this.sameAccount(account)) return;
+      this.retire({ state: "pending" });
+      void this.refresh();
+      return;
+    }
     this.removed(account, (row) => row.kind === kind);
   }
   private removed(account: Account, matches: (row: ConnectorInstallationInfo) => boolean): void {

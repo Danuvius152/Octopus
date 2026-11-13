@@ -31,7 +31,7 @@ export class SessionList {
   private archivedRequested = false;
   private closed = false;
   // Only outstanding reads are retained, including targets not yet in a list.
-  private observations = new Map<SessionObservation, string>();
+  private observations = new Map<SessionObservation, { id: string; archiveReceipt: boolean }>();
   private deletionListeners = new Set<(id: string, wasActive: boolean) => void>();
   // Provisional identities only until the inclusive confirmation succeeds.
   // They never filter incoming rows or claim deletion by themselves.
@@ -50,7 +50,7 @@ export class SessionList {
       if (account) {
         this.unconfirmedMissing.clear();
         this.socket = null; this.connection++; this.engaged = false; this.archivedRequested = false;
-        useSessionStore.setState({ sessions: [], archivedSessions: [], sessionRead: unreadList() });
+        useSessionStore.setState({ sessions: [], archivedSessions: [], sessionSuccessors: {}, sessionRead: unreadList() });
       } else if (this.engaged) this.invalidate();
     });
   }
@@ -78,18 +78,20 @@ export class SessionList {
     const now = useSessionStore.getState();
     return { scope: this.scope(start), change: start.sessions === now.sessions && start.archivedSessions === now.archivedSessions ? this.change : -1 };
   }
-  observe(id: string, start = useSessionStore.getState()) {
+  observe(id: string, start = useSessionStore.getState(), purpose: "detail" | "archive" = "detail") {
     const observation = this.capture(start);
-    this.observations.set(observation, id);
+    this.observations.set(observation, { id, archiveReceipt: purpose === "archive" });
     return { observation, finish: () => { this.observations.delete(observation); } };
   }
   onDeleted(listener: (id: string, wasActive: boolean) => void): () => void {
     this.deletionListeners.add(listener);
     return () => { this.deletionListeners.delete(listener); };
   }
-  private invalidateTarget(id: string): void {
+  private invalidateTarget(id: string, retainArchiveReceipts = false): void {
     for (const [observation, target] of this.observations) {
-      if (target === id) { observation.invalidated = true; this.observations.delete(observation); }
+      if (target.id === id && !(retainArchiveReceipts && target.archiveReceipt)) {
+        observation.invalidated = true; this.observations.delete(observation);
+      }
     }
   }
   accepts(source?: ListEventSource): boolean {
@@ -152,6 +154,7 @@ export class SessionList {
       } else {
         const store = useSessionStore.getState();
         const observed = new Set([...store.sessions, ...store.archivedSessions].map((row) => row.id));
+        for (const [from, to] of Object.entries(store.sessionSuccessors)) { observed.add(from); observed.add(to); }
         if (store.activeSessionId) observed.add(store.activeSessionId);
         for (const id of this.unconfirmedMissing) observed.add(id);
         const absent = [...observed].filter((id) => !rows.some((row) => row.id === id));
@@ -187,15 +190,32 @@ export class SessionList {
     const message = error instanceof Error ? error.message : "Could not load sessions";
     this.retire({ state: "failed", message }); this.dirty = false; this.state({ error: message });
   }
-  private commit(sessions: SessionInfo[], archivedSessions: SessionInfo[]): void {
+  private commit(sessions: SessionInfo[], archivedSessions: SessionInfo[], links = useSessionStore.getState().sessionSuccessors): void {
     const before = useSessionStore.getState();
     const nextRows = new Map([...sessions, ...archivedSessions].map((row) => [row.id, row]));
+    // A sparse event can precede the original row. Absence in a partial list
+    // is not deletion; an inclusive confirmation retires missing identities.
+    const sessionSuccessors = Object.fromEntries(Object.entries(links).filter(([from, to]) =>
+      from !== to && (!nextRows.has(from) || nextRows.get(from)?.archived)));
+    for (const [from, to] of Object.entries(before.sessionSuccessors)) {
+      if (sessionSuccessors[from] !== to) this.invalidateTarget(from);
+    }
     for (const row of [...before.sessions, ...before.archivedSessions]) {
       const next = nextRows.get(row.id);
-      if (!next || Boolean(next.archived) !== Boolean(row.archived)) this.invalidateTarget(row.id);
+      if (!next || Boolean(next.archived) !== Boolean(row.archived)) this.invalidateTarget(row.id, !next || !!next.archived);
+    }
+    // Missing live-list rows await inclusive confirmation. An archive receipt
+    // survives that gap, but a source returning live is restoration evidence;
+    // confirmed absence is retired by remove(), never by partial omission.
+    for (const id of this.unconfirmedMissing) {
+      const next = nextRows.get(id);
+      if (next && !next.archived) {
+        this.unconfirmedMissing.delete(id);
+        this.invalidateTarget(id);
+      }
     }
     this.change++;
-    useSessionStore.setState({ sessions, archivedSessions });
+    useSessionStore.setState({ sessions, archivedSessions, sessionSuccessors });
   }
   private canApply(observation?: SessionObservation, generation?: string | null): boolean {
     if (!observation || this.current(observation, generation) && observation.change === this.change) return !this.closed;
@@ -226,7 +246,16 @@ export class SessionList {
     return false;
   }
   async created(info: SessionInfo, observation: SessionObservation, archivedId?: string): Promise<boolean> {
-    if (!this.adoptCreated(info, observation, archivedId)) return this.confirmLive(info.id, observation, !!archivedId);
+    const adopted = this.adoptCreated(info, observation, archivedId);
+    const accepted = adopted || await this.confirmLive(info.id, observation, !!archivedId);
+    if (!accepted || !this.current(observation)) return false;
+    if (archivedId) {
+      const store = useSessionStore.getState();
+      if (!adopted && !store.archivedSessions.some((row) => row.id === archivedId)) return false;
+      if (store.sessionSuccessors[archivedId] !== info.id) {
+        this.commit(store.sessions, store.archivedSessions, { ...store.sessionSuccessors, [archivedId]: info.id });
+      }
+    }
     if (archivedId && !useSessionStore.getState().archivedSessions.some((row) => row.id === archivedId)) void this.refresh(true);
     return this.current(observation);
   }
@@ -236,7 +265,7 @@ export class SessionList {
     // A preceding event/read can already confirm this new live identity.
     // Navigation may follow that fact without copying the receipt's old fields.
     if (store.sessions.some((row) => row.id === info.id) &&
-        (!archivedId || !store.sessions.some((row) => row.id === archivedId))) return true;
+        (!archivedId || store.archivedSessions.some((row) => row.id === archivedId))) return true;
     if (!this.canConfirm(observation, !!archivedId) || store.archivedSessions.some((row) => row.id === info.id)) return false;
     if (archivedId) {
       const old = store.sessions.find((row) => row.id === archivedId);
@@ -277,14 +306,43 @@ export class SessionList {
       store.archivedSessions.map((row) => row.id === id ? { ...row, ...fields } : row));
     return true;
   }
-  archive(id: string, observation?: SessionObservation, info?: SessionInfo): boolean {
+  archive(id: string, observation?: SessionObservation, successor?: SessionInfo): boolean {
     if (!this.canConfirm(observation)) return false;
-    this.invalidateTarget(id);
     const store = useSessionStore.getState();
-    const old = info ?? store.sessions.find((row) => row.id === id);
-    this.commit(store.sessions.filter((row) => row.id !== id), old ?
-      [...store.archivedSessions.filter((row) => row.id !== id), { ...old, archived: true }] : store.archivedSessions);
+    if (!store.archivedSessions.some((row) => row.id === id)) this.invalidateTarget(id, true);
+    const old = [...store.sessions, ...store.archivedSessions].find((row) => row.id === id);
+    const live = store.sessions.filter((row) => row.id !== id && !(successor?.archived && row.id === successor.id))
+      .map((row) => row.id === successor?.id ? successor : row);
+    const archived = store.archivedSessions.filter((row) => successor?.archived || row.id !== successor?.id)
+      .map((row) => row.id === id ? { ...row, archived: true } : row.id === successor?.id ? successor : row);
+    if (old && !archived.some((row) => row.id === id)) archived.push({ ...old, archived: true });
+    if (successor && ![...live, ...archived].some((row) => row.id === successor.id)) {
+      (successor.archived ? archived : live).push(successor);
+    }
+    this.commit(live, archived, successor ? { ...store.sessionSuccessors, [id]: successor.id } : undefined);
+    if (!old) void this.refresh(true);
     return true;
+  }
+  async confirmSuccessor(id: string, observation: SessionObservation): Promise<SessionInfo | null> {
+    const target = useSessionStore.getState().sessionSuccessors[id];
+    if (!target) return null;
+    const successor = this.observe(target);
+    const linked = () => this.current(observation) && this.current(successor.observation) &&
+      useSessionStore.getState().sessionSuccessors[id] === target &&
+      useSessionStore.getState().archivedSessions.some((row) => row.id === id);
+    try {
+      while (linked()) {
+        const result = await this.refresh(true);
+        if (!linked()) return null;
+        if (result.state === "pending" || result.state === "applied" && useSessionStore.getState().sessionRead.stale) continue;
+        if (result.state !== "applied") return null;
+        const store = useSessionStore.getState();
+        return [...store.sessions, ...store.archivedSessions].find((row) => row.id === target) ?? null;
+      }
+      return null;
+    } finally {
+      successor.finish();
+    }
   }
   remove(id: string, observation?: SessionObservation): boolean {
     if (!this.canConfirm(observation)) return false;
@@ -292,7 +350,8 @@ export class SessionList {
     this.unconfirmedMissing.delete(id);
     const store = useSessionStore.getState();
     const wasActive = store.activeSessionId === id;
-    this.commit(store.sessions.filter((row) => row.id !== id), store.archivedSessions.filter((row) => row.id !== id));
+    this.commit(store.sessions.filter((row) => row.id !== id), store.archivedSessions.filter((row) => row.id !== id),
+      Object.fromEntries(Object.entries(store.sessionSuccessors).filter(([from, to]) => from !== id && to !== id)));
     useSessionStore.getState().forgetSession(id);
     for (const listener of this.deletionListeners) listener(id, wasActive);
     return true;

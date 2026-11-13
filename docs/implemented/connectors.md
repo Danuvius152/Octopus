@@ -198,14 +198,26 @@ failure remains separate from the login result.
 ## Browser installation observations
 
 The management page, sidebar and completed OAuth flows share the finite
-`connectorInstallations` business entry. Confirmed disconnects and custom
-definition deletion remove the affected current-account installations and retire
-overlapping reads before a follow-up GET. Zustand remains the single displayed
-list, including the sidebar count and Agent settings' installation choices.
-Read failure retains known rows and reports a synchronization error; it does not
-reverse an already confirmed connection or deletion. Catalog refresh stays with
-the page. Full admission, account, timeout and view-lifetime rules belong to the
-[frontend installation contract](frontend-list-reconciliation.md#connector-安装列表).
+`connectorInstallations` business entry. Confirmed disconnects remove their
+current-account targets and retire overlapping reads before a follow-up GET.
+Zustand remains the single displayed installation list, including the sidebar
+count and Agent settings' installation choices. Read failure retains known rows
+and reports a synchronization error; it does not reverse a confirmed operation.
+
+The separate `connectorCatalog` entry owns definition reads, creation,
+configuration and deletion. It publishes the single catalog array and passes
+confirmed deletion effects to the installation entry. The catalog distinguishes
+an old deletion superseded by an observed same-slug creation from a new deletion
+of that replacement. The superseded receipt only requests current catalog and
+installation confirmation, preserving the new definition and installations;
+independent deletion targets still apply their own results.
+
+Saving and subsequent synchronization have separate results. The page retains
+successful writes when confirmation fails and offers a read-only refresh; form
+lifetime does not decide shared-list publication. Full admission, account,
+timeout and view-lifetime rules belong to the
+[frontend directory](frontend-list-reconciliation.md#connector-目录观察) and
+[installation contracts](frontend-list-reconciliation.md#connector-安装列表).
 
 ## Refresh ownership and shutdown
 

@@ -32,7 +32,7 @@ from .mcp_identity import verify as verify_mcp_scope
 from .question_resolution import AnswerSource
 from .sessions import SessionManager
 from .sessions import session_manager as _singleton
-from .users import UserManager
+from .users import UserManager, token_digest
 
 
 def get_session_manager() -> SessionManager:
@@ -117,22 +117,39 @@ def _presented(
     return request.cookies.get("octopus_app_token") or ""
 
 
-async def current_user(
+@dataclass(frozen=True)
+class AccountAuthentication:
+    """The account and bearer digest established by one authentication."""
+
+    user: dict[str, Any]
+    token_hash: str
+
+
+async def authenticated_account(
     request: Request,
     manager: UserMgr,
     creds: _BearerCreds,
     token: _QueryToken = None,
-) -> dict[str, Any]:
-    """The account this request belongs to, or 401.
+) -> AccountAuthentication:
+    """The account and credential this request authenticated with, or 401.
 
     One failure for every way a bearer can be no good — unknown, revoked,
     expired, belonging to a disabled account — because a reply that
     distinguished them would tell an attacker which.
     """
-    user = await manager.resolve_token(_presented(request, creds, token))
+    presented = _presented(request, creds, token)
+    user = await manager.resolve_token(presented)
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-    return user
+    return AccountAuthentication(user, token_digest(presented))
+
+
+AuthenticatedAccount = Annotated[AccountAuthentication, Depends(authenticated_account)]
+
+
+async def current_user(authentication: AuthenticatedAccount) -> dict[str, Any]:
+    """Project the authenticated account for existing account-only routes."""
+    return authentication.user
 
 
 CurrentUser = Annotated[dict, Depends(current_user)]

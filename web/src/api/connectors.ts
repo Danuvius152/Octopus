@@ -59,9 +59,9 @@ async function oauthJson<T>(path: string, init: RequestInit): Promise<T> {
   }
 }
 
-export async function fetchCatalog(token: string): Promise<ConnectorCatalogEntry[]> {
+export async function fetchCatalog(token: string, signal?: AbortSignal): Promise<ConnectorCatalogEntry[]> {
   return json(
-    await fetch(`${API}/api/connectors/catalog`, { headers: authHeaders(token) })
+    await fetch(`${API}/api/connectors/catalog`, { headers: authHeaders(token), signal })
   );
 }
 
@@ -155,15 +155,18 @@ export async function setOAuthClient(
 
 export async function createCustomConnector(
   token: string,
-  body: CustomConnectorCreateRequest
+  body: CustomConnectorCreateRequest,
+  onCommitted?: () => void,
 ): Promise<ConnectorCatalogEntry> {
-  return json(
-    await fetch(`${API}/api/connectors/custom`, {
-      method: "POST",
-      headers: authHeaders(token),
-      body: JSON.stringify(body),
-    })
-  );
+  const response = await fetch(`${API}/api/connectors/custom`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(body),
+  });
+  // Successful headers prove creation even when acquiring the catalog entry
+  // body is still pending. Callers must not publish entry fields from this.
+  if (response.ok) onCommitted?.();
+  return json(response);
 }
 
 export async function deleteCustomConnector(

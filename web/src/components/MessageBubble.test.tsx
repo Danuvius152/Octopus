@@ -18,6 +18,38 @@ afterEach(cleanup);
 const nativeRuntime = (item_id: string) => ({ request_id: "request", attempt_id: "attempt", native: {
   thread_id: "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn", item_id } });
 
+it.each(["completed", "failed", "declined"])("keeps the actual %s tool result without a native status caption", (status) => {
+  const content = `Tool ${status}: actual output and reason`;
+  const view = render(<MessageBubble sessionId="native-status" message={{
+    role: "tool", type: "tool_result", content, is_error: status !== "completed",
+    runtime_metadata: nativeRuntime("tool"), tool_input: { native_item: { id: "tool", type: "mcpToolCall", status } },
+  }} />);
+  expect(view.queryByText(status, { exact: true })).not.toBeInTheDocument();
+  expect(view.getByText(status === "completed" ? "Result" : "Error")).toBeVisible();
+  expect(view.getByText(content)).toBeVisible();
+  fireEvent.click(view.container.querySelector<HTMLButtonElement>(".tool-header")!);
+  expect(view.container.querySelector(".tool-detail")).toHaveTextContent(content);
+});
+
+it.each(["live", "history"])("shows a compact normal conclusion without completion details in %s", async (path) => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const { normalizeMessage } = await import("../lib/turnOutcome");
+  const content = { kind: "outcome", operation: "message", request_id: "compact-result", status: "success",
+    native_status: "completed", recovery: { transient: 2 }, recording_integrity: "complete" };
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "result", session_id: "compact-result", terminal: true, seq: 1, content });
+  const message = path === "live" ? useSessionStore.getState().messages["compact-result"][0] :
+    normalizeMessage({ role: "system", type: "result", seq: 1, content });
+  const view = render(<MessageBubble sessionId="compact-result" message={message} />);
+  expect(view.getByText("Done")).toBeVisible();
+  expect(view.queryByText("Completion details")).not.toBeInTheDocument();
+  expect(view.container.querySelector("details")).toBeNull();
+  expect(view.queryByText("Native: completed")).not.toBeInTheDocument();
+  expect(view.queryByText("Model output was saved.")).not.toBeInTheDocument();
+  expect(view.queryByText("2 recoveries")).not.toBeInTheDocument();
+  expect(message.outcome).toMatchObject({ native_status: "completed", recovery: { transient: 2 } });
+});
+
 it("keeps literal output text without saved capture evidence in collapsed and expanded results", () => {
   const notice = "[输出已缩短：仅保存收到输出的头尾，中间未归档；以下不是完整日志。]";
   const content = notice + "\nHEAD\n" + "saved line\n".repeat(50) + "\n[... 中段已省略 ...]\nTAIL";
@@ -195,23 +227,6 @@ describe("saved message previews", () => {
   });
 });
 
-it.each(["missing", "other-request", "other-attempt", "commentary", "other-root"])(
-  "does not claim saved output for an unconfirmed %s reference", (damage) => {
-    const metadata = { request_id: damage === "other-request" ? "other" : "r", attempt_id: damage === "other-attempt" ? "other" : "a",
-      native: { thread_id: damage === "other-root" ? "other" : "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn",
-        item_id: "final", phase: damage === "commentary" ? "commentary" : "final_answer" } };
-    useSessionStore.setState({ messages: { evidence: damage === "missing" ? [] : [{ seq: 1, role: "assistant", type: "text",
-      content: "Collected text", runtime_metadata: metadata }] } });
-    const view = render(<MessageBubble sessionId="evidence" message={{ role: "system", type: "result", seq: 2,
-      tool_input: { attempt_context: { request_id: "r", attempt_id: "a" } }, outcome: {
-        request_id: "r", status: "success", native_status: "completed", recovery: {},
-        final_answer: { thread_id: "root", turn_id: "turn", message_seqs: [1] },
-      } }} />);
-    fireEvent.click(view.getByText("Completion details"));
-    expect(view.queryByText("Model output was saved.")).not.toBeInTheDocument();
-  },
-);
-
 it.each(["live", "history"])("keeps compact effect separate from an interrupted business outcome in %s records", async (path) => {
   const { handleWsMessage } = await import("../hooks/useWebSocket");
   const { normalizeMessage } = await import("../lib/turnOutcome");
@@ -227,7 +242,7 @@ it.each(["live", "history"])("keeps compact effect separate from an interrupted 
   expect(view.queryByText("Model output was saved.")).not.toBeInTheDocument();
 });
 
-it.each(["live", "history"])("preserves native compact command details in %s results", async (path) => {
+it.each(["live", "history"])("keeps native compact diagnostics in %s records without a completion details container", async (path) => {
   const { handleWsMessage } = await import("../hooks/useWebSocket");
   const { normalizeMessage } = await import("../lib/turnOutcome");
   const content = { kind: "outcome", operation: "compact", request_id: "compact-command", status: "failed", recovery: {},
@@ -241,12 +256,9 @@ it.each(["live", "history"])("preserves native compact command details in %s res
     normalizeMessage({ role: "system", type: "result", seq: 1, is_error: true, content });
   const view = render(<MessageBubble sessionId="native-command" message={message} />);
   expect(view.getByText(/Error: No messages to compact/)).toBeVisible();
-  fireEvent.click(view.getByText("Completion details"));
-  const details = view.getByLabelText("Native command details");
-  expect(details).toBeVisible();
-  expect(details).toHaveTextContent('"input_uuid": "original-native-input"');
-  expect(details).toHaveTextContent('"command": "compact"');
-  expect(details).toHaveTextContent('"kind": "failed"');
+  expect(view.queryByText("Completion details")).not.toBeInTheDocument();
+  expect(view.queryByLabelText("Native command details")).not.toBeInTheDocument();
+  expect(message.outcome?.compact?.native_command).toEqual(content.compact.native_command);
 });
 
 it.each([
@@ -285,7 +297,7 @@ it("uses a neutral explanation for an unknown historical question closure", () =
   expect(view.getByText("Legacy transport detail")).toBeVisible();
 });
 
-it.each(["live", "history"])("shows one canonical primary cause and keeps saved-output evidence in %s details", async (path) => {
+it.each(["live", "history"])("shows one canonical primary cause and retains diagnostic evidence in %s records", async (path) => {
   const { handleWsMessage } = await import("../hooks/useWebSocket");
   const { normalizeMessage } = await import("../lib/turnOutcome");
   const cause = "The model turn completed, but required tool results were not confirmed.";
@@ -306,14 +318,16 @@ it.each(["live", "history"])("shows one canonical primary cause and keeps saved-
   expect(view.getAllByText(cause)).toHaveLength(1);
   expect(view.getByText(cause)).toBeVisible();
   expect(view.queryByText("The answer was saved; completion records are incomplete.")).not.toBeInTheDocument();
-  expect(view.getByText("Native: completed")).not.toBeVisible();
-  fireEvent.click(view.getByText("Completion details"));
-  expect(view.getByText("Native: completed")).toBeVisible();
-  expect(view.getByText("Model output was saved.")).toBeVisible();
+  expect(view.queryByText("Native: completed")).not.toBeInTheDocument();
+  expect(view.queryByText("Completion details")).not.toBeInTheDocument();
+  expect(view.queryByText("Model output was saved.")).not.toBeInTheDocument();
+  expect(view.queryByText("Completion records are incomplete.")).not.toBeInTheDocument();
+  expect(message.outcome).toMatchObject({ native_status: "completed", final_answer: content.final_answer,
+    recording_issues: content.recording_issues });
   expect(view.queryByText("Done")).not.toBeInTheDocument();
 });
 
-it.each(["live", "history"])("keeps native status and missing-final evidence in %s results", async (path) => {
+it.each(["live", "history"])("shows the missing-final explanation directly and keeps native status in %s records", async (path) => {
   const { handleWsMessage } = await import("../hooks/useWebSocket");
   const { normalizeMessage } = await import("../lib/turnOutcome");
   const content = { kind: "outcome", operation: "message", request_id: "r", status: "failed", recovery: {}, native_status: "completed",
@@ -323,10 +337,43 @@ it.each(["live", "history"])("keeps native status and missing-final evidence in 
   handleWsMessage({ type: "result", session_id: "integrity", terminal: true, seq: 2, content });
   const message = path === "live" ? useSessionStore.getState().messages.integrity[0] :
     normalizeMessage({ type: "result", role: "system", content });
-  expect(message.outcome).toMatchObject({ recording_integrity: "incomplete", recording_issues: { native_final_missing: 1 } });
-  const { getByText } = render(<MessageBubble sessionId="integrity" message={message} />);
-  expect(getByText("Native: completed")).toBeTruthy();
-  expect(getByText("A declared final answer is missing from the saved transcript.")).toBeTruthy();
+  expect(message.outcome).toMatchObject({ native_status: "completed", recording_integrity: "incomplete",
+    recording_issues: { native_final_missing: 1 } });
+  const view = render(<MessageBubble sessionId="integrity" message={message} />);
+  expect(view.queryByText("Native: completed")).not.toBeInTheDocument();
+  expect(view.getByText("The model turn completed, but declared final output was not confirmed in the saved transcript.")).toBeVisible();
+  expect(view.queryByText("Completion details")).not.toBeInTheDocument();
+});
+
+it.each(["live", "history"])("keeps the only incomplete-recording explanation in the %s primary result", async (path) => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const { normalizeMessage } = await import("../lib/turnOutcome");
+  const content = { kind: "outcome", operation: "message", request_id: "gap", status: "failed", recovery: {},
+    recording_integrity: "incomplete", recording_issues: { protocol_gap: 1 } };
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "result", session_id: "gap", seq: 1, content });
+  const message = path === "live" ? useSessionStore.getState().messages.gap[0] :
+    normalizeMessage({ role: "system", type: "result", content });
+  const view = render(<MessageBubble sessionId="gap" message={message} />);
+  expect(view.getByText("Completion records are incomplete.")).toBeVisible();
+  expect(view.queryByText(/available below/)).not.toBeInTheDocument();
+});
+
+it.each(["live", "history"])("keeps a recording gap distinct from an execution failure in %s", async (path) => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const { normalizeMessage } = await import("../lib/turnOutcome");
+  const content = { kind: "outcome", operation: "message", request_id: "failed-gap", status: "failed",
+    native_status: "failed", message: "execution failed", recovery: {},
+    recording_integrity: "incomplete", recording_issues: { invalid_json: 1 } };
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "result", session_id: "failed-gap", seq: 1, content });
+  const message = path === "live" ? useSessionStore.getState().messages["failed-gap"][0] :
+    normalizeMessage({ role: "system", type: "result", content });
+  const view = render(<MessageBubble sessionId="failed-gap" message={message} />);
+  expect(view.getByText(/execution failed/)).toBeVisible();
+  expect(view.getByText(/Completion records are incomplete\./)).toBeVisible();
+  expect(view.queryByText("Completion details")).not.toBeInTheDocument();
+  expect(message.outcome?.recording_issues).toEqual({ invalid_json: 1 });
 });
 
 it.each([["expired", "system", "System · expired"], ["answered", "agent", "Agent"],
@@ -460,7 +507,8 @@ it.each([
   const { getByText, queryByText } = render(<MessageBubble sessionId="result-display"
     message={useSessionStore.getState().messages["result-display"][0]} />);
   expect(getByText(label)).toBeTruthy();
-  if (status !== "unknown") expect(getByText("1 recovery")).toBeTruthy();
+  expect(queryByText("1 recovery")).toBeNull();
+  if (status !== "unknown") expect(useSessionStore.getState().messages["result-display"][0].outcome?.recovery).toEqual({ transient: 1 });
   if (status !== "success") expect(queryByText(/^Done/)).toBeNull();
 });
 

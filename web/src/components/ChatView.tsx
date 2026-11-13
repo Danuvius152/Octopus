@@ -94,6 +94,46 @@ function canScrollChatUp(viewport: HTMLElement | null, target: EventTarget | nul
   return element === viewport;
 }
 
+function ArchivedSuccessor({ sessionId }: { sessionId: string }) {
+  const successorId = useSessionStore((state) => state.sessionSuccessors[sessionId]);
+  const pending = useRef(false);
+  const stop = useRef<() => void>(() => {});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => () => { stop.current(); stop.current = () => {}; }, []);
+
+  const open = async () => {
+    if (pending.current || !successorId) return;
+    const tracked = sessionList.observe(sessionId);
+    const start = useSessionStore.getState();
+    let foreground = start.activeSessionId === sessionId && start.mainView === "chat";
+    const unsubscribe = useSessionStore.subscribe((state) => {
+      if (state.activeSessionId !== sessionId || state.mainView !== "chat") foreground = false;
+    });
+    const retire = () => { foreground = false; unsubscribe(); };
+    stop.current = retire;
+    pending.current = true; setBusy(true); setError("");
+    try {
+      const info = await sessionList.confirmSuccessor(sessionId, tracked.observation);
+      if (!foreground || !sessionList.current(tracked.observation)) return;
+      const state = useSessionStore.getState();
+      if (!info || state.sessionSuccessors[sessionId] !== info.id || !state.archivedSessions.some((row) => row.id === sessionId)) {
+        setError(state.sessionRead.error ?? "Successor is no longer available.");
+        return;
+      }
+      await selectSession(info.id, info.agent_id);
+    } finally {
+      tracked.finish(); unsubscribe(); pending.current = false;
+      if (stop.current === retire) { stop.current = () => {}; setBusy(false); }
+    }
+  };
+  if (!successorId) return null;
+  return <div className="shrink-0">
+    <Button size="sm" variant="outline" disabled={busy} onClick={() => void open()}>Open successor</Button>
+    {error && <p role="alert" className="mt-1 text-destructive">{error}</p>}
+  </div>;
+}
+
 interface Props {
   sendMessage: (
     sessionId: string,
@@ -899,7 +939,8 @@ export function ChatView({
     if (trimmed.toLowerCase() === "/archive") {
       setInput("");
       const start = useSessionStore.getState();
-      const observation = sessionList.capture(start);
+      const tracked = sessionList.observe(activeSessionId, start, "archive");
+      const { observation } = tracked;
       let foreground = start.activeSessionId === activeSessionId && start.mainView === "chat";
       const unsubscribe = useSessionStore.subscribe((state) => {
         if (state.activeSessionId !== activeSessionId || state.mainView !== "chat") foreground = false;
@@ -930,6 +971,7 @@ export function ChatView({
       } catch {
         // A selected replacement exposes any snapshot acquisition failure.
       } finally {
+        tracked.finish();
         stop();
         archiveObservers.current.delete(stop);
       }
@@ -1750,7 +1792,8 @@ export function ChatView({
             — viewing read-only history. Unarchive from the sidebar to
             continue the conversation.
           </span>}
-                  <ContextMeter key={activeSessionId} state={contextState} historical={isArchived} pending={contextSnapshot?.pending} />
+          {isArchived && activeSessionId && <ArchivedSuccessor key={`${accountGeneration}:${activeSessionId}`} sessionId={activeSessionId} />}
+          <ContextMeter key={activeSessionId} state={contextState} historical={isArchived} pending={contextSnapshot?.pending} />
         </div>
       ) : (
         <div className="chat-input-bar shrink-0 bg-background px-6 pb-5 pt-2">

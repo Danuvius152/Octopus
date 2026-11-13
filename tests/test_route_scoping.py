@@ -34,6 +34,8 @@ SCOPE_MARKERS = (
     "scope_user_id",
     "CurrentUser",
     "current_user",
+    "AuthenticatedAccount",
+    "authenticated_account",
     "AdminUser",
     "require_admin",
     "ViewerUser",
@@ -41,7 +43,7 @@ SCOPE_MARKERS = (
 )
 
 SCOPE_GUARDS = (
-    deps.scope_user_id, deps.current_user, deps.require_admin,
+    deps.scope_user_id, deps.authenticated_account, deps.current_user, deps.require_admin,
     deps.viewer_user_id,
 )
 
@@ -188,6 +190,14 @@ def test_a_nested_real_scope_dependency_is_scoped():
     scoped_app = FastAPI()
     scoped_app.add_api_route("/real", endpoint)
     route = next(r for r in scoped_app.routes if isinstance(r, APIRoute))
+    assert _dependency_has_scope(route.dependant)
+
+
+def test_an_authenticated_account_dependency_is_scoped():
+    async def endpoint(authentication: deps.AuthenticatedAccount):
+        return {"user_id": authentication.user["id"]}
+
+    route = APIRoute("/account", endpoint)
     assert _dependency_has_scope(route.dependant)
 
 

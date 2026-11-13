@@ -298,8 +298,10 @@ status/code/details or discard the accepted safe prefix. Native interrupted
 remains interrupted with independent recording gaps unless an earlier local
 outcome already won, or collection failure initiated cleanup before that terminal.
 Completed with a true required-record gap is failed, keeps `native_status=completed`
-and any saved answer, and grants no automatic replay. Chat displays the native
-status and distinguishes saved-but-incomplete content from a known missing final.
+and any saved answer, and grants no automatic replay. Chat retains the primary
+outcome, actual errors and necessary recording-gap explanation. It shows no
+native-status caption or Completion details disclosure; native diagnostics remain
+in the saved outcome rather than being reclassified by the browser.
 The public Harness stream ends with its single provider result after internal
 retirement/summary observations and collection diagnostics. Wire terminal parsing
 still closes admission immediately; stream presentation order cannot extend it.
@@ -315,7 +317,9 @@ for formatting, input uncertainty and failure semantics.
 根 completed 而必要工具结果未确认时，canonical 失败说明保留这个区别，不再
 追加“缺少终态”的通用段落；原 Stop、provider 或整体上限原因继续优先。已完整
 记录的工具失败留在工具卡，不自行制造协议收尾失败。诊断位置、重试和采集缺口
-沿原 outcome 的结构化字段供实时与历史展示，浏览器不再重新裁定业务状态。
+沿原 outcome 的结构化字段保存，供实时与历史的必要说明及诊断消费者使用。
+同一 canonical 原因只显示一次；执行失败与独立记录缺口则均保留。浏览器不再
+在结果卡另附原生命令、恢复计数或 raw recording 折叠块，也不重新裁定业务状态。
 
 原生根失败携带的错误正文、provider 错误结构和原 request/attempt/native 来源
 沿既有 recovery 诊断消息保存，位于 terminal 之前。即使 Stop 或 start 等待失败

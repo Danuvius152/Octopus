@@ -301,7 +301,8 @@ export function ForkDialog({
   const createFork = async () => {
     const lifetime = foreground.current;
     if (selectedSeq === null || !preview || !lifetime?.active || creating) return;
-    const observation = sessionList.capture();
+    const tracked = sessionList.observe(sessionId, useSessionStore.getState(), "archive");
+    const { observation } = tracked;
     const ownsDialog = () => lifetime.active && foreground.current === lifetime && sessionList.accountCurrent(observation);
     setCreating(true);
     setError(null);
@@ -328,6 +329,7 @@ export function ForkDialog({
     } catch {
       if (ownsDialog()) setError("Fork failed.");
     } finally {
+      tracked.finish();
       if (ownsDialog()) setCreating(false);
     }
   };

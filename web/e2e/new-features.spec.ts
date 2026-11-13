@@ -2748,7 +2748,7 @@ test.describe("Composer history", () => {
 });
 
 test.describe("/model", () => {
-  test("keeps replacement overrides visible when another client archives the session", async ({ page, request }) => {
+  test("keeps replacement overrides visible after explicitly opening another client's archive successor", async ({ page, request }) => {
     const headers = { Authorization: `Bearer ${TOKEN}` };
     const settings = { model: "archive-override-probe", reasoning_effort: "high", service_tier: "fast" };
     await page.route("**/api/backends/codex/models*", (route) => route.fulfill({
@@ -2770,12 +2770,18 @@ test.describe("/model", () => {
     await page.locator(".session-item .session-name", { hasText: "Archive Settings Probe" }).click();
     await expect(page.locator(".msg", { hasText: "Old archive history" })).toBeVisible();
     try {
-      // The browser receives only the replacement event; the full HTTP response
-      // goes to this separate API client and cannot mask missing event fields.
+      // The archive response goes to this separate API client. The browser
+      // confirms the successor's final settings by GET when explicitly opened.
       const archived = await request.post(`${API}/sessions/${old.id}/archive`, { headers });
       expect(archived.ok()).toBeTruthy();
       const fresh = await archived.json();
       expect(fresh).toMatchObject(settings);
+      // A receiving browser keeps the original read-only history until the
+      // user explicitly opens the known successor through normal selection.
+      await expect(page.locator(".chat-archived-banner")).toContainText("viewing read-only history.");
+      await expect(page.locator(".msg", { hasText: "Old archive history" })).toBeVisible();
+      await expect(page.locator(".chat-input-bar textarea")).toBeHidden();
+      await page.getByRole("button", { name: "Open successor", exact: true }).click();
       await expect(page.locator(".msg", { hasText: "Old archive history" })).toBeHidden();
       await expect(page.locator(".session-item.active .session-name")).toHaveText("Archive Settings Probe");
       await page.locator(".btn-model-settings").click();
