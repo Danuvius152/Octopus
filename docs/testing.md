@@ -126,11 +126,16 @@ selection. All E2E files are checked by `tsconfig.e2e.json` through the ordinary
 ## Full checks before code commits
 
 At the code commit boundary, complete the check set in `./scripts/check.sh`:
-the Python dependency-pins check, full hermetic backend suite,
-backend/frontend lint and types, frontend unit
+the Python dependency-pins and installed-hook checks, test-support import check,
+full hermetic backend suite, backend/frontend lint and types, frontend unit
 tests, generated contracts and the docs index check. Use the script for a
 combined run, or use the pre-commit hook for its gates and run the remaining
 checks separately. See [Test Coverage](#test-coverage) for individual commands.
+
+Install Git hooks with `./scripts/setup-hooks.sh`; `--check` verifies installation
+without changing it. Hooks source `scripts/toolchain-env.sh` so noninteractive Git
+can resolve the local JS toolchain. Missing or stale hooks fail the full gate.
+Python edits under `scripts/` also trigger backend lint, tests and import checks.
 
 The pins gate checks the declared runtime + `test` + `dev` dependency closure
 against `constraints-python.txt`, including the recorded Python/platform.
@@ -187,11 +192,11 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 |-------|---------|------------------------------|
 | Backend hermetic | `.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -q` | Full correctness for **Claude Code and Codex**, including simulated CLI processes, Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
 | Wiki performance (opt-in) | `.venv/bin/pytest tests/ --run-wiki-perf -m wiki_perf -v -s` | Large-dataset projection and grant-lookup cost measurements. Outside default full checks and release gates; small correctness and query-boundary checks remain in the hermetic tier. |
-| Live Codex pytest | `.venv/bin/pytest tests/ --run-real --ignore=tests/test_codex_login_real.py -m "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval" -v` | Actual Codex execution, streaming/tools, scheduling, memory, fork, research and Wiki through the selected existing login. New device authentication is excluded from routine release checks. Use the isolated credential setup in [本机测试](local-wsl.md#本机测试). |
+| Live Codex pytest | `.venv/bin/python scripts/codex_live.py --suite pytest --output "$CODEX_EVIDENCE_DIR"` | Full live Codex selection through the explicitly selected existing login; excludes device authentication and optional evaluation/performance tiers. Set `CODEX_HOME` and a new evidence directory using [the common acceptance entry](local-wsl.md#live-凭据与网络). |
 | Supervisor integration | `.venv/bin/pytest tests/ --run-real -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
 | Frontend unit | `cd web && bun run test` | Stores, HTTP/WS events, components, input lifecycle, account/service generation boundaries and Wiki job cards. Vitest tests are colocated with source. |
 | Offline browser E2E | `cd web && bun run test:e2e:fast` | Real browser plus isolated backend: login/accounts, sessions, input recovery, sidebar/pins, attachments, Wiki cards and page readiness. Uses a test-only harness and verifies an offline execution audit; actual provider behavior needs the live tier. |
-| Codex browser E2E | `cd web && bun run test:e2e:llm codex-app-server.spec.ts` | Real default Codex creation, complete streamed response, Monitor, original-receipt deduplication and precise native resume after reload/reopen. Needs a compatible, signed-in Codex App Server CLI. |
+| Codex browser E2E | `.venv/bin/python scripts/codex_live.py --suite browser --output "$CODEX_EVIDENCE_DIR"` | Real default Codex creation, complete streamed response, Monitor, original-receipt deduplication and precise native resume after reload/reopen. Uses the same isolated credential, network and evidence checks as pytest; the default `--suite all` runs both serially. |
 
 ## Topic regression entry points
 
@@ -228,6 +233,12 @@ evidence under the reuse policy above.
 - `tests/native_app_server.py` keeps its function-scoped runtime, original Manager,
   SQLite database and cleanup together. `tests/session_runtime.py` owns shared
   dispatcher observations. Import support modules directly, not case modules.
+- `scripts/check_test_imports.py` enforces that rule for static Python imports
+  under `server/`, `tests/` and `scripts/`, in both the full gate and pre-commit.
+  Historical consumer/module/symbol exceptions are frozen in
+  `scripts/test-case-imports-baseline.json`; new consumers or imported symbols
+  fail. `--prune-baseline` only removes retired exceptions. Move new shared
+  helpers into support modules instead of adding exceptions.
 - `tests/_fixtures/jsonl_frames.py` splits snapshots on byte newlines before UTF-8
   decoding/JSON parsing. Readers retain active-writer suffixes; explicit writer
   completion rejects an unfinished suffix, while complete malformed frames fail

@@ -21,12 +21,20 @@
 #
 # `ruff format` is not run by any gate — see the note in scripts/check.sh.
 
+rc: '"$(git rev-parse --show-toplevel)/scripts/toolchain-env.sh"'
+
 pre-commit:
   parallel: true
   commands:
+    test-support-imports:
+      tags: backend
+      glob: "{server,tests,scripts}/**/*.py"
+      run: .venv/bin/python scripts/check_test_imports.py
+      fail_text: "Move reusable helpers into support modules; do not import new test case modules."
+
     ruff:
       tags: backend
-      glob: "{server,tests}/**/*.py"
+      glob: "{server,tests,scripts}/**/*.py"
       run: .venv/bin/ruff check .
       fail_text: "Ruff found problems. Run '.venv/bin/ruff check .' (many are auto-fixable with --fix)."
 
@@ -58,7 +66,7 @@ pre-commit:
       tags: backend
       # Full hermetic backend verification at a Python code commit. Live model
       # tests, knowledge evaluation and Wiki benchmarks are selected separately.
-      glob: "{server,tests}/**/*.py"
+      glob: "{server,tests,scripts}/**/*.py"
       run: .venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -q --tb=short
       fail_text: "Backend tests failed. Run './scripts/check.sh' or the failed test file for detail."
 

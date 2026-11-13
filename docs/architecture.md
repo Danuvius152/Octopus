@@ -155,8 +155,10 @@ Source: `wiki/registry.py`, `wiki/history.py`, `wiki/job_execution.py`.
 ### Applications
 
 ApplicationManager projects a build's original completion plus actual entrypoint
-to status; the entrypoint PATCH path still has a premature-ready exception documented
-in the [application contract](implemented/applications.md). AppAgent owns scoped
+to status. Entrypoint PATCH uses the same terminal projection checks for active
+inputs, original completion and preparation ownership; saving metadata alone
+cannot end an active build. See the [application lifecycle contract](implemented/applications.md#4-lifecycle).
+AppAgent owns scoped
 conversations, original ask/SSE/status and request slots. BackendSupervisor owns process instances, active uses and confirmed cleanup;
 code, durable data and rebuildable runtime have different lifetimes. Failed
 retirement preserves files, identity and deletion responsibility. Contract:

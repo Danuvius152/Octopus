@@ -13,8 +13,10 @@ export function isNativeChild(value: RuntimeMetadata | null | undefined): boolea
   return Boolean(value?.native && value.native.thread_id !== value.native.root_thread_id);
 }
 
-function workKey(identity: RuntimeMetadata | null | undefined, thread?: string | null, turn?: string | null): string | undefined {
-  return identity && thread && turn ? JSON.stringify([identity.request_id, identity.attempt_id, thread, turn]) : undefined;
+export function nativeWorkKey(value: unknown, thread?: unknown, turn?: unknown): string | undefined {
+  const identity = readRuntimeMetadata(value);
+  return identity && typeof thread === "string" && thread && typeof turn === "string" && turn
+    ? JSON.stringify([identity.request_id, identity.attempt_id, thread, turn]) : undefined;
 }
 
 /** Only real persisted seqs may identify a detail read, never snapshot ids. */
@@ -37,7 +39,7 @@ function observedCard(message: Message): SubagentRun | undefined {
   const identity = readRuntimeMetadata(message.runtime_metadata);
   const source = identity?.native;
   if (!["text", "thinking", "tool_use", "tool_result"].includes(message.type) || !isNativeChild(identity) || !source) return undefined;
-  return { card_id: `observed:${workKey(identity, source.thread_id, source.turn_id)}`,
+  return { card_id: `observed:${nativeWorkKey(identity, source.thread_id, source.turn_id)}`,
     task_id: source.thread_id, native_thread_id: source.thread_id, native_turn_id: source.turn_id,
     parent_thread_id: source.parent_thread_id, runtime_metadata: identity,
     status: "unknown", name: "", description: "", prompt: "", summary: "", steps: [] };
@@ -53,7 +55,7 @@ function cardAnchor(card: SubagentRun, anchor?: Message): Message {
 export function nativeChatMessages(messages: Message[], snapshots: SubagentRun[] = [], activeRequest?: string | null): Message[] {
   const cards = new Set<string>();
   const known = new Set(messages.filter((message) => message.type === "native_subagent").map((message) =>
-    workKey(message.runtime_metadata, message.tool_input?.native_thread_id as string, message.tool_input?.native_turn_id as string)));
+    nativeWorkKey(message.runtime_metadata, message.tool_input?.native_thread_id, message.tool_input?.native_turn_id)));
   const visible: Message[] = [];
   for (const message of messages) {
     if (message.type === "native_subagent") {
@@ -63,10 +65,10 @@ export function nativeChatMessages(messages: Message[], snapshots: SubagentRun[]
       visible.push(message);
     } else if (isNativeChild(message.runtime_metadata)) {
       const source = message.runtime_metadata?.native;
-      const snapshot = snapshots.find((run) => run.card_id && workKey(run.runtime_metadata, run.native_thread_id, run.native_turn_id) ===
-        workKey(message.runtime_metadata, source?.thread_id, source?.turn_id));
+      const snapshot = snapshots.find((run) => run.card_id && nativeWorkKey(run.runtime_metadata, run.native_thread_id, run.native_turn_id) ===
+        nativeWorkKey(message.runtime_metadata, source?.thread_id, source?.turn_id));
       const card = snapshot || observedCard(message);
-      if (!card?.card_id || known.has(workKey(message.runtime_metadata, card.native_thread_id, card.native_turn_id)) || cards.has(card.card_id)) continue;
+      if (!card?.card_id || known.has(nativeWorkKey(message.runtime_metadata, card.native_thread_id, card.native_turn_id)) || cards.has(card.card_id)) continue;
       // A window may start after the status observation. Keep the real body
       // reachable without inventing completion or changing persisted rows.
       cards.add(card.card_id);

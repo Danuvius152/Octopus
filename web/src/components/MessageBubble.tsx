@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   IconChevronDown,
   IconChevronRight,
@@ -31,6 +31,18 @@ import { questionClosure } from "../lib/questionPresentation";
 import { requestSource } from "../lib/injectedTurns";
 import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { ToolInputDetails } from "./ToolInputDetails";
+import { nativeWorkKey } from "../lib/nativeOutput";
+
+const completedRemarkPlugins = [remarkGfm, remarkMath];
+const completedRehypePlugins = [rehypeKatex];
+
+// Store and composer updates still render the card's controls and attribution.
+// Only unchanged completed prose skips the synchronous Markdown pipeline.
+const CompletedMarkdown = memo(function CompletedMarkdown({ source }: { source: string }) {
+  return <Markdown remarkPlugins={completedRemarkPlugins} rehypePlugins={completedRehypePlugins}>
+    {source}
+  </Markdown>;
+});
 
 // Marker the backend prepends to the synthesized user message it
 // injects when a bg task completes. Used to render those messages
@@ -158,7 +170,10 @@ function AttachmentList({
 }
 
 export function MessageBubble(props: MessageBubbleProps) {
-  return <MessageDetails key={`${props.sessionId}:${props.message.seq}:${props.message.detail_ref}`}
+  const work = props.message.type === "native_subagent" ? nativeWorkKey(props.message.runtime_metadata,
+    props.message.tool_input?.native_thread_id, props.message.tool_input?.native_turn_id) : undefined;
+  return <MessageDetails key={work ? JSON.stringify([props.sessionId, "native", work])
+    : `${props.sessionId}:${props.message.seq}:${props.message.detail_ref}`}
     sessionId={props.sessionId} message={props.message}
     expandWithMessage={props.message.type === "tool_use" || props.message.type === "tool_result"}>{(message, loadDetail) =>
       message !== props.message && (message.type === "native_subagent" || props.message.identity_unavailable)
@@ -303,12 +318,7 @@ function MessageBody({
                 {message.content || ""}
               </div>
             ) : (
-              <Markdown
-                remarkPlugins={[remarkGfm, remarkMath]}
-                rehypePlugins={[rehypeKatex]}
-              >
-                {message.content || ""}
-              </Markdown>
+              <CompletedMarkdown source={message.content || ""} />
             )}
           </div>
         </div>

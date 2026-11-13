@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NativeDetailPage } from "../api";
 import { accountFetch } from "../lib/accountFetch";
 import { useSessionStore } from "../stores/sessionStore";
@@ -8,33 +8,57 @@ import { ToolInputDetails } from "./ToolInputDetails";
 
 /** A separate read view: it never merges detail pages into chat or usage. */
 export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: string; anchorSeq?: number }) {
-  const [page, setPage] = useState<NativeDetailPage | null>(null);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const reading = useRef(0);
+  // The existing synchronous subscription wakes a new reader on scope changes,
+  // including disconnect/reconnect in one React batch. Capture that scope in
+  // the owner too: an old UI callback cannot borrow the new store's identity.
+  const identity = useMemo(() => {
+    const state = useSessionStore.getState();
+    return { sessionId, anchorSeq, refresh, retired: false, account: state.accountGeneration, connected: state.connected,
+      service: state.dispatchGeneration, window: state.messageWindows[sessionId] };
+  }, [sessionId, anchorSeq, refresh]);
+  const currentIdentity = useRef(identity);
+  currentIdentity.current = identity;
+  const [detail, setDetail] = useState<{ owner: typeof identity; page: NativeDetailPage | null; error: string; busy: boolean }>(
+    { owner: identity, page: null, error: "", busy: false });
+  const currentResource = useCallback(() => {
+    const state = useSessionStore.getState();
+    return !identity.retired && currentIdentity.current === identity && state.accountGeneration === identity.account &&
+      state.connected === identity.connected && state.dispatchGeneration === identity.service &&
+      state.messageWindows[sessionId] === identity.window;
+  }, [identity, sessionId]);
+  const visible = detail.owner === identity && currentResource();
+  const page = visible ? detail.page : null;
+  const error = visible ? detail.error : "";
+  const busy = visible && detail.busy;
 
   useEffect(() => useSessionStore.subscribe((next, previous) => {
+    const session = currentIdentity.current.sessionId;
     if (next.connected !== previous.connected || next.accountGeneration !== previous.accountGeneration ||
-        next.dispatchGeneration !== previous.dispatchGeneration) {
+        next.dispatchGeneration !== previous.dispatchGeneration || next.messageWindows[session] !== previous.messageWindows[session]) {
       // This runs synchronously even when React batches disconnect/reconnect
       // into one render with the same final connection and service identity.
+      // Retire the reader itself, so old controls cannot start a new request
+      // while React's successor commit is pending and scope values return.
+      currentIdentity.current.retired = true;
       reading.current++;
-      setPage(null);
       setRefresh((value) => value + 1);
     }
   }), []);
 
   const load = useCallback(async (afterSeq?: number, previous?: NativeDetailPage) => {
+    if (!currentResource()) return;
     const request = ++reading.current;
     const context = useSessionStore.getState();
-    const current = () => {
-      const state = useSessionStore.getState();
-      return reading.current === request && state.accountGeneration === context.accountGeneration &&
-        state.dispatchGeneration === context.dispatchGeneration;
-    };
-    if (anchorSeq === undefined || !context.token) return;
-    setBusy(true); setError("");
+    const current = () => reading.current === request && currentResource();
+    if (anchorSeq === undefined || !context.token) {
+      setDetail({ owner: identity, page: null, error: "", busy: false });
+      return;
+    }
+    setDetail({ owner: identity, page: previous ?? null, error: "", busy: true });
+    let nextPage = previous ?? null;
+    let failureMessage = "";
     try {
       const query = new URLSearchParams();
       query.set("view", "browser");
@@ -48,22 +72,25 @@ export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: str
       if (value.anchor_seq !== anchorSeq) throw new Error("Details belong to a different task.");
       const messages = previous ? [...previous.messages, ...value.messages.filter((row) =>
         !previous.messages.some((saved) => saved.seq === row.seq))] : value.messages;
-      setPage({ ...value, messages });
+      nextPage = { ...value, messages };
     } catch (failure) {
-      if (current()) setError(failure instanceof Error ? failure.message : "Could not load saved details.");
-    } finally { if (current()) setBusy(false); }
-  }, [sessionId, anchorSeq]);
+      failureMessage = failure instanceof Error ? failure.message : "Could not load saved details.";
+    } finally { if (current()) setDetail({ owner: identity, page: nextPage, error: failureMessage, busy: false }); }
+  }, [sessionId, anchorSeq, identity, currentResource]);
   useEffect(() => {
     const reads = reading;
-    setPage(null); setBusy(false); setError("");
     void load();
-    return () => { reads.current++; };
-  }, [load, refresh]);
+    return () => { if (currentIdentity.current === identity) reads.current++; };
+  }, [load, identity]);
 
   return <section aria-label="Saved helper details" className="space-y-2 border-t border-gray-300 pt-2 text-xs">
     <div className="flex items-center justify-between gap-2">
       <strong>Saved helper details</strong>
-      <button type="button" onClick={() => { reading.current++; setRefresh((value) => value + 1); }}>Refresh details</button>
+      <button type="button" onClick={() => {
+        if (!currentResource()) return;
+        identity.retired = true;
+        reading.current++; setRefresh((value) => value + 1);
+      }}>Refresh details</button>
     </div>
     <p className="text-gray-700">Collected content only. Helper completion does not confirm that its parent has consumed the result.</p>
     {anchorSeq === undefined && <p>No saved reference is available for this helper yet.</p>}

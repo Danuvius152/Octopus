@@ -98,6 +98,8 @@ cd ~/Octopus
 python3.14 -m venv .venv
 PIP_CONSTRAINT="$PWD/constraints-python.txt" .venv/bin/pip install \
   -c constraints-python.txt -c constraints-wiki.txt -e '.[test,dev]'
+npm install --global lefthook@2.2.2
+./scripts/setup-hooks.sh
 
 cd web
 bun install --frozen-lockfile
@@ -268,23 +270,34 @@ CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式�
 默认值。实机可用性以实际模型执行、网络审计和测试通过数为准，pytest 全部
 skip 的零退出码不能计为验收通过。
 
-重跑 Codex 后端实机测试时，可以这样创建并清理临时凭据入口：
+Codex 发布验收统一使用 `scripts/codex_live.py`，默认串行运行完整 Codex pytest
+选择与 Codex 浏览器用例。入口创建并清理隔离 home、凭据目录和临时目录，链接
+所选 auth，生成显式 file-store 配置，并在转发前阻断认证域。file-store 的语义
+见 [OpenAI 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+网络审计仅记录 method/host/port/转发结果，不解密 TLS；它证明经过本轮代理的
+请求，不是操作系统级网络隔离。
+
+输出目录必须尚不存在，保留 `result.json`、网络审计及各套件原始报告/日志。
+任一套件无实际通过项、有 skip/失败、认证域尝试、代理错误、缺失网络证据，
+未结算的代理处理器，或源 auth/config 改变，入口均非零退出。CONNECT 的
+200 响应发送并 flush 成功后才计入 `tunnels`；此后仅从客户端读取时的连接
+复位，或向客户端发送时的断管／复位，单独记录为 `client_closed`，不计为
+成功隧道。上游读写、握手及应答前的错误仍失败；只有 `client_closed` 而无
+成功 CONNECT 也不能通过。
+套件结束后先停止接入，再冻结已启动处理器的未结算数并关闭其持有的连接，
+最后统一判定网络结果。未结算数非零就保留失败，后续退出不会将该轮改判成功，
+也不通过重试或延长等待消除这个事实。指定 `--pytest-target` 是局部验证，
+不能替代完整发布选择。按需使用 `--suite pytest` 或 `--suite browser` 复验
+受影响一侧；`--model`、`--service-tier` 只改本轮隔离配置。
+隔离配置按 TOML 解析后的根值覆盖，其他配置值保持不变；引用键、多行指令、
+嵌套表及数组不按文本行改写。隔离副本可以改变排版，宿主原文件保持原样。
 
 ```bash
-(
-  cd ~/Octopus || exit
-  : "${CODEX_HOME:?Set CODEX_HOME to the current conversation's selected login}"
-  octopus_test_base="$HOME/.cache/octopus-tests"
-  mkdir -p "$octopus_test_base" || exit
-  octopus_test_root=$(mktemp -d "$octopus_test_base/pytest.XXXXXX") || exit
-  trap 'rm -rf -- "$octopus_test_root"' EXIT
-  mkdir "$octopus_test_root/credentials" || exit
-  ln -s "$CODEX_HOME" "$octopus_test_root/credentials/selected" || exit
-  TMPDIR="$octopus_test_root" OCTOPUS_CODEX_HOME_DIR="$octopus_test_root/credentials" \
-    .venv/bin/pytest tests/ --run-real -v \
-    --ignore=tests/test_codex_login_real.py \
-    -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'
-)
+cd ~/Octopus
+: "${CODEX_HOME:?Set CODEX_HOME to the current conversation's selected login}"
+# 先按上文设置 PATH/代理/浏览器平台；此目录必须尚不存在。
+.venv/bin/python scripts/codex_live.py --codex-home "$CODEX_HOME" \
+  --output "$HOME/.cache/octopus-tests/codex-release-evidence"
 ```
 
 可选 Wiki 测量、维护意图和自然问答命令见
@@ -513,18 +526,18 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
 2. 用不依赖当前模型回合继续存活的独立发布进程等待自然排空，包括主控会话、
    队列、CLI 和待交付的后台/委托回报。已有发布进程运行时只观察，不叠加切换
    或重启。停写前只读核对真实资料与本次完整源格式、物理布局及冲突准入条件，
-   失败保留原服务。切换前再确认目标和准入条件仍有效。
+   失败保留原服务。切换前再确认目标和准入条件仍有效。要求不变的环境/profile
+   清单不包含会转为 `/dev/null` mask 的受管 unit；unit 由原指纹、冻结计划及
+   mask／恢复的阶段核验单独保护，不能让自身的合法替换被误判为配置漂移。
 3. 原服务确认自然排空并交出单次许可后，屏蔽启动并等待原进程及 unit 全部退出。
    确认没有剩余进程或启动任务，取得安装离线锁，再执行本次存量检查、必要的
    有限转换和当前格式完整核验；通过后才原子替换 `current`、安装/解除屏蔽并幂等
    启动候选。任一库未准备、提交结果未知或跨库部分完成时保持业务关闭，按同一
    发布计划和实际提交事实前向继续。候选只接受[当前完整格式](implemented/current-storage-format.md)，
    不在启动时转换；不变格式也须只读完整核验。首次受管安装完成上文 unit/profile
-   过渡，前端产物随候选一次切换。本安装已完成 main9 交接，Wiki保持17；现有
-   publisher的有限8→9入口及专属夹具已退役。当前源码的 main10 需要本次有限9→10
-   交接；隔离转换与发布边界已验证，生产转换尚未执行。发布时把已固定版本的有限
-   helper纳入本轮冻结计划，只读准入通过后才可退休旧writer，并在离线锁内转换；
-   不得直接启动main10代码打开main9。有限工具及专属夹具按本节第5步退出。
+   过渡，前端产物随候选一次切换。本安装已完成 main10 的有限9→10交接和生产
+   验收，Wiki保持17。正常启动只接受当前完整格式；有限工具及专属夹具按本节
+   第5步退出，不作为今后的旧格式兼容入口。
    [交接约束与保全理由](implemented/current-storage-format.md#github-identity-and-finite-publication-handoff)
    不构成重新接纳旧格式的入口。
 4. 验证存活与就绪接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
@@ -539,8 +552,11 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
    后续上传、长输入、配置核验和重启不得重建它们。保留账户目录、旧附件及凭据。
    只读核对实际数据库、Wiki schema 与持久协议；验收失败仅在旧构建仍兼容时恢复
    旧指向并重启验证，否则保留现状前向修复。不回灌旧 DB、不清理诊断所需快照，
-   保留历史与会话设置。通知接纳、实际交付和部署验收分别记录，不等待发布进程
-   自身通知。
+   保留历史与会话设置。本次临时发布凭据须按原 hash 精确撤销，事务结束后用新
+   数据库连接确认 `auth_tokens.revoked_at`；确认前保留原凭据以便重试，确认后
+   删除原文件并同步目录。cleanup 自报或原文件消失均不能作为撤权证据。
+   最终发布成功必须包含该数据库事实和原文件清退；候选检查通过单独记录。
+   通知接纳、实际交付和部署验收分别记录，不等待发布进程自身通知。
 5. 验收全部通过且旧工作树干净、没有进程继续使用后，用 `git worktree remove`
    退役旧源码，不强制删除脏工作树。交接及发布验收、恢复责任全部完成后，
    同时退出本次有限转换和仅服务本次转换的测试材料；未完成时保留原计划及所需

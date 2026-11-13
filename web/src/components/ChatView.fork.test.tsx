@@ -95,6 +95,9 @@ it.each(["connection", "service"])("releases paging UI after an obsolete %s obse
     oldest_loaded_seq: 200, has_more_messages: true, next_message_seq: 201 };
   applyTranscript(parent.id, snapshot);
   mount();
+  // A mount-time top is not user navigation. Start this lifecycle check
+  // through the same manual history entry a reader can always use.
+  fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
   await waitFor(() => expect(replies).toHaveLength(1));
   const replacement = { ...source, socket: {} };
   act(() => {
@@ -194,12 +197,20 @@ it.each(["switch", "return", "remount"])("a late old page cannot settle the curr
     oldestSeq: { parent: 200, "fork-child": 200 }, hasMoreMessages: { parent: true, "fork-child": true },
   });
   const view = mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
   await waitFor(() => expect(replies.parent).toHaveLength(1));
-  if (transition === "remount") { view.unmount(); mount(); }
+  if (transition === "remount") {
+    view.unmount(); mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
+  }
   else {
     act(() => useSessionStore.getState().setActiveSessionId(child.id));
+    fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
     await waitFor(() => expect(replies[child.id]).toHaveLength(1));
-    if (transition === "return") act(() => useSessionStore.getState().setActiveSessionId(parent.id));
+    if (transition === "return") {
+      act(() => useSessionStore.getState().setActiveSessionId(parent.id));
+      fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
+    }
   }
   const active = transition === "switch" ? child.id : parent.id;
   await waitFor(() => expect(replies[active]).toHaveLength(active === "parent" ? 2 : 1));

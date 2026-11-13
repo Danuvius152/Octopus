@@ -10,7 +10,7 @@ import {
 } from "@tabler/icons-react";
 
 import { useSessionStore, type SubagentRun } from "../stores/sessionStore";
-import { nativeCard, nativeDetailAnchor } from "../lib/nativeOutput";
+import { nativeCard, nativeDetailAnchor, nativeWorkKey } from "../lib/nativeOutput";
 import { NativeSubagentDetails } from "./NativeSubagentDetails";
 
 export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; cardId: string }) {
@@ -28,7 +28,9 @@ export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; c
     return { ...saved, summary: [saved.summary, ...partials.map((item) => item.content)].filter(Boolean).join("\n\n") };
   }, [messages, streaming, cardId, snapshots]);
   const anchorSeq = run ? nativeDetailAnchor(messages || [], run) : undefined;
-  return <SubagentCard key={`${sessionId}:${cardId}`} sessionId={sessionId} observedRun={run} detailAnchor={anchorSeq} />;
+  const work = run && nativeWorkKey(run.runtime_metadata, run.native_thread_id, run.native_turn_id);
+  return <SubagentCard key={JSON.stringify([sessionId, work ?? cardId])}
+    sessionId={sessionId} observedRun={run} detailAnchor={anchorSeq} />;
 }
 
 const stopReasons: Record<string, string> = {
@@ -71,7 +73,15 @@ export function SubagentCard({
     toolCallId ? s.subagents[sessionId]?.[toolCallId] : undefined
   );
   const run = observedRun || cached;
-  const [open, setOpen] = useState(false);
+  const account = useSessionStore((s) => s.accountGeneration);
+  const work = observedRun && nativeWorkKey(observedRun.runtime_metadata, observedRun.native_thread_id, observedRun.native_turn_id);
+  // A complete native work survives cardId/seq completion. Without that proof,
+  // expansion belongs only to the current observed reference, not a reused name
+  // or cardId. Legacy cards keep their existing tool-call scope.
+  const reference = work ? undefined : observedRun;
+  const owner = useMemo(() => ({ account, sessionId, toolCallId, work, reference }), [account, sessionId, toolCallId, work, reference]);
+  const [openOwner, setOpenOwner] = useState<object | null>(null);
+  const open = openOwner === owner;
   if (!run) return null;
 
   const running = run.status === "running";
@@ -99,7 +109,7 @@ export function SubagentCard({
       <button
         type="button"
         className="subagent-summary-row flex w-full items-center gap-2 text-left text-[12.5px]"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpenOwner(open ? null : owner)}
         aria-expanded={open}
         title={open ? "Hide what it's doing" : "See what it's doing"}
       >

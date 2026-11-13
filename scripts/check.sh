@@ -22,10 +22,7 @@ ROOT="$PWD"
 
 # The JS toolchain lives under nvm, not on the default PATH (see AGENTS.md
 # Conventions). Resolve it here so callers don't have to.
-if [ -d "$HOME/.nvm/versions/node" ]; then
-  NODE_BIN="$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | sort -V | tail -1)/bin"
-  export PATH="$NODE_BIN:$PATH"
-fi
+. "$ROOT/scripts/toolchain-env.sh"
 
 # Python block-buffers stdout when it is a pipe rather than a tty, so a long
 # pytest run can emit nothing for its whole duration and then flush at the
@@ -71,6 +68,8 @@ gate_python_environment() {
 
 gate_ruff() { "$ROOT/.venv/bin/ruff" check .; }
 
+gate_test_imports() { "$ROOT/.venv/bin/python" "$ROOT/scripts/check_test_imports.py"; }
+
 gate_mypy() { "$ROOT/.venv/bin/mypy"; }
 
 gate_eslint() { cd "$ROOT/web" && bun run lint; }
@@ -78,7 +77,9 @@ gate_eslint() { cd "$ROOT/web" && bun run lint; }
 gate_e2e() { cd "$ROOT/web" && bun run test:e2e; }
 
 run_gate "Python dependency pins"              gate_python_environment
+run_gate "commit hook installed"               "$ROOT/scripts/setup-hooks.sh" --check
 run_gate "backend lint (ruff)"                 gate_ruff
+run_gate "test support imports"                gate_test_imports
 run_gate "backend types (mypy)"                gate_mypy
 run_gate "backend unit (hermetic release selection)" gate_pytest
 run_gate "frontend lint (eslint)"              gate_eslint

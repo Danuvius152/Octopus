@@ -122,40 +122,45 @@ unsupported evidence without repairing it. Account transfer excludes it with
 chats; there is no new collection root. Permissions and failure semantics belong
 to [safe rewind](session-rewind.md#563-the-one-revert-we-offer-file-edits-via-git).
 
-The finite 9→10 handoff is prepared and verified on isolated stores; production
-conversion and publication have not run as part of this implementation. Its
-private frozen input admits only the complete declared format-9 layout or the
+This installation's finite 9→10 handoff has completed production conversion and
+publication acceptance. Its private frozen input admitted only the complete declared format-9 layout or the
 complete observed format-9 physical layout, plus their fully verified format-10
 results. Per-table mixtures, unknown catalog objects, column orders, integrity
-failures, broken foreign keys and invalid retained facts refuse admission.
-Read-only preflight checks committed WAL and verifies an in-memory conversion
+failures, broken foreign keys and invalid retained facts refused admission.
+Read-only preflight checked committed WAL and verified an in-memory conversion
 before original-writer retirement. Application startup still rejects format 9.
 
 Under the publisher's existing writer-retirement, start-mask and offline-lock
-boundary, one `BEGIN IMMEDIATE` repeats admission, adds the nullable column and
-marker 10, then checks the complete candidate, foreign keys and typed row
+boundary, one `BEGIN IMMEDIATE` repeated admission, added the nullable column and
+marker 10, then checked the complete candidate, foreign keys and typed row
 multisets of every original column, rowid and sequence before COMMIT. Only NULL
-is initialized; no historical ignored-path observation is fabricated. Confirmed
-rollback retains format 9. Unconfirmed COMMIT/ROLLBACK leaves business closed;
-fresh reentry inspects actual committed facts, converts only a recognized 9 or
-verifies 10 without resetting subsequent writes. Failure retains the original
-credential and recovery material; cleanup does not reopen an uncertain store
-for token writes. A receipt-bearing offline resume needs no new credential
-before storage admission and candidate readiness. Every reentry validates the
-original frozen helper, candidate and settings, then reloads the start mask
-before acquiring the offline owner. Other retained ledgers must also pass
-before candidate start. No old database replaces a newer one. The
+was initialized; no historical ignored-path observation was fabricated. Confirmed
+rollback retained format 9. Unconfirmed COMMIT/ROLLBACK kept business closed;
+fresh reentry inspected actual committed facts, converted only a recognized 9 or
+verified 10 without resetting subsequent writes. Failure retained the original
+credential and recovery material; cleanup did not reopen an uncertain store
+for token writes. A receipt-bearing offline resume needed no new credential
+before storage admission and candidate readiness. Every reentry validated the
+original frozen helper, candidate and settings, then reloaded the start mask
+before acquiring the offline owner. Other retained ledgers also had to pass
+before candidate start. No old database replaced a newer one. The
 finite input and exclusive fixtures remain until publication, acceptance and
 forward-recovery responsibilities close, then retire together. This is not a
 startup migration route or a permanent chain of old-format support.
 
-Natural-drain timeout preserves the original request identity. A later live,
+Natural-drain timeout preserved the original request identity. A later live,
 unmasked original with freshly admitted storage and a confirmed ready response
-may replace only its own database-confirmed expired maintenance credential.
-A stopping response for the same request instead recovers the original receipt
-without token writes. Unknown handoff state refuses rotation. After candidate
-readiness, an expired credential can likewise retire before notification;
-offline conversion uncertainty never enters either write path.
+could replace only its own database-confirmed expired maintenance credential.
+A stopping response for the same request instead recovered the original receipt
+without token writes. Unknown handoff state refused rotation. After candidate
+readiness, an expired credential could likewise retire before notification;
+offline conversion uncertainty never entered either write path.
+
+Immutable environment/profile inputs excluded the managed unit: masking and
+restoration intentionally change that file. Its original fingerprint and frozen
+unit remained separate phase guards. Treating it as an immutable environment
+input would reject the publisher's own mask before conversion, rather than
+establish configuration drift. This boundary also applies to later publications.
 
 App Server command `tool_input.output_capture` uses existing message JSON.
 Completed content stores the actual retained output, with command retention

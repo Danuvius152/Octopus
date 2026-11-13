@@ -24,6 +24,7 @@ test("native root and helper items stay separate through completion, reconnect a
   const sent: unknown[] = [];
   const httpWrites: { method: string; path: string }[] = [];
   const detailReads: number[] = [];
+  let fullRecordReads = 0;
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (!path.startsWith("/api/")) { await route.continue(); return; }
@@ -50,6 +51,11 @@ test("native root and helper items stay separate through completion, reconnect a
       const collected = messages.filter((row) => row.type === "text" && row.runtime_metadata?.native?.thread_id === "helper");
       data = { anchor_seq: anchor, child: helper, availability: collected.length ? "available" : "not_collected",
         messages: collected, next_after_seq: collected.at(-1)?.seq ?? null, has_more: false };
+    }
+    else if (path === `/api/sessions/${session.id}/messages/3`) {
+      fullRecordReads += 1;
+      data = { role: "system", type: "native_subagent", seq: 3, runtime_metadata: identity("helper", null),
+        tool_input: { ...helper, name: "Complete saved helper record", description: "Complete saved description" } };
     }
     else if (path === `/api/sessions/${session.id}`) {
       const reconnected = reconnectGeneration > 0 && connections >= reconnectGeneration;
@@ -85,7 +91,7 @@ test("native root and helper items stay separate through completion, reconnect a
   await card.locator(".subagent-summary-row").click();
   await expect(card.getByText(/No saved reference/)).toBeVisible();
   expect(detailReads).toEqual([]);
-  await card.locator(".subagent-summary-row").click();
+  const originalShell = await card.elementHandle();
   send({ type: "assistant_delta", content: "Root partial", runtime_metadata: identity("root", "same") });
   send({ type: "assistant_delta", content: "Helper partial", runtime_metadata: identity("helper", "same") });
   await expect(page.locator('[data-testid="streaming-text"] .msg-streaming-text')).toHaveText("Root partial");
@@ -94,12 +100,28 @@ test("native root and helper items stay separate through completion, reconnect a
   messages.push(child);
   send({ ...child, type: "assistant_text" });
   await expect(card.locator(".subagent-summary")).toHaveText("Helper saved answer");
+  await expect(card.locator(".subagent-summary-row")).toHaveAttribute("aria-expanded", "true");
+  expect(await originalShell!.evaluate((element) => element.isConnected && element === document.querySelector(".subagent-card"))).toBe(true);
   await expect(page.locator('[data-testid="streaming-text"] .msg-streaming-text')).toHaveText("Root partial");
   await expect(page.locator(".msg-assistant .msg-content")).not.toContainText(["Helper saved answer"]);
   helper = { ...helper, status: "completed" };
   const { runtime_metadata, ...details } = helper;
-  messages.push({ role: "system", type: "native_subagent", seq: 3, runtime_metadata, tool_input: details });
-  send({ type: "subagent", ...helper, seq: 3 });
+  const savedHelper: Message = { role: "system", type: "native_subagent", seq: 3, runtime_metadata, tool_input: details,
+    body_state: "preview", detail_ref: `/api/sessions/${session.id}/messages/3` };
+  messages.push(savedHelper);
+  send({ type: "subagent", ...helper, seq: 3, body_state: savedHelper.body_state, detail_ref: savedHelper.detail_ref });
+  await expect(card.locator(".subagent-summary-row")).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("button", { name: "View full message", exact: true })).toBeVisible();
+  expect(await originalShell!.evaluate((element) => element.isConnected && element === document.querySelector(".subagent-card"))).toBe(true);
+  expect(fullRecordReads, "keeping the shell open does not fetch its full saved record").toBe(0);
+  const layout = await page.getByRole("button", { name: "View full message", exact: true }).evaluate((button) => {
+    const control = button.getBoundingClientRect();
+    const row = button.closest(".msg-row")!.getBoundingClientRect();
+    const summary = button.parentElement!.querySelector(".subagent-summary-row")!.getBoundingClientRect();
+    return { inside: control.left >= row.left && control.right <= row.right && control.top >= row.top && control.bottom <= row.bottom,
+      overlaps: control.left < summary.right && control.right > summary.left && control.top < summary.bottom && control.bottom > summary.top };
+  });
+  expect(layout).toEqual({ inside: true, overlaps: false });
   const root: Message = { role: "assistant", type: "text", seq: 4, content: "Root final answer", runtime_metadata: identity("root", "same") };
   messages.push(root);
   send({ ...root, type: "assistant_text" });
@@ -124,7 +146,7 @@ test("native root and helper items stay separate through completion, reconnect a
   await expect(page.locator('[data-testid="streaming-text"]')).toHaveCount(0);
   await expect(card).toHaveClass(/subagent-completed/);
   await expect(card.locator(".subagent-description")).toHaveText("helper finished");
-  await card.locator(".subagent-summary-row").click();
+  await expect(card.locator(".subagent-summary-row")).toHaveAttribute("aria-expanded", "true");
   const savedDetails = card.getByRole("region", { name: "Saved helper details" });
   await expect(savedDetails.getByText("Helper saved answer", { exact: true })).toBeVisible();
   await expect(savedDetails.getByText(/parent has consumed/)).toBeVisible();
@@ -149,6 +171,10 @@ test("native root and helper items stay separate through completion, reconnect a
   await card.locator(".subagent-summary-row").click();
   await expect(card.getByRole("region", { name: "Saved helper details" }).getByText("Helper saved answer", { exact: true })).toBeVisible();
   expect(detailReads.length).toBeGreaterThanOrEqual(2);
+  expect(fullRecordReads).toBe(0);
+  await page.getByRole("button", { name: "View full message", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Full saved helper record" })).toContainText("Complete saved description");
+  expect(fullRecordReads).toBe(1);
   expect(sent).toEqual([]);
   expect(httpWrites).toEqual([]);
 });
