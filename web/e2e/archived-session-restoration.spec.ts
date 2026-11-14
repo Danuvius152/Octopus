@@ -1,10 +1,10 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { deferred } from "../src/test-support/deferred";
 import { test, expect, type Page } from "./test";
 import type { components } from "../src/api/contracts";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 async function openArchive(page: Page) {
   await page.locator(".btn-account").click();
   await page.getByRole("menuitem", { name: "Archived sessions" }).click();

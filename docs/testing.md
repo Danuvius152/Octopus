@@ -123,6 +123,66 @@ remain offline, while Chat, schedule and native-provider cases keep their live
 selection. All E2E files are checked by `tsconfig.e2e.json` through the ordinary
 `bun run typecheck` and build commands.
 
+The shared fixture provisions a real account for each ordinary test attempt,
+including repeats and rebuilt workers. `current-account.ts` exposes that
+attempt's bearer at call time; do not capture it at module import. The account
+creation receipt grants cleanup authority over its namespace, including
+server-created successors whose creation response was lost. Locate individual
+resources by their returned IDs; display names do not establish ownership.
+Fixture teardown checks inventories and mutations, attaches cleanup failures
+and fails the test without discarding its original error. Archived sessions
+are already retired and have no public DELETE operation; they remain in the
+isolated runtime until that run ends. This does not require deleting test
+accounts or guaranteeing an empty cache after interruption.
+
+The runner first collects the actual Playwright selection, preserving native
+project names, multiple selections, wildcard matching and unmatched-selection
+errors. It intersects that selection with the isolation phases; each child
+receives one exact project. Ordinary `chromium` cases retain worker parallelism.
+The `installation` phase runs alone with one worker for installation-wide
+OAuth/custom-connector configuration, the agent-memory mutation guard and the
+offline Wiki fixture's shared worker. Account-local pin order still belongs to
+each attempt's account. Connector teardown restores the phase's initially empty
+configuration and checks the real API responses. Repeated cases reuse this
+phase's backend and Vite server rather than restarting services for each repeat.
+See [the project scopes](../web/playwright.config.ts) and
+[selection regressions](../web/tests/e2eOwnership.test.ts).
+
+`bun run test:e2e:ui` retains Playwright's native interactive entry, including
+`--ui-host` and `--ui-port`. Internal collection does not launch UI. The runner
+opens each selected phase in order; its UI exposes only that phase's project
+and scope, and closes its resources before the next phase. Choose cases and
+reruns inside that UI; an empty first-account story needs native Cleanup/Setup
+before rerunning. UI mode opens each selected phase once rather than applying
+batch repeat counts to UI windows. Each Setup cycle must have a complete
+offline guard/readiness audit, and a swallowed refusal still fails. Closing UI
+before Setup explicitly reports that no test execution was audited; it is not
+a passing batch-suite result. [UI protocol tests](../web/tests/e2eUI.test.ts)
+exercise the installed CLI and the actual package entry without launching a GUI.
+
+Only actually selected first-account stories prepare an empty accounts backend
+and its Vite proxy, with a fresh pair per story repetition. Those runs do not
+start the ordinary backend; other phases do not start the accounts pair. Mutable
+state and provider output stay under `~/.cache/octopus-tests`; installed tools,
+browser binaries, dependency optimizer and download caches are reused. Normal
+teardown closes owned resources and removes its own runtime after Playwright
+stops the servers. Cache residue is not a test failure. Keep the watched source
+tree fixed during browser execution: a source edit can reload an open Vite page
+and retire its in-memory selection.
+
+Ownership regressions use same-name resources in distinct real accounts,
+simultaneous account-local pin-order writes, and an injected cleanup HTTP error.
+The archive-management case retains direct archived-history navigation and
+forces first-generation/list-confirmation overlap; it exercises the existing
+[original-operation confirmation](implemented/frontend-list-reconciliation.md#归档恢复的原操作确认)
+without replaying its POST. The frontend ESLint configuration restricts
+production `randomUUID` property access to `newSubmissionId` in
+`src/lib/submission.ts`, with explicit test/support exceptions. Its
+[real-configuration probes](../web/tests/secureIdLint.test.ts) reject direct,
+aliased, computed-property and destructured access while allowing helper calls;
+the secure randomness and local capability-error behavior remain covered by
+the helper and HTTP submission regressions.
+
 ## Full checks before code commits
 
 At the code commit boundary, complete the check set in `./scripts/check.sh`:

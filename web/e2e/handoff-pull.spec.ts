@@ -1,3 +1,4 @@
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "./test";
 import { execFileSync } from "child_process";
 import {
@@ -16,14 +17,10 @@ import { systemAgentId } from "./system-agent";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const TOKEN = "changeme";
 const SERVER_URL = "http://localhost:8765";
 const API = `${SERVER_URL}/api/sessions`;
 
-/** Click the new-session "+" on the default "Octo" agent's row. The button is
- * per-agent, and specs share one in-memory backend DB, so a bare
- * ".btn-session-add" turns ambiguous once a concurrent spec creates another
- * agent. Scoping to Octo keeps it unambiguous. */
+/** Click the new-session button on this account's default Agent. */
 const addOctoSession = (page: Page) =>
   page
     .locator(".agent-item", { hasText: "Octo" })
@@ -99,8 +96,7 @@ function writeTestJsonl(
 
 async function login(page: any) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header")).toBeVisible();
   // Sessions live behind a folded agent row; open the default
   // agent's rail so they're reachable.
@@ -125,7 +121,7 @@ async function getSessionByName(
   name: string
 ): Promise<{ id: string; claude_session_id: string | null } | undefined> {
   const res = await request.get(API, {
-    headers: { Authorization: `Bearer ${TOKEN}` },
+    headers: { Authorization: `Bearer ${accountToken()}` },
   });
   const sessions: {
     id: string;
@@ -140,63 +136,15 @@ async function getSessionByName(
 // ---------------------------------------------------------------------------
 
 const tempDirs: string[] = [];
+test.afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 function makeTempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "octopus-e2e-"));
   tempDirs.push(dir);
   return dir;
 }
-
-// ---------------------------------------------------------------------------
-// Cleanup: delete only sessions created by this spec + temp dirs after suite
-// ---------------------------------------------------------------------------
-
-// Names of sessions this spec creates — only delete these to avoid
-// disturbing sessions in-flight on parallel worker processes.
-const OWNED_NAMES = new Set([
-  "Handoff E2E",
-  "Pull No Claude ID",
-  "Pull Test",
-  "Roundtrip Source",
-  "Roundtrip Re-imported",
-  "Cleanup A",
-  "Cleanup B",
-]);
-
-test.afterAll(async ({ request }) => {
-  // Delete only sessions this spec created (best-effort)
-  try {
-    const res = await request.get(API, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-      timeout: 5_000,
-    });
-    if (res.ok()) {
-      const sessions: { id: string; name: string }[] = await res.json();
-      for (const s of sessions) {
-        if (!OWNED_NAMES.has(s.name)) continue;
-        try {
-          await request.delete(`${API}/${s.id}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-            timeout: 3_000,
-          });
-        } catch {
-          // Session might be running or already deleted by another worker
-        }
-      }
-    }
-  } catch {
-    // Server might be unavailable, ignore
-  }
-
-  // Remove temp directories
-  for (const dir of tempDirs) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // ignore cleanup errors
-    }
-  }
-});
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -227,7 +175,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
       "--name",
       "Handoff E2E",
       "--token",
-      TOKEN,
+      accountToken(),
     ]);
 
     expect(result.exitCode).toBe(0);
@@ -261,10 +209,10 @@ test.describe("Handoff & Pull CLI @llm", () => {
     // Create a session via API (no messages sent, so no claude_session_id)
     const createRes = await request.post(API, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: `Bearer ${accountToken()}`,
         "Content-Type": "application/json",
       },
-      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Pull No Claude ID" },
+      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${accountToken()}` }), name: "Pull No Claude ID" },
     });
     expect(createRes.ok()).toBeTruthy();
     const created = await createRes.json();
@@ -277,7 +225,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
       "--project-dir",
       tmpDir,
       "--token",
-      TOKEN,
+      accountToken(),
     ]);
 
     expect(result.exitCode).toBe(0);
@@ -332,7 +280,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
       "--project-dir",
       tmpDir,
       "--token",
-      TOKEN,
+      accountToken(),
     ]);
 
     expect(result.exitCode).toBe(0);
@@ -410,7 +358,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
       "--project-dir",
       tmpDir,
       "--token",
-      TOKEN,
+      accountToken(),
     ]);
     expect(pullResult.exitCode).toBe(0);
 
@@ -431,7 +379,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
       "--name",
       "Roundtrip Re-imported",
       "--token",
-      TOKEN,
+      accountToken(),
     ]);
     expect(handoffResult.exitCode).toBe(0);
     expect(handoffResult.stdout).toContain("Session imported:");
@@ -474,10 +422,10 @@ test.describe("Handoff & Pull CLI @llm", () => {
     for (const name of ["Cleanup A", "Cleanup B"]) {
       const createRes = await request.post(API, {
         headers: {
-          Authorization: `Bearer ${TOKEN}`,
+          Authorization: `Bearer ${accountToken()}`,
           "Content-Type": "application/json",
         },
-        data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name },
+        data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${accountToken()}` }), name },
       });
       const created = await createRes.json();
       createdIds.push(created.id);
@@ -485,7 +433,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
 
     // Verify they exist
     let res = await request.get(API, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     let sessions: { id: string }[] = await res.json();
     const foundIds = sessions.map((s) => s.id);
@@ -496,14 +444,14 @@ test.describe("Handoff & Pull CLI @llm", () => {
     // Delete only the sessions we created
     for (const id of createdIds) {
       const delRes = await request.delete(`${API}/${id}`, {
-        headers: { Authorization: `Bearer ${TOKEN}` },
+        headers: { Authorization: `Bearer ${accountToken()}` },
       });
       expect(delRes.status()).toBe(204);
     }
 
     // Verify our created sessions are gone
     res = await request.get(API, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     sessions = await res.json();
     const remainingIds = sessions.map((s) => s.id);

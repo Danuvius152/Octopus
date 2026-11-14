@@ -1,50 +1,15 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "./test";
 import { systemAgentId } from "./system-agent";
 
-const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api/sessions";
 
-/** Click the new-session "+" on the default "Octo" agent's row. The button is
- * per-agent now, and specs share one in-memory backend DB, so a bare
- * ".btn-session-add" turns ambiguous (strict-mode violation) the moment a
- * concurrent spec has created another agent. Scoping to Octo is unambiguous. */
+/** Click the new-session button on this account's default Agent. */
 const addOctoSession = (page: Page) =>
   page
     .locator(".agent-item", { hasText: "Octo" })
     .locator(".btn-session-add")
     .click();
-
-// Names of sessions this spec creates — only delete these to avoid
-// disturbing sessions in-flight on parallel worker processes.
-const OWNED_NAMES = new Set([
-  "E2E Test Session",
-  "To Delete",
-  "Chat Test",
-  "Mobile Drawer",
-  "Mobile Viewport",
-  "Touch Chosen",
-  "Touch Other",
-]);
-
-// Clean up only sessions created by this spec
-test.afterAll(async ({ request }) => {
-  const res = await request.get(API, {
-    headers: { Authorization: `Bearer ${TOKEN}` },
-  });
-  if (res.ok()) {
-    const sessions: { id: string; name: string }[] = await res.json();
-    for (const s of sessions) {
-      if (OWNED_NAMES.has(s.name)) {
-        await request
-          .delete(`${API}/${s.id}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-          })
-          .catch(() => {});
-      }
-    }
-  }
-});
 
 test.describe("Login", () => {
   test("shows login screen when no token", async ({ page }) => {
@@ -132,7 +97,7 @@ test.describe("Session Management", () => {
     await expect(target).toHaveCount(0);
     // …but it was put away, not destroyed: the history is still there.
     const all = await request.get("http://localhost:8765/api/sessions", {
-      headers: { Authorization: `Bearer ${TEST_BEARER}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
       params: { include_archived: "true" },
     });
     const row = ((await all.json()) as { name: string; archived: boolean }[]).find(
@@ -157,7 +122,7 @@ test.describe("Chat", () => {
       .locator('.session-create input[placeholder="Session name"]')
       .fill("Chat Test");
     // The account owns its default workspace; /tmp is outside that boundary.
-    const agentId = await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` });
+    const agentId = await systemAgentId(request, API, { Authorization: `Bearer ${accountToken()}` });
     const createUrl = new URL(`/api/agents/${agentId}/sessions`, page.url()).href;
     const created = page.waitForResponse((response) =>
       response.url() === createUrl && response.request().method() === "POST");
@@ -258,7 +223,7 @@ test.describe("Touch affordances", () => {
     request,
   }) => {
     const headers = {
-      Authorization: `Bearer ${TOKEN}`,
+      Authorization: `Bearer ${accountToken()}`,
       "Content-Type": "application/json",
     };
     for (const name of ["Touch Chosen", "Touch Other"]) {
@@ -352,10 +317,10 @@ test.describe("Responsive Layout", () => {
     // chosen hidden behind the menu you chose it from (mobile.md §2).
     const created = await request.post(API, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: `Bearer ${accountToken()}`,
         "Content-Type": "application/json",
       },
-      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Mobile Drawer", },
+      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${accountToken()}` }), name: "Mobile Drawer", },
     });
     expect(created.ok()).toBeTruthy();
 
@@ -389,10 +354,10 @@ test.describe("Responsive Layout", () => {
     // the composer floating in a band of dead page (mobile.md §6).
     const created = await request.post(API, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: `Bearer ${accountToken()}`,
         "Content-Type": "application/json",
       },
-      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Mobile Viewport", },
+      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${accountToken()}` }), name: "Mobile Viewport", },
     });
     expect(created.ok()).toBeTruthy();
 

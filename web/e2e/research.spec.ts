@@ -1,4 +1,4 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { deferred } from "../src/test-support/deferred";
 import { restoreSession } from "./session-restoration";
 import {
@@ -10,33 +10,7 @@ import {
 // and sign-in still use the real backend. ResearchManager's cancellation is
 // covered by backend unit tests; the live pipeline by test_research_real.py.
 
-const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
-const OWNED = new Set(["Research E2E", "Research first generation E2E", "Restored original caller"]);
-
-test.afterAll(async ({ request }) => {
-  try {
-    const res = await request.get(`${API}/sessions`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-      params: { include_archived: "true" },
-      timeout: 5_000,
-    });
-    if (res.ok()) {
-      const sessions: { id: string; name: string }[] = await res.json();
-      for (const s of sessions) {
-        if (!OWNED.has(s.name)) continue;
-        await request
-          .delete(`${API}/sessions/${s.id}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-            timeout: 3_000,
-          })
-          .catch(() => {});
-      }
-    }
-  } catch {
-    /* best-effort */
-  }
-});
 
 async function login(page: Page) {
   await page.goto("/");
@@ -62,7 +36,7 @@ async function openSessionRail(page: Page, agentName = "Octo") {
 
 async function importSession(request: APIRequestContext, name = "Research E2E"): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions/import`, {
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${accountToken()}`, "Content-Type": "application/json" },
     data: {
       name,
       messages: [{ role: "user", type: "text", content: "hello" }],
@@ -74,7 +48,7 @@ async function importSession(request: APIRequestContext, name = "Research E2E"):
 
 test("a restored original session reappears in the sidebar", async ({ page, request }) => {
   const created = await request.post(`${API}/sessions/import`, {
-    headers: { Authorization: `Bearer ${TOKEN}` },
+    headers: { Authorization: `Bearer ${accountToken()}` },
     data: { name: "Restored original caller", messages: [{ role: "user", type: "text", content: "Original context" }] },
   });
   expect(created.ok(), await created.text()).toBeTruthy();
@@ -83,11 +57,11 @@ test("a restored original session reappears in the sidebar", async ({ page, requ
   const row = page.locator(".session-item", { hasText: "Restored original caller" });
   await expect(row).toBeVisible();
   const archived = await request.post(`${API}/sessions/${session.id}/archive?replace=false`, {
-    headers: { Authorization: `Bearer ${TOKEN}` },
+    headers: { Authorization: `Bearer ${accountToken()}` },
   });
   expect(archived.ok(), await archived.text()).toBeTruthy();
   await expect(row).toBeHidden();
-  await restoreSession(request, API, session.id, { Authorization: `Bearer ${TOKEN}` });
+  await restoreSession(request, API, session.id, { Authorization: `Bearer ${accountToken()}` });
   await expect(row).toBeVisible();
 });
 

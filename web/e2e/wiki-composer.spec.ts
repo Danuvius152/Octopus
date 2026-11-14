@@ -1,9 +1,9 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test } from "./test";
 import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 
 for (const width of [1280, 390]) {
   test.describe(`Shared Wiki composer at ${width}px`, () => {

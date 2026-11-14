@@ -1,8 +1,8 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect } from "./test";
 
 const agentsUrl = "http://localhost:8765/api/agents";
-const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 
 test("a saved Agent remains saved while its delayed receipt leaves the reopened draft alone", async ({ page, request }) => {
   const created = await request.post(agentsUrl, { headers, data: { name: "E2E Form lifetime" } });

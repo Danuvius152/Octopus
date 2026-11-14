@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Locator } from "@playwright/test";
 
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test } from "./test";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 
 async function renderedMath(root: Locator) {
   await expect(root.locator("math")).toHaveCount(2);

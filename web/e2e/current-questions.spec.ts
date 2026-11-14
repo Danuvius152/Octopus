@@ -1,9 +1,9 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test } from "./test";
 
 test("current questions submit complete answers and keep answered and cancelled history after reload", async ({ page, request }) => {
   const api = "http://localhost:8765/api";
-  const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+  const headers = { Authorization: `Bearer ${accountToken()}` };
   const listed = await request.get(`${api}/agents`, { headers });
   expect(listed.ok()).toBeTruthy();
   const agents = await listed.json() as { id: string; name: string; archived?: boolean; pinned?: boolean }[];

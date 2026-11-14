@@ -1,11 +1,11 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test, type Page, type WebSocketRoute } from "./test";
 import { systemAgentId } from "./system-agent";
 import { wikiJob } from "../src/lib/wikiJobs.fixture";
 import { restoreSession } from "./session-restoration";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 
 async function openSession(page: Page, name: string) {
   const agent = page.locator(".agent-item", { hasText: "Octo" });

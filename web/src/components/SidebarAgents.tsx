@@ -512,6 +512,7 @@ export function SidebarAgents() {
               return (
                 <div
                   key={s.id}
+                  data-session-id={s.id}
                   className={`session-item group/session flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 cursor-pointer transition-colors ${
                     isActive
                       ? "active bg-primary-50 border border-primary-100 shadow-[0_1px_2px_rgba(37,99,184,0.06)]"

@@ -1,4 +1,4 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 /**
  * End-to-end coverage of applications (docs/implemented/applications.md).
  *
@@ -14,11 +14,8 @@ import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 
 import { expect, test, type APIRequestContext, type Page } from "./test";
 
-const TOKEN = TEST_BEARER;
 const SERVER_URL = "http://localhost:8765";
 const API = `${SERVER_URL}/api`;
-
-const OWNED_APPS = new Set(["E2E Hello App"]);
 
 type AppRow = {
   id: string;
@@ -28,42 +25,8 @@ type AppRow = {
   app_dir: string;
 };
 
-const headers = { Authorization: `Bearer ${TOKEN}` };
-const jsonHeaders = { ...headers, "Content-Type": "application/json" };
-
-test.afterAll(async ({ request }) => {
-  try {
-    // Live and archived: the UI archives rather than deletes, so a finished
-    // run leaves its app in the archive.
-    const lists = await Promise.all(
-      [false, true].map((archived) =>
-        request.get(`${API}/applications`, { headers, params: { archived }, timeout: 5_000 })
-      )
-    );
-    for (const res of lists) {
-      if (!res.ok()) continue;
-      for (const app of (await res.json()) as AppRow[]) {
-        if (!OWNED_APPS.has(app.name)) continue;
-        await request
-          .delete(`${API}/applications/${app.id}`, { headers, timeout: 5_000 })
-          .catch(() => {});
-      }
-    }
-    // Build sessions outlive their application by design — clean ours up.
-    const sRes = await request.get(`${API}/sessions`, { headers, timeout: 5_000 });
-    if (sRes.ok()) {
-      const sessions: { id: string; name: string }[] = await sRes.json();
-      for (const s of sessions) {
-        if (!/^Build: E2E /.test(s.name)) continue;
-        await request
-          .delete(`${API}/sessions/${s.id}`, { headers, timeout: 3_000 })
-          .catch(() => {});
-      }
-    }
-  } catch {
-    // best-effort
-  }
-});
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
+const jsonHeaders = { get Authorization() { return headers.Authorization; }, "Content-Type": "application/json" };
 
 async function login(page: Page) {
   await page.goto("/");

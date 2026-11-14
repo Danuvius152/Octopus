@@ -1,4 +1,4 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 /**
  * Sidebar pins, end to end (docs/implemented/sidebar-pins.md). Pure UI, no model.
  *
@@ -11,14 +11,13 @@ import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 
 import { expect, test, type APIRequestContext, type Page } from "./test";
 
-const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
-const headers = { Authorization: `Bearer ${TOKEN}` };
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 
 const PIN_A = "E2E Pin Alpha";
 const PIN_B = "E2E Pin Beta";
 const PIN_C = "E2E Pin Gamma";
-const OWNED = new Set([PIN_A, PIN_B, PIN_C]);
+const PIN_NAMES = new Set([PIN_A, PIN_B, PIN_C]);
 
 type AgentRow = { id: string; name: string; pinned: boolean; pin_order: number };
 
@@ -28,14 +27,7 @@ async function agents(request: APIRequestContext): Promise<AgentRow[]> {
   return res.json();
 }
 
-async function ensureAgent(request: APIRequestContext, name: string): Promise<AgentRow> {
-  const existing = (await agents(request)).find((a) => a.name === name);
-  if (existing) {
-    if (!existing.pinned) {
-      await request.post(`${API}/agents/${existing.id}/pin`, { headers });
-    }
-    return existing;
-  }
+async function createAgent(request: APIRequestContext, name: string): Promise<AgentRow> {
   const res = await request.post(`${API}/agents`, {
     headers: { ...headers, "Content-Type": "application/json" },
     data: { name },
@@ -49,9 +41,9 @@ async function sidebarNames(page: Page): Promise<string[]> {
   return page.locator(".agent-list-items .agent-name").allTextContents();
 }
 
-/** Only this spec's agents, in sidebar order — other specs share the server. */
+/** The three rows exercised by this test, excluding the locked default row. */
 async function ownOrder(page: Page): Promise<string[]> {
-  return (await sidebarNames(page)).filter((n) => OWNED.has(n));
+  return (await sidebarNames(page)).filter((n) => PIN_NAMES.has(n));
 }
 
 async function login(page: Page) {
@@ -72,24 +64,17 @@ const row = (page: Page, name: string) =>
 
 test.beforeEach(async ({ request }) => {
   // A fixed starting point: all three pinned, in A, B, C order.
-  const rows = [];
-  for (const name of [PIN_A, PIN_B, PIN_C]) rows.push(await ensureAgent(request, name));
   const pinned = (await agents(request))
-    .filter((a) => a.pinned && !OWNED.has(a.name))
+    .filter((a) => a.pinned)
     .sort((x, y) => x.pin_order - y.pin_order)
     .map((a) => a.id);
-  await request.put(`${API}/agents/pin-order`, {
+  const rows = [];
+  for (const name of [PIN_A, PIN_B, PIN_C]) rows.push(await createAgent(request, name));
+  const response = await request.put(`${API}/agents/pin-order`, {
     headers: { ...headers, "Content-Type": "application/json" },
     data: { ids: [...pinned, ...rows.map((r) => r.id)] },
   });
-});
-
-test.afterAll(async ({ request }) => {
-  for (const a of await agents(request).catch(() => [] as AgentRow[])) {
-    if (OWNED.has(a.name)) {
-      await request.post(`${API}/agents/${a.id}/archive`, { headers }).catch(() => {});
-    }
-  }
+  expect(response.ok()).toBeTruthy();
 });
 
 test.describe("Sidebar pins", () => {
@@ -221,15 +206,5 @@ test.describe("Sidebar pins", () => {
       .click();
     await expect(row(page, PIN_C)).toHaveCount(0);
 
-    // Clean up the sessions this test made.
-    const sessions = (await (
-      await request.get(`${API}/sessions`, { headers })
-    ).json()) as { id: string; agent_id: string }[];
-    for (const s of sessions) {
-      const owner = (await agents(request)).find((a) => a.id === s.agent_id);
-      if (owner && OWNED.has(owner.name)) {
-        await request.delete(`${API}/sessions/${s.id}`, { headers }).catch(() => {});
-      }
-    }
   });
 });

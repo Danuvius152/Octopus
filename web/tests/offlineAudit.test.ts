@@ -28,12 +28,16 @@ function runnerDouble(refusal: boolean) {
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+if (process.argv.includes('--list')) {
+  console.log(JSON.stringify({ suites: [{ specs: [{ file: 'audit-probe.spec.ts', tests: [{ projectName: 'chromium' }] }] }], errors: [] }));
+  process.exit(0);
+}
 const root = os.tmpdir();
 if (process.env.CODEX_HOME.startsWith(root + path.sep)) throw new Error('CLI home is inside its temporary directory');
 if (fs.existsSync(path.join(root, 'prior-run'))) throw new Error('Inherited stale mutable state');
 fs.writeFileSync(path.join(root, 'prior-run'), 'test state');
 console.log('ISOLATION ' + JSON.stringify({root, homes: [process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR, process.env.OCTOPUS_CODEX_HOME_DIR, process.env.OCTOPUS_LARGE_PROMPTS_DIR]}));
-for (const server of ['main', 'accounts']) {
+for (const server of [process.env.OCTOPUS_E2E_SCOPE]) {
   const events = ['guard_installed', 'offline_ready', ...(${refusal} && server === 'main' ? ['violation'] : [])];
   fs.writeFileSync(path.join(process.env.OCTOPUS_E2E_AUDIT_DIR, server + '.jsonl'), events.map(kind => JSON.stringify({kind, reason: 'process_dispatch'})).join('\\n'));
 }
@@ -49,7 +53,7 @@ process.exit(0);
 }
 
 describe("offline runner's final audit", () => {
-  it("requires guarded offline startup on both servers and counts only test dispatch", () => {
+  it("requires guarded offline startup on every selected server and counts only test dispatch", () => {
     const main = audit("main", ["guard_installed", "offline_ready", "offline_dispatch"]);
     const accounts = audit("accounts", ["guard_installed", "offline_ready"]);
     expect(verifyOfflineAudit([main, accounts])).toEqual({ offlineDispatches: 1, realDispatches: 0 });
@@ -64,6 +68,18 @@ describe("offline runner's final audit", () => {
     const invalid = path.join(root, "invalid");
     writeFileSync(invalid, "not json");
     expect(() => verifyOfflineAudit([invalid])).toThrow();
+  });
+  it("checks every native UI cleanup/setup cycle without relaxing ordinary runs", () => {
+    const restarted = audit("restarted", ["guard_installed", "offline_ready", "offline_dispatch", "guard_installed", "offline_ready"]);
+    expect(() => verifyOfflineAudit([restarted])).toThrow("missing or duplicated");
+    expect(verifyOfflineAudit([restarted], { allowRestarts: true })).toEqual({ offlineDispatches: 1, realDispatches: 0 });
+    for (const events of [
+      ["guard_installed", "offline_ready", "guard_installed"],
+      ["guard_installed", "guard_installed", "offline_ready"],
+      ["offline_dispatch", "guard_installed", "offline_ready"],
+      ["guard_installed", "offline_ready", "guard_installed", "offline_dispatch", "offline_ready"],
+      ["guard_installed", "offline_ready", "guard_installed", "offline_ready", "violation"],
+    ]) expect(() => verifyOfflineAudit([audit("invalid-cycle", events)], { allowRestarts: true })).toThrow();
   });
   it("makes the actual runner fail after a successful child swallowed a refusal", () => {
     const child = runnerDouble(true).run();

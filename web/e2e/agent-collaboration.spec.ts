@@ -1,3 +1,4 @@
+import { accountToken, enterAccountCredentials } from "./current-account";
 /**
  * End-to-end coverage of agent-to-agent delegation (agent-collaboration.md).
  *
@@ -27,53 +28,12 @@
 import { test, expect, type Page, type APIRequestContext } from "./test";
 import { systemAgentId } from "./system-agent";
 
-const TOKEN = "changeme";
 const SERVER_URL = "http://localhost:8765";
 const API = `${SERVER_URL}/api`;
 
-const OWNED_AGENTS = new Set(["E2E DelegTarget"]);
-const OWNED_SESSIONS = new Set(["Delegation E2E"]);
-
-test.afterAll(async ({ request }) => {
-  const headers = { Authorization: `Bearer ${TOKEN}` };
-  try {
-    const sRes = await request.get(`${API}/sessions`, { headers });
-    if (sRes.ok()) {
-      const sessions: { id: string; name: string }[] = await sRes.json();
-      for (const s of sessions) {
-        // Clean up the user-typed session AND any delegation child
-        // sessions we spawned along the way (their names auto-derive
-        // as "<target> ← <parent>").
-        if (
-          OWNED_SESSIONS.has(s.name) ||
-          /←\s*Octo$/.test(s.name)
-        ) {
-          await request
-            .delete(`${API}/sessions/${s.id}`, { headers })
-            .catch(() => {});
-        }
-      }
-    }
-    const aRes = await request.get(`${API}/agents`, { headers });
-    if (aRes.ok()) {
-      const agents: { id: string; name: string }[] = await aRes.json();
-      for (const a of agents) {
-        if (OWNED_AGENTS.has(a.name)) {
-          await request
-            .post(`${API}/agents/${a.id}/archive`, { headers })
-            .catch(() => {});
-        }
-      }
-    }
-  } catch {
-    // best-effort
-  }
-});
-
 async function login(page: Page) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header")).toBeVisible();
   // Sessions live behind a folded agent row; open the default
   // agent's rail so they're reachable.
@@ -98,7 +58,7 @@ async function ensureAgent(
   name: string
 ): Promise<{ id: string; name: string }> {
   const headers = {
-    Authorization: `Bearer ${TOKEN}`,
+    Authorization: `Bearer ${accountToken()}`,
     "Content-Type": "application/json",
   };
   const list = await request.get(`${API}/agents`, { headers });
@@ -149,10 +109,10 @@ test.describe("Agent-to-agent delegation @llm", () => {
     // intercepting our typed prompt).
     const sessRes = await request.post(`${API}/sessions`, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: `Bearer ${accountToken()}`,
         "Content-Type": "application/json",
       },
-      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Delegation E2E", working_dir: "/tmp" },
+      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name: "Delegation E2E", working_dir: "/tmp" },
     });
     expect(sessRes.ok()).toBeTruthy();
 

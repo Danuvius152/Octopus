@@ -3,13 +3,11 @@
 import asyncio
 import os
 import uuid
-from pathlib import Path
 
 from fastapi import Depends, HTTPException, Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from server.auth import verify_token
-from server.config import settings
 from server.deps import ScopeUser, SessionMgr
 from server.mcp_identity import mint
 from server.routers.wiki import access
@@ -17,6 +15,7 @@ from server.wiki import registry
 from server.wiki.job_notifications import dispatch
 from server.wiki.jobs import WikiJobs, worker
 from server.wiki.tasks import tasks
+from server.workspace import paths_for
 
 
 def install(app):
@@ -82,7 +81,7 @@ def install(app):
         # cancellation route. No model, fabricated job or card is seeded.
         await worker.stop()
         worker.manager = session_manager
-        root = Path(settings.default_working_dir) / "wiki-card-browser"
+        root = paths_for(user_id).workspace / "wiki-card-browser"
         root.mkdir(parents=True, exist_ok=True)
         (root / "note.md").write_text("# Browser fixture\nPreserve these words.\n")
         config = await asyncio.to_thread(registry.configure, user_id, root, session.agent_id)

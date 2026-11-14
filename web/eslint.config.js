@@ -8,6 +8,18 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   globalIgnores(['dist']),
   {
+    files: ['src/**/*.{ts,tsx}'],
+    ignores: ['src/lib/submission.ts', 'src/**/*.test.{ts,tsx}',
+      'src/**/*.fixture.ts', 'src/test-support/**', 'src/test-setup.ts'],
+    rules: {
+      // A property-only restriction also catches aliases and destructuring.
+      'no-restricted-properties': ['error', {
+        property: 'randomUUID',
+        message: 'Use newSubmissionId from lib/submission for secure, compatible IDs.',
+      }],
+    },
+  },
+  {
     files: ['e2e/**/*.spec.ts'],
     rules: {
       'no-restricted-imports': ['error', {

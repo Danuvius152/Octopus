@@ -2,11 +2,11 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test, type APIRequestContext, type Page } from "./test";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 const document = readFileSync(new URL("../../tests/fixtures/viewer.pdf", import.meta.url));
 const filename = "指南 %.pdf";
 

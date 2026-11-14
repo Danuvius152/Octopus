@@ -1,9 +1,9 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test } from "./test";
 import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 
 test("a rejected draft survives archive and restores its text and attachment to a new conversation", async ({ page, request }) => {
   const sent: { session_id: string; client_request_id: string; content: string; attachment_ids: string[]; wiki_mode?: string }[] = [];

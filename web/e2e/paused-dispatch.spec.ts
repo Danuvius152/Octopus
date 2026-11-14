@@ -1,4 +1,4 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test, type Page, type WebSocketRoute } from "./test";
 import { systemAgentId } from "./system-agent";
 
@@ -127,7 +127,7 @@ test("Stop keeps returns paused through correction and reconnect until explicit 
 
 test("real idle Stop and Resume synchronize dispatch pause across browser clients", async ({ page, context, request }) => {
   const api = "http://localhost:8765/api";
-  const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+  const headers = { Authorization: `Bearer ${accountToken()}` };
   const created = await request.post(`${api}/sessions`, {
     headers, data: { agent_id: await systemAgentId(request, `${api}/sessions`, headers), name: `Idle remote dispatch ${Date.now()}`, backend: "codex" },
   });

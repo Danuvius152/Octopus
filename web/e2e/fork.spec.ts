@@ -1,4 +1,4 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page, type APIRequestContext } from "./test";
 
 // Pure-UI e2e for session tree-rewind / fork (session-rewind.md §6).
@@ -8,35 +8,7 @@ import { test, expect, type Page, type APIRequestContext } from "./test";
 // the parent's name and the parent is archived, so the fork surfaces in the
 // sidebar as a plain top-level session (no nesting, no "@msg" badge).
 
-const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
-const OWNED = new Set(["Fork E2E Parent"]);
-
-test.afterAll(async ({ request }) => {
-  try {
-    const res = await request.get(`${API}/sessions`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-      params: { include_archived: "true" },
-      timeout: 5_000,
-    });
-    if (res.ok()) {
-      const sessions: { id: string; name: string }[] = await res.json();
-      for (const s of sessions) {
-        // The parent and its forks all carry the same name now (a fork inherits
-        // the parent's name), so one membership check covers both.
-        if (!OWNED.has(s.name)) continue;
-        await request
-          .delete(`${API}/sessions/${s.id}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-            timeout: 3_000,
-          })
-          .catch(() => {});
-      }
-    }
-  } catch {
-    /* best-effort */
-  }
-});
 
 async function login(page: Page) {
   await page.goto("/");
@@ -62,7 +34,7 @@ async function openSessionRail(page: Page, agentName = "Octo") {
 
 async function importParent(request: APIRequestContext): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions/import`, {
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${accountToken()}`, "Content-Type": "application/json" },
     data: {
       name: "Fork E2E Parent",
       messages: [

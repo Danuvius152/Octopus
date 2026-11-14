@@ -43,19 +43,11 @@ export const E2E_METRICS_DB = path.join(os.tmpdir(), "octopus-e2e-metrics.db");
 // install they actually run. Removed in global-teardown.
 export const E2E_STATE_DIR = path.join(os.tmpdir(), "octopus-e2e-state");
 
-// Accounts get a backend of their own (accounts.spec.ts). First-account setup
-// needs an empty installation, separate from the shared owned-account server.
-// A second uvicorn on its own port,
-// with its own everything, plus the dev server that proxies to it. Started
-// fresh each run rather than reused: a leftover server from a previous run
-// would already have accounts and could not exercise first-account setup.
-//
-// Both buckets need them: the UI story is in accounts.spec.ts and the real
-// turn — the one that proves an agent's tools still work once an account owns
-// the session — is in accounts-llm.spec.ts. They were briefly started only for
-// non-`@llm` runs, because two idle servers were destabilising the real-CLI
-// half; the cause turned out to be two *workers* driving two `claude`
-// processes at once, and `test:e2e:llm` runs serially now (package.json).
+// First-account stories alone need an empty installation. The runner selects
+// this service pair only for an actually collected accounts story, one fresh
+// pair per story repetition. Other phases start only the main service pair.
+const scope = process.env.OCTOPUS_E2E_SCOPE;
+if (scope && scope !== "main" && scope !== "accounts") throw new Error("Unknown E2E state scope");
 export const E2E_ACCOUNTS_PORT = 8766;
 export const E2E_ACCOUNTS_WEB_PORT = 5175;
 export const E2E_ACCOUNTS_STATE_DIR = path.join(
@@ -68,7 +60,14 @@ export const E2E_ACCOUNTS_STATE_DIR = path.join(
 // server exits "unable to open database file" and the run dies waiting for a
 // port. The shared backend avoids this only by keeping its metrics DB loose in
 // the temp directory.
-mkdirSync(E2E_ACCOUNTS_STATE_DIR, { recursive: true });
+if (scope === "accounts") mkdirSync(E2E_ACCOUNTS_STATE_DIR, { recursive: true });
+
+// OAuth/setup and the database-wide agent-memory mutation guard are install
+// state. The runner executes this partition exclusively, reusing its services
+// across repeats. Wiki's offline fixture also pauses an installation worker.
+const accountSpecs = ["**/accounts*.spec.ts"];
+const installationSpecs = ["connectors", "accounts*", "agents", "pins", "agent-form-lifetime", "agent-collaboration", "resource-isolation", "wiki-job-cards"]
+  .map((name) => `**/${name}.spec.ts`);
 
 export default defineConfig({
   testDir: "./e2e",
@@ -105,10 +104,18 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { browserName: "chromium" },
+      testIgnore: installationSpecs,
+      use: { browserName: "chromium" as const },
     },
-  ],
-  webServer: [
+    {
+      name: "installation",
+      testMatch: scope === "accounts" ? accountSpecs : installationSpecs,
+      ...(scope === "main" ? { testIgnore: accountSpecs } : {}),
+      workers: 1,
+      use: { browserName: "chromium" as const },
+    },
+  ].filter((project) => !process.env.OCTOPUS_E2E_UI_PROJECT || project.name === process.env.OCTOPUS_E2E_UI_PROJECT),
+  webServer: [ ...(scope === "accounts" ? [] : [
     {
       command:
         `cd .. && .venv/bin/uvicorn ${backendApp}${backendLoop} --host 127.0.0.1 --port 8765`,
@@ -164,6 +171,7 @@ export default defineConfig({
         OCTOPUS_API_PORT: "8765",
       },
     },
+  ]), ...(scope !== "accounts" ? [] : [
     {
       command:
         `cd .. && .venv/bin/uvicorn ${backendApp}${backendLoop} --host 127.0.0.1 --port ` +
@@ -220,5 +228,5 @@ export default defineConfig({
         VITE_CACHE_DIR: "node_modules/.vite-e2e-accounts",
       },
     },
-  ],
+  ]) ],
 });

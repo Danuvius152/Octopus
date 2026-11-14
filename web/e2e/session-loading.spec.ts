@@ -1,11 +1,11 @@
-import { enterAccountCredentials, TEST_BEARER } from "./current-account";
+import { enterAccountCredentials, accountToken } from "./current-account";
 import { systemAgentId } from "./system-agent";
 import { expect, test } from "./test";
 
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
 test("mobile creation acknowledges one submission and shows history before auxiliary data", async ({ page, request }) => {
-  const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+  const headers = { Authorization: `Bearer ${accountToken()}` };
   const endpoint = "http://localhost:8765/api/sessions";
   const agentId = await systemAgentId(request, endpoint, headers);
   let releaseCreate!: () => void;

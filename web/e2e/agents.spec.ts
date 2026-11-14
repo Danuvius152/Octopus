@@ -1,21 +1,9 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "./test";
 import { systemAgentId } from "./system-agent";
 
-const TOKEN = TEST_BEARER;
 const AGENTS_API = "http://localhost:8765/api/agents";
 const SESSIONS_API = "http://localhost:8765/api/sessions";
-
-// Agent names this spec creates — cleaned up in afterAll so reruns against
-// the same in-memory server don't accumulate (and unique-name create works).
-const OWNED_AGENTS = new Set([
-  "E2E Researcher",
-  "E2E Persisted",
-  "E2E Rail",
-  "E2E Codex Agent",
-  "E2E Stable sessions",
-]);
-const OWNED_SESSIONS = new Set(["Agent Thread"]);
 
 async function login(page: Page) {
   await page.goto("/");
@@ -30,30 +18,6 @@ async function openAgentSettings(page: Page) {
   await expect(page.locator(".agent-settings")).toBeVisible();
 }
 
-test.afterAll(async ({ request }) => {
-  const headers = { Authorization: `Bearer ${TOKEN}` };
-  // Delete owned sessions first.
-  const sRes = await request.get(SESSIONS_API, { headers });
-  if (sRes.ok()) {
-    for (const s of (await sRes.json()) as { id: string; name: string }[]) {
-      if (OWNED_SESSIONS.has(s.name)) {
-        await request.delete(`${SESSIONS_API}/${s.id}`, { headers }).catch(() => {});
-      }
-    }
-  }
-  // Archive owned agents (archive works whether or not they have sessions).
-  const aRes = await request.get(AGENTS_API, { headers });
-  if (aRes.ok()) {
-    for (const a of (await aRes.json()) as { id: string; name: string }[]) {
-      if (OWNED_AGENTS.has(a.name)) {
-        await request
-          .post(`${AGENTS_API}/${a.id}/archive`, { headers })
-          .catch(() => {});
-      }
-    }
-  }
-});
-
 test.describe("Agents", () => {
   test.beforeEach(async ({ page }) => {
     await login(page);
@@ -66,7 +30,7 @@ test.describe("Agents", () => {
   });
 
   test("selecting sessions keeps their sidebar positions", async ({ page, request }) => {
-    const headers = { Authorization: `Bearer ${TOKEN}` };
+    const headers = { Authorization: `Bearer ${accountToken()}` };
     const response = await request.post(AGENTS_API, { headers, data: { name: "E2E Stable sessions" } });
     expect(response.ok()).toBe(true);
     const agent = await response.json();
@@ -128,8 +92,8 @@ test.describe("Agents", () => {
 
   test("a delayed create receipt cannot revive a session archived by another client", async ({ page, request }) => {
     const witnessResponse = await request.post(SESSIONS_API, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-      data: { agent_id: await systemAgentId(request, SESSIONS_API, { Authorization: `Bearer ${TOKEN}` }), name: "E2E Archive witness" },
+      headers: { Authorization: `Bearer ${accountToken()}` },
+      data: { agent_id: await systemAgentId(request, SESSIONS_API, { Authorization: `Bearer ${accountToken()}` }), name: "E2E Archive witness" },
     });
     expect(witnessResponse.ok()).toBe(true);
     const witness = await witnessResponse.json();
@@ -154,11 +118,11 @@ test.describe("Agents", () => {
     const id = await serverCreated;
     try {
       const archived = await request.post(`${SESSIONS_API}/${id}/archive?replace=false`, {
-        headers: { Authorization: `Bearer ${TOKEN}` },
+        headers: { Authorization: `Bearer ${accountToken()}` },
       });
       expect(archived.ok()).toBe(true);
       const witnessed = await request.post(`${SESSIONS_API}/${witness.id}/archive?replace=false`, {
-        headers: { Authorization: `Bearer ${TOKEN}` },
+        headers: { Authorization: `Bearer ${accountToken()}` },
       });
       expect(witnessed.ok()).toBe(true);
       // This later event on the same socket proves the earlier archive handler
@@ -170,8 +134,8 @@ test.describe("Agents", () => {
       await expect(page.locator(".session-item .session-name", { hasText: "E2E Delayed creation" })).toHaveCount(0);
     } finally {
       release();
-      await request.delete(`${SESSIONS_API}/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
-      await request.delete(`${SESSIONS_API}/${witness.id}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+      await request.delete(`${SESSIONS_API}/${id}`, { headers: { Authorization: `Bearer ${accountToken()}` } });
+      await request.delete(`${SESSIONS_API}/${witness.id}`, { headers: { Authorization: `Bearer ${accountToken()}` } });
     }
   });
 

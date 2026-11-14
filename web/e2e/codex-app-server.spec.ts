@@ -1,22 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { test, expect } from "./test";
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { PROVISIONING_ACCOUNT, accountToken, enterAccountCredentials } from "./current-account";
 import type { components } from "../src/api/contracts";
 
 type Submission = components["schemas"]["ClientSubmissionStatus"];
 type Input = components["schemas"]["ClientSubmissionRequest"];
 const API = "http://localhost:8765/api";
-const headers = { Authorization: `Bearer ${TEST_BEARER}` };
-let sessionId: string | undefined;
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 
-test.afterAll(async ({ request }) => {
-  if (sessionId) {
-    expect((await request.delete(`${API}/sessions/${sessionId}`, { headers })).status()).toBe(204);
-    expect((await request.get(`${API}/sessions/${sessionId}`, { headers })).status()).toBe(404);
-  }
-});
-
-test("App Server preserves native history and original submissions across reload @llm", async ({ page, request }) => {
+test("App Server preserves native history and original submissions across reload @llm", async ({ page, request, browser }) => {
   test.setTimeout(180_000);
   const backends = await request.get(`${API}/backends`, { headers });
   expect(backends.ok()).toBeTruthy();
@@ -43,7 +35,7 @@ test("App Server preserves native history and original submissions across reload
   const sessions = await (await request.get(`${API}/sessions`, { headers })).json();
   const session = sessions.find((session: { name: string }) => session.name === name);
   expect(session.backend).toBe("codex");
-  sessionId = session.id;
+  const sessionId = session.id;
   const settings = await request.patch(`${API}/sessions/${sessionId}`, {
     headers, data: { reasoning_effort: "low" },
   });
@@ -81,9 +73,12 @@ test("App Server preserves native history and original submissions across reload
   await expect(page.locator(".result-badge")).toBeVisible();
   // This fresh thread has no earlier rollout or tool responses. Verify usage
   // and original-process retirement before reload or a second model request.
+  // Monitor is installation-wide and administrator-only. Observe this owned
+  // session as the provisioning administrator without changing its creator.
+  const monitorHeaders = { Authorization: `Bearer ${process.env.OCTOPUS_E2E_ACCOUNT_TOKEN!}` };
   let model = "";
   await expect.poll(async () => {
-    const report = await request.get(`${API}/monitor/codex_turns?window=1h`, { headers });
+    const report = await request.get(`${API}/monitor/codex_turns?window=1h`, { headers: monitorHeaders });
     expect(report.ok()).toBeTruthy();
     const rows = (await report.json()).rows as {
       session_id: string; request_id: string; model: string; weighted_tps: number | null; output_tokens: number;
@@ -94,7 +89,7 @@ test("App Server preserves native history and original submissions across reload
     return sample.weighted_tps ?? 0;
   }, { timeout: 15_000 }).toBeGreaterThan(0);
   await expect.poll(async () => {
-    const report = await request.get(`${API}/monitor/codex_runs?window=1h`, { headers });
+    const report = await request.get(`${API}/monitor/codex_runs?window=1h`, { headers: monitorHeaders });
     expect(report.ok()).toBeTruthy();
     const rows = (await report.json()).rows as {
       session_id: string; request_id: string; root_turns: number;
@@ -158,7 +153,14 @@ test("App Server preserves native history and original submissions across reload
   expect(saved.claude_session_id).toBe(firstNative.thread_id);
 
   // The first turn's actual model is also visible in Monitor after reopening.
-  await page.locator("button.btn-manage-monitor").click();
-  await expect(page.getByRole("row").filter({ has: page.getByRole("cell", { name: model, exact: true }) }).first())
-    .toContainText("tok/s");
+  const monitor = await browser.newPage();
+  try {
+    await monitor.goto("http://localhost:5174");
+    await enterAccountCredentials(monitor, PROVISIONING_ACCOUNT);
+    await monitor.locator("button.btn-manage-monitor").click();
+    await expect(monitor.getByRole("row").filter({ has: monitor.getByRole("cell", { name: model, exact: true }) }).first())
+      .toContainText("tok/s");
+  } finally { await monitor.close(); }
+  expect((await request.delete(`${API}/sessions/${sessionId}`, { headers })).status()).toBe(204);
+  expect((await request.get(`${API}/sessions/${sessionId}`, { headers })).status()).toBe(404);
 });

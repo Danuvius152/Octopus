@@ -1,6 +1,6 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page, type APIRequestContext } from "./test";
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from "fs";
+import { mkdtempSync, writeFileSync } from "fs";
 import { join } from "path";
 import { systemAgentId } from "./system-agent";
 
@@ -9,57 +9,16 @@ import { systemAgentId } from "./system-agent";
 // run `/fork copy`, and assert a NEW session appears + becomes active with the
 // "full copy" banner while the ORIGINAL session stays put (not archived).
 //
-// /fork triggers a real backend copytree into ~/.octopus/fork/, so afterAll
-// deletes both sessions and removes the copied + source dirs.
+// Source and copied directories live in this attempt's account workspace;
+// the runner retires the complete runtime after stopping the backend.
 
-const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
-const OWNED = new Set([
-  "Fork-Copy E2E Parent",
-  "copy",
-  "Deferred Fork Parent",
-  "deferred-fork",
-]);
-const cleanupDirs: string[] = [];
 
 async function workspaceDirectory(request: APIRequestContext): Promise<string> {
-  const response = await request.get(`${API}/auth/workspace`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  const response = await request.get(`${API}/auth/workspace`, { headers: { Authorization: `Bearer ${accountToken()}` } });
   expect(response.ok()).toBeTruthy();
   return (await response.json()).workspace;
 }
-
-test.afterAll(async ({ request }) => {
-  try {
-    const res = await request.get(`${API}/sessions`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-      params: { include_archived: "true" },
-      timeout: 5_000,
-    });
-    if (res.ok()) {
-      const sessions: { id: string; name: string; working_dir: string }[] =
-        await res.json();
-      for (const s of sessions) {
-        if (!OWNED.has(s.name)) continue;
-        if (s.working_dir?.includes("/.octopus/fork/")) cleanupDirs.push(s.working_dir);
-        await request
-          .delete(`${API}/sessions/${s.id}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-            timeout: 3_000,
-          })
-          .catch(() => {});
-      }
-    }
-  } catch {
-    /* best-effort */
-  }
-  for (const d of cleanupDirs) {
-    try {
-      if (existsSync(d)) rmSync(d, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
-  }
-});
 
 async function login(page: Page) {
   await page.goto("/");
@@ -88,7 +47,7 @@ async function importParent(
   workingDir: string
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions/import`, {
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${accountToken()}`, "Content-Type": "application/json" },
     data: {
       name: "Fork-Copy E2E Parent",
       working_dir: workingDir,
@@ -108,7 +67,6 @@ test("/fork duplicates onto a copied dir; the original session stays", async ({
 }) => {
   // A small, real working dir so the backend copytree is cheap and safe.
   const srcDir = mkdtempSync(join(await workspaceDirectory(request), "octo-forkcopy-"));
-  cleanupDirs.push(srcDir);
   writeFileSync(join(srcDir, "hello.txt"), "original\n");
 
   await importParent(request, srcDir);
@@ -149,8 +107,8 @@ async function createSessionWithDir(
   workingDir: string
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions`, {
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-    data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name, working_dir: workingDir },
+    headers: { Authorization: `Bearer ${accountToken()}`, "Content-Type": "application/json" },
+    data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name, working_dir: workingDir },
   });
   expect(res.ok()).toBeTruthy();
   return res.json();
@@ -167,7 +125,6 @@ test.describe("Deferred /fork @llm", () => {
     request,
   }) => {
     const srcDir = mkdtempSync(join(await workspaceDirectory(request), "octo-deferfork-"));
-    cleanupDirs.push(srcDir);
     writeFileSync(join(srcDir, "hello.txt"), "original\n");
 
     await createSessionWithDir(request, "Deferred Fork Parent", srcDir);

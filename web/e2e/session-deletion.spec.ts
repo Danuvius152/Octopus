@@ -1,9 +1,9 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test, type Page } from "./test";
 
 test("confirmed REST deletion removes a selected session from both online pages", async ({ page, context, request }) => {
   const api = "http://localhost:8765/api";
-  const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+  const headers = { Authorization: `Bearer ${accountToken()}` };
   const agents = await (await request.get(`${api}/agents`, { headers })).json() as { id: string; name: string; archived?: boolean; pinned?: boolean }[];
   const agent = agents.find((row) => !row.archived && row.pinned !== false);
   if (!agent) throw new Error("The offline harness needs a visible active agent");

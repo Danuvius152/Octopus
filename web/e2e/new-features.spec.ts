@@ -1,4 +1,4 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import * as http from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -6,78 +6,15 @@ import * as path from "node:path";
 import { test, expect, type Page, type APIRequestContext } from "./test";
 import { systemAgentId } from "./system-agent";
 
-const TOKEN = TEST_BEARER;
 const SERVER_URL = "http://localhost:8765";
 const API = `${SERVER_URL}/api`;
 
-/** Click the new-session "+" on the default "Octo" agent's row. The button is
- * per-agent, and specs share one in-memory backend DB, so a bare
- * ".btn-session-add" turns ambiguous once a concurrent spec creates another
- * agent. Scoping to Octo keeps it unambiguous. */
+/** Click the new-session button on this account's default Agent. */
 const addOctoSession = (page: Page) =>
   page
     .locator(".agent-item", { hasText: "Octo" })
     .locator(".btn-session-add")
     .click();
-
-const OWNED_NAMES = new Set([
-  "Reasoning Session",
-  "Model Session",
-  "Credential Swap",
-  "Schedule UI Test",
-  "Schedule Cmd Test",
-  "Waiting Hint Yes",
-  "Waiting Hint No",
-  "Virtuoso Long Session",
-  "Windowed Transcript",
-  "Windowed Transcript Tall",
-  "Queue Test",
-  "Interrupt Test",
-  "Asked Question",
-  "Real Q Session",
-  "Resume Session",
-  "Bad Cred Session",
-  "Webhook Fire Probe",
-  "Archive Probe",
-  "Archive Probe Two",
-  "Archive Settings Probe",
-  "Attachment Picker Test",
-  "Attachment History Test",
-  "Viewer Showme Test",
-  "Q Re-render A",
-  "Q Re-render B",
-  "Q Interrupt Recovery",
-  "Q Auto Answer",
-  "Reset Slash Cmd",
-  "Agent Label Probe",
-  "Slash Menu Probe",
-  "Bg Run E2E",
-  "Bg Spill Pipeline",
-  "Bg Idle Watchdog",
-]);
-
-test.afterAll(async ({ request }) => {
-  try {
-    const res = await request.get(`${API}/sessions`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-      timeout: 5_000,
-    });
-    if (res.ok()) {
-      const sessions: { id: string; name: string }[] = await res.json();
-      for (const s of sessions) {
-        if (!OWNED_NAMES.has(s.name)) continue;
-        await request
-          .delete(`${API}/sessions/${s.id}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-            timeout: 3_000,
-          })
-          .catch(() => {});
-      }
-    }
-  } catch {
-    // best-effort
-  }
-});
 
 async function login(page: Page) {
   await page.goto("/");
@@ -112,8 +49,8 @@ async function createSessionApi(
   name: string
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions`, {
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-    data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name, },
+    headers: { Authorization: `Bearer ${accountToken()}`, "Content-Type": "application/json" },
+    data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name, },
   });
   expect(res.ok()).toBeTruthy();
   return res.json();
@@ -125,7 +62,7 @@ async function importSessionApi(
   messages: Record<string, unknown>[]
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions/import`, {
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${accountToken()}`, "Content-Type": "application/json" },
     data: { name, messages },
   });
   expect(res.ok()).toBeTruthy();
@@ -296,7 +233,7 @@ test.describe("Windowed transcript", () => {
         await olderResponse;
         await route.continue();
       });
-      await importSessionApi(
+      const session = await importSessionApi(
         request,
         sessionName,
         Array.from({ length: TOTAL }, (_, i) => ({
@@ -307,7 +244,7 @@ test.describe("Windowed transcript", () => {
       );
       await login(page);
       await page
-        .locator(".session-item").getByText(sessionName, { exact: true })
+        .locator(`.session-item[data-session-id="${session.id}"]`)
         .click();
       await expect(page.locator(".chat-header .crumb-current")).toHaveText(
         sessionName
@@ -572,7 +509,7 @@ test.describe("Message Queue & Interrupt @llm", () => {
     // time both turns finish. Verify the truth (DB) instead of the
     // rendered window.
     const detailRes = await request.get(`${API}/sessions/${sessionId}`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     expect(detailRes.ok()).toBeTruthy();
     const detail = await detailRes.json();
@@ -692,37 +629,13 @@ test.describe("Virtualized Chat", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("Credentials Panel", () => {
-  // Clean up credentials our test creates so we don't pollute later runs.
-  const ownedLabels = new Set(["E2E Cred", "E2E Cred Renamed"]);
-
-  test.afterAll(async ({ request }) => {
-    try {
-      const res = await request.get(`${API}/credentials`, {
-        headers: { Authorization: `Bearer ${TOKEN}` },
-        timeout: 5_000,
-      });
-      if (!res.ok()) return;
-      const items: { id: string; label: string }[] = await res.json();
-      for (const i of items) {
-        if (!ownedLabels.has(i.label)) continue;
-        await request
-          .delete(`${API}/credentials/${i.id}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-            timeout: 3_000,
-          })
-          .catch(() => {});
-      }
-    } catch {
-      // best-effort
-    }
-  });
 
   test("delete a credential via the sidebar", async ({ page, request }) => {
     // Seed via API — the UI's only add path is OAuth, which can't run
     // in the test env. Deletion is the in-UI path we verify here.
     const res = await request.post(`${API}/credentials`, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: `Bearer ${accountToken()}`,
         "Content-Type": "application/json",
       },
       data: {
@@ -900,7 +813,7 @@ test.describe("Credentials Panel", () => {
     // Seed one via API so the selector has something to show.
     const res = await request.post(`${API}/credentials`, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: `Bearer ${accountToken()}`,
         "Content-Type": "application/json",
       },
       data: {
@@ -940,7 +853,7 @@ test.describe("Session credential picker", () => {
     // conversation.
     const mk = async (label: string) => {
       const res = await request.post(`${API}/credentials`, {
-        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${accountToken()}`, "Content-Type": "application/json" },
         data: { backend: "claude-code", label, auth_type: "api_key", secret: "sk-e2e" },
       });
       expect(res.ok()).toBeTruthy();
@@ -950,8 +863,8 @@ test.describe("Session credential picker", () => {
     await mk("E2E New Key");
 
     const made = await request.post(`${API}/sessions`, {
-      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Credential Swap", credential_id: oldId },
+      headers: { Authorization: `Bearer ${accountToken()}`, "Content-Type": "application/json" },
+      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name: "Credential Swap", credential_id: oldId },
     });
     expect(made.ok()).toBeTruthy();
     const sessionId = (await made.json()).id as string;
@@ -973,7 +886,7 @@ test.describe("Session credential picker", () => {
 
     // It stuck server-side, not just in the store.
     const after = await request.get(`${API}/sessions/${sessionId}`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     const newId = (await after.json()).credential_id as string;
     expect(newId).not.toBe(oldId);
@@ -1118,7 +1031,7 @@ test.describe("Real CLI end-to-end @llm", () => {
     // but API is fewer steps and what we already test in Credentials Panel).
     const credRes = await request.post(`${API}/credentials`, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: `Bearer ${accountToken()}`,
         "Content-Type": "application/json",
       },
       data: {
@@ -1134,11 +1047,11 @@ test.describe("Real CLI end-to-end @llm", () => {
     // Create a session that uses the bad credential
     const sessRes = await request.post(`${API}/sessions`, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: `Bearer ${accountToken()}`,
         "Content-Type": "application/json",
       },
       data: {
-        agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }),
+        agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }),
         name: "Bad Cred Session",
         credential_id: credId,
       },
@@ -1175,12 +1088,6 @@ test.describe("Real CLI end-to-end @llm", () => {
     const joined = assistantTexts.join(" ");
     expect(joined).not.toMatch(/^HI$/);
 
-    // Cleanup: delete the credential so it doesn't accumulate
-    await request
-      .delete(`${API}/credentials/${credId}`, {
-        headers: { Authorization: `Bearer ${TOKEN}` },
-      })
-      .catch(() => {});
   });
 
   test("Resume: turn 2 has context from turn 1", async ({ page, request }) => {
@@ -1309,7 +1216,7 @@ test.describe("AskUserQuestion edge cases (real CLI) @llm", () => {
 
     // Clean up: answer the question so the session drains and the
     // backend subprocess doesn't sit around until the autoanswer timer
-    // fires (which would race the afterAll cleanup).
+    // fires (which would race fixture cleanup).
     await formAfterSwitch
       .locator(".question-option", { hasText: "red" })
       .locator("input")
@@ -1657,7 +1564,7 @@ test.describe("/archive command", () => {
 
     // The old session id is hidden from the REST list; the new one is live.
     const listRes = await request.get(`${API}/sessions`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     const list: Array<{ id: string; name: string }> = await listRes.json();
     const probeIds = list.filter((s) => s.name === "Archive Probe").map((s) => s.id);
@@ -1667,7 +1574,7 @@ test.describe("/archive command", () => {
     // The old session is still fetchable but reports archived=true
     // (so the UI can render read-only history for it).
     const oldRes = await request.get(`${API}/sessions/${imp.id}`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     expect(oldRes.status()).toBe(200);
     expect((await oldRes.json()).archived).toBe(true);
@@ -1677,11 +1584,6 @@ test.describe("/archive command", () => {
     page,
     request,
   }) => {
-    // Unique name so the row we're asserting on doesn't collide with
-    // residue from the sibling "Archive Probe" test (both pre-test
-    // imports + archive() create extra rows, and afterAll cleanup runs
-    // after both tests, so the manage page would otherwise contain
-    // multiple matching rows).
     const ITEM_NAME = "Archive Probe Two";
 
     // Seed + archive in one shot via REST.
@@ -1689,10 +1591,43 @@ test.describe("/archive command", () => {
       { role: "user", type: "text", content: "old" },
     ]);
     const arc = await request.post(`${API}/sessions/${imp.id}/archive`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     expect(arc.ok()).toBeTruthy();
     const fresh = await arc.json();
+
+    // Preserve direct archived navigation without opening a live snapshot.
+    // Force the first service generation to arrive during the restoration's
+    // inclusive read. The existing contract keeps the original operation for
+    // read-only confirmation when that read is retired as obsolete.
+    let release!: () => void;
+    const event = new Promise<void>((resolve) => { release = resolve; });
+    const writes: { operation_id: string; service_generation: string }[] = [];
+    let gated = false;
+    await page.routeWebSocket("**/ws?*", (socket) => {
+      const server = socket.connectToServer();
+      server.onMessage(async (message) => {
+        if (JSON.parse(String(message)).type === "session_unarchived") await event;
+        socket.send(message);
+      });
+      socket.onMessage((message) => server.send(message));
+    });
+    page.on("request", (sent) => {
+      if (sent.method() === "POST" && sent.url().endsWith(`/${imp.id}/unarchive`)) writes.push(sent.postDataJSON());
+    });
+    const generation = async () => {
+      const module = await new Function("return import('/src/stores/sessionStore.ts')")();
+      return module.useSessionStore.getState().dispatchGeneration;
+    };
+    await page.route("**/api/sessions?include_archived=true", async (route) => {
+      if (!writes.length || gated) return route.fallback();
+      gated = true;
+      const response = await route.fetch();
+      release();
+      // Observe the actual store; the test never writes its generation.
+      await page.waitForFunction(generation);
+      await route.fulfill({ response });
+    });
 
     await login(page);
 
@@ -1718,6 +1653,7 @@ test.describe("/archive command", () => {
     );
     await expect(page.locator(".chat-input-bar")).toHaveCount(0);
     await expect(page.locator(".msg-user .msg-content")).toContainText("old");
+    expect(await page.evaluate(generation)).toBeNull();
 
     // Reopen the manage page and unarchive: the row leaves the list and the
     // session comes back as a live, editable session.
@@ -1726,48 +1662,32 @@ test.describe("/archive command", () => {
       .locator(".archived-session-row", { hasText: ITEM_NAME })
       .locator(".btn-archived-unarchive")
       .click();
+    await expect(page.getByRole("alert")).toHaveText("Could not synchronize restored sessions. Retry confirmation.");
+    expect(writes).toHaveLength(1);
+    const confirmation = page.waitForRequest((sent) => sent.method() === "GET" &&
+      new URL(sent.url()).pathname.endsWith(`/${imp.id}/restoration`));
+    await page.getByRole("button", { name: "Confirm restoration", exact: true }).click();
+    expect(Object.fromEntries(new URL((await confirmation).url()).searchParams)).toEqual(writes[0]);
     await expect(page.locator(".archived-sessions-dialog")).toHaveCount(0);
     await expect(page.locator(".chat-input-bar")).toBeVisible();
     await expect(page.locator(".chat-archived-banner")).toHaveCount(0);
+    expect(writes).toHaveLength(1);
 
     // The unarchived session is live again (its id is imp.id); the previously
     // created `fresh` session is still in the list too.
     const listRes = await request.get(`${API}/sessions`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     const ids: string[] = (await listRes.json()).map((s: { id: string }) => s.id);
     expect(ids).toContain(imp.id);
     expect(ids).toContain(fresh.id);
 
-    // Cleanup the extras so afterAll's OWNED_NAMES sweep doesn't trip.
-    await request.delete(`${API}/sessions/${fresh.id}`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-    });
   });
 });
 
 // ---------------------------------------------------------------------------
 // Notifier framework — UI CRUD + real-CLI webhook fire on session idle
 // ---------------------------------------------------------------------------
-
-async function clearAllNotifiers(request: APIRequestContext): Promise<void> {
-  try {
-    const list = await request.get(`${API}/notifiers`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-    });
-    if (!list.ok()) return;
-    const items: { id: string }[] = await list.json();
-    for (const n of items) {
-      await request
-        .delete(`${API}/notifiers/${n.id}`, {
-          headers: { Authorization: `Bearer ${TOKEN}` },
-        })
-        .catch(() => {});
-    }
-  } catch {
-    // best-effort
-  }
-}
 
 test.describe("Notifier framework", () => {
   // The session-goes-idle webhook test depends on a real Claude turn
@@ -1777,13 +1697,6 @@ test.describe("Notifier framework", () => {
   // non-determinism without masking a real defect (passes in
   // isolation in ~8 s).
   test.describe.configure({ retries: 1 });
-
-  test.beforeEach(async ({ request }) => {
-    await clearAllNotifiers(request);
-  });
-  test.afterAll(async ({ request }) => {
-    await clearAllNotifiers(request);
-  });
 
   test("add / list / delete a webhook via the Settings dialog", async ({
     page,
@@ -1811,7 +1724,7 @@ test.describe("Notifier framework", () => {
 
     // Server persisted it (REST source of truth)
     const listRes = await request.get(`${API}/notifiers`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     const items: Array<{ id: string; label: string; config: { url: string } }> =
       await listRes.json();
@@ -1825,7 +1738,7 @@ test.describe("Notifier framework", () => {
     await expect(page.locator(".notifier-item")).toHaveCount(0);
 
     const afterRes = await request.get(`${API}/notifiers`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     const after: Array<{ label: string }> = await afterRes.json();
     expect(after.find((n) => n.label === "CRUD probe")).toBeUndefined();
@@ -1869,13 +1782,11 @@ test.describe("Notifier framework", () => {
     const port = typeof addr === "object" && addr ? addr.port : 0;
     const hookUrl = `http://127.0.0.1:${port}/hook`;
 
-    let notifierId: string | undefined;
-    let sessionId: string | undefined;
     try {
       // 2. Register the webhook target.
       const create = await request.post(`${API}/notifiers`, {
         headers: {
-          Authorization: `Bearer ${TOKEN}`,
+          Authorization: `Bearer ${accountToken()}`,
           "Content-Type": "application/json",
         },
         data: {
@@ -1885,12 +1796,11 @@ test.describe("Notifier framework", () => {
         },
       });
       expect(create.ok()).toBeTruthy();
-      notifierId = (await create.json()).id;
+      await create.json();
 
       // 3. Create the session via API, THEN log in (login fetches the
       //    session list on mount, so order matters).
       const sess = await createSessionApi(request, "Webhook Fire Probe");
-      sessionId = sess.id;
       await login(page);
       await page
         .locator(".session-item .session-name", {
@@ -1922,20 +1832,6 @@ test.describe("Notifier framework", () => {
       expect(ev.session_id).toBe(sess.id);
       expect(ev.session_name).toBe("Webhook Fire Probe");
     } finally {
-      if (notifierId) {
-        await request
-          .delete(`${API}/notifiers/${notifierId}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-          })
-          .catch(() => {});
-      }
-      if (sessionId) {
-        await request
-          .delete(`${API}/sessions/${sessionId}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-          })
-          .catch(() => {});
-      }
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
@@ -2006,7 +1902,7 @@ test.describe("File attachments", () => {
 
     // Upload a small text file.
     const up = await request.post(`${API}/sessions/${sid}/attachments`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
       multipart: {
         file: {
           name: "doc.md",
@@ -2053,7 +1949,7 @@ test.describe("File attachments", () => {
     await expect(page.locator(".msg-assistant", { hasText: "Offline UI execution complete." })).toBeVisible();
 
     const snapshot = await request.get(`${API}/sessions/${sid}`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     });
     expect(snapshot.ok()).toBeTruthy();
     const saved = await snapshot.json() as { messages: { role: string; attachments?: { id: string; filename: string }[] }[] };
@@ -2150,10 +2046,10 @@ test.describe("Native sub-agents @llm", () => {
 
       const sessRes = await request.post(`${API}/sessions`, {
         headers: {
-          Authorization: `Bearer ${TOKEN}`,
+          Authorization: `Bearer ${accountToken()}`,
           "Content-Type": "application/json",
         },
-        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Subagent E2E", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name: "Subagent E2E", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2200,7 +2096,7 @@ test.describe("Native sub-agents @llm", () => {
       // the transcript beyond the tool call the model made.
       const detail = await request.get(
         `${API}/sessions/${(await sessRes.json()).id}`,
-        { headers: { Authorization: `Bearer ${TOKEN}` } }
+        { headers: { Authorization: `Bearer ${accountToken()}` } }
       );
       const messages = (await detail.json()).messages as { type: string }[];
       expect(messages.some((m) => m.type === "subagent")).toBe(false);
@@ -2224,10 +2120,10 @@ test.describe("Cross-turn bg tasks @llm", () => {
     try {
       const sessRes = await request.post(`${API}/sessions`, {
         headers: {
-          Authorization: `Bearer ${TOKEN}`,
+          Authorization: `Bearer ${accountToken()}`,
           "Content-Type": "application/json",
         },
-        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Bg Run E2E", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name: "Bg Run E2E", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2298,10 +2194,10 @@ test.describe("Cross-turn bg tasks @llm", () => {
     try {
       const sessRes = await request.post(`${API}/sessions`, {
         headers: {
-          Authorization: `Bearer ${TOKEN}`,
+          Authorization: `Bearer ${accountToken()}`,
           "Content-Type": "application/json",
         },
-        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Bg Idle Watchdog", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name: "Bg Idle Watchdog", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2399,10 +2295,10 @@ test.describe("Bg-task pipeline hardening @llm", () => {
     try {
       const sessRes = await request.post(`${API}/sessions`, {
         headers: {
-          Authorization: `Bearer ${TOKEN}`,
+          Authorization: `Bearer ${accountToken()}`,
           "Content-Type": "application/json",
         },
-        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Bg Spill Pipeline", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name: "Bg Spill Pipeline", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2479,10 +2375,10 @@ test.describe("File viewer (/showme) @llm", () => {
     try {
       const sessRes = await request.post(`${API}/sessions`, {
         headers: {
-          Authorization: `Bearer ${TOKEN}`,
+          Authorization: `Bearer ${accountToken()}`,
           "Content-Type": "application/json",
         },
-        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Viewer Showme Test", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name: "Viewer Showme Test", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2533,7 +2429,6 @@ test.describe("File viewer (/showme) @llm", () => {
     }
   });
 });
-
 
 // ---------------------------------------------------------------------------
 // Composer + transcript affordances: message time, history recall, /model
@@ -2749,7 +2644,7 @@ test.describe("Composer history", () => {
 
 test.describe("/model", () => {
   test("keeps replacement overrides visible after explicitly opening another client's archive successor", async ({ page, request }) => {
-    const headers = { Authorization: `Bearer ${TOKEN}` };
+    const headers = { Authorization: `Bearer ${accountToken()}` };
     const settings = { model: "archive-override-probe", reasoning_effort: "high", service_tier: "fast" };
     await page.route("**/api/backends/codex/models*", (route) => route.fulfill({
       json: {
@@ -2810,7 +2705,7 @@ test.describe("/model", () => {
       },
     }));
     const imported = await request.post(`${API}/sessions/import`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
       data: {
         name: "Speed Session", backend: "codex", claude_session_id: "speed-thread",
         messages: [{ role: "user", type: "text", content: "Keep this speed conversation" }],
@@ -2834,7 +2729,7 @@ test.describe("/model", () => {
     await expect(page.locator(".btn-model-settings")).toContainText("Fast");
     await expect(page.locator(".msg", { hasText: "Keep this speed conversation" })).toBeVisible();
     const saved = await (await request.get(`${API}/sessions/${id}`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     })).json();
     expect(saved.service_tier).toBe("fast");
     expect(saved.model).toBeNull();
@@ -2847,7 +2742,7 @@ test.describe("/model", () => {
     await expect(dialog).toBeHidden();
     await expect(page.locator(".btn-model-settings")).not.toContainText("Fast");
     const normal = await (await request.get(`${API}/sessions/${id}`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
     })).json();
     expect(normal.service_tier).toBe("default");
     expect(normal.claude_session_id).toBe("speed-thread");
@@ -2862,7 +2757,7 @@ test.describe("/model", () => {
       },
     }));
     const imported = await request.post(`${API}/sessions/import`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+      headers: { Authorization: `Bearer ${accountToken()}` },
       data: {
         name: "Reasoning Session", backend: "codex",
         claude_session_id: "existing-thread",
@@ -2884,7 +2779,7 @@ test.describe("/model", () => {
     await page.locator(".session-item .session-name", { hasText: "Reasoning Session" }).click();
     await expect(page.locator(".chat-header .btn-model-settings")).toContainText("high");
     await expect(page.locator(".msg", { hasText: "Remember the existing history" })).toBeVisible();
-    const detail = await request.get(`${API}/sessions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const detail = await request.get(`${API}/sessions/${id}`, { headers: { Authorization: `Bearer ${accountToken()}` } });
     const saved = await detail.json();
     expect(saved.reasoning_effort).toBe("high");
     expect(saved.model).toBeNull();
@@ -2920,7 +2815,7 @@ test.describe("/model", () => {
     await expect(
       page.locator(".msg-notice, .msg", { hasText: "Model for this session: opus" })
     ).toBeVisible();
-    const saved = await request.get(`${API}/sessions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const saved = await request.get(`${API}/sessions/${id}`, { headers: { Authorization: `Bearer ${accountToken()}` } });
     expect((await saved.json()).model).toBe("opus");
 
     // Bare `/model` opens the picker. Two Enters: the first is captured by the

@@ -1,4 +1,4 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "./test";
 import { deferred } from "../src/test-support/deferred";
 
@@ -6,11 +6,9 @@ import { deferred } from "../src/test-support/deferred";
 // configuring an OAuth client (or creating a custom connector) just flips a
 // connector to "available" — which is the browser-only setup flow we verify.
 
-// OAuth client configuration is global per kind: keep all real client writes
-// and cleanup in this file, sequentially even if the suite enables parallelism.
-test.describe.configure({ mode: "default" });
+// The runner gives this installation phase one worker and reuses its backend
+// across repetitions. Each case restores the empty configuration it received.
 
-const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
 
 async function login(page: Page) {
@@ -19,22 +17,20 @@ async function login(page: Page) {
   await expect(page.locator(".agent-list-header h2")).toHaveText("Agents");
 }
 
-// Keep the shared in-memory backend clean between tests (configuring a built-in
-// or adding a custom connector persists for the whole server run).
+// This exclusive installation starts empty; return it to empty between cases.
 test.afterEach(async ({ request }) => {
-  const headers = { Authorization: `Bearer ${TOKEN}` };
+  const headers = { Authorization: `Bearer ${accountToken()}` };
   for (const kind of ["github", "gmail"]) {
-    await request
-      .delete(`${API}/connectors/${kind}/oauth-client`, { headers })
-      .catch(() => {});
+    const response = await request.delete(`${API}/connectors/${kind}/oauth-client`, { headers });
+    expect(response.ok(), `${kind} OAuth cleanup: HTTP ${response.status()} ${await response.text()}`).toBe(true);
   }
   const cat = await request.get(`${API}/connectors/catalog`, { headers });
-  if (cat.ok()) {
+  expect(cat.ok(), `Connector inventory: HTTP ${cat.status()}`).toBe(true);
+  {
     for (const c of (await cat.json()) as { kind: string; custom: boolean }[]) {
       if (c.custom) {
-        await request
-          .delete(`${API}/connectors/custom/${c.kind}`, { headers })
-          .catch(() => {});
+        const response = await request.delete(`${API}/connectors/custom/${c.kind}`, { headers });
+        expect(response.ok(), `${c.kind} cleanup: HTTP ${response.status()} ${await response.text()}`).toBe(true);
       }
     }
   }
@@ -136,7 +132,7 @@ test.describe("Connectors", () => {
 });
 
 const setupAPI = "http://localhost:8765/api/connectors";
-const setupHeaders = { Authorization: `Bearer ${TEST_BEARER}` };
+const setupHeaders = { get Authorization() { return `Bearer ${accountToken()}`; } };
 const catalog = ["gmail", "github"].map((kind) => ({ kind, display_name: kind, available: false }));
 
 async function start(page: Page) {

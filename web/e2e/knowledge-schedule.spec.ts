@@ -1,8 +1,8 @@
-import { TEST_BEARER, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test } from "./test";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
 
 test("an explicit read control survives schedule text edits until a human changes it", async ({ page, request }) => {
   const agents = await (await request.get(`${API}/agents`, { headers })).json();
