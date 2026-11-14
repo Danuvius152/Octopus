@@ -8,7 +8,6 @@ anyone who could see the screen. It answers with a label instead.
 from __future__ import annotations
 
 import hmac
-import json
 import logging
 import time
 from datetime import UTC, datetime
@@ -37,10 +36,13 @@ from ..models import (
     SetupRequest,
     UserDisabledRequest,
     UserInfo,
+    WorkspaceEditReceipt,
+    WorkspaceFlowRequest,
     WorkspaceInfo,
+    WorkspaceSequenceRequest,
 )
 from ..users import UserError
-from ..workspace import normalise_root, paths_for
+from ..workspace_edits import workspace_info
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -226,16 +228,26 @@ async def workspace(
     if user_id is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
     row = await users.db.get_user(user_id)
-    raw = (row or {}).get("extra_roots")
+    return workspace_info(user_id, (row or {}).get("extra_roots"))
+
+
+@router.post("/users/{user_id}/workspace-edits", response_model=WorkspaceEditReceipt)
+async def open_workspace_edit(user_id: str, req: WorkspaceFlowRequest, users: UserMgr,
+                              authentication: AuthenticatedAccount, _operator: AdminUser) -> WorkspaceEditReceipt:
     try:
-        roots = json.loads(raw) if raw else []
-    except (json.JSONDecodeError, TypeError):
-        roots = []
-    return WorkspaceInfo(
-        workspace=str(paths_for(user_id).workspace),
-        extra_roots=[str(r) for r in roots],
-        confined=True,
-    )
+        return await users.workspace_edits.open(authentication.user["id"], authentication.token_hash, user_id, req.flow_id)
+    except UserError as error:
+        raise HTTPException(error.status_code, error.message) from error
+
+
+@router.post("/users/{user_id}/workspace-edits/confirm", response_model=WorkspaceEditReceipt)
+async def confirm_workspace_edit(user_id: str, req: WorkspaceSequenceRequest, users: UserMgr,
+                                 authentication: AuthenticatedAccount, _operator: AdminUser) -> WorkspaceEditReceipt:
+    try:
+        return await users.workspace_edits.confirm(authentication.user["id"], authentication.token_hash, user_id,
+                                                   req.flow_id, req.service_generation, req.sequence)
+    except UserError as error:
+        raise HTTPException(error.status_code, error.message) from error
 
 
 @router.put("/users/{user_id}/extra-roots", response_model=WorkspaceInfo)
@@ -244,6 +256,7 @@ async def set_extra_roots(
     req: ExtraRootsRequest,
     users: UserMgr,
     _operator: AdminUser,
+    authentication: AuthenticatedAccount,
 ) -> WorkspaceInfo:
     """Open a path outside an account's workspace to it, or close one.
 
@@ -256,19 +269,11 @@ async def set_extra_roots(
     what is stored is the resolved path, so a symlink cannot change what an
     approved root means afterwards.
     """
-    if await users.db.get_user(user_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such account")
-    roots = [str(normalise_root(r)) for r in req.extra_roots]
-    # Deduplicated, keeping the order given, so the list reads as it was typed.
-    seen: dict[str, None] = {}
-    for r in roots:
-        seen.setdefault(r, None)
-    await users.db.update_user_field(user_id, extra_roots=json.dumps(list(seen)))
-    return WorkspaceInfo(
-        workspace=str(paths_for(user_id).workspace),
-        extra_roots=list(seen),
-        confined=True,
-    )
+    try:
+        return await users.workspace_edits.replace(authentication.user["id"], authentication.token_hash, user_id,
+                                                   req.flow_id, req.service_generation, req.sequence, req.extra_roots)
+    except UserError as error:
+        raise HTTPException(error.status_code, error.message) from error
 
 
 # ---------------------------------------------------------------------------

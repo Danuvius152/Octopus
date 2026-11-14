@@ -423,7 +423,8 @@ export function SidebarAgents() {
                     autoFocus
                     onChange={(e) => setNewName(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter" && !isImeComposing(e)) { e.preventDefault(); void createSession(a.id); }
+                      if (isImeComposing(e.nativeEvent)) return;
+                      if (e.key === "Enter") { e.preventDefault(); void createSession(a.id); }
                       if (e.key === "Escape") closeCreateRow();
                     }}
                   />

@@ -21,7 +21,8 @@ ArrowUp walks backward through human-entered prompts, ArrowDown forward, and
 moving past the newest restores the draft present before navigation. At the
 oldest entry the key remains consumed. History activates only on the first/last
 line as appropriate; an open slash menu owns its arrow keys. Only nonblank
-user text is eligible, and consecutive duplicate prompts collapse. Structured
+user text is eligible. Consecutive equal complete inline prompts collapse;
+equal previews remain distinct because their saved bodies may differ. Structured
 `tool_input.request_context.source` takes precedence: `human` remains eligible
 even when its text resembles an injection marker, while non-human sources are
 excluded. Only history without that provenance falls back to the shared legacy
@@ -29,11 +30,36 @@ prefix predicate (BG results, agent replies/questions/errors and scheduled fires
 Rewind uses the same provenance-first distinction; a markerless legacy machine
 message cannot reliably be classified from text alone.
 
+The shared text draft remains account-wide, while each history walk belongs to
+the selected session and account lifetime. Switching away and back permanently
+ends the old walk without clearing the draft. A candidate uses its persisted
+`seq`, or its original message object when no sequence exists. Window insertions
+continue from that identity; removal ends the walk, and later reappearance does
+not revive it. An empty history never writes an absent candidate into the draft.
+
+`useComposerHistory` owns the walk and at most one selected-body read. A preview
+is never copied into the composer: it reads the existing saved-message endpoint,
+validates the session reference, sequence, user/text role and complete string
+body, then writes only while the original candidate and draft still match.
+The response and body share a 30-second deadline. Waiting preserves the current
+text, shows its status and synchronously blocks every send path. Typing or
+moving to another candidate retires the old read; moving past the newest restores
+the pre-walk draft. Failure preserves text and exposes the error.
+
+External draft text or version changes end both the old read and its saved
+pre-walk draft. This includes identity restoration, which can replace text
+without increasing the version; a save-warning change alone is not an edit.
+Late success, failure, caret work or cleanup cannot affect a successor. The
+transcript stays bounded and no full-history cache or per-session draft is added.
+
 ## Model selection
 
 `/model` and the header open the same settings dialog; `/model <name>` applies a
 session override for later turns. Independent inheritance, native model metadata,
 effort and speed are maintained in [model settings](model-reasoning.md).
+Command feedback and its partial list update retain the original account and
+session observation, so an old `/model` response cannot write a notice into a
+later account or a confirmed-deleted conversation.
 The original plan's missing model endpoint/header are already implemented.
 Persistent effective-model/source display and additional input controls remain
 in [the input-control plan](../plans/session-input-controls.md); future display

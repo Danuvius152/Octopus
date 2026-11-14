@@ -1,5 +1,6 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useState } from "react";
+import { useStore } from "zustand";
 import {
   IconCopy,
   IconPlus,
@@ -16,6 +17,8 @@ import type {
   WorkspaceInfo,
 } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
+import { workspaceEditsFor } from "../lib/workspaceEdits";
+import { isImeComposing } from "../lib/composerKeys";
 import { PageHeader } from "./PageHeader";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -142,11 +145,11 @@ function Workspace({
   headers: () => HeadersInit;
   me: IdentityResponse;
 }) {
+  return me.is_admin ? <WorkspaceEditor me={me} /> : <WorkspaceReadOnly headers={headers} />;
+}
+
+function WorkspaceReadOnly({ headers }: { headers: () => HeadersInit }) {
   const [info, setInfo] = useState<WorkspaceInfo | null>(null);
-  const [adding, setAdding] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -156,37 +159,28 @@ function Workspace({
     return () => {
       alive = false;
     };
-  }, [headers, reload]);
+  }, [headers]);
+  return <WorkspaceForm info={info} />;
+}
 
-  const save = async (roots: string[]) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`${API}/users/${me.user_id}/extra-roots`, {
-        method: "PUT",
-        headers: headers(),
-        body: JSON.stringify({ extra_roots: roots }),
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        setError(
-          typeof data?.detail === "string"
-            ? data.detail
-            : `Could not save — HTTP ${res.status}`
-        );
-        return;
-      }
-      setAdding("");
-      setReload((n) => n + 1);
-    } catch {
-      setError("Could not reach Octopus.");
-    } finally {
-      setBusy(false);
-    }
-  };
+function WorkspaceEditor({ me }: { me: IdentityResponse }) {
+  const account = useSessionStore(state => state.accountGeneration);
+  const edits = workspaceEditsFor(me.user_id!);
+  const { info, adding, phase, error } = useStore(edits.store);
+  useEffect(() => edits.attach(account), [edits, account]);
+  return <WorkspaceForm info={info} editor={{ adding, busy: phase !== "ready", error,
+    change: text => edits.edit(text, account), add: () => edits.add(account), remove: root => edits.remove(root, account),
+    recovery: phase === "unknown" ? () => edits.confirm(account) : phase === "load-failed" ? () => edits.retry(account) : undefined,
+    recoveryLabel: phase === "unknown" ? "Confirm directory permissions" : "Retry loading" }} />;
+}
 
-  if (!info) return null;
-  const roots = info.extra_roots ?? [];
+function WorkspaceForm({ info, editor }: { info: WorkspaceInfo | null; editor?: {
+  adding: string; busy: boolean; error: string; change: (text: string) => void; add: () => void; remove: (root: string) => void;
+  recovery?: () => void; recoveryLabel: string;
+} }) {
+
+  if (!info) return editor?.error ? <div role="alert">{editor.error}<Button onClick={editor.recovery}>{editor.recoveryLabel}</Button></div> : null;
+  const roots = info.extra_roots;
 
   return (
     <Section
@@ -204,13 +198,13 @@ function Workspace({
               <code className="root-path min-w-0 flex-1 truncate font-mono text-[12px] text-gray-900">
                 {root}
               </code>
-              {me.is_admin && (
+              {editor && (
                 <button
                   type="button"
                   className="btn-remove-root rounded p-1 text-gray-700 hover:bg-gray-100"
                   aria-label={`Stop allowing ${root}`}
-                  disabled={busy}
-                  onClick={() => save(roots.filter((r) => r !== root))}
+                  disabled={editor.busy}
+                  onClick={() => editor.remove(root)}
                 >
                   <IconTrash size={15} />
                 </button>
@@ -219,7 +213,7 @@ function Workspace({
           ))}
         </ul>
       )}
-      {me.is_admin ? (
+      {editor ? (
         <div className="mt-3 flex max-w-lg items-end gap-2">
           <div className="min-w-0 flex-1 space-y-1.5">
             <Label htmlFor="new-root">Add a directory</Label>
@@ -230,11 +224,13 @@ function Workspace({
               autoCapitalize="off"
               autoCorrect="off"
               spellCheck={false}
-              value={adding}
-              onChange={(e) => setAdding(e.target.value)}
+              disabled={editor.busy}
+              value={editor.adding}
+              onChange={(e) => editor.change(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && adding.trim()) {
-                  void save([...roots, adding.trim()]);
+                if (e.key === "Enter" && !isImeComposing(e.nativeEvent)) {
+                  e.preventDefault();
+                  editor.add();
                 }
               }}
             />
@@ -242,8 +238,8 @@ function Workspace({
           <Button
             className="btn-add-root"
             variant="outline"
-            disabled={busy || !adding.trim()}
-            onClick={() => save([...roots, adding.trim()])}
+            disabled={editor.busy || !editor.adding.trim()}
+            onClick={editor.add}
           >
             <IconPlus size={14} />
             Add
@@ -256,7 +252,8 @@ function Workspace({
           </p>
         )
       )}
-      {error && <p className="workspace-error mt-2 text-xs text-destructive">{error}</p>}
+      {editor?.error && <p role="alert" className="workspace-error mt-2 text-xs text-destructive">{editor.error}</p>}
+      {editor?.recovery && <Button variant="outline" onClick={editor.recovery}>{editor.recoveryLabel}</Button>}
     </Section>
   );
 }

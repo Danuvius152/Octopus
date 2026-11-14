@@ -1,5 +1,6 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { deferred } from "../src/test-support/deferred";
+import { restoreSession } from "./session-restoration";
 import {
   test, expect, type Page, type APIRequestContext, type WebSocketRoute,
 } from "./test";
@@ -86,11 +87,7 @@ test("a restored original session reappears in the sidebar", async ({ page, requ
   });
   expect(archived.ok(), await archived.text()).toBeTruthy();
   await expect(row).toBeHidden();
-  const restored = await request.post(`${API}/sessions/${session.id}/unarchive`, {
-    headers: { Authorization: `Bearer ${TOKEN}` },
-  });
-  expect(restored.ok(), await restored.text()).toBeTruthy();
-  expect((await restored.json()).id).toBe(session.id);
+  await restoreSession(request, API, session.id, { Authorization: `Bearer ${TOKEN}` });
   await expect(row).toBeVisible();
 });
 

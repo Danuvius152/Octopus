@@ -8,9 +8,9 @@ import pytest
 from server import deps
 from server.attachments import MAX_FILE_BYTES, get_path, save_upload
 from server.workspace import paths_for
+from tests.attachment_runtime import storage_user_id as storage_user_id
+from tests.attachment_runtime import users_root as users_root
 from tests.session_runtime import wait_dispatch_idle
-from tests.test_attachments import storage_user_id as storage_user_id
-from tests.test_attachments import users_root as users_root
 from tests.test_runtime_review_races import connect_ws, disconnect_ws
 from tests.test_runtime_review_races import runtime as runtime
 

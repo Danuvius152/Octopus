@@ -6,7 +6,7 @@ from . import format, resolver, source_bindings, source_confirmations, uids
 from .links import note_name
 from .references import ParsedReference, local_references
 
-VERSION = "direct-links-v4"
+VERSION = "direct-links-v5"
 
 
 def initialize(db):

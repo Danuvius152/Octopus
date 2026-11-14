@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from ..harness import HarnessRun
+    from ..harness.run import RetirementObservation
 
 EvidenceState = Literal["pending", "proven", "failed", "unavailable"]
 
@@ -24,16 +24,16 @@ class AttemptResource:
     attempt_id: str
     work_id: str | None
     run_lease_id: str | None
-    _backend: HarnessRun = field(repr=False, compare=False)
+    _retirement: RetirementObservation | None = field(repr=False, compare=False)
 
     @property
     def state(self) -> EvidenceState:
-        return getattr(self._backend, "retirement_state", "unavailable")
+        return self._retirement.state if self._retirement is not None else "unavailable"
 
     async def wait(self) -> EvidenceState:
-        if not hasattr(self._backend, "wait_retirement"):
+        if self._retirement is None:
             return "unavailable"
-        await self._backend.wait_retirement()
+        await self._retirement.wait()
         return self.state
 
 

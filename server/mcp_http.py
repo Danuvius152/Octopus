@@ -26,6 +26,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import anyio.to_thread
+from anyio import CapacityLimiter
+from anyio.lowlevel import checkpoint_if_cancelled
 from fastapi import FastAPI
 from starlette.types import Receive, Scope, Send
 
@@ -77,7 +79,7 @@ def _load(module_path: str, *, fresh: bool = False) -> Any:
     return module.mcp
 
 
-def _threaded(fn: Any) -> Any:
+def _threaded(fn: Any, limiter: CapacityLimiter) -> Any:
     """An async wrapper that runs `fn` in a worker thread, in this context."""
 
     @functools.wraps(fn)
@@ -86,12 +88,21 @@ def _threaded(fn: Any) -> Any:
         # (mcp_identity), so the calling context has to come along explicitly —
         # a thread does not inherit one.
         ctx = contextvars.copy_context()
-        return await anyio.to_thread.run_sync(functools.partial(ctx.run, fn, **kwargs))
+        try:
+            return await anyio.to_thread.run_sync(
+                functools.partial(ctx.run, fn, **kwargs),
+                limiter=limiter, abandon_on_cancel=False,
+            )
+        finally:
+            # A shielded worker can return with cancellation still pending.
+            # Deliver it before the SDK attempts a second response to a call
+            # whose CancelledNotification already received an error reply.
+            await checkpoint_if_cancelled()
 
     return run
 
 
-def _offload_sync_tools(server: Any) -> None:
+def _offload_sync_tools(server: Any, limiter: CapacityLimiter) -> None:
     """Run `def` tool bodies in a worker thread instead of on the event loop.
 
     FastMCP calls a sync tool straight on the loop
@@ -109,9 +120,11 @@ def _offload_sync_tools(server: Any) -> None:
     made them wrong, so the fix belongs here rather than in nine tool modules —
     and threading a sync handler is what FastAPI does for a `def` endpoint.
 
-    The bound is anyio's default thread limiter (40). Async tools own their
-    cancellation/retirement contract; ordinary synchronous side-effect tools
-    retain their original worker until their operation has returned.
+    All namespaces share the host's separate 40-worker capacity. The inner
+    FastAPI sync routes keep AnyIO's default limiter, so outer tool workers
+    cannot consume the capacity needed by their own HTTP callbacks. Async
+    tools own their cancellation/retirement contract; ordinary synchronous
+    side-effect tools retain their worker until the operation returns.
     """
     tools = getattr(getattr(server, "_tool_manager", None), "_tools", None)
     if not tools:  # pragma: no cover - a namespace with no tools
@@ -119,7 +132,7 @@ def _offload_sync_tools(server: Any) -> None:
     for tool in tools.values():
         if tool.is_async:
             continue
-        tool.fn = _threaded(tool.fn)
+        tool.fn = _threaded(tool.fn, limiter)
         tool.is_async = True
 
 
@@ -138,8 +151,9 @@ def build_servers(*, fresh: bool = False) -> dict[str, Any]:
         name: _load(path, fresh=fresh)
         for name, path in {**_BUILTIN_MODULES, **_CONNECTOR_MODULES}.items()
     }
+    limiter = CapacityLimiter(40)
     for server in servers.values():
-        _offload_sync_tools(server)
+        _offload_sync_tools(server, limiter)
     return servers
 
 

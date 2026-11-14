@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 
 from .format import DocumentFormat
-from .links import anchor_exists, note_name
+from .links import anchor_status, note_name
 from .references import candidate_keys
 
 
@@ -84,6 +84,8 @@ def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_ancho
     current = overlay if target == overlay_id else db.execute("SELECT text FROM documents WHERE id=?", (target,)).fetchone()
     if current is None:
         return Resolution(target, "missing", keys)
-    if check_anchor and reference.fragment and reference.relation in {"wikilink", "markdown_link"} and not anchor_exists(current["text"], reference.fragment, parsed=source_parse if target == source_doc else None):
-        return Resolution(target, "missing_anchor", keys)
+    if check_anchor and reference.fragment and reference.relation in {"wikilink", "markdown_link"}:
+        status = anchor_status(current["text"], reference.fragment, parsed=source_parse if target == source_doc else None)
+        if status != "resolved":
+            return Resolution(target, status, keys)
     return Resolution(target, "resolved", keys)

@@ -12,6 +12,7 @@ from server.main import app
 from server.session_manager import session_manager
 from server.users import UserManager
 from server.workspace import paths_for
+from tests.browser_restore import restore_session
 
 
 @pytest.fixture
@@ -239,12 +240,10 @@ async def test_archive_session(client):
     assert new_id in ids
 
     # Unarchive brings the old id back; it returns to the default list.
-    un = await client.post(
-        f"/api/sessions/{old_id}/unarchive", headers=client.headers
-    )
+    un = await restore_session(client, old_id, headers=client.headers)
     assert un.status_code == 200
-    assert un.json()["id"] == old_id
-    assert un.json()["archived"] is False
+    assert un.json()["state"] == "finished" and un.json()["status_code"] is None
+    assert (await client.get(f"/api/sessions/{old_id}")).json()["archived"] is False
     list_after = await client.get("/api/sessions", headers=client.headers)
     assert old_id in [s["id"] for s in list_after.json()]
 
@@ -388,7 +387,7 @@ async def test_archive_session_without_replacement(client):
     assert archived.status_code == 200
     assert archived.json()["archived"] is True
 
-    un = await client.post(f"/api/sessions/{old_id}/unarchive", headers=client.headers)
+    un = await restore_session(client, old_id, headers=client.headers)
     assert un.status_code == 200
     assert old_id in [
         s["id"] for s in (await client.get("/api/sessions", headers=client.headers)).json()

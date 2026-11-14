@@ -61,8 +61,12 @@ async def native_runtime(tmp_path, monkeypatch):
     try:
         yield NativeRuntime(manager, database, session, mode, starts, events)
     finally:
-        await manager.interrupt(session.id)
-        await manager.await_session_execution(session.id, timeout=5)
+        owner = manager._session_owners.get(id(session))
+        if owner is None or not owner.failed:
+            await manager.interrupt(session.id)
+            await manager.await_session_execution(session.id, timeout=5)
+        # Failed owners reject new commands; close joins their original
+        # registered resource cleanup instead of submitting another interrupt.
         await manager.close_session_owners()
         await database.close()
 

@@ -21,7 +21,12 @@ from ..credential_bindings import validate_credential_binding
 from ..db.applications import ApplicationDeleting
 from ..harness import get_harness
 from ..knowledge import KnowledgeContext, OwnedTaskContext, receive_return
-from ..models import MessageContent, SessionDetail
+from ..models import (
+    MessageContent,
+    SessionDetail,
+    SessionRestoreRequest,
+    SessionRestoreStatus,
+)
 from ..users import owner_is_available
 from ..workspace import confine
 from .base import (
@@ -40,6 +45,7 @@ from .owner_runtime import (
     ReleaseArchive,
 )
 from .presentation import session_info
+from .restoration import RestoreOperation, RestoreRefused
 from .runtime_types import SessionAdmissionBusy, SessionAdmissionClosed
 from .submission import ReturnRefused
 
@@ -768,6 +774,105 @@ class LifecycleMixin(SessionManagerBase):
             has_more_messages=await database.has_messages_before(session_id, oldest),
             next_message_seq=max((m.seq for m in messages if m.seq is not None), default=-1) + 1,
         )
+
+    async def join_browser_restorations(self) -> None:
+        # Initialization joins originals before replacing locks, owners or DB.
+        tasks = [record.task for record in self._browser_restorations.values() if record.task is not None]
+        if tasks:
+            await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+
+    async def _browser_restore_target(self, session_id: str, user_id: str | None) -> dict[str, Any]:
+        binding = await self.db.get_session_binding(session_id) if self.db else None
+        if binding is None or user_id is not None and binding["user_id"] != user_id:
+            raise RestoreRefused("Session not found", 404)
+        return binding
+
+    def _browser_restore_record(self, session_id: str, user_id: str | None, operation_id: str) -> RestoreOperation | None:
+        record = self._browser_restorations.get(operation_id)
+        if record is not None and (record.actor, record.session_id) != (user_id, session_id):
+            raise RestoreRefused("Restore identity not found", 404)
+        return record
+
+    def _browser_restore_status(self, operation_id: str | None, record: RestoreOperation | None,
+                                state: str = "not_registered") -> SessionRestoreStatus:
+        return SessionRestoreStatus.model_validate({
+            "service_generation": record.generation if record else self._dispatch_generation, "operation_id": operation_id,
+            "state": record.state if record else state,
+            "status_code": record.status_code if record else None, "message": record.message if record else None,
+        })
+
+    async def browser_restore_status(self, session_id: str, user_id: str | None,
+                                     request: SessionRestoreRequest | None = None, *, seal: bool = False) -> SessionRestoreStatus:
+        if request is not None and request.service_generation == self._dispatch_generation:
+            record = self._browser_restore_record(session_id, user_id, request.operation_id)
+            if record is not None:
+                return self._browser_restore_status(request.operation_id, record)
+        await self._browser_restore_target(session_id, user_id)
+        if request is None:
+            operation_id = self._active_browser_restorations.get((user_id, session_id))
+            record = self._browser_restorations.get(operation_id) if operation_id else None
+            return self._browser_restore_status(operation_id, record, "idle")
+        if request.service_generation != self._dispatch_generation:
+            return self._browser_restore_status(request.operation_id, None,
+                "generation_retired" if self._restore_previous_writers_retired else "generation_unknown")
+        # Registration and sealing linearize here, after the last storage await.
+        record = self._browser_restore_record(session_id, user_id, request.operation_id)
+        if record is None and seal:
+            record = RestoreOperation(user_id, session_id, request.service_generation, "sealed")
+            self._browser_restorations[request.operation_id] = record
+        return self._browser_restore_status(request.operation_id, record)
+
+    async def browser_restore(self, session_id: str, user_id: str | None,
+                               request: SessionRestoreRequest) -> SessionRestoreStatus:
+        if request.service_generation != self._dispatch_generation:
+            await self._browser_restore_target(session_id, user_id)
+            raise RestoreRefused("Restore service generation changed; confirm the original identity", 409)
+        record = self._browser_restore_record(session_id, user_id, request.operation_id)
+        if record is None:
+            binding = await self._browser_restore_target(session_id, user_id)
+            # No await separates readiness, shutdown/generation checks and
+            # registration. Internal task returns keep their distinct admission.
+            if (self._input_state != "ready" or self._admission_closed
+                    or request.service_generation != self._dispatch_generation):
+                raise RestoreRefused("Browser restoration admission is closed", 503)
+            record = self._browser_restore_record(session_id, user_id, request.operation_id)
+            if record is None:
+                record = RestoreOperation(user_id, session_id, request.service_generation, "running")
+                self._browser_restorations[request.operation_id] = record
+                if (user_id, session_id) in self._active_browser_restorations:
+                    record.state, record.status_code, record.message = "finished", 409, "Another restoration is still running"
+                else:
+                    self._active_browser_restorations[user_id, session_id] = request.operation_id
+
+                    async def run() -> tuple[int, str] | None:
+                        try:
+                            async with self.agent_operation(binding["agent_id"]):
+                                await self._unarchive_session(session_id, user_id)
+                            return None
+                        except ValueError as error:
+                            return 404, str(error)
+                        except ForkError as error:
+                            return error.status_code, str(error)
+                        except Exception:
+                            return 500, "Restoration could not finish. Confirm the current session state."
+
+                    task = asyncio.create_task(run(), name=f"browser-restore-{session_id}")
+                    record.task = task
+                    original = record
+
+                    def ended(done: asyncio.Task[tuple[int, str] | None]) -> None:
+                        result = (500, "Restoration ended without a confirmed result") if done.cancelled() else done.result()
+                        original.state, original.task = "finished", None
+                        if result is not None:
+                            original.status_code, original.message = result
+                        if self._active_browser_restorations.get((user_id, session_id)) == request.operation_id:
+                            self._active_browser_restorations.pop((user_id, session_id))
+
+                    task.add_done_callback(ended)
+                    self._own_task(task)
+        if record.task is not None:
+            await asyncio.shield(record.task)
+        return self._browser_restore_status(request.operation_id, record)
 
     async def unarchive_session(
         self, session_id: str, user_id: str | None = None,

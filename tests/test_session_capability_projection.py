@@ -14,6 +14,7 @@ from server.session_manager import session_manager
 from server.wiki.registry import registry
 from server.wiki.tasks import tasks
 from server.workspace import paths_for
+from tests.browser_restore import restore_session
 from tests.harness_profiles import process_profile
 from tests.test_agent_credential_bindings import bindings as bindings
 
@@ -118,9 +119,10 @@ async def test_session_capabilities_are_consistent_across_live_and_archived_view
     assert history["can_steer"] is can_steer and summary["can_steer"] is can_steer
     assert history["archived"] and summary["archived"]
     assert history["messages"] == [] and history["next_message_seq"] == 0
-    restored = await client.post(url + "/unarchive", headers=headers)
+    restored = await restore_session(client, session_id, headers=headers)
     assert restored.status_code == 200, restored.text
-    assert restored.json()["can_steer"] is can_steer
+    assert restored.json()["state"] == "finished" and restored.json()["status_code"] is None
+    assert (await client.get(url, headers=headers)).json()["can_steer"] is can_steer
 
 
 @pytest.mark.parametrize("backend,can_steer", [("claude-code", True), ("codex", True)])

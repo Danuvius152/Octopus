@@ -1,6 +1,7 @@
 """Public first-turn dispatch consumes only proven resumable native input."""
 
 import json
+import re
 
 import pytest
 
@@ -71,6 +72,39 @@ async def test_claude_stop_commits_installed_opening_without_a_result(claude_run
     saved = next(row for row in await db.load_sessions() if row["id"] == child.id)
     assert saved["fork_needs_replay"] == 0
     assert await db.get_session_resume_id(child.id) == "exact-claude-session"
+
+
+@pytest.mark.parametrize("retire", ["stop", "archive"])
+async def test_claude_held_result_retains_late_history_proof(claude_runtime, tmp_path, monkeypatch, retire):
+    manager, db, parent, _, _ = claude_runtime
+    config = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    child = await branch(manager, parent)
+    await submit_client_message(manager, child.id, "Opening with late history", [], "late", wiki_mode=None)
+    await wait_dispatch_idle(manager, child.id)
+    original = child._run.backend
+    assert original is not None and original.is_alive()
+    saved = next(row for row in await db.load_sessions() if row["id"] == child.id)
+    assert saved["fork_needs_replay"] == 1
+
+    # The native result preceded installation. Only EOF/retirement can now
+    # record that this original input consumed the branch replay.
+    delivered = (await inputs(tmp_path, 1))[0]["input"]
+    directory = config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", child.working_dir)
+    directory.mkdir(parents=True)
+    (directory / "exact-claude-session.jsonl").write_text(json.dumps({
+        "type": "user", "uuid": delivered["uuid"], "sessionId": "exact-claude-session",
+        "isSidechain": False, "message": delivered["message"],
+    }) + "\n")
+    if retire == "archive":
+        await manager.archive_session(child.id, replace=False)
+    else:
+        await manager.interrupt(child.id)
+        await original.wait_retirement()
+    saved = next(row for row in await db.load_sessions(include_archived=True) if row["id"] == child.id)
+    assert saved["fork_needs_replay"] == 0
+    assert await db.get_session_resume_id(child.id) == "exact-claude-session"
+    assert original.retirement_state == "proven"
 
 
 async def test_unknown_installation_remains_blocked_after_restart(native_runtime, tmp_path):

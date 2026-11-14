@@ -17,6 +17,7 @@ import {
 import { selectSession } from "../lib/selectSession";
 import { applications as applicationList } from "../lib/applicationList";
 import { applicationDraft } from "../lib/applicationDrafts";
+import { isImeComposing } from "../lib/composerKeys";
 import { useSessionStore } from "../stores/sessionStore";
 import { PageHeader } from "./PageHeader";
 import { Button } from "./ui/button";
@@ -258,6 +259,7 @@ function ApplicationPane({ onToggleSidebar }: { onToggleSidebar: () => void }) {
                 value={request}
                 onChange={(e) => draft.text.edit(e.target.value)}
                 onKeyDown={(e) => {
+                  if (isImeComposing(e.nativeEvent)) return;
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     askForChanges();

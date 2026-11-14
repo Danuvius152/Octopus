@@ -1679,29 +1679,34 @@ class OwnerRuntime:
                 await self._failed(execution, ValueError("The original native history changed before compaction"), "native_history_changed")
                 return
 
+            input_changed, wake = execution.input_changed, self.owner.wake
+            request_id, history_attempt_id = execution.request.request_id, attempt.attempt_id
+            backend_name = backend.profile.backend
+
             async def record_input(evidence):
                 await database.record_native_input(session.id, evidence.input_id, evidence,
                                                    process_group=backend.process_group_id)
                 # Report a committed read-model change to the original Owner.
                 # Coalescing notifications does not replace the saved evidence.
-                execution.input_changed.set()
-                self.owner.wake()
+                input_changed.set()
+                wake()
 
             backend.bind_input_recorder(record_input)
             generation = self.owner.manager._dispatch_generation
 
             async def record_history(native_id: str | None, may_have_run: bool) -> None:
-                await database.record_input_history(session.id, execution.request.request_id, attempt.attempt_id,
-                    generation, backend.profile.backend, native_id, may_have_run)
-                execution.input_changed.set()
-                self.owner.wake()
+                await database.record_input_history(session.id, request_id, history_attempt_id,
+                    generation, backend_name, native_id, may_have_run)
+                input_changed.set()
+                wake()
 
             backend.bind_input_history_recorder(record_history if session.fork_needs_replay else None)
             backend.bind_questions(self.owner.wake)
         observation = session._request_observations.get(execution.request.request_id)
         if observation is not None:
             observation._attempts.append(AttemptResource(execution.request.request_id, attempt.attempt_id,
-                execution.request.work_id, getattr(backend, "run_lease_id", None), backend))
+                execution.request.work_id, getattr(backend, "run_lease_id", None),
+                backend.retirement_observation if isinstance(backend, HarnessRun) else None))
         execution.settlement.attempt_id = attempt.attempt_id
         session._run.backend, session._run.held_since = backend, None
         if hasattr(backend, "bind_tool_context"):
@@ -1718,12 +1723,13 @@ class OwnerRuntime:
         if hasattr(backend, "bind_observation_clock"):
             turn = execution.turn
             assert turn is not None
+            started_at, watchdog = turn.started_at, attempt.watchdog
             backend.bind_observation_clock(lambda at: {
-                "overall_elapsed_ms": max(0, at - turn.started_at) * 1000,
-                "idle_elapsed_ms": max(0, at - attempt.watchdog["last"]) * 1000,
+                "overall_elapsed_ms": max(0, at - started_at) * 1000,
+                "idle_elapsed_ms": max(0, at - watchdog["last"]) * 1000,
                 "overall_limit_ms": settings.turn_max_seconds * 1000 if settings.turn_max_seconds > 0 else None,
                 "idle_limit_ms": settings.turn_idle_timeout_seconds * 1000 if settings.turn_idle_timeout_seconds > 0 else None,
-                "idle_suspended": bool(attempt.watchdog.get("waiting_questions")),
+                "idle_suspended": bool(watchdog.get("waiting_questions")),
             })
         await self.owner.questions.handle(BeginQuestionAttempt(attempt.attempt_id, attempt.watchdog))
         execution.frames.append({"type": "attempt_started", "session_id": session.id,

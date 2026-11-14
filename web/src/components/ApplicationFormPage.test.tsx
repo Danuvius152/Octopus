@@ -66,6 +66,56 @@ afterEach(() => {
 });
 
 describe("ApplicationFormPage", () => {
+  it("freezes every creation field through POST and pending list confirmation without creating twice", async () => {
+    let finishWrite!: (response: Response) => void;
+    let synchronized = false;
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") return new Promise<Response>(resolve => { finishWrite = resolve; });
+      return synchronized ? json([application({ archived: false })]) : json({ detail: "offline" }, 503);
+    });
+    const { container } = mount();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Frozen snapshot" } });
+    fireEvent.change(screen.getByLabelText(/What problem/), { target: { value: "Original brief" } });
+    const save = screen.getByRole("button", { name: /Start Build/ });
+    act(() => { save.click(); save.click(); });
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    const expectFrozen = () => {
+      for (const control of container.querySelectorAll(".page-body input, .page-body textarea, .page-body select, .page-body .app-agent-option")) {
+        expect(control).toBeDisabled();
+      }
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    };
+    expectFrozen();
+    await act(async () => {
+      applicationList.receive({ type: "application_updated", application: application({ id: "other", archived: false }) });
+      finishWrite(json(application({ archived: false }), 201));
+    });
+    await screen.findByText(/List not synchronized/);
+    expectFrozen();
+    synchronized = true;
+    fireEvent.click(screen.getByRole("button", { name: /Refresh applications/ }));
+    await waitFor(() => expect(useSessionStore.getState().activeApplicationId).toBe("a1"));
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("allows tab navigation while preventing new All-tab configuration writes during creation", async () => {
+    let finish!: (response: Response) => void;
+    const live = application({ archived: false });
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => init?.method === "POST"
+      ? new Promise<Response>(resolve => { finish = resolve; })
+      : json(String(url).includes("archived=true") ? [] : [live]));
+    mount("form", [live]);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Pending" } });
+    fireEvent.change(screen.getByLabelText(/What problem/), { target: { value: "Brief" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start Build/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^All/ }));
+    expect(screen.getByLabelText("Archive Habit Tracker")).toBeDisabled();
+    expect(screen.getByLabelText("Unpin Habit Tracker from the sidebar")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Open" })).toBeEnabled();
+    await act(async () => finish(json({ detail: "Creation refused" }, 409)));
+    expect(screen.getByLabelText("Archive Habit Tracker")).toBeEnabled();
+  });
+
   it("keeps Start Build disabled until there's a name and a brief", () => {
     mount();
     const submit = screen.getByRole("button", { name: /Start Build/ });

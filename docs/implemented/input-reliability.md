@@ -104,6 +104,10 @@ Restore waits for confirmed account identity. A null identity during startup
 does not mean logout. If the user edits before identity arrives, the new version
 wins over stored text and is saved once identity is known. Edits and clearing
 write synchronously rather than waiting for an effect or unload callback.
+Restoring saved text can change the text without incrementing its runtime
+version. Async draft consumers must observe both changes; a version-only guard
+cannot protect a just-restored draft. History's full-body read and saved pre-walk
+draft follow the [composer contract](composer-and-time.md#composer-history).
 Token/account changes clear the previous draft namespace, including entries for
 Apps not opened in this page lifetime; identity confirmation removes entries
 belonging to other accounts. Confirmed App deletion also clears an unopened
@@ -146,6 +150,12 @@ and cleanup cannot be guaranteed; the in-memory text remains usable. This is a
 current-tab text convenience, without attachment, closed-tab or cross-device
 recovery guarantees. No server draft table or storage root is added, and
 browser drafts are outside [account archives](../backup-and-migrate.md#account-export-and-import).
+
+Unresolved archived-session restoration identities are a separate tab-local
+record, not text drafts or input receipts. Unlike draft namespaces, they survive
+local sign-out/reload so a late restore POST cannot be forgotten. Their sealing,
+current-account adoption and retirement rules belong to
+[session restoration](frontend-list-reconciliation.md#归档恢复的原操作确认).
 
 ## 原请求完成与失败交接
 
@@ -255,7 +265,7 @@ root completion; it does not resume execution or change an existing outcome.
 ## 原执行的观察
 
 原接纳回执的 `execution` 持有 `RequestObservation`：原 input request/work、
-驱动完成 Future，以及按尝试捕获的 request/attempt/work/run lease 和 backend。
+驱动完成 Future，以及按尝试捕获的 request/attempt/work/run lease 和只读资源观察。
 原 OwnerRuntime 在原 Execution 的完成或故障接管中绑定这些事实；Manager 不回读
 当前执行解释旧回执。重建回执没有进程内资源证明时保持 `execution=None`，不因
 会话 idle、删除或对象缺失推导成功。
@@ -263,13 +273,23 @@ root completion; it does not resume execution or change an existing outcome.
 `driver_state` / `wait_driver()` 只观察原输入的驱动收束。Stop 将未启动输入保留
 队列时，该输入仍 pending；未知 steer 即使先返回 unavailable，其观察仍跟随原
 承载 driver。`attempts` 返回有原身份的资源引用；`wait_resources()` 先等原 driver
-不再添加 attempt，再等这些 backend 的实际退出。资源仍存活、退出失败和缺少证明
+不再添加 attempt，再等这些原资源的实际退出。资源仍存活、退出失败和缺少证明
 分别保持 pending、failed、unavailable；等待失败也可传播原异常。
 
 请求驱动结束允许 Claude 宿主供 B 复用，不能据此把 A 捕获的宿主报为已退出。
 观察 A 或取消其等待不调用 stop，也不停止 B；资源引用由原消费者持有至观察责任
 结束。普通 App 槽只等待原 driver，保留复用政策。安装交接另按
 [领域事实与封口收据](installation-lifecycle.md#领域事实与封口收据)执行，不替代指定资源证明。
+
+资源观察共享原 Harness 的退休 Task/Event，不持有完整 Run 或复制第二份终态。
+提前捕获及多个回执共享的句柄继续观察同一原任务；取消等待不取消该任务，失败
+仍传播原异常。输入、history recorder 与时钟闭包只捕获原身份和必要依赖，避免
+已退休回执间接保留 Execution 和大输入。请求完成或 Owner 失败不能无条件清除
+recorder：Claude held result 后迟到的历史仍须沿原提交点记录输入及 fork replay
+消费事实。原资源和最后协议责任结束后，保留多个回执不再线性保留这些重对象；
+最后当前或 held 对象可有界保留，轻量历史身份与原接纳、完成事实仍可增长。
+双后端真实协议进程的 GC、retry、steer、held、Stop、归档及 Owner 失败回归
+分别验证观察寿命与原责任收束，不以 TTL/LRU 或 driver 完成替代退出证明。
 
 ## 原请求结果读取
 

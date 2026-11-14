@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import {
   IconAppWindow,
   IconArchive,
@@ -51,10 +51,15 @@ export function ApplicationFormPage({
   const [instructions, setInstructions] = useState("");
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(null);
   const [operation, setOperation] = useState<{ current: () => boolean } | null>(null);
+  // Admission lasts through the original POST and its list confirmation.
+  const pending = useRef<{ current: () => boolean } | null>(null);
   const [created, setCreated] = useState<{ id: string; current: () => boolean; canNavigate: () => boolean } | null>(null);
   const navigation = useRef(0);
   const busy = !!operation?.current() || !!created?.current();
   const [error, setError] = useState<string | null>(null);
+  const freezeEdit = (event: SyntheticEvent) => {
+    if (pending.current?.current()) { event.preventDefault(); event.stopPropagation(); }
+  };
 
   useEffect(() => useSessionStore.subscribe((state, before) => {
     if ((state.mainView !== before.mainView || state.pageTab !== before.pageTab) &&
@@ -73,6 +78,7 @@ export function ApplicationFormPage({
     const synchronized = () => {
       const state = useSessionStore.getState();
       if (!created.current() || !state.applications.some((row) => row.id === created.id)) return;
+      if (pending.current?.current === created.current) pending.current = null;
       setCreated(null);
       if (created.canNavigate() && state.mainView === "application-create" && state.pageTab === "form") {
         openApplication(created.id);
@@ -99,11 +105,16 @@ export function ApplicationFormPage({
     !busy && name.trim().length > 0 && description.trim().length > 0 && !!agentId;
 
   const submit = async () => {
-    if (!canSubmit) return;
+    const state = useSessionStore.getState();
+    if (!canSubmit || pending.current?.current() || state.accountGeneration !== accountGeneration ||
+        state.mainView !== "application-create" || state.pageTab !== "form") return;
     const current = applicationList.accountGuard();
     const startNavigation = navigation.current;
-    setOperation({ current });
+    const request = { current };
+    pending.current = request;
+    setOperation(request);
     setError(null);
+    let awaitingList = false;
     try {
       const app = await applicationList.create({
         name: name.trim(),
@@ -112,10 +123,14 @@ export function ApplicationFormPage({
         icon: icon.trim() || null,
         instructions: instructions.trim(),
       });
-      if (current()) setCreated({ id: app.id, current, canNavigate: () => navigation.current === startNavigation });
+      if (current()) {
+        awaitingList = true;
+        setCreated({ id: app.id, current, canNavigate: () => navigation.current === startNavigation });
+      }
     } catch (e) {
       if (current()) setError(e instanceof Error ? e.message : "Failed to create application");
     } finally {
+      if (!awaitingList && pending.current === request) pending.current = null;
       if (current()) setOperation(null);
     }
   };
@@ -123,6 +138,7 @@ export function ApplicationFormPage({
   // Restoring stays on the All tab: the app reappears under "In sidebar"
   // (the server pins what it restores), which is the confirmation.
   const restore = async (app: Application) => {
+    if (pending.current?.current()) return;
     const current = applicationList.currentGuard();
     setError(null);
     try {
@@ -133,6 +149,7 @@ export function ApplicationFormPage({
   };
 
   const archive = async (app: Application) => {
+    if (pending.current?.current()) return;
     if (!window.confirm(`Archive "${app.name}"? Its files are kept.`)) return;
     const current = applicationList.currentGuard();
     setError(null);
@@ -144,6 +161,7 @@ export function ApplicationFormPage({
   };
 
   const togglePin = async (app: Application, pinned: boolean) => {
+    if (pending.current?.current()) return;
     const current = applicationList.currentGuard();
     setError(null);
     try {
@@ -209,6 +227,7 @@ export function ApplicationFormPage({
 
           {tab === "all" ? (
             <ApplicationLibrary
+              busy={busy}
               live={applications}
               archived={archived}
               ordering={ordering}
@@ -221,7 +240,7 @@ export function ApplicationFormPage({
               onCreate={() => setTab("form")}
             />
           ) : (
-            <div className="space-y-6">
+            <fieldset disabled={busy} className="space-y-6" onClickCapture={freezeEdit} onChangeCapture={freezeEdit}>
               <div className="flex items-start gap-4">
                 <span className="tile tile-plain mt-7 size-14 rounded-xl text-2xl">
                   {icon || "🪟"}
@@ -336,7 +355,7 @@ export function ApplicationFormPage({
                   ))}
                 </select>
               </div>
-            </div>
+            </fieldset>
           )}
         </div>
       </div>
@@ -383,6 +402,7 @@ function TabSwitch({
 
 /** The All tab: every application, as `ItemLibrary` rows. */
 function ApplicationLibrary({
+  busy,
   live,
   archived,
   onOpen,
@@ -394,6 +414,7 @@ function ApplicationLibrary({
   pinOrder,
   loaded,
 }: {
+  busy: boolean;
   live: Application[];
   archived: Application[];
   onOpen: (app: Application) => void;
@@ -418,7 +439,7 @@ function ApplicationLibrary({
     icon: <AppIcon app={a} />,
     meta: a.status,
     pinned: a.pinned !== false,
-    pinDisabled: ordering,
+    pinDisabled: ordering || busy,
     archived: !!a.archived,
   }));
 
@@ -435,6 +456,7 @@ function ApplicationLibrary({
               size="sm"
               variant="outline"
               className="btn-restore"
+              disabled={busy}
               onClick={() => onRestore(app)}
             >
               Restore
@@ -454,6 +476,7 @@ function ApplicationLibrary({
             <button
               type="button"
               className="btn-library-archive inline-flex size-8 items-center justify-center rounded-lg text-gray-600 transition-colors hover:bg-warn-bg hover:text-warn-foreground"
+              disabled={busy}
               onClick={() => onArchive(app)}
               title="Archive"
               aria-label={`Archive ${app.name}`}

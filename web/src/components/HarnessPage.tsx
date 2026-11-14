@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { components } from "../api/contracts";
 import {
   IconCheck,
@@ -77,7 +77,7 @@ type FlowState =
   | { kind: "sign_in_result"; backend: "codex" | "claude-code"; credentialId: string | null; phase: "syncing" | "failed" | "missing"; alreadyCompleted?: boolean }
   | { kind: "codex_label" }
   | { kind: "codex_starting" }
-  | { kind: "codex_device"; loginId: string; url: string; code: string }
+  | { kind: "codex_device"; loginId: string; url: string; code: string; observation?: "unconfirmed" | "missing" | "forbidden"; message?: string }
   | { kind: "error"; message: string };
 
 export function HarnessPage({
@@ -137,7 +137,7 @@ export function HarnessPage({
     setOpen(true);
   };
 
-  const closeAndReset = () => {
+  const closeAndReset = useCallback(() => {
     viewGeneration.current++;
     setOpen(false);
     setLabel("");
@@ -145,7 +145,11 @@ export function HarnessPage({
     setCopiedCode(false);
     setReauthId(null);
     setFlow({ kind: "idle" });
-  };
+  }, []);
+
+  useEffect(() => useSessionStore.subscribe((state, before) => {
+    if (state.accountGeneration !== before.accountGeneration) closeAndReset();
+  }), [closeAndReset]);
 
   const confirmSignIn = async (backend: "codex" | "claude-code", credentialId: string | null, alreadyCompleted = false) => {
     const current = beginViewRequest();
@@ -299,28 +303,59 @@ export function HarnessPage({
   // reports the browser authorization completed (or failed).
   const flowKind = flow.kind;
   const codexLoginId = flow.kind === "codex_device" ? flow.loginId : null;
+  const codexObservation = flow.kind === "codex_device" ? flow.observation : undefined;
   useEffect(() => {
-    if (flowKind !== "codex_device" || !codexLoginId) return;
+    if (flowKind !== "codex_device" || !codexLoginId || codexObservation) return;
     let cancelled = false;
     const view = viewGeneration.current;
     const account = useSessionStore.getState().accountGeneration;
     const current = () => !cancelled && viewGeneration.current === view && useSessionStore.getState().accountGeneration === account;
     let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
+    let reading: AbortController | null = null;
+    let failureDeadline: number | null = null;
+    const stop = (observation: "unconfirmed" | "missing" | "forbidden", message: string) => {
+      if (current()) setFlow(previous => previous.kind === "codex_device" && previous.loginId === codexLoginId
+        ? { ...previous, observation, message } : previous);
+    };
+    const unavailable = () => stop("unconfirmed", "Codex sign-in is temporarily unconfirmed. You can continue querying this sign-in.");
+    const readStatus = async (deadline: number) => {
+      const controller = new AbortController();
+      reading = controller;
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+      });
+      const timeout = setTimeout(() => controller.abort(new DOMException("Codex status read timed out", "TimeoutError")), Math.max(0, deadline - Date.now()));
       try {
-        const res = await fetch(`${API}/codex/${codexLoginId}/status`, {
-          headers,
-        });
+        return await Promise.race([cancelled, (async () => {
+          const response = await fetch(`${API}/codex/${codexLoginId}/status`, { headers, signal: controller.signal });
+          if ([401, 403, 404].includes(response.status)) return { http: response.status };
+          if (!response.ok) throw new Error(`Could not read Codex sign-in (HTTP ${response.status}).`);
+          const body: components["schemas"]["CodexLoginStatusResponse"] = await response.json();
+          if (!body || !["pending", "success", "error", "cancelled"].includes(body.state) ||
+              [body.verification_url, body.user_code, body.message].some(value => value != null && typeof value !== "string") ||
+              body.credential != null && typeof body.credential.id !== "string") throw new Error("Invalid Codex sign-in status");
+          return { body };
+        })()]);
+      } finally {
+        clearTimeout(timeout);
+        if (reading === controller) reading = null;
+        controller.abort();
+      }
+    };
+    const poll = async () => {
+      if (!current()) return;
+      const started = Date.now();
+      if (failureDeadline !== null && started >= failureDeadline) { unavailable(); return; }
+      try {
+        const result = await readStatus(Math.min(started + 30_000, failureDeadline ?? Infinity));
         if (!current()) return;
-        if (res.ok) {
-          const body: {
-            state: string;
-            verification_url?: string | null;
-            user_code?: string | null;
-            message?: string | null;
-            credential?: CredentialInfo | null;
-          } = await res.json();
-          if (!current()) return;
+        if ("http" in result) {
+          if (result.http === 404) stop("missing", "The original Codex sign-in status is no longer available. Refresh current credentials or start a new sign-in.");
+          else stop("forbidden", result.http === 401 ? "Authentication is required to observe this Codex sign-in." : "You do not have permission to observe this Codex sign-in.");
+          return;
+        }
+        {
+          const { body } = result;
           if (body.state === "success") {
             await confirmSignIn("codex", body.credential?.id ?? null);
             return;
@@ -332,29 +367,30 @@ export function HarnessPage({
             });
             return;
           }
+          // Only a complete, valid pending body ends the continuous fault segment.
+          failureDeadline = null;
           // Still pending — surface the URL + code as soon as codex emits them.
           if (body.verification_url && body.user_code) {
-            setFlow({
-              kind: "codex_device",
-              loginId: codexLoginId,
-              url: body.verification_url,
-              code: body.user_code,
-            });
+            setFlow(previous => previous.kind === "codex_device" && previous.loginId === codexLoginId
+              ? { ...previous, url: body.verification_url!, code: body.user_code! } : previous);
           }
         }
       } catch {
-        // transient — keep polling
+        if (!current()) return;
+        failureDeadline ??= started + 30_000;
+        if (Date.now() >= failureDeadline) { unavailable(); return; }
       }
-      if (current()) timer = setTimeout(poll, 2000);
+      if (current()) timer = setTimeout(poll, Math.min(2000, failureDeadline === null ? Infinity : Math.max(0, failureDeadline - Date.now())));
     };
     // Poll quickly at first so the code appears promptly, then settle to 2s.
     timer = setTimeout(poll, 600);
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      reading?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flowKind, codexLoginId]);
+  }, [flowKind, codexLoginId, codexObservation]);
 
   const cancelInflightLogin = async () => {
     if (flow.kind === "codex_device") {
@@ -608,7 +644,7 @@ export function HarnessPage({
           )}
 
           {/* Codex — waiting on codex to fetch the device code */}
-          {flow.kind === "codex_device" && !flow.url && (
+          {flow.kind === "codex_device" && !flow.observation && !flow.url && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <span className="inline-block size-2 rounded-full bg-primary animate-pulse" />
               Asking Codex for a device code…
@@ -656,12 +692,23 @@ export function HarnessPage({
                   </Button>
                 </div>
               </div>
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              {!flow.observation && <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <span className="inline-block size-2 rounded-full bg-primary animate-pulse" />
                 Waiting for you to authorize in the browser…
-              </div>
+              </div>}
             </div>
           )}
+
+          {flow.kind === "codex_device" && flow.observation && <div className="space-y-3">
+            <p role="alert" className="text-sm text-destructive">{flow.message}</p>
+            <div className="flex flex-wrap gap-2">
+              {flow.observation === "unconfirmed" && <Button variant="outline" onClick={() => setFlow({ ...flow, observation: undefined, message: undefined })}>
+                Continue querying this sign-in
+              </Button>}
+              <Button variant="outline" onClick={() => void modelCredentials.refresh()}>Refresh current credentials</Button>
+              <Button variant="outline" onClick={() => setFlow({ kind: "codex_label" })}>Start a new Codex sign-in</Button>
+            </div>
+          </div>}
 
           {/* Claude — paste the code from the callback page */}
           {flow.kind === "claude_awaiting_code" && (
@@ -754,7 +801,7 @@ export function HarnessPage({
             {flow.kind === "codex_label" && (
               <Button
                 className="btn-codex-start"
-                onClick={() => startCodexLogin()}
+                onClick={() => startCodexLogin(reauthId ?? undefined)}
                 disabled={!label.trim()}
               >
                 Continue

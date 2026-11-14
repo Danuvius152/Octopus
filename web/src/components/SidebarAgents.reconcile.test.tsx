@@ -10,6 +10,29 @@ const agent = (id: string, name: string): Agent => ({ id, name, backend: "codex"
 beforeEach(() => useSessionStore.setState({ ...useSessionStore.getInitialState(), token: "synthetic-token", accountGeneration: 1, dispatchGeneration: "service-a", agents: [agent("a", "Old A"), agent("b", "Old B")] }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+it.each([{ isComposing: true }, { keyCode: 229 }])("keeps the new-session form during IME Enter %j", async flags => {
+  let finish!: (response: Response) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return new Promise<Response>(resolve => { finish = resolve; });
+    if (url.endsWith("/api/agents")) return Promise.resolve(Response.json([agent("a", "Old A")]));
+    return Promise.resolve(Response.json([]));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  render(<SidebarAgents />);
+  fireEvent.click(await screen.findByLabelText("New session for Old A"));
+  const name = screen.getByPlaceholderText("Session name");
+  fireEvent.change(name, { target: { value: "中文会话" } });
+  const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...flags });
+  fireEvent(name, event);
+  expect(event.defaultPrevented).toBe(false);
+  expect(name).toHaveValue("中文会话");
+  expect(name).toBeEnabled();
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  fireEvent.keyDown(name, { key: "Enter" });
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  await act(async () => finish(Response.json({ detail: "Controlled refusal" }, { status: 503 })));
+});
+
 it("immediately acknowledges a pending creation and submits it only once", async () => {
   let finish!: (response: Response) => void;
   const fetcher = vi.fn((url: string, init?: RequestInit) => {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { isImeComposing } from "../../lib/composerKeys";
 
 /** A small panel anchored under its trigger.
  *
@@ -37,7 +38,10 @@ export function Popover({
       if (!wrap.current?.contains(e.target as Node)) onClose();
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !e.defaultPrevented && !isImeComposing(e)) {
+        e.preventDefault();
+        onClose();
+      }
     };
     // mousedown, not click: a click that starts outside and ends inside (a
     // drag-select that overshoots the panel) shouldn't be treated as "done".
@@ -50,7 +54,18 @@ export function Popover({
   }, [open, onClose]);
 
   return (
-    <div className={`popover-wrap relative ${className}`} ref={wrap}>
+    <div
+      className={`popover-wrap relative ${className}`}
+      ref={wrap}
+      onKeyDown={(event) => {
+        // The focused panel (or its trigger) consumes Escape before the
+        // document fallback can close a different open panel.
+        if (open && event.key === "Escape" && !event.defaultPrevented && !isImeComposing(event.nativeEvent)) {
+          event.preventDefault();
+          onClose();
+        }
+      }}
+    >
       {trigger}
       {open && (
         <div

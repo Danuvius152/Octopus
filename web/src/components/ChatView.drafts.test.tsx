@@ -29,6 +29,57 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); useSessionStore.getState().setToken(""); });
 
+const arrow = (key: "ArrowUp" | "ArrowDown") => {
+  box().setSelectionRange(box().value.length, box().value.length);
+  fireEvent.keyDown(box(), { key });
+};
+const prompt = (seq: number, content: string) => ({ seq, role: "user" as const, type: "text", content });
+
+it("ends history on every session change while preserving the shared draft", () => {
+  useSessionStore.setState({ messages: { [a.id]: [prompt(0, "A first"), prompt(1, "A second"), prompt(2, "A third")],
+    [b.id]: [prompt(0, "B only")] } });
+  mount();
+  edit("Unsent draft");
+  arrow("ArrowUp");
+  expect(box()).toHaveValue("A third");
+  act(() => useSessionStore.setState({ activeSessionId: b.id }));
+  arrow("ArrowUp");
+  expect(box()).toHaveValue("B only");
+  arrow("ArrowDown");
+  expect(box()).toHaveValue("A third");
+  act(() => useSessionStore.setState({ activeSessionId: a.id }));
+  arrow("ArrowDown");
+  expect(box()).toHaveValue("A third");
+  arrow("ArrowUp");
+  expect(box()).toHaveValue("A third");
+  arrow("ArrowDown");
+  expect(box()).toHaveValue("A third");
+});
+
+it("follows the selected message across insertion, and retires a missing candidate permanently", () => {
+  const rows = [prompt(1, "First"), prompt(2, "Second"), prompt(3, "Third")];
+  useSessionStore.setState({ messages: { [a.id]: rows } });
+  mount();
+  edit("Original draft");
+  arrow("ArrowUp");
+  arrow("ArrowUp");
+  expect(box()).toHaveValue("Second");
+  act(() => useSessionStore.setState({ messages: { [a.id]: [prompt(0, "Earlier"), ...rows.map(row => ({ ...row }))] } }));
+  arrow("ArrowUp");
+  expect(box()).toHaveValue("First");
+  arrow("ArrowDown");
+  arrow("ArrowDown");
+  arrow("ArrowDown");
+  expect(box()).toHaveValue("Original draft");
+  arrow("ArrowUp");
+  act(() => useSessionStore.setState({ messages: { [a.id]: [] } }));
+  arrow("ArrowUp");
+  expect(box()).toHaveValue("Third");
+  act(() => useSessionStore.setState({ messages: { [a.id]: rows } }));
+  arrow("ArrowDown");
+  expect(box()).toHaveValue("Third");
+});
+
 it("restores one shared unsent text after identity confirmation and component remount without sending", () => {
   sessionStorage.setItem(saved, "Saved before refresh 中文");
   const view = mount();

@@ -49,6 +49,7 @@ afterEach(() => {
   cleanup();
   useSessionStore.setState({ viewer: null });
   vi.restoreAllMocks();
+  Reflect.deleteProperty(navigator, "pdfViewerEnabled");
 });
 
 describe("FileViewerDialog", () => {
@@ -93,7 +94,7 @@ describe("FileViewerDialog", () => {
     });
   });
 
-  it("renders sandboxed <iframe> for kind=pdf", async () => {
+  it("requests explicit PDF preview and preserves the download URL", async () => {
     vi.stubGlobal(
       "fetch",
       mockFetch(
@@ -108,8 +109,23 @@ describe("FileViewerDialog", () => {
       const iframe = document.querySelector("iframe");
       expect(iframe).not.toBeNull();
       expect(iframe!.getAttribute("src")).toContain("/files?path=doc.pdf");
-      expect(iframe!.getAttribute("sandbox")).toContain("allow-same-origin");
+      expect(new URL(iframe!.getAttribute("src")!).searchParams.get("preview")).toBe("true");
     });
+    expect(screen.getByRole("link", { name: "Open in new tab" })).toHaveAttribute("href", document.querySelector("iframe")!.getAttribute("src"));
+    const download = screen.getByRole("link", { name: "Download file" });
+    expect(new URL(download.getAttribute("href")!).searchParams.has("preview")).toBe(false);
+    expect(download).toHaveAttribute("download", "doc.pdf");
+  });
+
+  it("keeps explicit open and download when PDF rendering is unavailable", async () => {
+    Object.defineProperty(navigator, "pdfViewerEnabled", { configurable: true, value: false });
+    vi.stubGlobal("fetch", mockFetch({ kind: "pdf", mime_type: "application/pdf", size: 8000 }, "ignored"));
+    render(<FileViewerDialog />);
+    act(() => useSessionStore.getState().openViewer("s1", "doc.pdf"));
+    await screen.findByText(/PDF preview is unavailable/);
+    expect(document.querySelector("iframe")).toBeNull();
+    expect(screen.getByRole("link", { name: "Open in new tab" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Download file" })).toBeVisible();
   });
 
   it("renders <pre><code> for kind=code", async () => {

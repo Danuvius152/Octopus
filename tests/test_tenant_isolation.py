@@ -663,7 +663,7 @@ async def test_vera_cannot_reach_archers_work_through_any_surface(two_accounts):
     writes = [
         ("post", f"/api/sessions/{sid}/reset", None),
         ("post", f"/api/sessions/{sid}/archive", None),
-        ("post", f"/api/sessions/{sid}/unarchive", None),
+        ("post", f"/api/sessions/{sid}/unarchive", {"operation_id": "foreign-restore", "service_generation": "unknown"}),
         ("delete", f"/api/sessions/{sid}", None),
         ("post", f"/api/sessions/{sid}/duplicate", {}),
         ("post", f"/api/sessions/{sid}/fork", {"rewind_to_msg_seq": 0}),

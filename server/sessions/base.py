@@ -31,6 +31,7 @@ from ..models import (
 )
 from ..session_operations import OperationKind
 from .observation import RequestObservation
+from .restoration import RestoreOperation
 from .submission import (
     RequestCompletion,
     ReturnAdmission,
@@ -495,6 +496,9 @@ class SessionManagerBase:
     async def close_session_owners(self) -> None:
         raise NotImplementedError  # provided by a mixin
 
+    async def join_browser_restorations(self) -> None:
+        raise NotImplementedError  # provided by a mixin
+
     async def join_mcp_question_calls(self) -> None:
         raise NotImplementedError  # provided by a mixin
 
@@ -757,6 +761,10 @@ class SessionManagerBase:
         self._archived_dispatch: dict[str, tuple[bool, int, int]] = {}
         self._dispatch_generation = uuid.uuid4().hex
         self._retired_dispatch_generations: frozenset[str] = frozenset()
+        # Only browser restoration identities survive their original task.
+        self._browser_restorations: dict[str, RestoreOperation] = {}
+        self._active_browser_restorations: dict[tuple[str | None, str], str] = {}
+        self._restore_previous_writers_retired = False
         self._admission_closed = False
         self._input_state: Literal["uninitialized", "initializing", "ready", "failed"] = "uninitialized"
         self._owned_tasks: set[asyncio.Task[Any]] = set()
@@ -815,6 +823,7 @@ class SessionManagerBase:
         return self.db
 
     async def _initialize_storage(self, db: Database, *, previous_writers_retired: bool) -> None:
+        await self.join_browser_restorations()
         await self.drain_credential_refreshes()
         self._credential_refresh_closed = False
         if self._session_owners:
@@ -832,6 +841,9 @@ class SessionManagerBase:
         self._archived_dispatch.clear()
         self.db = db
         self._dispatch_generation = uuid.uuid4().hex
+        self._browser_restorations.clear()
+        self._active_browser_restorations.clear()
+        self._restore_previous_writers_retired = previous_writers_retired
         self._retired_dispatch_generations = frozenset()
         previous_generations = await db.recover_client_submissions()
         # Only the verified startup boundary can prove retirement of these

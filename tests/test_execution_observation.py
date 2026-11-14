@@ -55,13 +55,15 @@ async def test_original_driver_can_end_while_host_serves_next_request(held, monk
     assert original.run_lease_id and original.state == "pending"
     second = await manager.start_message(session.id, "B")
     entered = asyncio.Event()
-    wait_retirement = original._backend.wait_retirement
+    retirement = original._retirement
+    assert retirement is not None
+    wait_retirement = retirement.wait
 
     async def observe_retirement():
         entered.set()
         await wait_retirement()
 
-    monkeypatch.setattr(original._backend, "wait_retirement", observe_retirement)
+    monkeypatch.setattr(retirement, "wait", observe_retirement)
     waiting = asyncio.create_task(observation.wait_resources())
     await entered.wait()
     # Waiting and cancelling A is observation only, including while B is live.
@@ -116,7 +118,8 @@ async def test_failed_resource_exit_is_not_successful_retirement(held, monkeypat
     receipt = await manager.start_message(session.id, "A")
     await asyncio.wait_for(receipt.wait(), 2)
     original = receipt.execution.attempts[0]
-    backend = original._backend
+    backend = session._run.backend
+    assert backend is not None and backend.run_lease_id == original.run_lease_id
     stop = backend._stop
 
     async def fail():

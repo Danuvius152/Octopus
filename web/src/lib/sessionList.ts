@@ -3,6 +3,7 @@ import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import type { ListEventSource } from "./applicationList";
 import { unreadList, type ListReadState, type RefreshResult } from "./listState";
 import type { DispatchState } from "./sessionDispatch";
+import { SessionRestorations } from "./sessionRestorations";
 
 interface Scope { account: number; token: string; generation: string | null; connection: number }
 export interface SessionObservation {
@@ -21,6 +22,7 @@ interface Read extends SessionObservation {
  * no per-session tombstone or second collection survives that read boundary.
  */
 export class SessionList {
+  readonly restorations = new SessionRestorations(this);
   private socket: object | null = null;
   private connection = 0;
   private change = 0;
@@ -31,7 +33,7 @@ export class SessionList {
   private archivedRequested = false;
   private closed = false;
   // Only outstanding reads are retained, including targets not yet in a list.
-  private observations = new Map<SessionObservation, { id: string; archiveReceipt: boolean }>();
+  private observations = new Map<SessionObservation, { id: string | undefined; archiveReceipt: boolean }>();
   private deletionListeners = new Set<(id: string, wasActive: boolean) => void>();
   // Provisional identities only until the inclusive confirmation succeeds.
   // They never filter incoming rows or claim deletion by themselves.
@@ -48,6 +50,7 @@ export class SessionList {
       }
       this.retire({ state: "obsolete" }); this.dirty = false;
       if (account) {
+        this.restorations.retire();
         this.unconfirmedMissing.clear();
         this.socket = null; this.connection++; this.engaged = false; this.archivedRequested = false;
         useSessionStore.setState({ sessions: [], archivedSessions: [], sessionSuccessors: {}, sessionRead: unreadList() });
@@ -78,7 +81,9 @@ export class SessionList {
     const now = useSessionStore.getState();
     return { scope: this.scope(start), change: start.sessions === now.sessions && start.archivedSessions === now.archivedSessions ? this.change : -1 };
   }
-  observe(id: string, start = useSessionStore.getState(), purpose: "detail" | "archive" = "detail") {
+  // Without a target, track only the scope lifetime (including its first
+  // generation); membership changes must not retire navigation after restore.
+  observe(id?: string, start = useSessionStore.getState(), purpose: "detail" | "archive" = "detail") {
     const observation = this.capture(start);
     this.observations.set(observation, { id, archiveReceipt: purpose === "archive" });
     return { observation, finish: () => { this.observations.delete(observation); } };
@@ -132,6 +137,11 @@ export class SessionList {
     this.dirty = true;
     return this.start()!.promise;
   }
+  refreshAfterRestoration(): Promise<RefreshResult> {
+    this.retire({ state: "pending" });
+    this.dirty = true;
+    return this.refresh(true);
+  }
   private start(): Read | null {
     if (this.closed || this.active || !this.dirty || !this.scope().token) return this.active;
     this.dirty = false;
@@ -154,6 +164,7 @@ export class SessionList {
       } else {
         const store = useSessionStore.getState();
         const observed = new Set([...store.sessions, ...store.archivedSessions].map((row) => row.id));
+        for (const id of this.restorations.pendingIds()) observed.add(id);
         for (const [from, to] of Object.entries(store.sessionSuccessors)) { observed.add(from); observed.add(to); }
         if (store.activeSessionId) observed.add(store.activeSessionId);
         for (const id of this.unconfirmedMissing) observed.add(id);
@@ -275,11 +286,6 @@ export class SessionList {
     }
     return this.row(info);
   }
-  async restored(info: SessionInfo, observation: SessionObservation): Promise<boolean> {
-    if (this.current(observation) && useSessionStore.getState().sessions.some((row) => row.id === info.id)) return true;
-    if (this.canConfirm(observation) && this.row(info)) return true;
-    return this.confirmLive(info.id, observation, true);
-  }
   detail(info: SessionInfo, observation: SessionObservation, dispatch: DispatchState | null): boolean {
     const known = useSessionStore.getState().dispatchStates[info.id];
     if (dispatch && known?.generation === dispatch.generation && known.revision > dispatch.revision) return false;
@@ -353,10 +359,12 @@ export class SessionList {
     this.commit(store.sessions.filter((row) => row.id !== id), store.archivedSessions.filter((row) => row.id !== id),
       Object.fromEntries(Object.entries(store.sessionSuccessors).filter(([from, to]) => from !== id && to !== id)));
     useSessionStore.getState().forgetSession(id);
+    this.restorations.deleted(id);
     for (const listener of this.deletionListeners) listener(id, wasActive);
     return true;
   }
   dispose(): void {
+    this.restorations.retire();
     this.unconfirmedMissing.clear();
     this.deletionListeners.clear();
     this.observations.clear();

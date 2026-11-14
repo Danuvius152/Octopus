@@ -10,6 +10,7 @@ admin disabling themselves — is refused.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -161,6 +162,203 @@ async def test_password_commit_uses_entry_identity_and_current_account_state(cli
 # ---------------------------------------------------------------------------
 # Signing in
 # ---------------------------------------------------------------------------
+
+
+async def test_workspace_seal_rejects_a_late_put_and_adopts_the_next_list(client, tmp_path):
+    c, users, db = client
+    admin = await users.create_user(username="operator", password="password1", is_admin=True)
+    headers = _bearer(await users.issue_token(admin["id"]))
+    roots = [str(tmp_path / name) for name in ("a", "b")]
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    await db.update_user_field(admin["id"], extra_roots=json.dumps(roots))
+    base = f"/api/auth/users/{admin['id']}"
+    opened = await c.post(f"{base}/workspace-edits", headers=headers, json={"flow_id": "late-put"})
+    assert opened.status_code == 200
+    flow = {key: opened.json()[key] for key in ("flow_id", "service_generation")}
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held_body():
+        entered.set()
+        await release.wait()
+        yield json.dumps({**flow, "sequence": 1, "extra_roots": roots[1:]}).encode()
+
+    writing = asyncio.create_task(c.put(f"{base}/extra-roots", headers={**headers, "Content-Type": "application/json"}, content=held_body()))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert (await c.get("/api/auth/workspace", headers=headers)).json()["extra_roots"] == roots
+        seal = await c.post(f"{base}/workspace-edits/confirm", headers=headers, json={**flow, "sequence": 1})
+        assert seal.status_code == 200
+        assert seal.json()["sealed_through"] == 1
+        assert seal.json()["workspace"]["extra_roots"] == roots
+        assert (await c.put(f"{base}/extra-roots", headers=headers,
+                            json={**flow, "sequence": 2, "extra_roots": roots[:1]})).status_code == 200
+        release.set()
+        late = await writing
+    finally:
+        release.set()
+        await asyncio.gather(writing, return_exceptions=True)
+    assert late.status_code == 409
+    assert (await c.get("/api/auth/workspace", headers=headers)).json()["extra_roots"] == roots[:1]
+    repeated = await c.post(f"{base}/workspace-edits/confirm", headers=headers, json={**flow, "sequence": 1})
+    assert repeated.json()["sealed_through"] >= 2
+    assert repeated.json()["workspace"]["extra_roots"] == roots[:1]
+
+
+async def test_workspace_confirmation_waits_for_the_original_cancelled_commit(client, tmp_path, monkeypatch):
+    c, users, db = client
+    admin = await users.create_user(username="operator", password="password1", is_admin=True)
+    headers = _bearer(await users.issue_token(admin["id"]))
+    roots = [str(tmp_path / name) for name in ("a", "b")]
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    await db.update_user_field(admin["id"], extra_roots=json.dumps(roots))
+    base = f"/api/auth/users/{admin['id']}"
+    opened = (await c.post(f"{base}/workspace-edits", headers=headers, json={"flow_id": "cancelled-commit"})).json()
+    flow = {key: opened[key] for key in ("flow_id", "service_generation")}
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute, commit = db.conn.execute, db.conn.commit
+    updating = False
+
+    async def observed_execute(sql, parameters=()):
+        nonlocal updating
+        cursor = await execute(sql, parameters)
+        if sql.startswith("UPDATE users SET extra_roots="):
+            updating = True
+        return cursor
+
+    async def gated_commit():
+        nonlocal updating
+        if updating:
+            updating = False
+            entered.set()
+            await release.wait()
+        await commit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db.conn, "execute", observed_execute)
+        patch.setattr(db.conn, "commit", gated_commit)
+        writing = asyncio.create_task(c.put(f"{base}/extra-roots", headers=headers,
+                                            json={**flow, "sequence": 1, "extra_roots": roots[1:]}))
+        confirmation = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            writing.cancel()
+            await asyncio.sleep(0)
+            writing.cancel()
+            confirmation = asyncio.create_task(c.post(f"{base}/workspace-edits/confirm", headers=headers,
+                                                       json={**flow, "sequence": 1}))
+            await asyncio.sleep(0)
+            assert not writing.done(), "cancellation discarded the original commit acknowledgment"
+            assert not confirmation.done(), "confirmation overtook the still-running original commit"
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await writing
+            result = await confirmation
+        finally:
+            release.set()
+            await asyncio.gather(writing, *([confirmation] if confirmation else []), return_exceptions=True)
+    assert result.status_code == 200
+    assert result.json()["workspace"]["extra_roots"] == roots[1:]
+    assert result.json()["sealed_through"] == 1
+    next_write = await c.put(f"{base}/extra-roots", headers=headers, json={**flow, "sequence": 2, "extra_roots": []})
+    assert next_write.json()["extra_roots"] == []
+    assert (await c.put(f"{base}/extra-roots", headers=headers,
+                        json={**flow, "sequence": 1, "extra_roots": roots[1:]})).status_code == 409
+
+
+@pytest.mark.parametrize("change", ["revoke", "disable", "demote"])
+async def test_workspace_permission_is_rechecked_in_the_authorization_write_transaction(client, monkeypatch, change):
+    c, users, db = client
+    admin = await users.create_user(username="operator", password="password1", is_admin=True)
+    bearer = await users.issue_token(admin["id"])
+    headers = _bearer(bearer)
+    base = f"/api/auth/users/{admin['id']}"
+    opened = (await c.post(f"{base}/workspace-edits", headers=headers, json={"flow_id": "permission-change"})).json()
+    flow = {key: opened[key] for key in ("flow_id", "service_generation")}
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute, commit = db.conn.execute, db.conn.commit
+    proof_read = False
+
+    async def observed_execute(sql, parameters=()):
+        nonlocal proof_read
+        cursor = await execute(sql, parameters)
+        if "FROM auth_tokens AS t JOIN users AS u" in sql and not entered.is_set():
+            proof_read = True
+        return cursor
+
+    async def gated_commit():
+        nonlocal proof_read
+        if proof_read:
+            proof_read = False
+            entered.set()
+            await release.wait()
+        await commit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db.conn, "execute", observed_execute)
+        patch.setattr(db.conn, "commit", gated_commit)
+        writing = asyncio.create_task(c.put(f"{base}/extra-roots", headers=headers,
+                                            json={**flow, "sequence": 1, "extra_roots": []}))
+        mutation = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            mutation = asyncio.create_task(users.revoke_token(bearer) if change == "revoke" else
+                                           users.set_disabled(admin["id"], True) if change == "disable" else
+                                           db.update_user_field(admin["id"], is_admin=0))
+            await asyncio.sleep(0)
+            release.set()
+            await mutation
+            result = await writing
+        finally:
+            release.set()
+            await asyncio.gather(writing, *([mutation] if mutation else []), return_exceptions=True)
+    assert result.status_code == (403 if change == "demote" else 401)
+
+
+@pytest.mark.parametrize("previous_writers_retired", [False, True])
+async def test_workspace_generation_change_needs_actual_writer_retirement_proof(client, previous_writers_retired):
+    c, users, db = client
+    admin = await users.create_user(username="operator", password="password1", is_admin=True)
+    headers = _bearer(await users.issue_token(admin["id"]))
+    base = f"/api/auth/users/{admin['id']}"
+    opened = (await c.post(f"{base}/workspace-edits", headers=headers, json={"flow_id": "old-generation"})).json()
+    flow = {key: opened[key] for key in ("flow_id", "service_generation")}
+    # This flag is supplied only by InstallationOwner's managed retirement
+    # proof at real startup. A new random generation alone is insufficient.
+    deps.set_user_manager(UserManager(db, previous_writers_retired=previous_writers_retired))
+    assert (await c.put(f"{base}/extra-roots", headers=headers,
+                        json={**flow, "sequence": 1, "extra_roots": []})).status_code == 409
+    confirmation = await c.post(f"{base}/workspace-edits/confirm", headers=headers, json={**flow, "sequence": 1})
+    if not previous_writers_retired:
+        assert confirmation.status_code == 409
+        return
+    receipt = confirmation.json()
+    assert receipt["previous_generation_retired"] is True
+    assert receipt["service_generation"] != flow["service_generation"]
+    assert receipt["sealed_through"] == 1
+    assert receipt["workspace"]["extra_roots"] == []
+    new_flow = {key: receipt[key] for key in ("flow_id", "service_generation")}
+    assert (await c.put(f"{base}/extra-roots", headers=headers,
+                        json={**new_flow, "sequence": 2, "extra_roots": []})).status_code == 200
+
+
+async def test_workspace_flow_is_bound_to_operator_and_target_and_legacy_put_cannot_bypass_it(client):
+    c, users, _db = client
+    first = await users.create_user(username="first", password="password1", is_admin=True)
+    second = await users.create_user(username="second", password="password1", is_admin=True)
+    headers = _bearer(await users.issue_token(first["id"]))
+    other_headers = _bearer(await users.issue_token(second["id"]))
+    base = f"/api/auth/users/{first['id']}"
+    opened = (await c.post(f"{base}/workspace-edits", headers=headers, json={"flow_id": "bound-flow"})).json()
+    flow = {key: opened[key] for key in ("flow_id", "service_generation")}
+    for actor, target in ((other_headers, first["id"]), (headers, second["id"])):
+        for suffix, body, method in (("workspace-edits/confirm", {**flow, "sequence": 1}, c.post),
+                                     ("extra-roots", {**flow, "sequence": 1, "extra_roots": []}, c.put)):
+            response = await method(f"/api/auth/users/{target}/{suffix}", headers=actor, json=body)
+            assert response.status_code == 403
+    assert (await c.put(f"{base}/extra-roots", headers=headers, json={"extra_roots": []})).status_code == 422
+    assert (await c.post("/api/auth/users/missing/workspace-edits", headers=headers, json={"flow_id": "missing-target"})).status_code == 404
 
 
 @pytest.mark.asyncio
@@ -746,10 +944,12 @@ async def test_an_extra_root_can_be_opened_and_closed_after_the_upgrade(
     token = await users.issue_token(admin["id"])
     repo = tmp_path / "a-new-repo"
     repo.mkdir()
+    flow = (await c.post(f"/api/auth/users/{admin['id']}/workspace-edits", json={"flow_id": "open-close"}, headers=_bearer(token))).json()
+    identity = {key: flow[key] for key in ("flow_id", "service_generation")}
 
     opened = await c.put(
         f"/api/auth/users/{admin['id']}/extra-roots",
-        json={"extra_roots": [str(repo)]},
+        json={**identity, "sequence": 1, "extra_roots": [str(repo)]},
         headers=_bearer(token),
     )
     assert opened.status_code == 200, opened.text
@@ -769,7 +969,7 @@ async def test_an_extra_root_can_be_opened_and_closed_after_the_upgrade(
 
     closed = await c.put(
         f"/api/auth/users/{admin['id']}/extra-roots",
-        json={"extra_roots": []},
+        json={**identity, "sequence": 2, "extra_roots": []},
         headers=_bearer(token),
     )
     assert closed.json()["extra_roots"] == []
@@ -785,10 +985,12 @@ async def test_an_extra_root_that_would_switch_confinement_off_is_refused(
     admin = await users.create_user(username="archer", password="password1", is_admin=True)
     token = await users.issue_token(admin["id"])
 
-    for bad in ("/", "/home", "relative/path", str(tmp_path / "does-not-exist")):
+    flow = (await c.post(f"/api/auth/users/{admin['id']}/workspace-edits", json={"flow_id": "invalid-path"}, headers=_bearer(token))).json()
+    identity = {key: flow[key] for key in ("flow_id", "service_generation")}
+    for sequence, bad in enumerate(("/", "/home", "relative/path", str(tmp_path / "does-not-exist")), start=1):
         res = await c.put(
             f"/api/auth/users/{admin['id']}/extra-roots",
-            json={"extra_roots": [bad]},
+            json={**identity, "sequence": sequence, "extra_roots": [bad]},
             headers=_bearer(token),
         )
         assert res.status_code == 400, f"{bad!r} answered {res.status_code}"

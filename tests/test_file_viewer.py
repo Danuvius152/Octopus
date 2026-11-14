@@ -191,7 +191,7 @@ async def session_with_files(client, tmp_path):
     (root / "plan.md").write_text("# plan\nstep one")
     (root / "main.py").write_text("def main():\n    pass\n")
     (root / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
-    (root / "doc.pdf").write_bytes(b"%PDF-1.4\nfake")
+    (root / "doc.pdf").write_bytes((Path(__file__).parent / "fixtures" / "viewer.pdf").read_bytes())
     (root / "blob.bin").write_bytes(b"\x00\x01")
     (root / "huge.md").write_bytes(b"x" * (MAX_FILE_BYTES + 1))
     sub = root / "sub"
@@ -239,6 +239,38 @@ async def test_get_file_image(client, session_with_files):
     )
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
+
+
+async def test_pdf_preview_is_inline_while_default_and_download_remain_attachments(client, session_with_files):
+    sid, root = session_with_files
+    name = "指南 %.pdf"
+    (root / name).write_bytes((root / "doc.pdf").read_bytes())
+    url = f"/api/sessions/{sid}/files"
+    preview = await client.get(url, params={"path": name, "preview": "true"})
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == "application/pdf"
+    assert preview.headers["content-disposition"].startswith("inline;")
+    assert "filename*=utf-8''%E6%8C%87%E5%8D%97%20%25.pdf" in preview.headers["content-disposition"]
+    for params in ({"path": name}, {"path": name, "preview": "false"}):
+        download = await client.get(url, params=params)
+        assert download.content == preview.content
+        assert download.headers["content-disposition"].startswith("attachment;")
+        assert download.headers["etag"] == preview.headers["etag"]
+    partial = await client.get(url, params={"path": name, "preview": "true"}, headers={"Range": "bytes=0-7"})
+    assert partial.status_code == 206 and partial.content == b"%PDF-1.4"
+    assert partial.headers["etag"] == preview.headers["etag"]
+    assert partial.headers["content-disposition"].startswith("inline;")
+
+
+@pytest.mark.parametrize("path", ["plan.md", "main.py", "logo.png", "../outside.md", "no-such.pdf", "huge.md", "blob.bin"])
+async def test_preview_preserves_non_pdf_behavior_and_path_gates(client, session_with_files, path):
+    sid, _ = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    default = await client.get(url, params={"path": path})
+    preview = await client.get(url, params={"path": path, "preview": "true"})
+    assert preview.status_code == default.status_code
+    assert preview.content == default.content
+    assert preview.headers.get("content-disposition") == default.headers.get("content-disposition")
 
 
 async def test_get_file_nested_path(client, session_with_files):

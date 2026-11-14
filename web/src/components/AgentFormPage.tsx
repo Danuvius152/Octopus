@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { IconArchive, IconPlus, IconTrash, IconUsers } from "@tabler/icons-react";
 import { setAgentPinned } from "../api/agents";
 import { fetchAgentConnectors, toggleAgentConnector } from "../api/connectors";
@@ -161,6 +161,10 @@ function AgentFormInstance({
   // the normal case: the CLI's own built-ins are always available.
   const [subagents, setSubagents] = useState(initialDraft.subagents);
   const [busy, setBusy] = useState(false);
+  const saving = useRef(false);
+  const freezeEdit = (event: SyntheticEvent) => {
+    if (saving.current) { event.preventDefault(); event.stopPropagation(); }
+  };
   const [error, setError] = useState<string | null>(null);
   // External updates do not turn untouched fields into draft changes.
   const initialFields = useRef(agentFields(initialDraft));
@@ -173,7 +177,7 @@ function AgentFormInstance({
   // The install preference may finish loading after the form opens. Apply it
   // to a new draft, preserving a backend the user has already chosen.
   useEffect(() => {
-    if (!editingAgentId && !backendChosen.current) setBackend(defaultBackend);
+    if (!editingAgentId && !backendChosen.current && !saving.current) setBackend(defaultBackend);
   }, [defaultBackend, editingAgentId]);
 
   useEffect(() => {
@@ -198,7 +202,7 @@ function AgentFormInstance({
   }, [tab, token]);
 
   const save = async () => {
-    if (!isCurrent() || !name.trim() || busy) return;
+    if (!isCurrent() || useSessionStore.getState().pageTab !== "form" || !name.trim() || saving.current) return;
     for (const [field, value, supported] of [
       ["tool_allow", toolAllow, toolPolicy?.allow],
       ["tool_deny", toolDeny, toolPolicy?.deny],
@@ -208,6 +212,7 @@ function AgentFormInstance({
         return;
       }
     }
+    saving.current = true;
     setBusy(true);
     setError(null);
     const fields = agentFields({
@@ -251,6 +256,7 @@ function AgentFormInstance({
       if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to save agent");
     } finally {
       useSessionStore.getState().endAgentRequest(request);
+      saving.current = false;
       if (isCurrent()) setBusy(false);
     }
   };
@@ -259,7 +265,7 @@ function AgentFormInstance({
   // being edited and leaves the page; the All tab's row button archives that
   // row and stays, so the row visibly moves to the Archived section.
   const archiveAgent = async (agent: Agent): Promise<boolean> => {
-    if (agent.is_system) return false;
+    if (!isCurrent() || saving.current || agent.is_system) return false;
     if (!window.confirm(`Archive "${agent.name}"? You can restore it later.`))
       return false;
     return withAgentRequest(async (request) => {
@@ -287,6 +293,7 @@ function AgentFormInstance({
   // Restoring stays on the All tab: the agent reappears under "In sidebar"
   // (the server pins what it restores), which is the confirmation.
   const restore = async (agent: Agent) => {
+    if (!isCurrent() || saving.current) return;
     setError(null);
     await withAgentRequest(async (request) => {
       try {
@@ -304,6 +311,7 @@ function AgentFormInstance({
   };
 
   const togglePin = async (agent: Agent, pinned: boolean) => {
+    if (!isCurrent() || saving.current) return;
     setError(null);
     await withAgentRequest(async (request) => {
       try {
@@ -334,7 +342,7 @@ function AgentFormInstance({
   };
 
   const toggleConnector = async (installationId: string, enabled: boolean) => {
-    if (!editing || !isCurrent() || pendingConnectors.current.has(installationId)) return;
+    if (!editing || !isCurrent() || saving.current || pendingConnectors.current.has(installationId)) return;
     pendingConnectors.current.add(installationId);
     setConnectorPending([...pendingConnectors.current]);
     const previous = connectorEdits[installationId];
@@ -380,6 +388,7 @@ function AgentFormInstance({
                     type="button"
                     className="btn-agent-archive inline-flex items-center gap-1.5 text-[13.5px] text-gray-800 transition-colors hover:text-warn-foreground"
                     onClick={archive}
+                    disabled={busy}
                   >
                     <IconArchive size={15} />
                     Archive agent
@@ -421,6 +430,7 @@ function AgentFormInstance({
               <button onClick={() => void refreshAgents(undefined, "all").catch(() => {})}>Refresh agents</button>
             </p>}
             <AgentLibrary
+              busy={busy}
               live={agents}
               archived={archived}
               sessionCount={(id) =>
@@ -436,7 +446,7 @@ function AgentFormInstance({
             />
             </>
           ) : (
-            <div className="space-y-6">
+            <fieldset disabled={busy} className="space-y-6" onClickCapture={freezeEdit} onChangeCapture={freezeEdit}>
               <div className="flex items-start gap-4">
                 <div className="mt-7">
                   <EmojiPicker
@@ -675,7 +685,7 @@ function AgentFormInstance({
               </div>
 
               <SubagentEditor value={subagents} onChange={setSubagents} backend={backend} />
-            </div>
+            </fieldset>
           )}
         </div>
       </div>
@@ -819,6 +829,7 @@ function TabSwitch({
 
 /** The All tab: every agent, as `ItemLibrary` rows. */
 function AgentLibrary({
+  busy,
   live,
   archived,
   sessionCount,
@@ -828,6 +839,7 @@ function AgentLibrary({
   onArchive,
   onRestore,
 }: {
+  busy: boolean;
   live: Agent[];
   archived: Agent[];
   sessionCount: (id: string) => number;
@@ -856,6 +868,7 @@ function AgentLibrary({
       pinned: a.pinned !== false,
       archived: !!a.archived,
       pinLocked: a.is_system,
+      pinDisabled: busy,
     };
   });
 
@@ -872,6 +885,7 @@ function AgentLibrary({
               size="sm"
               variant="outline"
               className="btn-restore"
+              disabled={busy}
               onClick={() => onRestore(agent)}
             >
               Restore
@@ -900,6 +914,7 @@ function AgentLibrary({
               <button
                 type="button"
                 className="btn-library-archive inline-flex size-8 items-center justify-center rounded-lg text-gray-600 transition-colors hover:bg-warn-bg hover:text-warn-foreground"
+                disabled={busy}
                 onClick={() => onArchive(agent)}
                 title="Archive"
                 aria-label={`Archive ${agent.name}`}

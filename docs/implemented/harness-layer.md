@@ -330,7 +330,8 @@ source, including after business status selection. A late failure therefore
 remains readable without rewriting the selected outcome or adding a result ledger.
 
 The run also owns local input-submission evidence and its captured cleanup task.
-`retirement_state` and `wait_retirement()` observe that task without starting
+Its shared read-only `retirement_observation`, `retirement_state` and
+`wait_retirement()` observe that task without starting
 retirement or changing its original process. A live held host remains pending
 even after a request driver ends; cancellation of the waiter leaves resource
 ownership intact. The [execution observation contract](input-reliability.md#原执行的观察)
@@ -376,6 +377,14 @@ assignment 或 executing 登记结束不放行 Wiki 重试。正常退出与忽�
 
 <a id="mcp-question-retirement"></a>
 ## MCP 原调用退休
+
+每个服务实例的 builtin 与 connector 同步 MCP 工具共用独立的 40 容量；内层
+FastAPI 同步 API 继续使用默认线程池。等待本机 HTTP 的 MCP worker 因而不会
+占满回调自身所需的容量，也不会按 namespace 各自扩大并发。调用沿原 ContextVar
+传递身份；排队取消不启动 worker，已开始的调用则先等待原 worker 完成，再传播
+取消。成功和抛错路径都在退出原 worker 后检查待处理取消，避免 SDK 为已经取消的
+调用重复响应。真实 MCP→HTTP→同步路由回归覆盖满容量回环、普通 API 推进、
+跨 namespace 上限和两种取消窗口。
 
 只有 ask 的长等待使用 async。实际 SDK Request 绑定原宿主，原 QuestionOwner
 持有 `McpQuestionCall`，从建题开始保留已认证 scope、原 MCP RPC/session、

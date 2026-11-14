@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 
 import { SignIn } from "./SignIn";
 import { useSessionStore } from "../stores/sessionStore";
+import { deferred } from "../test-support/deferred";
 
 afterEach(() => {
   cleanup();
@@ -40,6 +41,65 @@ describe("SignIn", () => {
   beforeEach(() => {
     useSessionStore.getState().setToken("");
     stubFetch({ accountsExist: false });
+  });
+
+  it.each(["login", "setup", "register"] as const)("admits only one %s POST across Enter/click, freezes fields and allows retry after rejection", async mode => {
+    const replies: ReturnType<typeof deferred<Response>>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method !== "POST") return Response.json({ accounts_exist: mode !== "setup" });
+      const reply = deferred<Response>(); replies.push(reply); return reply.promise;
+    }));
+    const signedIn = vi.fn();
+    render(<SignIn onSignedIn={signedIn} />);
+    await screen.findByLabelText("Username");
+    if (mode === "register") fireEvent.click(screen.getByText("I have an invite code"));
+    const username = screen.getByLabelText(mode === "register" ? "Choose a username" : "Username");
+    const password = screen.getByLabelText(mode === "register" ? "Choose a password" : "Password");
+    fireEvent.change(username, { target: { value: "owner" } });
+    fireEvent.change(password, { target: { value: "password1" } });
+    if (mode === "setup") fireEvent.change(screen.getByLabelText("Setup token"), { target: { value: "proof" } });
+    if (mode === "register") fireEvent.change(screen.getByLabelText("Invite code"), { target: { value: "invite" } });
+    for (const flags of [{ isComposing: true }, { keyCode: 229 }]) {
+      const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...flags });
+      fireEvent(password, event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(replies).toHaveLength(0);
+    const button = screen.getByRole("button", { name: mode === "setup" ? "Set up Octopus" : mode === "register" ? "Create account" : "Sign in" });
+    act(() => { fireEvent.keyDown(password, { key: "Enter" }); button.click(); fireEvent.keyDown(username, { key: "Enter" }); });
+    expect(replies).toHaveLength(1);
+    for (const field of document.querySelectorAll("input")) expect(field).toBeDisabled();
+    await act(async () => replies[0].resolve(Response.json({ detail: "Try again" }, { status: 401 })));
+    expect(username).toBeEnabled();
+    expect(password).toHaveValue("password1");
+    expect(screen.getByText("Try again")).toBeVisible();
+    fireEvent.click(button);
+    expect(replies).toHaveLength(2);
+    await act(async () => replies[1].resolve(Response.json({ token: "current-token" })));
+    expect(signedIn).toHaveBeenCalledExactlyOnceWith("current-token");
+  });
+
+  it.each(["mode", "mode round trip", "account round trip"])("keeps a successor sign-in locked when an old reply arrives after %s", async transition => {
+    const replies: ReturnType<typeof deferred<Response>>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method !== "POST") return Response.json({ accounts_exist: true });
+      const reply = deferred<Response>(); replies.push(reply); return reply.promise;
+    }));
+    const signedIn = vi.fn();
+    render(<SignIn onSignedIn={signedIn} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+    if (transition.startsWith("mode")) {
+      fireEvent.click(screen.getByText("I have an invite code"));
+      if (transition === "mode round trip") fireEvent.click(screen.getByText("Back to sign in"));
+    } else act(() => { useSessionStore.getState().setToken("different-account"); useSessionStore.getState().setToken(""); });
+    const currentButton = screen.getByRole("button", { name: transition === "mode" ? "Create account" : "Sign in" });
+    fireEvent.click(currentButton);
+    expect(replies).toHaveLength(2);
+    await act(async () => replies[0].resolve(Response.json({ token: "obsolete-token" })));
+    expect(signedIn).not.toHaveBeenCalled();
+    expect(currentButton).toBeDisabled();
+    await act(async () => replies[1].resolve(Response.json({ token: "current-token" })));
+    expect(signedIn).toHaveBeenCalledExactlyOnceWith("current-token");
   });
 
   it("requires first-account credentials and a setup-only proof", async () => {

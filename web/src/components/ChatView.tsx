@@ -38,14 +38,8 @@ import { MessageTime } from "./MessageTime";
 import { ModelPickerDialog } from "./ModelPickerDialog";
 import { isImeComposing } from "../lib/composerKeys";
 import { isNativeChild, nativeChatMessages } from "../lib/nativeOutput";
-import { isAutoInjectedPrompt } from "../lib/injectedTurns";
-import {
-  IDLE as HISTORY_IDLE,
-  caretWantsHistory,
-  historyFromMessages,
-  recallNext,
-  recallPrev,
-} from "../lib/composerHistory";
+import { caretWantsHistory } from "../lib/composerHistory";
+import { useComposerHistory } from "../hooks/useComposerHistory";
 import { OctopusLogo } from "./OctopusLogo";
 import { CredentialPicker } from "./CredentialPicker";
 import { PageHeader } from "./PageHeader";
@@ -274,16 +268,24 @@ export function ChatView({
   // Slash-command autocomplete: which item is highlighted, and whether the
   // user dismissed the menu with Esc (re-opens as soon as they type again).
   const [slashIndex, setSlashIndex] = useState(0);
-  // Composer history (shell-style ArrowUp/ArrowDown).
-  const [history, setHistory] = useState(HISTORY_IDLE);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerHistory = useComposerHistory(textDraft, textareaRef);
+  const resetHistory = composerHistory.reset;
   // Counter for nested dragenter/dragleave events — without this the
   // overlay flickers as the cursor crosses child elements (textarea,
   // chips, etc.) because each crossing fires a leave on the parent.
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const viewing = useRef<{ account: number; sessionId: string } | null>(null);
+  useEffect(() => {
+    const unsubscribe = useSessionStore.subscribe((state, before) => {
+      if (state.accountGeneration !== before.accountGeneration || state.activeSessionId !== before.activeSessionId ||
+          state.mainView !== before.mainView || state.viewer !== before.viewer) viewing.current = null;
+    });
+    return () => { viewing.current = null; unsubscribe(); };
+  }, []);
   const composerRevision = useRef(0);
   const compactSending = useRef<AbortController | null>(null);
   useEffect(() => () => {
@@ -310,7 +312,7 @@ export function ChatView({
       setRestoredInput((draft) => draft && sessionId && draft.sessionId !== sessionId ? draft : null);
       setRestoredQuestion((draft) => draft && sessionId && draft.sessionId !== sessionId ? draft : null);
       if (!sessionId || sessionId === activeSessionId) {
-        clearAttachments(); setRequiredAttachmentCount(0); setSubmissionError(""); setHistory(HISTORY_IDLE);
+        clearAttachments(); setRequiredAttachmentCount(0); setSubmissionError(""); resetHistory();
       }
     };
     const deleted = sessionList.onDeleted(discard);
@@ -318,7 +320,7 @@ export function ChatView({
       if (state.accountGeneration !== before.accountGeneration) discard();
     });
     return () => { deleted(); account(); };
-  }, [activeSessionId, clearAttachments]);
+  }, [activeSessionId, clearAttachments, resetHistory]);
   const messagesMap = useSessionStore((s) => s.messages);
   const streamingMap = useSessionStore((s) => s.streamingText);
   const streamingItems = useSessionStore((s) => s.streamingItems);
@@ -350,10 +352,10 @@ export function ChatView({
     setInput(saved.input.content);
     addFiles(files);
     setRequiredAttachmentCount(saved.input.attachment_ids.length);
-    setHistory(HISTORY_IDLE);
+    resetHistory();
     setRestoredInput({ sessionId: activeSessionId, clientId: saved.client_request_id });
     textareaRef.current?.focus();
-  }, [activeSessionId, input, pendingAttachments, isArchived, transcriptDamaged, addFiles, setInput]);
+  }, [activeSessionId, input, pendingAttachments, isArchived, transcriptDamaged, addFiles, setInput, resetHistory]);
   const dispatchStates = useSessionStore((s) => s.dispatchStates);
   const chatMessages = useMemo(() => nativeChatMessages(messages,
     Object.values(activeSessionId ? subagentSnapshots[activeSessionId] || {} : {}),
@@ -764,7 +766,7 @@ export function ChatView({
     const requestId = message.outcome?.request_id;
     const draft = requestId ? submittedDrafts.current.get(requestId) : undefined;
     setInput(recovery.content);
-    setHistory(HISTORY_IDLE);
+    resetHistory();
     if (draft) {
       restoreAttachments(draft.attachments);
       submittedDrafts.current.delete(requestId!);
@@ -775,7 +777,7 @@ export function ChatView({
       setRequiredAttachmentCount(recovery.attachment_ids.length);
     }
     textareaRef.current?.focus();
-  }, [activeSessionId, input.length, pendingAttachments.length, restoreAttachments, setInput]);
+  }, [activeSessionId, input.length, pendingAttachments.length, restoreAttachments, setInput, resetHistory]);
 
   // The body per message shape. Wrapped by `renderMessage` below, which is
   // where the hover-revealed timestamp is attached — one place, so every shape
@@ -987,19 +989,12 @@ export function ChatView({
 
   // Slash-command autocomplete state, derived from the current input.
   const slashCommands = useMemo(() => filterSlashCommands(input), [input]);
-  // What ArrowUp walks back through. A user-role message the user never typed —
-  // a bg-task result, a delegation reply, a scheduled fire — is machine text
-  // wearing a user's hat, and recalling it into the box would be nonsense.
-  const sentHistory = useMemo(
-    () => historyFromMessages(messages, isAutoInjectedPrompt),
-    [messages]
-  );
   const showSlashMenu = slashCommands.length > 0 && !slashDismissed;
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
     // Editing ends the walk: the next ArrowUp starts from the newest again.
-    setHistory(HISTORY_IDLE);
+    resetHistory();
     // Any edit re-arms the menu and resets the highlight to the top match.
     setSlashIndex(0);
     setSlashDismissed(false);
@@ -1038,7 +1033,7 @@ export function ChatView({
       const key = restoredQuestion.key;
       const submission = Promise.resolve().then<void | SubmissionReply>(() => sendMessage(activeSessionId, content,
         readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined, undefined, draftId));
-      setInput(""); setRestoredQuestion(null); setRestoredInput(null); setHistory(HISTORY_IDLE);
+      setInput(""); setRestoredQuestion(null); setRestoredInput(null); resetHistory();
       clearAttachments(); setRequiredAttachmentCount(0); setSubmissionError("");
       void Promise.resolve(submission).then((reply) => finishQuestionTransmission(key, draftId, reply))
         .catch(() => finishQuestionTransmission(key, draftId, { accepted: false, state: "unknown" }));
@@ -1062,7 +1057,7 @@ export function ChatView({
     );
     setInput("");
     setRestoredInput(null);
-    setHistory(HISTORY_IDLE);
+    resetHistory();
     clearAttachments();
     setRequiredAttachmentCount(0);
     if (submission) {
@@ -1165,6 +1160,7 @@ export function ChatView({
   };
 
   const handleSend = async () => {
+    if (composerHistory.isWaiting()) return;
     if (!activeSessionId) return;
     const trimmed = input.trim();
     if (/^\/compact(?:\s|$)/.test(trimmed)) {
@@ -1246,21 +1242,24 @@ export function ChatView({
     const lowerModel = trimmed.toLowerCase();
     if (lowerModel === "/model" || lowerModel.startsWith("/model ")) {
       setInput("");
-      setHistory(HISTORY_IDLE);
+      resetHistory();
       const wanted = trimmed.slice("/model".length).trim();
       if (!wanted) {
         setModelPickerOpen(true);
         return;
       }
       const store = useSessionStore.getState();
-      const observation = sessionList.capture(store);
-      const notice = (content: string, isError = false) =>
+      const tracked = sessionList.observe(activeSessionId, store);
+      const { observation } = tracked;
+      const notice = (content: string, isError = false) => {
+        if (!sessionList.current(observation)) return;
         store.addMessage(activeSessionId, {
           role: "system",
           type: "notice",
           content,
           is_error: isError,
         });
+      };
       try {
         const res = await fetch(
           `${window.location.origin}/api/sessions/${activeSessionId}`,
@@ -1293,6 +1292,8 @@ export function ChatView({
         );
       } catch {
         notice("Could not change the model — the server was unreachable.", true);
+      } finally {
+        tracked.finish();
       }
       return;
     }
@@ -1408,6 +1409,8 @@ export function ChatView({
     }
 
     if (lower === "/showme" || lower.startsWith("/showme ")) {
+      const store = useSessionStore.getState();
+      if (store.activeSessionId !== activeSessionId || store.mainView !== "chat") return;
       const text = trimmed.slice("/showme".length).trim();
       if (!text) {
         useSessionStore.getState().addMessage(activeSessionId, {
@@ -1425,7 +1428,16 @@ export function ChatView({
       // post a loading notice (the resolver call can take a second or two
       // when the model has to interpret a fuzzy reference).
       setInput("");
-      const store = useSessionStore.getState();
+      const intent = { account: store.accountGeneration, sessionId: activeSessionId };
+      viewing.current = intent;
+      const current = () => {
+        const now = useSessionStore.getState();
+        return viewing.current === intent && now.accountGeneration === intent.account &&
+          now.activeSessionId === intent.sessionId && now.mainView === "chat";
+      };
+      const failure = (content: string) => {
+        if (current()) useSessionStore.getState().addMessage(activeSessionId, { role: "system", type: "notice", content, is_error: true });
+      };
       store.addMessage(activeSessionId, {
         role: "user",
         type: "text",
@@ -1449,6 +1461,7 @@ export function ChatView({
             body: JSON.stringify({ text }),
           }
         );
+        if (!current()) return;
         if (!res.ok) {
           let detail = `Couldn't resolve file reference (HTTP ${res.status}).`;
           try {
@@ -1457,52 +1470,25 @@ export function ChatView({
           } catch {
             // keep the generic message
           }
-          useSessionStore.getState().addMessage(activeSessionId, {
-            role: "system",
-            type: "notice",
-            content: detail,
-            is_error: true,
-          });
+          failure(detail);
           return;
         }
         const data = await res.json();
+        if (!current()) return;
         if (typeof data?.path === "string" && data.path) {
           useSessionStore.getState().openViewer(activeSessionId, data.path);
         } else {
-          useSessionStore.getState().addMessage(activeSessionId, {
-            role: "system",
-            type: "notice",
-            content:
-              typeof data?.message === "string" && data.message
-                ? data.message
-                : "Couldn't resolve that file reference.",
-            is_error: true,
-          });
+          failure(typeof data?.message === "string" && data.message ? data.message : "Couldn't resolve that file reference.");
         }
       } catch {
-        useSessionStore.getState().addMessage(activeSessionId, {
-          role: "system",
-          type: "notice",
-          content: "Couldn't resolve file reference — network error.",
-          is_error: true,
-        });
+        failure("Couldn't resolve file reference — network error.");
+      } finally {
+        if (viewing.current === intent) viewing.current = null;
       }
       return;
     }
 
     submitTurn(trimmed);
-  };
-
-  /** Put a recalled message in the box with the caret at its end, which is
-   *  where a shell leaves it and where you want to keep typing. */
-  const applyRecall = (text: string) => {
-    setInput(text);
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      const end = ta.value.length;
-      ta.setSelectionRange(end, end);
-    });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1560,14 +1546,8 @@ export function ChatView({
       const collapsed = (ta.selectionEnd ?? caret) === caret;
       const dir = e.key === "ArrowUp" ? "up" : "down";
       if (collapsed && caretWantsHistory(ta.value, caret, dir)) {
-        const recall =
-          dir === "up"
-            ? recallPrev(sentHistory, history, ta.value)
-            : recallNext(sentHistory, history, ta.value);
-        if (recall) {
+        if (composerHistory.recall(dir, ta.value)) {
           e.preventDefault();
-          setHistory(recall.state);
-          applyRecall(recall.text);
           return;
         }
       }
@@ -1587,9 +1567,12 @@ export function ChatView({
   // textarea is focused. Skip when typing in another input (e.g. Schedules
   // form) so we don't hijack their native Esc behavior.
   useEffect(() => {
-    if (!activeSessionId || !isRunning) return;
     const onEsc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || e.defaultPrevented || isImeComposing(e)) return;
+      const state = useSessionStore.getState();
+      const target = state.sessions.find((session) => session.id === state.activeSessionId) ??
+        state.archivedSessions.find((session) => session.id === state.activeSessionId);
+      if (state.mainView !== "chat" || !target || target.status !== "running") return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       const inChatInput =
         tag === "TEXTAREA" &&
@@ -1598,11 +1581,11 @@ export function ChatView({
         (tag === "INPUT" || tag === "TEXTAREA") && !inChatInput;
       if (inOtherField) return;
       e.preventDefault();
-      interrupt(activeSessionId);
+      interrupt(target.id);
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [activeSessionId, isRunning, interrupt]);
+  }, [interrupt]);
 
   const renderStatusBadge = (status: string | undefined) => {
     const base = "status-badge font-mono text-[11px]";
@@ -1792,7 +1775,7 @@ export function ChatView({
             onContinue={(key, content, attachments) => {
               setInput(content); setRestoredQuestion({ key, sessionId: activeSessionId });
               restoreAttachments(attachments);
-              setRestoredInput(null); setHistory(HISTORY_IDLE); textareaRef.current?.focus();
+              setRestoredInput(null); resetHistory(); textareaRef.current?.focus();
             }} />}
           {rejectedDrafts.map((draft) => (
             <div key={draft.id} role="alert" className="mb-2 rounded-md border border-destructive/40 p-3 text-sm">
@@ -1820,7 +1803,7 @@ export function ChatView({
                     ? { sessionId: activeSessionId, clientId: draft.recoveryOfClientId } : null);
                   restoreAttachments(draft.attachments);
                   setRequiredAttachmentCount(0);
-                  setHistory(HISTORY_IDLE);
+                  resetHistory();
                   setRejectedDrafts((drafts) => drafts.filter((item) => item.id !== draft.id));
                   textareaRef.current?.focus();
                 }}>Restore draft</Button>
@@ -2225,6 +2208,8 @@ export function ChatView({
               </div>
             )}
 
+            {composerHistory.waiting && <p role="status" className="px-3 text-xs text-muted-foreground">Loading full history message…</p>}
+            {composerHistory.error && <p role="alert" className="px-3 text-xs text-destructive">{composerHistory.error}</p>}
             <textarea
               ref={textareaRef}
               value={input}
@@ -2283,6 +2268,7 @@ export function ChatView({
                   className="btn btn-send size-9 shrink-0 rounded-full p-0"
                   onClick={handleSend}
                   disabled={
+                    composerHistory.waiting ||
                     (hasUploadInFlight && !/^\/compact(?:\s|$)/.test(input.trim())) ||
                     (!input.trim() && readyAttachmentIds.length === 0)
                   }

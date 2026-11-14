@@ -79,6 +79,68 @@ afterEach(() => {
 });
 
 describe("AgentFormPage", () => {
+  it("freezes every editor and new configuration write during one synchronously admitted save", async () => {
+    const existing = agent({ is_system: false, backend: "codex", subagents: [{ name: "reviewer", description: "Review", prompt: "Inspect", model: null, tools: [] }] });
+    const reply = deferred<Response>();
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => init?.method === "PATCH" ? reply.promise : emptyRead(url));
+    const { container } = mount(existing.id, [existing]);
+    act(() => useSessionStore.setState({ connectorInstallations: [{
+      id: "connector-1", label: "Connected source", kind: "github", auth_type: "oauth", scopes: [],
+      external_account_id: "1", enable_by_default: false, needs_reconnect: false,
+      token_expires_at: null, last_refresh_error_code: null, created_at: "2026-11-14",
+    }] }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose an avatar" }));
+    expect(screen.getByRole("dialog", { name: "Choose an avatar" })).toBeVisible();
+    const save = screen.getByRole("button", { name: "Save Agent" });
+    const archive = screen.getByRole("button", { name: "Archive agent" });
+    act(() => {
+      save.click();
+      fireEvent.change(screen.getByLabelText("One-line role"), { target: { value: "Too late" } });
+      screen.getByRole("button", { name: "Use 🦊" }).click();
+      archive.click();
+      save.click();
+    });
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
+    expect(screen.getByLabelText("One-line role")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Choose an avatar" })).toHaveTextContent("🐙");
+    for (const control of container.querySelectorAll(".page-body input, .page-body textarea, .page-body select, .page-body button")) {
+      expect(control).toBeDisabled();
+    }
+    expect(archive).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    archive.click();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/archive"))).toHaveLength(0);
+    await act(async () => reply.resolve(json({ detail: "Cannot save now" }, 409)));
+    expect(screen.getByRole("button", { name: "Save Agent" })).toBeEnabled();
+    expect(screen.getByLabelText("One-line role")).toBeEnabled();
+    expect(screen.getByLabelText("Name")).toHaveValue("Octo");
+  });
+
+  it.each([true, false])("lets a prior Connector write settle during Save without unlocking the editors (success=%s)", async success => {
+    const connector = deferred<Response>(), save = deferred<Response>();
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") return url.includes("/connectors/") ? connector.promise : save.promise;
+      return emptyRead(url);
+    });
+    mount("ag1");
+    act(() => useSessionStore.setState({ connectorInstallations: [{
+      id: "source", label: "Prior source", kind: "github", auth_type: "oauth", scopes: [], external_account_id: "1",
+      enable_by_default: false, needs_reconnect: false, token_expires_at: null, last_refresh_error_code: null, created_at: "2026-11-14",
+    }] }));
+    await act(async () => {});
+    const checkbox = screen.getByRole("checkbox", { name: /Prior source/ });
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    await act(async () => connector.resolve(new Response(null, { status: success ? 204 : 503 })));
+    expect(checkbox).toHaveProperty("checked", success);
+    expect(checkbox).toBeDisabled();
+    expect(screen.getByLabelText("System prompt", { exact: false })).toBeDisabled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(2);
+    await act(async () => save.resolve(json({ detail: "Save refused" }, 409)));
+    expect(checkbox).toHaveProperty("checked", success);
+    expect(checkbox).toBeEnabled();
+  });
+
   it.each(["archive", "delete"])("an external %s keeps the draft's original edit target", async (change) => {
     const existing = agent({ is_system: false, name: "Original" });
     const writes: { url: string; method: string; body: unknown }[] = [];

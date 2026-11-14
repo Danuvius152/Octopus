@@ -4,6 +4,7 @@ import {
   loadSessionSnapshots,
   hydrateSession,
   loadResearchSnapshot,
+  confirmBackgroundEvent,
 } from "../lib/hydrateSession";
 import { decodeWsEvent, type WsEvent } from "../lib/wsEvents";
 import { readResearchEvidence } from "../lib/researchEvidence";
@@ -445,6 +446,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
           stop_reason: (data.stop_reason) ?? null,
         });
       }
+      confirmBackgroundEvent(sessionId, data.task_id);
       break;
     }
 
@@ -460,6 +462,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         ...("delivery_disposition" in data ? { delivery_disposition: data.delivery_disposition } : {}),
         ...("delivery_error" in data ? { delivery_error: data.delivery_error } : {}),
       });
+      confirmBackgroundEvent(sessionId, data.task_id);
       break;
     }
 

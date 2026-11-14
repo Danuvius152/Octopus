@@ -203,6 +203,26 @@ class RunConfig:
     authorize_spawn: Callable[[], Awaitable[None]] | None = None
 
 
+class RetirementObservation:
+    """Read-only exit proof from the original task, without owning its Run."""
+
+    def __init__(self) -> None:
+        self._started = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def state(self) -> Literal["pending", "proven", "failed"]:
+        task = self._task
+        if task is None or not task.done():
+            return "pending"
+        return "failed" if task.cancelled() or task.exception() is not None else "proven"
+
+    async def wait(self) -> None:
+        await self._started.wait()
+        assert self._task is not None
+        await asyncio.shield(self._task)
+
+
 class HarnessRun:
     """One streamed turn. Lifecycle: `start()`, iterate `stream()` until a
     terminal event closes it, then `stop()`. `interrupt()` cancels in-flight."""
@@ -222,8 +242,8 @@ class HarnessRun:
         self.input_may_have_run = False
         self._spawn_task: asyncio.Task[asyncio.subprocess.Process | None] | None = None
         self._preparation_task: asyncio.Task[tuple[TurnContext, list[str], dict[str, Any]]] | None = None
-        self._stop_task: asyncio.Task[None] | None = None
-        self._retirement_started = asyncio.Event()
+        self._retirement = RetirementObservation()
+        self._retirement_started = self._retirement._started
         self._retirement_phases: list[dict[str, Any]] = []
         self._activity_observer: ActivityObserver | None = None
         self._driver = profile.new_driver(profile)
@@ -867,11 +887,12 @@ class HarnessRun:
 
     def _begin_retirement(self) -> asyncio.Task[None]:
         self.close_admission()
-        if self._stop_task is None:
-            self._stop_task = asyncio.create_task(self._stop(), name="harness-retirement")
-            self._stop_task.add_done_callback(self._retirement_finished)
+        task = self._retirement._task
+        if task is None:
+            task = self._retirement._task = asyncio.create_task(self._stop(), name="harness-retirement")
+            task.add_done_callback(self._retirement_finished)
             self._retirement_started.set()
-        return self._stop_task
+        return task
 
     def _retirement_finished(self, task: asyncio.Task[None]) -> None:
         if not self.captures_retirement_output:
@@ -887,18 +908,17 @@ class HarnessRun:
             self.questions_changed()
 
     @property
+    def retirement_observation(self) -> RetirementObservation:
+        return self._retirement
+
+    @property
     def retirement_state(self) -> str:
         """Only the original cleanup task proves exit; observing never stops it."""
-        task = self._stop_task
-        if task is None or not task.done():
-            return "pending"
-        return "failed" if task.cancelled() or task.exception() is not None else "proven"
+        return self._retirement.state
 
     async def wait_retirement(self) -> None:
         """Cancellation withdraws this observer, leaving retirement owned here."""
-        await self._retirement_started.wait()
-        assert self._stop_task is not None
-        await asyncio.shield(self._stop_task)
+        await self._retirement.wait()
 
     async def stop(self) -> None:
         """Owned retirement includes a late spawn; caller cancellation cannot orphan it."""

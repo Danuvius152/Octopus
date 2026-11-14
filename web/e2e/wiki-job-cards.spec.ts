@@ -2,6 +2,7 @@ import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { expect, test, type Page, type WebSocketRoute } from "./test";
 import { systemAgentId } from "./system-agent";
 import { wikiJob } from "../src/lib/wikiJobs.fixture";
+import { restoreSession } from "./session-restoration";
 
 const API = "http://localhost:8765/api";
 const headers = { Authorization: `Bearer ${TEST_BEARER}` };
@@ -166,7 +167,7 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
     expect(detail.messages).toHaveLength(1);
     expect(detail.messages[0]).toMatchObject({ role: "system", type: "delivery_notice" });
     expect(detail.messages[0].content).toContain("原请求的执行约束无法核实");
-    expect((await request.post(`${API}/sessions/${session.id}/unarchive`, { headers })).ok()).toBeTruthy();
+    await restoreSession(request, API, session.id, headers);
     await page.reload();
     await openSession(page, session.name);
     await expect(page.locator("[data-wiki-job]")).toHaveCount(2);

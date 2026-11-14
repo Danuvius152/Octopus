@@ -16,6 +16,19 @@ class SessionStatus(str, Enum):
     running = "running"
 
 
+class SessionRestoreRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    service_generation: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+
+
+class SessionRestoreStatus(BaseModel):
+    service_generation: str
+    operation_id: str | None = None
+    state: Literal["idle", "not_registered", "running", "finished", "sealed", "generation_retired", "generation_unknown"]
+    status_code: int | None = None
+    message: str | None = None
+
+
 class BackendKind(str, Enum):
     claude_code = "claude-code"
     codex = "codex"
@@ -764,7 +777,24 @@ class WorkspaceInfo(BaseModel):
     confined: bool = True
 
 
-class ExtraRootsRequest(BaseModel):
+class WorkspaceFlowRequest(BaseModel):
+    flow_id: str = Field(min_length=1, max_length=128)
+
+
+class WorkspaceSequenceRequest(WorkspaceFlowRequest):
+    service_generation: str = Field(min_length=1, max_length=128)
+    sequence: int = Field(ge=1, le=9007199254740991, strict=True)
+
+
+class WorkspaceEditReceipt(BaseModel):
+    flow_id: str
+    service_generation: str
+    sealed_through: int
+    previous_generation_retired: bool = False
+    workspace: WorkspaceInfo
+
+
+class ExtraRootsRequest(WorkspaceSequenceRequest):
     """The whole list, not a delta.
 
     Replacing rather than appending because the list *is* the boundary: a

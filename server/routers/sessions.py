@@ -2,7 +2,7 @@ from dataclasses import asdict
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 from ..auth import verify_token
@@ -30,6 +30,8 @@ from ..models import (
     PendingQuestionInfo,
     SessionDetail,
     SessionInfo,
+    SessionRestoreRequest,
+    SessionRestoreStatus,
     SessionUpdate,
     SubagentRun,
 )
@@ -37,6 +39,7 @@ from ..session_manager import ForkError
 from ..sessions import SessionManager
 from ..sessions.configuration import SessionConfigurationError
 from ..sessions.presentation import session_info
+from ..sessions.restoration import RestoreRefused
 from ..sessions.runtime_types import QuotaExceeded
 from ..submission_models import (
     ClientSubmissionRefusal,
@@ -717,20 +720,46 @@ async def archive_session(
     return session_info(new)
 
 
-@router.post("/{session_id}/unarchive", response_model=SessionInfo)
+@router.get("/{session_id}/restoration", response_model=SessionRestoreStatus)
+async def restoration_status(
+    session_manager: SessionMgr, session_id: str,
+    operation_id: str | None = Query(None, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$"),
+    service_generation: str | None = Query(None, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$"),
+    user_id: ScopeUser = None, _: str = Depends(verify_token),
+):
+    if (operation_id is None) != (service_generation is None):
+        raise HTTPException(422, "Both restore identity fields are required")
+    request = SessionRestoreRequest(operation_id=operation_id, service_generation=service_generation) if operation_id and service_generation else None
+    try:
+        return await session_manager.browser_restore_status(session_id, user_id, request)
+    except RestoreRefused as error:
+        raise HTTPException(error.status_code, str(error))
+
+
+@router.post("/{session_id}/restoration/seal", response_model=SessionRestoreStatus)
+async def seal_restoration(
+    session_manager: SessionMgr, session_id: str, request: SessionRestoreRequest,
+    user_id: ScopeUser = None, _: str = Depends(verify_token),
+):
+    try:
+        return await session_manager.browser_restore_status(session_id, user_id, request, seal=True)
+    except RestoreRefused as error:
+        raise HTTPException(error.status_code, str(error))
+
+
+@router.post("/{session_id}/unarchive", response_model=SessionRestoreStatus)
 async def unarchive_session(
     session_manager: SessionMgr,
     session_id: str,
+    request: SessionRestoreRequest,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    """Bring an archived session back as a live session.
-
-    Flips the DB row's `archived=0` and reloads it into the in-memory
-    session map so writes (sendMessage, schedules, etc.) work again.
-    """
+    """Restore once under an original identity; lost replies are queried or sealed."""
     try:
-        s = await session_manager.unarchive_session(session_id, user_id)
-    except ValueError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    return session_info(s)
+        result = await session_manager.browser_restore(session_id, user_id, request)
+    except RestoreRefused as error:
+        raise HTTPException(error.status_code, str(error))
+    if result.state == "sealed":
+        return JSONResponse(result.model_dump(), status_code=409)
+    return result

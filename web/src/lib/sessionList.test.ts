@@ -136,12 +136,11 @@ it("preserves rows and exposes errors until a successful explicit refresh", asyn
   expect(useSessionStore.getState().sessionRead).toMatchObject({ loaded: true, stale: false, error: null });
 });
 
-it.each(["created", "patch", "restored", "archive", "remove"] as const)("confirms a late %s write through the current connection", async (kind) => {
+it.each(["created", "patch", "archive", "remove"] as const)("confirms a late %s write through the current connection", async (kind) => {
   const original = list.capture();
   list.connect({ socket: {}, accountGeneration: useSessionStore.getState().accountGeneration }); await flush();
   calls[0].resolve(Response.json([row("old", "idle")])); await flush();
   const applied = kind === "created" ? await list.created(row("late"), original) :
-    kind === "restored" ? await list.restored(row("late"), original) :
     kind === "patch" ? list.patch("old", { status: "running" }, original) : list[kind]("old", original);
   expect(applied).toBe(false); await flush();
   expect(useSessionStore.getState().sessions).toEqual([row("old", "idle")]);
@@ -160,17 +159,17 @@ it.each(["account", "token", "dispose"])("does not confirm an obsolete write aft
   await flush(); expect(calls).toHaveLength(0);
 });
 
-it.each(["created", "restored"] as const)("a %s receipt can follow an already observed live identity without replacing newer fields", async (kind) => {
+it("a creation receipt can follow an already observed live identity without replacing newer fields", async () => {
   const original = list.capture();
   list.row(row("new", "idle"));
-  expect(await list[kind](row("new", "running"), original)).toBe(true);
+  expect(await list.created(row("new", "running"), original)).toBe(true);
   expect(useSessionStore.getState().sessions.find((item) => item.id === "new")?.status).toBe("idle");
 });
 
-it.each(["created", "restored"] as const)("waits for one accepted snapshot before allowing navigation after %s", async (kind) => {
+it("waits for one accepted snapshot before allowing navigation after creation", async () => {
   const oldRead = list.refresh(true), original = list.capture();
   list.patch("old", { status: "idle" });
-  const confirmed = list[kind](row("new", "running"), original);
+  const confirmed = list.created(row("new", "running"), original);
   calls[0].resolve(Response.json([row()]));
   expect(await oldRead).toEqual({ state: "pending" }); await flush();
   expect(calls).toHaveLength(2);
@@ -183,16 +182,16 @@ it.each(["created", "restored"] as const)("waits for one accepted snapshot befor
   expect(useSessionStore.getState().sessions).toEqual([row("new", "idle")]);
 });
 
-it.each(["created", "restored"] as const)("ends %s confirmation on read failure or scope retirement", async (kind) => {
+it("ends creation confirmation on read failure or scope retirement", async () => {
   const original = list.capture();
   list.patch("old", { status: "idle" });
-  const failed = list[kind](row("new"), original);
+  const failed = list.created(row("new"), original);
   calls[0].reject(new Error("offline"));
   expect(await failed).toBe(false);
   expect(useSessionStore.getState().sessionRead).toMatchObject({ stale: true, error: "offline" });
   const next = list.capture();
   list.patch("old", { status: "running" });
-  const retired = list[kind](row("new"), next);
+  const retired = list.created(row("new"), next);
   useSessionStore.getState().setToken("different-account");
   expect(await retired).toBe(false);
   calls[1].resolve(Response.json([row("new")])); await flush();

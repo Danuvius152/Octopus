@@ -323,6 +323,12 @@ application conversations and an Iterate popover with the development-session
 link. The iframe does not replace ordinary chat state; chat remains mounted
 while another main view is selected. Application and session list updates use
 the [shared business reconciliation contract](frontend-list-reconciliation.md).
+Application creation freezes the complete editing form through creation and
+authoritative-list confirmation; failed confirmation offers a list refresh,
+never another creation. Cancel and navigation remain available. Iterate Enter
+respects native IME composition before submission, draft clearing or closing.
+The shared [keyboard and view ownership](frontend-list-reconciliation.md#前台键盘归属)
+contract also keeps its Escape from interrupting a hidden chat.
 
 ## 8. Verification and limits
 

@@ -23,8 +23,12 @@ function stub(routes: Routes) {
     vi.fn(async (url: string, init?: RequestInit) => {
       const path = String(url).replace(`${window.location.origin}/api/auth`, "");
       if (init?.method && init.method !== "GET") {
+        if (path.endsWith("/workspace-edits")) return Response.json({ flow_id: JSON.parse(String(init.body)).flow_id,
+          service_generation: "account-tests", sealed_through: 0, workspace: routes.workspace ?? {
+            workspace: "/home/you/.octopus/users/u/workspace", extra_roots: [], confined: true } });
         posts.push({ path, body: init.body ? JSON.parse(String(init.body)) : null });
-        return { ok: true, status: 200, json: async () => ({}) };
+        return Response.json(init.method === "PUT" ? { ...(routes.workspace as object),
+          workspace: "/home/you/.octopus/users/u1/workspace", extra_roots: JSON.parse(String(init.body)).extra_roots, confined: true } : {});
       }
       const body: Record<string, unknown> = {
         "/identity": routes.identity,
@@ -225,7 +229,7 @@ describe("AccountPage — where you can work", () => {
     await waitFor(() =>
       expect(posts).toContainEqual({
         path: "/users/u1/extra-roots",
-        body: { extra_roots: ["/home/you/Octopus", "/home/you/another-repo"] },
+        body: { extra_roots: ["/home/you/Octopus", "/home/you/another-repo"], flow_id: expect.any(String), service_generation: "account-tests", sequence: expect.any(Number) },
       })
     );
   });
@@ -243,7 +247,7 @@ describe("AccountPage — where you can work", () => {
     await waitFor(() =>
       expect(posts).toContainEqual({
         path: "/users/u1/extra-roots",
-        body: { extra_roots: [] },
+        body: { extra_roots: [], flow_id: expect.any(String), service_generation: "account-tests", sequence: expect.any(Number) },
       })
     );
   });
@@ -257,5 +261,32 @@ describe("AccountPage — where you can work", () => {
     await waitFor(() => expect(screen.getByText("Where you can work")).toBeTruthy());
     expect(screen.queryByLabelText("Add a directory")).toBeNull();
     expect(screen.getByText(/An admin can open another directory/)).toBeTruthy();
+  });
+
+  it("uses each authoritative write receipt for the next removal without a success GET", async () => {
+    stub({ identity: { label: "owner", user_id: "serial-owner", is_admin: true },
+      workspace: { ...workspace, extra_roots: ["/repo/a", "/repo/b"] } });
+    const original = globalThis.fetch;
+    const writes: string[][] = [];
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const path = String(url);
+      if (path.endsWith("/workspace")) reads++;
+      if (path.endsWith("/workspace-edits")) return Response.json({ flow_id: JSON.parse(String(init?.body)).flow_id,
+        service_generation: "serial-service", sealed_through: 0, workspace: { ...workspace, extra_roots: ["/repo/a", "/repo/b"] } });
+      if (init?.method === "PUT") {
+        const roots = JSON.parse(String(init.body)).extra_roots;
+        writes.push(roots);
+        return Response.json({ ...workspace, extra_roots: roots });
+      }
+      return original(url, init);
+    }));
+    render(<AccountPage />);
+    fireEvent.click(await screen.findByLabelText("Stop allowing /repo/a"));
+    await waitFor(() => expect(screen.queryByLabelText("Stop allowing /repo/a")).toBeNull());
+    fireEvent.click(screen.getByLabelText("Stop allowing /repo/b"));
+    await waitFor(() => expect(screen.queryByLabelText("Stop allowing /repo/b")).toBeNull());
+    expect(writes).toEqual([["/repo/b"], []]);
+    expect(reads).toBeLessThanOrEqual(1);
   });
 });

@@ -7,6 +7,7 @@ extracted text. Parsing never modifies the file or certifies its content.
 import json
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
@@ -20,7 +21,7 @@ from .bounded_yaml import compose as compose_metadata
 from .bounded_yaml import load as load_metadata
 from .line_coordinates import LineCoordinates
 
-VERSION = "okf-parser-v11"
+VERSION = "okf-parser-v12"
 _FRONT = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.S)
 _BLOCK_ID = re.compile(r"\^([A-Za-z0-9-]+)[ \t]*(?=\r\n|\r|\n|$)")
 _WIKILINK = re.compile(r"\[\[([^\]\n]+)\]\]")
@@ -113,6 +114,7 @@ class DocumentFormat:
     body_start: int = 0
     sections: list[dict] = field(default_factory=list)
     headings: list[dict] = field(default_factory=list)
+    ambiguous_heading_slugs: set[str] = field(default_factory=set)
     html_anchors: set[str] = field(default_factory=set)
     html_comments: list[str] = field(default_factory=list)
     block_spans: dict[str, tuple[int, int] | None] = field(default_factory=dict)
@@ -392,6 +394,22 @@ def parse(text: str) -> DocumentFormat:
             boundaries.append((start, active_role, active_heading))
         elif token.type in {"fence", "code_block"}:
             boundaries.extend(((start, "example", active_heading), (end, active_role, active_heading)))
+    # Reserve every legacy candidate before assigning collisions. In
+    # particular, an early collision cannot steal a later unique old address.
+    candidates = Counter(heading["slug"] for heading in result.headings)
+    result.ambiguous_heading_slugs = {slug for slug, count in candidates.items() if count > 1}
+    occupied = set(candidates)
+    next_suffix: dict[str, int] = {}
+    for heading_entry in result.headings:
+        if heading_entry["slug"] not in result.ambiguous_heading_slugs:
+            continue
+        base = heading_slug(heading_entry["title"])
+        suffix = next_suffix.get(base, 1)
+        while f"{base}-{suffix}" in occupied:
+            suffix += 1
+        heading_entry["slug"] = f"{base}-{suffix}"
+        occupied.add(heading_entry["slug"])
+        next_suffix[base] = suffix + 1
     ordered = sorted({start: (role, heading) for start, role, heading in boundaries}.items())
     for index, (start, (role, heading)) in enumerate(ordered):
         end = ordered[index + 1][0] if index + 1 < len(ordered) else len(text)

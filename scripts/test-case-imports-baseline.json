@@ -27,8 +27,6 @@
   "tests/test_application_portability.py:tests.test_service_runtime:installation_settings",
   "tests/test_ask_mcp.py:tests.test_question_run_scope:begin_run",
   "tests/test_ask_mcp.py:tests.test_question_run_scope:question_runtime",
-  "tests/test_attachment_admission.py:tests.test_attachments:storage_user_id",
-  "tests/test_attachment_admission.py:tests.test_attachments:users_root",
   "tests/test_attachment_admission.py:tests.test_runtime_review_races:connect_ws",
   "tests/test_attachment_admission.py:tests.test_runtime_review_races:disconnect_ws",
   "tests/test_attachment_admission.py:tests.test_runtime_review_races:runtime",

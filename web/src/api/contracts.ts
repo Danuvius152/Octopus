@@ -932,6 +932,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/restoration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Restoration Status */
+        get: operations["restoration_status_api_sessions__session_id__restoration_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/restoration/seal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Seal Restoration */
+        post: operations["seal_restoration_api_sessions__session_id__restoration_seal_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/unarchive": {
         parameters: {
             query?: never;
@@ -943,10 +977,7 @@ export interface paths {
         put?: never;
         /**
          * Unarchive Session
-         * @description Bring an archived session back as a live session.
-         *
-         *     Flips the DB row's `archived=0` and reloads it into the in-memory
-         *     session map so writes (sendMessage, schedules, etc.) work again.
+         * @description Restore once under an original identity; lost replies are queried or sealed.
          */
         post: operations["unarchive_session_api_sessions__session_id__unarchive_post"];
         delete?: never;
@@ -2521,6 +2552,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/users/{user_id}/workspace-edits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Open Workspace Edit */
+        post: operations["open_workspace_edit_api_auth_users__user_id__workspace_edits_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/users/{user_id}/workspace-edits/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm Workspace Edit */
+        post: operations["confirm_workspace_edit_api_auth_users__user_id__workspace_edits_confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/users/{user_id}/extra-roots": {
         parameters: {
             query?: never;
@@ -3588,11 +3653,6 @@ export interface components {
             /** Delivery Error */
             delivery_error: string | null;
         };
-        /** Body_upload_attachment_api_sessions__session_id__attachments_post */
-        Body_upload_attachment_api_sessions__session_id__attachments_post: {
-            /** File */
-            file: string;
-        };
         /**
          * BrowserMessageContent
          * @description A disposable browser representation of an original committed row.
@@ -4637,6 +4697,12 @@ export interface components {
          *     just set is then the only way to know what it says.
          */
         ExtraRootsRequest: {
+            /** Flow Id */
+            flow_id: string;
+            /** Service Generation */
+            service_generation: string;
+            /** Sequence */
+            sequence: number;
             /** Extra Roots */
             extra_roots: string[];
         };
@@ -6136,6 +6202,29 @@ export interface components {
              */
             archived: boolean;
         };
+        /** SessionRestoreRequest */
+        SessionRestoreRequest: {
+            /** Operation Id */
+            operation_id: string;
+            /** Service Generation */
+            service_generation: string;
+        };
+        /** SessionRestoreStatus */
+        SessionRestoreStatus: {
+            /** Service Generation */
+            service_generation: string;
+            /** Operation Id */
+            operation_id?: string | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "idle" | "not_registered" | "running" | "finished" | "sealed" | "generation_retired" | "generation_unknown";
+            /** Status Code */
+            status_code?: number | null;
+            /** Message */
+            message?: string | null;
+        };
         /**
          * SessionStatus
          * @enum {string}
@@ -6587,6 +6676,26 @@ export interface components {
             /** App Id */
             app_id?: string | null;
         };
+        /** WorkspaceEditReceipt */
+        WorkspaceEditReceipt: {
+            /** Flow Id */
+            flow_id: string;
+            /** Service Generation */
+            service_generation: string;
+            /** Sealed Through */
+            sealed_through: number;
+            /**
+             * Previous Generation Retired
+             * @default false
+             */
+            previous_generation_retired: boolean;
+            workspace: components["schemas"]["WorkspaceInfo"];
+        };
+        /** WorkspaceFlowRequest */
+        WorkspaceFlowRequest: {
+            /** Flow Id */
+            flow_id: string;
+        };
         /**
          * WorkspaceInfo
          * @description Where this account may put a session's working directory.
@@ -6607,6 +6716,15 @@ export interface components {
              * @default true
              */
             confined: boolean;
+        };
+        /** WorkspaceSequenceRequest */
+        WorkspaceSequenceRequest: {
+            /** Flow Id */
+            flow_id: string;
+            /** Service Generation */
+            service_generation: string;
+            /** Sequence */
+            sequence: number;
         };
     };
     responses: never;
@@ -8657,9 +8775,11 @@ export interface operations {
             };
         };
     };
-    unarchive_session_api_sessions__session_id__unarchive_post: {
+    restoration_status_api_sessions__session_id__restoration_get: {
         parameters: {
             query?: {
+                operation_id?: string | null;
+                service_generation?: string | null;
                 token?: string | null;
             };
             header?: never;
@@ -8676,7 +8796,81 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SessionInfo"];
+                    "application/json": components["schemas"]["SessionRestoreStatus"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    seal_restoration_api_sessions__session_id__restoration_seal_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionRestoreRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionRestoreStatus"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unarchive_session_api_sessions__session_id__unarchive_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionRestoreRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionRestoreStatus"];
                 };
             };
             /** @description Validation Error */
@@ -8703,7 +8897,10 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "multipart/form-data": components["schemas"]["Body_upload_attachment_api_sessions__session_id__attachments_post"];
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file: string;
+                };
             };
         };
         responses: {
@@ -8836,6 +9033,7 @@ export interface operations {
         parameters: {
             query: {
                 path: string;
+                preview?: boolean;
                 token?: string | null;
             };
             header?: never;
@@ -11918,6 +12116,80 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkspaceInfo"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    open_workspace_edit_api_auth_users__user_id__workspace_edits_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkspaceFlowRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceEditReceipt"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    confirm_workspace_edit_api_auth_users__user_id__workspace_edits_confirm_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkspaceSequenceRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceEditReceipt"];
                 };
             };
             /** @description Validation Error */

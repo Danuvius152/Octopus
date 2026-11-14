@@ -217,6 +217,21 @@ describe("ApplicationView", () => {
     );
   });
 
+  it.each([{ isComposing: true }, { keyCode: 229 }])("keeps Iterate draft during IME Enter %j", async flags => {
+    mount(application());
+    openIterate();
+    const box = screen.getByPlaceholderText(/Ask Octo for a change/);
+    fireEvent.change(box, { target: { value: "正在确认中文" } });
+    const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...flags });
+    fireEvent(box, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(box).toHaveValue("正在确认中文");
+    expect(box).toBeVisible();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/build"))).toHaveLength(0);
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/build"))).toHaveLength(1));
+  });
+
   it("surfaces a build-request failure", async () => {
     fetchMock.mockImplementation(
       async () =>
@@ -306,6 +321,29 @@ describe("ApplicationView", () => {
     expect(
       fetchMock.mock.calls.some(([u]) => String(u).includes("/build"))
     ).toBe(false);
+  });
+
+  it("gives the focused panel Escape before another keyboard-opened panel", () => {
+    mount(application({ backend: { state: "running", port: 8080 } }));
+    // Keyboard button activation emits click without an outside mousedown.
+    fireEvent.click(screen.getByTitle("Backend process"));
+    openIterate();
+    expect(screen.getAllByRole("dialog")).toHaveLength(2);
+    const box = screen.getByPlaceholderText(/Ask Octo for a change/);
+    box.focus();
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: /Ask Octo/ })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Backend" })).toBeVisible();
+
+    // A trigger and focus outside either panel retain the closing affordance.
+    const trigger = screen.getByTitle("Backend process");
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    openIterate();
+    screen.getByLabelText("Reload the app").focus();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("lists the app's own agent conversations, and opens one", async () => {

@@ -1,7 +1,8 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { LoginResponse } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
+import { isImeComposing } from "../lib/composerKeys";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -26,10 +27,26 @@ export function SignIn({
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
   const mounted = useRef(false);
+  const modeRef = useRef<Mode>("loading");
+  const active = useRef<{ generation: number } | null>(null);
+  const changeMode = useCallback((next: Mode) => {
+    // Leaving a form retires its observation, including a return to that mode.
+    active.current = null;
+    modeRef.current = next;
+    setBusy(false);
+    setError(null);
+    setMode(next);
+  }, []);
 
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; };
+    const unsubscribe = useSessionStore.subscribe((state, before) => {
+      if (state.accountGeneration !== before.accountGeneration) {
+        active.current = null;
+        setBusy(false);
+      }
+    });
+    return () => { mounted.current = false; active.current = null; unsubscribe(); };
   }, []);
 
   useEffect(() => {
@@ -42,27 +59,30 @@ export function SignIn({
         return body.accounts_exist as boolean;
       })
       .then((d) => {
-        if (alive) setMode(d ? "login" : "setup");
+        if (alive) changeMode(d ? "login" : "setup");
       })
       .catch((error: unknown) => {
         if (!alive || error instanceof DOMException && error.name === "AbortError") return;
-        setMode("unavailable");
+        changeMode("unavailable");
         setError("Could not load sign-in information.");
       });
     return () => {
       alive = false;
     };
-  }, [reload]);
+  }, [reload, changeMode]);
 
-  const post = async (path: string, body: object, proof?: string) => {
-    const generation = useSessionStore.getState().accountGeneration;
-    const current = () => mounted.current && useSessionStore.getState().accountGeneration === generation;
+  const post = async (kind: "login" | "setup" | "register", body: object, proof?: string) => {
+    if (!mounted.current || active.current || modeRef.current !== kind) return;
+    const operation = { generation: useSessionStore.getState().accountGeneration };
+    active.current = operation;
+    const current = () => mounted.current && active.current === operation &&
+      useSessionStore.getState().accountGeneration === operation.generation;
     setBusy(true);
     setError(null);
     try {
       // Setup proof stays outside the store and accountFetch's bearer check.
       const send = proof === undefined ? fetch : globalThis.fetch;
-      const res = await send(`${API}${path}`, {
+      const res = await send(`${API}/api/auth/${kind}`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(proof === undefined ? {} : { Authorization: `Bearer ${proof}` }) },
         body: JSON.stringify(body),
@@ -88,20 +108,20 @@ export function SignIn({
     } catch {
       if (current()) setError("Could not reach Octopus.");
     } finally {
-      if (current()) setBusy(false);
+      if (current()) { active.current = null; setBusy(false); }
     }
   };
 
   const submitLogin = async () => {
-    await post("/api/auth/login", { username, password });
+    await post("login", { username, password });
   };
 
   const submitSetup = async () => {
-    if (setupProof.trim()) await post("/api/auth/setup", { username, password }, setupProof.trim());
+    if (setupProof.trim()) await post("setup", { username, password }, setupProof.trim());
   };
 
   const submitRegister = async () => {
-    await post("/api/auth/register", {
+    await post("register", {
       invite_code: invite,
       username,
       password,
@@ -117,7 +137,7 @@ export function SignIn({
 
         {mode === "loading" && <p role="status">Loading sign-in information…</p>}
         {mode === "unavailable" && (
-          <Button onClick={() => { setError(null); setMode("loading"); setReload((value) => value + 1); }}>Retry</Button>
+          <Button onClick={() => { changeMode("loading"); setReload((value) => value + 1); }}>Retry</Button>
         )}
 
         {mode === "setup" && (
@@ -133,11 +153,12 @@ export function SignIn({
                 value={setupProof}
                 onChange={setSetupProof}
                 onEnter={submitSetup}
+                disabled={busy}
                 placeholder="Paste your setup token"
                 autoFocus
               />
-              <SignInField id="username" label="Username" value={username} onChange={setUsername} onEnter={submitSetup} />
-              <SignInField id="password" label="Password" type="password" value={password} onChange={setPassword} onEnter={submitSetup} />
+              <SignInField id="username" label="Username" value={username} onChange={setUsername} onEnter={submitSetup} disabled={busy} />
+              <SignInField id="password" label="Password" type="password" value={password} onChange={setPassword} onEnter={submitSetup} disabled={busy} />
               <Button className="btn-setup w-full" disabled={busy || !setupProof.trim()} onClick={submitSetup}>
                 Set up Octopus
               </Button>
@@ -157,6 +178,7 @@ export function SignIn({
                 value={username}
                 onChange={setUsername}
                 onEnter={submitLogin}
+                disabled={busy}
                 autoFocus
               />
               <SignInField
@@ -166,6 +188,7 @@ export function SignIn({
                 value={password}
                 onChange={setPassword}
                 onEnter={submitLogin}
+                disabled={busy}
               />
               <Button
                 className="btn-login w-full"
@@ -178,8 +201,7 @@ export function SignIn({
                 type="button"
                 className="btn-have-invite w-full text-center text-xs text-gray-700 hover:underline"
                 onClick={() => {
-                  setError(null);
-                  setMode("register");
+                  changeMode("register");
                 }}
               >
                 I have an invite code
@@ -200,6 +222,7 @@ export function SignIn({
                 value={invite}
                 onChange={setInvite}
                 onEnter={submitRegister}
+                disabled={busy}
                 autoFocus
               />
               <SignInField
@@ -208,6 +231,7 @@ export function SignIn({
                 value={username}
                 onChange={setUsername}
                 onEnter={submitRegister}
+                disabled={busy}
               />
               <SignInField
                 id="password"
@@ -216,6 +240,7 @@ export function SignIn({
                 value={password}
                 onChange={setPassword}
                 onEnter={submitRegister}
+                disabled={busy}
               />
               <Button
                 className="btn-register w-full"
@@ -228,8 +253,7 @@ export function SignIn({
                 type="button"
                 className="btn-back-to-sign-in w-full text-center text-xs text-gray-700 hover:underline"
                 onClick={() => {
-                  setError(null);
-                  setMode("login");
+                  changeMode("login");
                 }}
               >
                 Back to sign in
@@ -252,6 +276,7 @@ function SignInField({
   value,
   onChange,
   onEnter,
+  disabled,
   type = "text",
   placeholder,
   autoFocus = false,
@@ -261,6 +286,7 @@ function SignInField({
   value: string;
   onChange: (v: string) => void;
   onEnter: () => void;
+  disabled: boolean;
   type?: string;
   placeholder?: string;
   autoFocus?: boolean;
@@ -278,9 +304,13 @@ function SignInField({
         value={value}
         placeholder={placeholder}
         autoFocus={autoFocus}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e: KeyboardEvent) => {
-          if (e.key === "Enter") onEnter();
+          if (e.key === "Enter" && !isImeComposing(e.nativeEvent)) {
+            e.preventDefault();
+            onEnter();
+          }
         }}
       />
     </div>

@@ -12,7 +12,7 @@ import { accountFetch as fetch } from "../lib/accountFetch";
  *   code     → <pre><code class="language-x"> through highlight.js
  *   text     → <pre> plain
  *   image    → <img> with click-to-zoom
- *   pdf      → sandboxed <iframe>
+ *   pdf      → browser PDF viewer in an <iframe>
  *
  * Bytes fetched from GET /api/sessions/{id}/files?path=... with the
  * auth token in the query string (matches the attachments pattern,
@@ -229,6 +229,7 @@ function FileViewerInner({
   }, [metaUrl, token, reloadKey]);
 
   const filename = path.split("/").pop() || path;
+  const previewUrl = meta?.kind === "pdf" ? `${bytesUrl}&preview=true` : bytesUrl;
 
   return (
     <>
@@ -259,7 +260,7 @@ function FileViewerInner({
           <IconRefresh size={16} />
         </button>
         <a
-          href={bytesUrl}
+          href={previewUrl}
           target="_blank"
           rel="noreferrer"
           className="flex items-center justify-center size-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
@@ -296,7 +297,7 @@ function FileViewerInner({
         ) : (
           <FileBody
             meta={meta}
-            bytesUrl={bytesUrl}
+            bytesUrl={previewUrl}
             token={token}
             reloadKey={reloadKey}
           />
@@ -372,15 +373,21 @@ function ImageBody({ bytesUrl, alt }: { bytesUrl: string; alt: string }) {
 }
 
 function PdfBody({ bytesUrl }: { bytesUrl: string }) {
-  // sandbox + same-origin: the file is served by our own backend, so
-  // same-origin is required for the browser's PDF viewer to use the
-  // bytes. allow-scripts lets the viewer's toolbar function.
+  if (navigator.pdfViewerEnabled === false) {
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
+        PDF preview is unavailable in this browser. Open in a new tab or download the file using the actions above.
+      </div>
+    );
+  }
+  // Chromium blocks its native PDF viewer in an HTML-sandboxed frame.
+  // This URL selects only PDF bytes through the existing file security gate;
+  // the browser's PDF engine owns document rendering.
   return (
     <iframe
       src={bytesUrl}
       title="PDF preview"
       className="block h-full w-full border-0 bg-white"
-      sandbox="allow-same-origin allow-scripts"
     />
   );
 }

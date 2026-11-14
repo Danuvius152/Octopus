@@ -2684,6 +2684,91 @@ async def test_a_real_backend_answers_through_the_proxy(client, query_contract):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("root_path", ["", "/mounted", "/挂 载"])
+@pytest.mark.parametrize("omit_raw_path", [False, True])
+async def test_proxy_preserves_raw_target_through_asgi_and_local_backend(client, root_path, omit_raw_path):
+    from server.app_backends import backend_supervisor
+    from tests.app_proxy import write_backend
+
+    row = await _api_create(client, name="Raw Target")
+    write_backend(Path(row["app_dir"]), """
+import http.server, json, os
+class Handler(http.server.BaseHTTPRequestHandler):
+ def do_POST(self):
+  body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+  data = json.dumps({'target': self.path, 'body': body.decode()}).encode()
+  self.send_response(200)
+  self.send_header('Content-Length', str(len(data)))
+  self.end_headers()
+  self.wfile.write(data)
+ def log_message(self, *args): pass
+http.server.HTTPServer(('127.0.0.1', int(os.environ['PORT'])), Handler).serve_forever()
+""")
+    async def entry(scope, receive, send):
+        if omit_raw_path:
+            scope.pop("raw_path", None)
+        await app(scope, receive, send)
+
+    transport = ASGITransport(app=entry, root_path=root_path)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test", headers=client.headers) as mounted:
+            # Real servers may supply the mounted prefix in path/raw_path;
+            # stripped reverse-proxy paths are also supported by Starlette.
+            for mount in dict.fromkeys(["", quote(root_path)]):
+                for raw in ["plain", "a%20b", "%E4%B8%AD%E6%96%87", "%23", "%3F", "%25", "%252F", "nested/api/%23"]:
+                    response = await mounted.post(
+                        f"{mount}/apps/{row['id']}/api/{raw}?tag=a&token=discard&x=1&tag=b",
+                        content="正文 # ? %",
+                    )
+                    assert response.status_code == 200, response.text
+                    assert response.json() == {"target": f"/api/{raw}?tag=a&x=1&tag=b", "body": "正文 # ? %"}
+    finally:
+        await backend_supervisor.stop_all()
+
+
+async def test_proxy_url_construction_failure_releases_backend_use_and_drain(client):
+    from httpx import InvalidURL
+
+    from server.app_backends import backend_supervisor
+    from tests.app_proxy import write_backend
+
+    row = await _api_create(client, name="Long Target")
+    # Keep the real process and acquire/cleanup boundary, including idle reclaim.
+    write_backend(Path(row["app_dir"]), "import http.server, os\nhttp.server.HTTPServer(('127.0.0.1', int(os.environ['PORT'])), http.server.BaseHTTPRequestHandler).serve_forever()")
+
+    async def long_target(scope, receive, send):
+        scope["path"] = f"/apps/{row['id']}/api/" + "中" * 8000
+        scope["raw_path"] = quote(scope["path"]).encode("ascii")
+        await app(scope, receive, send)
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=long_target), base_url="http://test", headers=client.headers) as large:
+            request = asyncio.create_task(large.get("/long"))
+            with pytest.raises(InvalidURL):
+                await request
+        assert not backend_supervisor.drain_blockers()
+        assert not backend_supervisor.get(row["id"])._uses
+    finally:
+        await backend_supervisor.stop_all()
+
+
+async def test_proxy_rejects_raw_prefix_mismatch_before_backend_acquisition(client):
+    from server.app_backends import backend_supervisor
+
+    row = await _api_create(client, name="Mismatched Target")
+
+    async def inconsistent(scope, receive, send):
+        scope["raw_path"] = b"/apps/other/api/plain"
+        await app(scope, receive, send)
+
+    async with AsyncClient(transport=ASGITransport(app=inconsistent), base_url="http://test", headers=client.headers) as broken:
+        response = await broken.get(f"/apps/{row['id']}/api/plain")
+    assert response.status_code == 400
+    assert backend_supervisor.get(row["id"]) is None
+    assert not backend_supervisor.drain_blockers()
+
+
+@pytest.mark.asyncio
 async def test_proxy_is_404_when_the_app_has_no_backend(client):
     app_row = await _api_create(client, name="Static Only")
     Path(app_row["app_dir"], "index.html").write_text("<html></html>")

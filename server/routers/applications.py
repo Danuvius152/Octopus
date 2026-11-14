@@ -20,7 +20,7 @@ import mimetypes
 import os
 from collections.abc import AsyncIterator, Callable
 from importlib.resources import files
-from urllib.parse import unquote, urlencode
+from urllib.parse import quote, unquote, unquote_to_bytes, urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -367,6 +367,24 @@ _SKIP_RESPONSE_HEADERS = {
 }
 
 
+def _backend_raw_path(request: Request, path: str) -> bytes:
+    raw = request.scope.get("raw_path")
+    if raw is None:
+        # ASGI permits servers to omit raw_path. Encode literal path data once.
+        return b"/api/" + quote(path, safe="/").encode("ascii")
+    # Routing already selected this suffix from the decoded path. Everything
+    # before it includes any mount/root prefix, whether stripped by the server
+    # or present in both ASGI paths. Count decoded bytes to find its raw end.
+    prefix = request.scope["path"][:len(request.scope["path"]) - len(path)].encode("utf-8")
+    offset = 0
+    for _ in prefix:
+        token = raw[offset:offset + 3]
+        offset += 3 if token.startswith(b"%") and len(unquote_to_bytes(token)) == 1 else 1
+    if unquote_to_bytes(raw[:offset]) != prefix:
+        raise HTTPException(400, "raw path does not match the routed prefix")
+    return b"/api/" + raw[offset:]
+
+
 @static_router.api_route(
     "/apps/{app_id}/api/{path:path}",
     methods=_PROXY_METHODS,
@@ -386,6 +404,7 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     changes routing.
     """
     row = await _application_for_request(request, app_id)
+    raw_path = _backend_raw_path(request, path)
 
     try:
         use = await backend_supervisor.acquire(app_id, row["app_dir"])
@@ -393,7 +412,6 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     except BackendCapacityError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
-    url = f"http://127.0.0.1:{use.target.port}/api/{path}"
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in _SKIP_REQUEST_HEADERS
@@ -404,10 +422,11 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     from ..wiki.app_bridge import forward
 
     try:
+        url = httpx.URL(scheme="http", host="127.0.0.1", port=use.target.port, raw_path=raw_path)
         request_body = await request.body()
         # Preserve pair order; the query token belongs only to Octopus.
         query = urlencode([(key, value) for key, value in request.query_params.multi_items() if key != "token"]).encode("ascii")
-        upstream = httpx.Request(request.method, httpx.URL(url).copy_with(query=query or None), headers=headers, content=request_body)
+        upstream = httpx.Request(request.method, url.copy_with(query=query or None), headers=headers, content=request_body)
         use.require_running()
         managed = await forward(row, use, upstream)
         if managed is not None:

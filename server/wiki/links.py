@@ -25,14 +25,38 @@ def block_span(text: str, identifier: str, *, parsed: format.DocumentFormat | No
     return (parsed if parsed is not None else format.parse(text)).block_spans.get(identifier)
 
 
-def anchor_exists(text: str, anchor: str, *, parsed: format.DocumentFormat | None = None) -> bool:
+def _heading(parsed: format.DocumentFormat, value: str, *, fragment: bool) -> tuple[str, dict | None]:
+    """Explicit URI fragments and bare display titles have different priority."""
+    value = value.casefold()
+    if fragment:
+        if value in parsed.ambiguous_heading_slugs:
+            return "ambiguous", None
+        matches = [heading for heading in parsed.headings if value == heading["slug"]]
+        if matches:
+            return "resolved", matches[0]
+    matches = [heading for heading in parsed.headings if value == heading["title"].casefold()]
+    if not matches and not fragment:
+        matches = [heading for heading in parsed.headings if value == heading["slug"]]
+    if len(matches) == 1:
+        return "resolved", matches[0]
+    return ("ambiguous" if matches else "missing_anchor"), None
+
+
+def anchor_status(text: str, anchor: str, *, parsed: format.DocumentFormat | None = None) -> str:
+    """The anchor was already URI-decoded; keep its explicit fragment kind."""
     parsed = parsed if parsed is not None else format.parse(text)
     if anchor.startswith("^"):
-        return block_span(text, anchor, parsed=parsed) is not None
-    for heading in parsed.headings:
-        if anchor.casefold() in {heading["title"].casefold(), heading["slug"]}:
-            return True
-    return anchor in parsed.html_anchors
+        return "resolved" if block_span(text, anchor, parsed=parsed) is not None else "missing_anchor"
+    if anchor.casefold() in parsed.ambiguous_heading_slugs:
+        return "ambiguous"
+    if anchor in parsed.html_anchors:
+        return "resolved"
+    status, _ = _heading(parsed, anchor, fragment=True)
+    return status
+
+
+def anchor_exists(text: str, anchor: str, *, parsed: format.DocumentFormat | None = None) -> bool:
+    return anchor_status(text, anchor, parsed=parsed) == "resolved"
 
 
 def source_span(text: str, location: str, *, parsed: format.DocumentFormat | None = None) -> tuple[int, int] | None:
@@ -53,15 +77,6 @@ def source_span(text: str, location: str, *, parsed: format.DocumentFormat | Non
         return None
     if location.startswith("^"):
         return block_span(text, location, parsed=parsed)
-    title = location.lstrip("#").strip().casefold()
-    current = (parsed if parsed is not None else format.parse(text)).headings
-    # An explicit fragment selects its slug projection; a plain repeated title
-    # remains ambiguous rather than silently citing the first occurrence.
-    if location.startswith("#"):
-        matches = [heading for heading in current if title == heading["slug"]]
-        if len(matches) == 1:
-            return matches[0]["start"], matches[0]["section_end"]
-    matches = [heading for heading in current if title in {heading["title"].casefold(), heading["slug"]}]
-    if len(matches) == 1:
-        return matches[0]["start"], matches[0]["section_end"]
-    return None
+    parsed = parsed if parsed is not None else format.parse(text)
+    _, heading = _heading(parsed, location.removeprefix("#").strip(), fragment=location.startswith("#"))
+    return (heading["start"], heading["section_end"]) if heading is not None else None

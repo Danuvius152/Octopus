@@ -302,6 +302,21 @@ late process output and bounded, masked full logging.
   current credential list instead of upserting its old result, so deleting a
   credential is not undone by a late response. Codex stops status polling on
   historical success, including when its current credential is gone.
+- Codex status observation gives each GET, including its complete validated
+  JSON body, at most 30 seconds. Consecutive failures share a 30-second fault
+  window starting at the first failed read's start, including time spent waiting
+  and between polls. Only a complete valid pending response resets it; healthy
+  pending has no overall browser authorization deadline. Hanging headers or body,
+  invalid data and repeated transient failures end in an unconfirmed view rather
+  than a new authorization POST.
+- A status 404 stops observing that old ID. The view can refresh current
+  credentials or explicitly start a new sign-in; 401/403 stops unauthorized
+  observation. Unconfirmed state can continue querying the same ID. Refreshing
+  credentials reports current facts without claiming the old login succeeded.
+  No recovery action automatically repeats authorization. An explicit new login
+  reached from Re-authorize retains the original `reauth_credential_id` through
+  Continue, so success replaces that credential in place and preserves Agent
+  bindings; ordinary new-credential sign-in still has no reauthorization target.
 - Both backends retain **Sign-in completed; credential list is not synchronized**
   when confirmation fails. **Close** ends that result view; **Refresh credential
   list** only reads the list and cannot replay authorization or deletion. A

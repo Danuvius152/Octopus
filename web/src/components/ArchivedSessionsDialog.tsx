@@ -1,5 +1,5 @@
-import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
+import { useStore } from "zustand";
 import { IconEye, IconRestore } from "@tabler/icons-react";
 import {
   useSessionStore,
@@ -15,8 +15,6 @@ import {
 } from "./ui/dialog";
 import { selectSession } from "../lib/selectSession";
 import { sessions as sessionList } from "../lib/sessionList";
-
-const API_URL = window.location.origin;
 
 interface Props {
   open: boolean;
@@ -36,6 +34,13 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
   const agents = useSessionStore((s) => s.agents);
   const archived = useSessionStore((s) => s.archivedSessions);
   const read = useSessionStore((s) => s.sessionRead);
+  const identity = useSessionStore((s) => s.identity?.user_id);
+  const live = useSessionStore((s) => s.sessions);
+  const restoring = useStore(sessionList.restorations.store, state => state.entries);
+  const restoreError = useStore(sessionList.restorations.store, state => state.error);
+  const [errors, setErrors] = useState<{ [id: string]: string }>({});
+  const feedback = useRef(new Map<string, object>());
+  const navigation = useRef<object | null>(null);
   const [openingView] = useState(() => useSessionStore.getState().mainView);
   const foreground = useRef(false);
   const close = useEffectEvent(() => onOpenChange(false));
@@ -50,50 +55,54 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
     return () => { foreground.current = false; unsubscribe(); };
   }, [openingView]);
 
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${token}`,
-  };
-
   const fetchArchived = useCallback(async () => {
     await sessionList.refresh(true);
   }, []);
 
   useEffect(() => {
-    if (open) fetchArchived();
-  }, [open, token, fetchArchived]);
+    if (open) {
+      void fetchArchived();
+      sessionList.restorations.observePending();
+    }
+  }, [open, token, identity, fetchArchived]);
 
   // Select an archived session for read-only viewing. ChatView detects the
   // active session is archived (it's in archivedSessions) and renders the
   // read-only banner + history. Mirrors SessionList's old selectSession.
   const view = async (s: SessionInfo) => {
+    navigation.current = null;
     foreground.current = false;
     onOpenChange(false);
     await selectSession(s.id, s.agent_id);
   };
 
-  const unarchive = async (s: SessionInfo) => {
+  const unarchive = async (s: Pick<SessionInfo, "id">, confirming = false) => {
     if (!foreground.current) return;
-    const observation = sessionList.capture();
+    const pending = confirming ? sessionList.restorations.confirm(s.id) : sessionList.restorations.restore(s.id);
+    if (!pending) return;
+    const intent = {};
+    feedback.current.set(s.id, intent);
+    navigation.current = intent;
+    setErrors(previous => ({ ...previous, [s.id]: "" }));
+    const { observation, finish } = sessionList.observe();
     try {
-      const res = await fetch(`${API_URL}/api/sessions/${s.id}/unarchive`, {
-        method: "POST",
-        headers,
-      });
-      if (res.ok) {
-        const revived: SessionInfo = await res.json();
-        // Dedupe on insert in case a session_unarchived broadcast already
-        // landed in the live list.
-        const accepted = await sessionList.restored(revived, observation);
-        if (!foreground.current || !sessionList.accountCurrent(observation)) return;
+      const result = await pending;
+      if (!foreground.current || feedback.current.get(s.id) !== intent || !sessionList.accountCurrent(observation)) return;
+      if (result.message) setErrors(previous => ({ ...previous, [s.id]: result.message! }));
+      if (navigation.current === intent && result.session &&
+          (sessionList.current(observation) || sessionList.initialGenerationCurrent(observation))) {
         foreground.current = false;
         onOpenChange(false);
-        if (accepted && sessionList.current(observation)) await selectSession(revived.id, revived.agent_id);
+        await selectSession(result.session.id, result.session.agent_id);
       }
-    } catch {
-      // ignore
+    } finally {
+      finish();
+      if (feedback.current.get(s.id) === intent) feedback.current.delete(s.id);
     }
   };
+
+  const unsettled = Object.keys(restoring).filter(id => !archived.some(row => row.id === id) &&
+    ["writing", "unknown", "confirming"].includes(restoring[id].phase));
 
   const groups: { agent: Agent | null; items: SessionInfo[] }[] = agents
     .map((a) => ({
@@ -114,6 +123,7 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
     }}>
       <DialogContent className="archived-sessions-dialog max-w-xl">
         {read.error && <p role="alert">Sessions not synchronized: {read.error}</p>}
+        {restoreError && <div><p role="alert">{restoreError}</p><button onClick={() => sessionList.restorations.observePending()}>Retry restoration identities</button></div>}
         <DialogHeader>
           <DialogTitle>Archived sessions</DialogTitle>
           <DialogDescription>
@@ -121,6 +131,12 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
             unarchive it to continue the conversation as a live session.
           </DialogDescription>
         </DialogHeader>
+
+        {unsettled.map(id => <div key={id} className="restoration-pending text-sm">
+          <p>Restoration of {live.find(row => row.id === id)?.name ?? id} is unconfirmed.</p>
+          {errors[id] && <p role="alert">{errors[id]}</p>}
+          <button onClick={() => unarchive({ id }, true)} disabled={restoring[id].phase === "confirming"}>Confirm restoration</button>
+        </div>)}
 
         {archived.length === 0 ? (
           <div className="archived-empty rounded-lg border border-dashed border-border bg-muted/30 px-4 py-8 text-center text-sm text-muted-foreground">
@@ -147,7 +163,7 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
                   {items.map((s) => (
                     <div
                       key={s.id}
-                      className="archived-session-row group flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2"
+                      className="archived-session-row group flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2"
                     >
                       <span className="archived-session-name min-w-0 flex-1 truncate text-sm italic text-foreground">
                         {s.name}
@@ -163,11 +179,18 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
                       <button
                         className="btn-archived-unarchive inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-primary hover:bg-primary/10"
                         onClick={() => unarchive(s)}
+                        disabled={!!restoreError || !!restoring[s.id] && !["ready", "failed"].includes(restoring[s.id].phase)}
                         title="Unarchive — bring this session back as a live session"
                       >
                         <IconRestore size={13} />
                         Unarchive
                       </button>
+                      {restoring[s.id] && ["writing", "unknown", "confirming"].includes(restoring[s.id].phase) && <button
+                        onClick={() => unarchive(s, true)} disabled={restoring[s.id].phase === "confirming"}>
+                        Confirm restoration
+                      </button>}
+                      {restoring[s.id]?.phase === "unknown" && <p className="basis-full text-xs">Restoration is unconfirmed. Confirm its state before restoring again.</p>}
+                      {errors[s.id] && <p role="alert" className="basis-full text-xs">{errors[s.id]}</p>}
                     </div>
                   ))}
                 </div>

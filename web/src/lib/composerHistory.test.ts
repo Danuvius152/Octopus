@@ -18,14 +18,14 @@ import {
   recallPrev,
 } from "./composerHistory";
 
-const H = ["first", "second", "third"];
+const H = historyFromMessages(["first", "second", "third"].map((content, seq) => ({ role: "user", type: "text", content, seq })));
 
 describe("historyFromMessages", () => {
   it("uses request provenance before textual injection markers", () => {
     expect(historyFromMessages([
       { role: "user", type: "text", content: "machine result without a marker", tool_input: { request_context: { source: "research" } } },
       { role: "user", type: "text", content: "[bg-task-result] typed by a person", tool_input: { request_context: { source: "human" } } },
-    ], isAutoInjectedPrompt)).toEqual(["[bg-task-result] typed by a person"]);
+    ], isAutoInjectedPrompt).map((entry) => entry.text)).toEqual(["[bg-task-result] typed by a person"]);
   });
   it("keeps the user's own text turns, oldest first", () => {
     expect(
@@ -34,7 +34,7 @@ describe("historyFromMessages", () => {
         { role: "assistant", type: "text", content: "reply" },
         { role: "user", type: "text", content: "b" },
         { role: "user", type: "tool_result", content: "not a turn" },
-      ])
+      ]).map((entry) => entry.text)
     ).toEqual(["a", "b"]);
   });
 
@@ -45,7 +45,7 @@ describe("historyFromMessages", () => {
         { role: "user", type: "text", content: "same" },
         { role: "user", type: "text", content: "   " },
         { role: "user", type: "text", content: "other" },
-      ])
+      ]).map((entry) => entry.text)
     ).toEqual(["same", "other"]);
   });
 
@@ -60,7 +60,7 @@ describe("historyFromMessages", () => {
           { role: "user", type: "text", content: "[agent-reply:Vera] hi" },
         ],
         injected
-      )
+      ).map((entry) => entry.text)
     ).toEqual(["mine"]);
   });
 });
@@ -69,7 +69,7 @@ describe("recallPrev / recallNext", () => {
   it("walks back from the newest and remembers the draft", () => {
     const up1 = recallPrev(H, IDLE, "half-typed")!;
     expect(up1.text).toBe("third");
-    expect(up1.state).toEqual({ cursor: 2, draft: "half-typed" });
+    expect(up1.state).toEqual({ entry: H[2], draft: "half-typed" });
 
     const up2 = recallPrev(H, up1.state, up1.text)!;
     expect(up2.text).toBe("second");
@@ -83,7 +83,7 @@ describe("recallPrev / recallNext", () => {
     const again = recallPrev(H, r.state, r.text);
     expect(again).not.toBeNull();
     expect(again!.text).toBe("first");
-    expect(again!.state.cursor).toBe(0);
+    expect(again!.state.entry).toBe(H[0]);
   });
 
   it("comes back out to the draft that was there", () => {
@@ -96,6 +96,12 @@ describe("recallPrev / recallNext", () => {
   it("is not ours with no history, or on Down while not navigating", () => {
     expect(recallPrev([], IDLE, "x")).toBeNull();
     expect(recallNext(H, IDLE, "x")).toBeNull();
+  });
+
+  it("never selects an invalid candidate when the window no longer contains it", () => {
+    const up = recallPrev(H, IDLE, "draft")!;
+    expect(recallPrev(H.slice(0, 1), up.state, up.text)).toEqual({ state: IDLE, text: "third" });
+    expect(recallNext([], up.state, up.text)).toEqual({ state: IDLE, text: "third" });
   });
 });
 

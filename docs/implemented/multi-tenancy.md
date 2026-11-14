@@ -14,6 +14,15 @@ The old pre-account business mode, installation adoption, global access-token
 rotation and its recovery route have been retired. Current account transfer is
 the explicit [offline operation](../backup-and-migrate.md#account-export-and-import).
 
+The browser's Login, Setup and Register actions share one synchronous POST
+admission before the first await. Enter and button activation cannot issue a
+second request while it is held. Native IME composition, including key code 229,
+returns before submission or consuming Enter. Mode changes, account changes and
+unmounting permanently retire the old UI operation: its response, body, error or
+cleanup cannot sign in a later screen or unlock a successor. Current failures
+remain retryable. The setup proof stays local to that request and never becomes
+the account bearer in the shared store.
+
 `CurrentUser` and `ScopeUser` receive their account service through the same
 FastAPI `UserMgr` dependency (`Depends(get_user_manager)`). Overriding that one
 dependency controls account-token resolution in both paths without setting the
@@ -207,6 +216,44 @@ paths are validated against the account root and granted extra roots after
 symlink resolution. Applications legitimately work in their account-owned sibling
 directory, not necessarily below `workspace/` itself.
 
+### Continuous directory authorization
+
+Extra-root replacement remains a full-list PUT. A browser-runtime editing flow
+owns its confirmed baseline, input, synchronous write admission and unresolved
+sequence; the account form only observes it. Successful replacement adopts the
+returned normalized roots before the next edit. Definite rejection preserves
+the input. A lost, malformed or uncertain reply keeps new writes closed and
+offers confirmation rather than replaying the old list or accepting a plain GET
+as proof that a late PUT cannot overwrite the next edit. Closing/reopening or
+account A→B→A retires UI observation but retains the original unresolved flow.
+
+`POST /api/auth/users/{id}/workspace-edits` registers the flow, bound to the
+operator and target account. PUT `/{id}/extra-roots` additionally carries its
+service generation and monotonic sequence. The per-flow gate covers current
+bearer, admin and target revalidation in the same DB write transaction as the
+replacement, and remains held until the original driver acknowledges commit or
+rollback, including cancellation. The sequence is then sealed before release.
+Transactions, rather than a flow lock alone, exclude concurrent account disable
+or permission changes from bypassing that authorization check.
+
+`POST /api/auth/users/{id}/workspace-edits/confirm` takes the same gate, waits for
+an arrived write to finish or seals an unarrived sequence, and returns the
+authoritative baseline. A late PUT at or below the sealed high-water mark cannot
+write; a late response cannot unlock a later sequence. Failed confirmation stays
+unknown and only retries confirmation. Flow identity, lock and high-water mark
+remain in the service lifetime, without a second authorization table or TTL.
+After service replacement, only the managed installation's actual previous-writer
+retirement proof permits confirmation under the new generation; standalone
+without that proof remains unknown. A different UUID is not retirement proof.
+
+These guarantees cover continuous editing in one browser runtime, not competing
+flows in other tabs or clients. ID generation uses the existing secure-random
+fallback; failure is a directory-editor error, never an account-page render
+exception. The persisted roots, account export and path validation remain the
+authorities for actual directory access.
+
+### Attachment storage limits
+
 Attachment storage owns filename sanitization and the final UTF-8 byte budget.
 The on-disk basename is at most 214 bytes, including the 12-character attachment
 ID and `__` separator. Truncation preserves whole characters and extensions of
@@ -215,15 +262,26 @@ keeps the previous ASCII limit and reserves space for fork-preservation temporar
 names. Invalid UTF-8 names produce an attachment error. Existing account paths,
 attachment identity and download authorization retain their original owners.
 
-The upload route materializes at most `MAX_FILE_BYTES + 1` bytes from the parsed
-upload, regardless of absent or inaccurate size metadata. Storage remains the
-authority for empty-file and size rejection; the extra byte distinguishes an
-oversized upload without reading its remainder. A failed destination write
-removes only that attempt's unpublished file and propagates cleanup failure.
-This bounds route-level materialization, not multipart spooling, network intake
-or an account-wide quota. Authenticated multipart tests cover exact-limit and
-oversized bodies with misleading metadata, read failure, partial write failure
-and a subsequent successful upload.
+Attachment POST authenticates the account and admits the session before parsing
+multipart data. Only this route has a 26 MiB total body budget, including part
+headers and boundaries; it does not limit application proxies or MCP streams.
+An oversized declared length can be rejected early. All received ASGI chunks
+are counted even when Content-Length is absent or inaccurate; the chunk that
+crosses the budget is refused and no subsequent chunk is requested. This does
+not retract bytes already buffered by the ASGI server or impose an account quota.
+
+The parser accepts one file part named `file` and no ordinary fields. The route
+reads at most `MAX_FILE_BYTES + 1` bytes, independently of upload size metadata,
+and rejects content over 25 MiB. The extra byte distinguishes an exact-limit
+file without reading its remainder; storage still rejects empty files.
+The parser owns partial temporary files through failure, cancellation and
+truncated input. Once parsing succeeds, the route owns the complete FormData
+through its final close. Started disk write/rollover, seek and read operations
+are joined before handles close; repeated cancellation cannot interrupt that
+cleanup, while waiting for the next body chunk remains cancellable. A failed
+destination write removes only that attempt's unpublished file and propagates
+cleanup failure. Receive-stream and real spool regressions cover these windows,
+exact limits, malformed parts and a subsequent successful upload.
 
 This validates session directory selection. The local deployment runs trusted
 agents and applications under the host user; it is not an OS sandbox against

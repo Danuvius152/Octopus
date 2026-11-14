@@ -194,8 +194,11 @@ async def owner_is_available(db: Database, user_id: str | None) -> bool:
 class UserManager:
     """Accounts against a `Database`. Constructed per app, like AgentManager."""
 
-    def __init__(self, db: Any) -> None:
+    def __init__(self, db: Any, *, previous_writers_retired: bool = False) -> None:
+        from .workspace_edits import WorkspaceEdits
+
         self.db = db
+        self.workspace_edits = WorkspaceEdits(db, previous_writers_retired=previous_writers_retired)
 
     # -- accounts -----------------------------------------------------------
 

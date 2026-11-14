@@ -145,6 +145,37 @@ const auxiliaryReads: Record<SessionAuxiliaryKind, SnapshotReads> = {
 };
 const backgroundReads = new TaskSnapshotReads();
 
+// Event confirmation owns only an in-flight demand, never a second task cache.
+const backgroundEvents = new Map<string, { current: () => boolean; dirty: boolean }>();
+export function confirmBackgroundEvent(sessionId: string, taskId: string): void {
+  const key = JSON.stringify([sessionId, taskId]);
+  const pending = backgroundEvents.get(key);
+  if (pending?.current()) { pending.dirty = true; return; }
+  const start = useSessionStore.getState();
+  if (!start.token || start.bgTasks[sessionId]?.some(task => task.id === taskId)) return;
+  const lifetime = sessions.observe(sessionId, start);
+  const demand = { current: () => sessions.current(lifetime.observation) || sessions.initialGenerationCurrent(lifetime.observation), dirty: false };
+  backgroundEvents.set(key, demand);
+  void (async () => {
+    try {
+      do {
+        demand.dirty = false;
+        // Each pass starts after the events it confirms, using the original
+        // account/session qualification and the live task merge baseline.
+        const baseline = useSessionStore.getState();
+        const read = observeAuxiliarySnapshot(sessionId, "background", baseline, undefined, demand.current, taskId);
+        await read.done.catch(() => {}); // Existing auxiliary error/retry UI owns failures.
+        // The first service confirmation preserves demand, not the old read's
+        // authority. Confirm again in that service's current scope.
+        demand.dirty ||= baseline.dispatchGeneration !== useSessionStore.getState().dispatchGeneration;
+      } while (demand.dirty && demand.current());
+    } finally {
+      lifetime.finish();
+      if (backgroundEvents.get(key) === demand) backgroundEvents.delete(key);
+    }
+  })();
+}
+
 function observeAuxiliarySnapshot(
   sessionId: string, kind: SessionAuxiliaryKind, start: SnapshotStart,
   acceptedDetail?: Promise<Record<string, unknown> | null>,

@@ -172,6 +172,17 @@ attempted, including when one fails. Unconfirmed cleanup retains the registratio
 HTTPX automatic body closure: `Response.is_closed` is set before cleanup awaits
 and cannot prove that a failed close completed. Both transport paths join the
 same close task rather than replaying cleanup or trusting that flag.
+
+Proxy routing removes the verified application and mount prefix from ASGI
+`raw_path`, preserving the encoded suffix without reparsing decoded characters
+as URL syntax. A missing optional `raw_path` encodes the literal path once;
+inconsistent prefixes return HTTP 400 before acquiring a backend. Query pairs
+retain their order and duplicates, excluding the Octopus token. URL construction
+is inside the original use's cleanup boundary, so even an invalid or excessively
+long target cannot leave a use blocking drain, idle reaping or capacity eviction.
+Real ASGI-to-loopback regressions cover encoded punctuation, Unicode, mount
+paths, write bodies and construction failure.
+
 Wiki polls also capture each streamed response before reading it. A successful
 close releases that local transport responsibility while retaining the job use;
 failed close receipts survive later successful polls and continue blocking

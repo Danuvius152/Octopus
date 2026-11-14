@@ -141,7 +141,7 @@ async def lifespan(app: FastAPI):
         applications_router.set_manager(application_manager)
         # Accounts. Bound like the other managers; `deps.current_user` resolves
         # every request's bearer through it (multi-tenancy.md §5.1).
-        deps.set_user_manager(UserManager(db))
+        deps.set_user_manager(UserManager(db, previous_writers_retired=installation.profile is not None))
         credentials.set_db(db)
         notifiers.set_db(db)
         notifier_manager.set_db(db)

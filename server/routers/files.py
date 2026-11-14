@@ -168,6 +168,7 @@ async def get_file(
     session_manager: SessionMgr,
     session_id: str,
     path: str = Query(...),
+    preview: bool = False,
     user_id: ViewerUser = None,
 ) -> FileResponse:
     working_dir = await _working_dir_for(session_manager, session_id, user_id)
@@ -179,4 +180,5 @@ async def get_file(
         resolved.abs_path,
         media_type=resolved.mime_type,
         filename=resolved.abs_path.name,
+        content_disposition_type="inline" if preview and resolved.kind == "pdf" else "attachment",
     )
