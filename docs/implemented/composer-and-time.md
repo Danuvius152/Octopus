@@ -12,8 +12,7 @@ the tool result's. Missing historical times stay absent instead of being invente
 `MessageTime` belongs inside its message row. Its geometry must not cover text,
 the rewind control or a bordered tool card's stroke, and must not reflow the
 transcript on hover. Touch displays show dimmed timestamps without needing hover.
-The useful lesson from the original fixes is preserved as a verification rule:
-assert box placement and intersections, not only that a label exists.
+Verify actual box placement and intersections, including before and after hover.
 
 ## Composer history
 
@@ -60,10 +59,9 @@ effort and speed are maintained in [model settings](model-reasoning.md).
 Command feedback and its partial list update retain the original account and
 session observation, so an old `/model` response cannot write a notice into a
 later account or a confirmed-deleted conversation.
-The original plan's missing model endpoint/header are already implemented.
-Persistent effective-model/source display and additional input controls remain
-in [the input-control plan](../plans/session-input-controls.md); future display
-must distinguish the currently captured request from next-turn inherited settings.
+The dialog displays effective values and their sources. The header displays
+short Model/effort/Fast state; captured request settings and next-request
+inherited settings have separate timing.
 
 ## Verification
 
@@ -72,7 +70,3 @@ Code: `web/src/lib/composerHistory.ts`, `web/src/lib/injectedTurns.ts` and
 `web/src/lib/composerHistory.test.ts` and the message-time browser scenarios.
 Preserve user draft/caret behavior when changing either prompt history or slash
 menus; timestamps must retain original identity across live updates and reloads.
-
-## Historical evidence
-
-The [original design and evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/composer-and-time.md) retain their original version and conditions. Current verification follows [testing.md](../testing.md); this document does not establish production deployment.

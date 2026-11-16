@@ -2,8 +2,8 @@
 
 ## Do It Right The First Time (no MVPs, no future-polish)
 
-**If we choose to do something, we do it perfectly — right now, in
-this session.** No "minimal fix", no "MVP for now", no "we'll polish
+**If we choose to do something, we do it perfectly — right now, in**
+**this session.** No "minimal fix", no "MVP for now", no "we'll polish
 this later". No deferral of cleanup to a "follow-up" item.
 
 This rule is non-negotiable. Specifically that means:
@@ -16,8 +16,8 @@ This rule is non-negotiable. Specifically that means:
   second use case, an external dep, or a user decision) belong in
   the owning plan's deferred-scope section; nothing else is a
   legitimate place to stash "felt too long".
-- Never add a comment like `# TODO: handle X properly later` or `#
-  HACK: works for now`. If `X` matters, handle it in this change.
+- Never add a comment like `# TODO: handle X properly later` or
+  `#HACK: works for now`. If `X` matters, handle it in this change.
   If it doesn't matter, delete the comment.
 - When the user asks "fix this", interpret it as "fix it the way a
   careful engineer with infinite time would" — not "ship the
@@ -88,7 +88,7 @@ For captured execution/exit proof, read
 for process or MCP-call retirement, read
 [Harness resources](docs/implemented/harness-layer.md#execution-and-resources) or
 [MCP retirement](docs/implemented/harness-layer.md#mcp-question-retirement).
-Business outcome, notification delivery and resource retirement have separate authorities.
+These contracts distinguish business outcome, notification delivery and resource retirement.
 
 Persistence changes follow [current storage and publication handoff](docs/implemented/current-storage-format.md).
 New persistent types, relationships or roots must also update
@@ -116,9 +116,9 @@ when changing E2E fixtures or selection. Keep counts in execution reports.
 
 ### Backend validation scope
 
-Offline correctness covers Claude Code and Codex; this installation's live
-scope is Codex only. Follow [provider and isolation rules](docs/testing.md#markers-providers-and-isolation)
-and [local credential setup](docs/local-wsl.md#live-凭据与网络) for live checks.
+For backend coverage and live-provider selection, follow the
+[verification policy](docs/testing.md) and
+[local credential setup](docs/local-wsl.md#live-凭据与网络).
 
 ## Common commands
 
@@ -138,7 +138,8 @@ git diff --check
 # Full code-commit gates; reuse existing passing evidence
 ./scripts/check.sh
 
-# Local development
+# Standalone development with isolated state and provider homes
+# Prepare the environment described in docs/local-wsl.md first.
 .venv/bin/uvicorn server.main:app
 (cd web && bun run build)
 (cd web && bun dev)
@@ -146,18 +147,21 @@ git diff --check
 
 Commands start at the repository root. The backend serves `web/dist/`, so
 frontend source edits need the build command above for backend-served previews;
-Vite HMR uses port 5173. The running release is a separate snapshot: restarting
-the service does not publish the development tree.
+Vite HMR uses port 5173. For a managed installation, follow
+[the installation lifecycle](docs/implemented/installation-lifecycle.md) and
+[service management](docs/local-wsl.md#服务管理); direct ASGI/reload commands
+are for isolated standalone development. The running release is a separate
+snapshot: restarting the service does not publish the development tree.
 
 ## Conventions
 
 - Python 3.12+, type hints and async/await; React 19, strict TypeScript and zustand.
-- Use `useSessionStore.getState()` in state-mutating callbacks/effects to avoid
-  selector-driven render loops.
+- Use selectors to subscribe to state needed by rendering. Use
+  `useSessionStore.getState()` for a one-time current-state read in an event or
+  imperative callback; keep effect dependencies tied to the behavior they drive.
 - Use the existing Python venv and pip, not uv. Keep fixed application assets
   local; use installed test tools and fail clearly when a dependency is missing.
-- Resolve the nvm JS toolchain and `~/.local/bin` Codex on PATH for noninteractive
-  checks. Use [local test setup](docs/local-wsl.md#本机测试) for PATH, proxies and
+- Use [local test setup](docs/local-wsl.md#本机测试) for toolchain PATH, proxies and
   credential isolation, and [service management](docs/local-wsl.md#服务管理) for operations.
 - Read only task-relevant references. For implementation tasks, follow
   [documentation update timing](docs/AGENTS.md#writing-and-maintenance).
@@ -194,8 +198,8 @@ repository checkout or worktree.
 Test runtime state follows its separate isolation rules; the test cache is not
 a general development directory.
 
-Durable decisions and final evidence belong in existing `docs/` owners before
-temporary task material is removed. Preserve active tasks at their current
+Current contracts and necessary rationale belong in existing `docs/` owners;
+task reports retain execution evidence. Preserve active tasks at their current
 paths until their processes and references can be retired or updated safely.
 Skills support the task's scope and existing authorization.
 

@@ -366,7 +366,7 @@ class ResearchManager:
                 # Run leaves in an EMPTY per-job scratch cwd, NOT the session's
                 # working_dir — a web/reasoning leaf has no reason to read the
                 # user's repo, and this keeps the read-only-sandbox/denylist
-                # leaves from touching real files (Vera review).
+                # leaves away from the session's files.
                 try:
                     scratch = os.path.join(_research_dir(session.user_id), job_id, "cwd")
                     os.makedirs(scratch, exist_ok=True)

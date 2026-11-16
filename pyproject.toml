@@ -1,7 +1,7 @@
 [project]
 name = "octopus"
 version = "0.1.0"
-description = "Remote Claude Code controller"
+description = "Personal agent platform for Claude Code and Codex"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -58,10 +58,7 @@ line-length = 88
 exclude = [".venv", "web", "docs"]
 
 [tool.ruff.lint]
-# Deliberately a narrow starting set: pyflakes (real errors), pycodestyle,
-# isort, pyupgrade, flake8-bugbear. Broad rule sets on 28k lines of working
-# code produce a wall of stylistic noise that nobody reads, which is how a
-# linter becomes decoration. Widen this once the current set is clean.
+# Check pyflakes, pycodestyle, isort, pyupgrade and flake8-bugbear rules.
 select = ["F", "E", "W", "I", "UP", "B"]
 ignore = [
     # The codebase uses long explanatory comments and prose docstrings that
@@ -69,20 +66,13 @@ ignore = [
     # still enforced by the formatter.
     "E501",
 
-    # raise-without-from-inside-except. NOT a backlog item — a policy call.
-    # There are 86 sites and they split between two different correct
-    # answers: `server/harness/*` re-raises domain errors where `from e`
-    # belongs, while `server/routers/*` deliberately converts an internal
-    # exception into an HTTPException response, where `from None` is the
-    # more honest form. Ruff cannot fix either automatically (not even
-    # under --unsafe-fixes), so enforcing it would mean 86 per-site
-    # judgements. Inserting `from e` blindly across all of them would look
-    # like quality without being it.
+    # Exception chaining depends on the boundary: harness domain errors may
+    # retain a cause; HTTP response conversion may intentionally suppress it.
+    # Review that choice at the affected site.
     "B904",
 
-    # replace-str-enum. `class SessionStatus(str, Enum)` appears 13 times,
-    # several in `server/models.py`, where the members are serialized into
-    # API responses and thence into the generated web/src/api/contracts.ts.
+    # String/Enum members are serialized into API responses and generated
+    # web/src/api/contracts.ts.
     # StrEnum differs from (str, Enum) in __str__/__format__ behavior, so
     # this "modernization" can change wire output. Not worth the risk for a
     # cosmetic gain.
@@ -102,10 +92,8 @@ ignore = [
 "server/app_agent.py" = ["B008"]
 
 [tool.mypy]
-# Non-strict on purpose (docs/post-mortems/2026-09-25-polish-pass.md). The annotations
-# are thorough — 89% return coverage — but were never checked, so a strict
-# first run would be a tarpit that stalls the A1 refactor instead of enabling
-# it. Ratchet these on once the baseline is clean.
+# Check annotated service code with the explicit options below; untyped bodies
+# and missing third-party stubs are outside this configuration's coverage.
 python_version = "3.12"
 files = ["server"]
 exclude = ["^\\.venv/", "^web/"]
@@ -134,9 +122,8 @@ addopts = "--strict-markers"
 # `real_codex` want one that is signed in and actually answers.
 #
 # These are markers rather than module-level skipif calls so the probe
-# happens in pytest_runtest_setup (tests/conftest.py) instead of at
-# import: evaluating them during collection made plain `--collect-only`
-# spawn a real `claude --print` (0.80 s hermetic vs 16.44 s full).
+# happens in pytest_runtest_setup (tests/conftest.py), keeping provider probes
+# out of imports and collection-only runs.
 markers = [
     "real: real provider or supervisor integration; requires --run-real",
     "supervisor: isolated systemd user-unit checks; no provider CLI or production service mutations",

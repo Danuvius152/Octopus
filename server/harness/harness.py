@@ -142,12 +142,11 @@ class Harness:
         driver.validate_replay(ctx)
 
     def is_auth_error(self, text: str, *, code: str | None = None) -> bool:
-        """Whether `text` (a failed turn's combined error output + stderr)
-        looks like this backend's auth-credential rejection — a 401 / expired
-        or revoked token (harness-credential-reauth.md §3). Case-insensitive
-        substring match over the profile's `auth_error_patterns`; pure, no I/O.
-        Callers gate on the turn actually having failed so a tool that merely
-        returns a 401 to the model can't trip it."""
+        """Classify provider failure evidence using typed codes first, then
+        the profile's case-insensitive auth text patterns. Callers supply a
+        failed execution's provider error/stderr, not arbitrary tool content.
+        See docs/implemented/harness-credential-reauth.md; pure, no I/O.
+        """
         if code in {"unauthorized", "auth_error"}:
             return True
         if code in self.profile.transient_error_codes or code in {

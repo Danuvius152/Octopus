@@ -2,7 +2,8 @@
 
 > **Status:** implemented — 置顶独立于归档，选择和详情刷新在原位置更新会话。
 
-## 1. Two questions, two flags
+<a id="1-two-questions-two-flags"></a>
+## Two questions, two flags
 
 An agent or application answers two questions independently:
 
@@ -12,15 +13,13 @@ An agent or application answers two questions independently:
 | not pinned | no¹ | yes | yes |
 | archived | no | no | yes, with Restore |
 
-¹ except while it needs you — §5.
+¹ except [while it needs you](#something-unpinned-that-needs-you).
 
-The model is positive, not negative. The sidebar is a set of **shortcuts**
-you chose, like a dock; the page is the whole collection. There is no
-"hidden" state to reason about — something you haven't pinned simply isn't a
-shortcut. That's why the flag is `pinned` and not `hidden`: the default
-(nothing chosen) and the action (choosing) read the same way round as the UI.
+The sidebar holds selected shortcuts; the All page holds the complete collection.
+`pinned` controls shortcut membership independently of archive state.
 
-## 2. Defaults
+<a id="2-defaults"></a>
+## Defaults
 
 * **A new agent or application is pinned**, at the bottom. You almost always
   use something right after making it; making it land off-screen would turn
@@ -34,7 +33,8 @@ shortcut. That's why the flag is `pinned` and not `hidden`: the default
   not recreate one missing from an existing account; default lookup can fail
   rather than silently altering saved configuration.
 
-## 3. Order
+<a id="3-order"></a>
+## Order
 
 `pin_order` is a position among the pinned, 1-based, meaningful only while
 `pinned = 1`. Unpinning leaves it alone; pinning always appends (`MAX + 1`,
@@ -68,7 +68,8 @@ switching conversations and leaves agent pin order under the user's control.
 `lib/sessionList.test.ts`, `lib/hydrateSession.test.ts` and
 `e2e/agents.spec.ts` cover repeated selection and in-place updates.
 
-## 4. Schema
+<a id="4-schema"></a>
+## Schema
 
 The complete current schema declares `pinned` and `pin_order` directly.
 Format preparation preserves saved positions; startup does not derive them again.
@@ -78,7 +79,8 @@ their existing order; the sidebar sorts by `pin_order` itself, because every
 other consumer of the agent list (the application form's builder picker,
 delegation targets) wants the stable one.
 
-## 5. Something unpinned that needs you
+<a id="5-something-unpinned-that-needs-you"></a>
+## Something unpinned that needs you
 
 Unpinned must not mean unreachable at the moment it matters. An unpinned row
 appears in the sidebar — after the pinned ones, dimmed, not draggable, with a
@@ -104,14 +106,12 @@ functions over store state. [sidebarPins.test.ts](../../web/src/lib/sidebarPins.
 covers running/question/active-session presence and exclusion of application
 conversations, plus open/building/unseen-failure application presence.
 
-## 6. The pages
+<a id="6-the-pages"></a>
+## The pages
 
-The Agents and Applications pages' tabs become **`All · Create`** (`Edit`
-when an agent is open for editing); the old Archived tab is the bottom
-section of All. The page is reached the way it always was — the section's
-"+" — and All is one tab away. An "All agents (N)" row at the foot of each
-sidebar section was tried and dropped: it was a second door to the page the
-"+" already opens, and it read as another item in the list.
+The Agents and Applications pages offer **All · Create** (**Edit** while editing
+an agent). The sidebar section's **+** opens the page. Archived rows appear in
+the bottom section of All.
 
 `ItemLibrary` renders both tabs' All:
 
@@ -140,23 +140,15 @@ undoes:
 The `DELETE` routes stay in the API, for scripts and test cleanup; the UI
 just doesn't reach them.
 
-## 7. Sync
+<a id="7-sync"></a>
+## Sync
 
-Pins have to agree across tabs and devices — a phone and a laptop showing
-different sidebars is the bug this would otherwise be.
+| Domain | Events and effect |
+| --- | --- |
+| Applications | `application_updated` merges edits and pin positions; reorder broadcasts changed rows. `application_archived` removes the live row. |
+| Agents | `agent_created` / `agent_updated` publish complete rows into the live or archived partition. A complete `agent_archived` row moves into archived; an ID-only event uses the known row or confirms missing data. `agent_deleted` removes both partitions. |
 
-* **Applications** already broadcast `application_updated` rows, so pin and
-  unpin travel through the existing handler; a reorder broadcasts only the
-  rows whose position changed. `application_archived` — sent by the archive
-  route since archiving landed but never handled — now removes the row from
-  the store too.
-* **Agents** had no broadcast channel at all, so no agent edit ever synced
-  across tabs. They get the same shape now, sent from the agents router:
-  `agent_created` / `agent_updated` (edit, pin, unpin, restore, and each row
-  a reorder moved) publish the complete row into the live or archived partition.
-  A complete `agent_archived` row moves into archived, retaining All's Restore
-  action; an ID-only event uses the known row or confirms missing data. `agent_deleted` removes
-  both partitions. A request that fails broadcasts nothing.
+Failed requests broadcast nothing.
 
 Agent ordering receipts confirm only the submitted positions; their attached live
 list remains a read observation. Success and failure both finish that operation's
@@ -167,9 +159,5 @@ using the original operation identity. The [Agent list contract](frontend-list-r
 owns scope, overlapping requests and completeness; no component keeps its own
 archived authority.
 
-§3's reorder rule is what keeps two tabs from destroying each other's pins in
+The reorder rule is what keeps two tabs from destroying each other's pins in
 the window before an event lands.
-
-## Historical evidence
-
-The [original design and evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/sidebar-pins.md) retain their original version and conditions. Current verification follows [testing.md](../testing.md); this document does not establish production deployment.

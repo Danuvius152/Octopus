@@ -137,7 +137,7 @@ class ScheduleRunner:
     async def _fire(self, schedule_id: str) -> None:
         """Run the schedule's prompt for this fire.
 
-        Two modes (agent-refactor.md §5.3/§5.6):
+        Delivery modes (docs/implemented/scheduled-runs.md):
 
         * **Append into the origin session** — when the schedule was created from
           a `/schedule` chat command and that session is still live, the run is
@@ -149,11 +149,9 @@ class ScheduleRunner:
           run the prompt, and hide it on idle. Continuity across fires comes from
           agent memory, not a reused session.
 
-        A fire never starts while the previous one is still outstanding
-        (§"overlap"): a schedule that runs every 5 minutes and takes 10 would
-        otherwise stack runs on top of each other until the box gives out. The
-        skip is logged and the schedule keeps its cadence — the next tick tries
-        again.
+        Origin delivery checks queued schedule inputs; the temporary-session
+        branch waits for its turn. These are different overlap boundaries;
+        the time-field and overlap discrepancy is documented in the contract.
 
         A one-shot is removed only by the target/input admission transaction.
         Returning or losing this callback cannot consume an unaccepted fire.
@@ -306,14 +304,8 @@ class ScheduleRunner:
 
     @staticmethod
     def _compose_prompt(row: dict | None, prompt: str) -> str:
-        """The prompt with a marker saying where it came from.
-
-        Every other machine-injected turn in Octopus announces itself —
-        `[bg-task-result]`, `[agent-reply:…]` — and a schedule's didn't, so an
-        agent woken at 07:00 could not tell its own daily run from something
-        the user had just typed. That matters for what it does next: a
-        scheduled run reports, it doesn't ask a follow-up question of someone
-        who isn't there.
+        """Mark scheduled input and require an autonomous report: no human is
+        waiting to answer a follow-up question for this fire.
         """
         if not row:
             return prompt

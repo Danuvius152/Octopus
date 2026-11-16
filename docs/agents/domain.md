@@ -2,7 +2,7 @@
 
 This repository uses one root `GLOSSARY.md` for settled domain language.
 Current decisions and their rationale live with the corresponding contracts
-in `docs/implemented/`; unfinished formal designs live in `docs/plans/`.
+in `docs/implemented/`; unmet needs and active-specification pointers live in `docs/plans/`.
 Use this existing layout rather than creating a parallel `docs/adr/` tree.
 
 ## Before exploring
@@ -13,6 +13,7 @@ Use this existing layout rather than creating a parallel `docs/adr/` tree.
   including their rationale and retained obligations.
 - Read the relevant `docs/plans/` document when the task concerns planned work.
   A plan or a confirmed interview choice is not evidence of implementation.
+  Code that differs from a confirmed requirement does not redefine that requirement.
 
 Read only task-relevant documents. Missing documents do not require creating
 empty placeholders. Repository document maintenance and consolidation timing
@@ -32,7 +33,8 @@ glossary drafts do not silently replace the root glossary.
 ## Record and revisit decisions
 
 Keep a decision's rationale, conditions and exceptions with its owning
-contract or formal plan. On completion, consolidate the verified current
+contract or authorized active specification. Replace superseded rules directly,
+without retaining the debate or a correction timeline. On completion, consolidate the verified current
 contract in `docs/implemented/` and retire the superseded execution material
 under the repository's documentation rules. Do not label an unimplemented
 decision as implemented merely because the user confirmed it.

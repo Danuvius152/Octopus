@@ -17,8 +17,8 @@ import type {
   SessionInfo,
 } from "../stores/sessionStore";
 
-/** Pinned rows, in sidebar order. A row without a position (only possible
- * mid-migration) sorts last rather than first. */
+/** Pinned rows, in sidebar order. Missing positions use MAX_SAFE_INTEGER;
+ * ties preserve input order. */
 export function pinnedInOrder<T extends { pinned?: boolean; pin_order?: number | null }>(
   rows: T[]
 ): T[] {
@@ -41,9 +41,9 @@ export interface SidebarRows<T> {
 }
 
 /** Agents for the sidebar. An unpinned agent is present while it owns the
- * open session, or any of its sessions is running, waiting on approval, or
- * holding a question for you. An application's own conversations don't
- * count — the rail never shows them (app-agent-access.md §7). */
+ * open session, or a non-app session is running or holds a pending question.
+ * App conversations are excluded from the running/question check
+ * (app-agent-access.md). */
 export function sidebarAgents(
   agents: Agent[],
   state: {

@@ -2,7 +2,8 @@
 
 > **Status:** implemented — 原 owner 负责主动刷新和拒绝处置，重新授权保留凭据身份。
 
-## 2. Scope
+<a id="2-scope"></a>
+## Scope
 
 In: detect an attributed auth-credential rejection, conditionally mark the
 adopted authorization, surface it (chat error + sidebar badge), and let the user
@@ -61,38 +62,26 @@ fail the current call with their exception context while retaining retryable
 credential state. Error text does not decide persistent invalidation. Directory
 credentials and the reactive CLI rejection path retain their separate contracts.
 
-Regression evidence (2026-10-27): the resolver, provider and reauthorization
-modules passed 179 hermetic cases with temporary SQLite and controlled HTTP,
-including shared refresh, independent progress, late results, cancelled waiters,
-short-lived renewals and total deadlines under slow streaming responses.
-This does not establish a live Claude result.
+<a id="3-detection-lives-behind-the-harness-contract"></a>
+## Detection lives behind the harness contract
 
-## 3. Detection lives behind the harness contract
+`Harness.is_auth_error(text, *, code=None)` is a pure classification
+boundary. Text matching depends on the selected profile; native typed evidence
+has its own source requirements.
 
-Per the harness-layer rule (no `if backend ==` outside `server/harness/`),
-each backend declares how *its* CLI reports an auth-credential rejection:
+| Backend/path | Attributed evidence | Credential update |
+| --- | --- | --- |
+| Claude | Failed terminal/preparation diagnostics using profile-specific phrases; parser-recognized fatal API retry rejection | Only when the adopted `CredentialUse` still matches the current owned row |
+| Independent Codex exec | Failed attributed diagnostics using its own profile patterns | Adoption must be proven separately; a home path is insufficient |
+| Ordinary Codex App Server | Typed provider-auth failure from the exact bound root terminal | The current adapter cannot derive adoption from a home path; return `auth_failed` and preserve current login |
+| Tool/child/RPC or unbound stderr | Diagnostic only for the main credential | No update |
 
-- `RuntimeProfile.auth_error_patterns: tuple[str, ...]` — lowercased
-  substrings. A turn-failure whose combined error text contains any of
-  them is an auth-expiry.
-- `Harness.is_auth_error(text, *, code=None) -> bool` — accepts a trusted
-  normalized auth code first, then uses the profile's case-insensitive text
-  patterns when enabled. Pure; no I/O.
+Specific text phrases avoid treating a tool's returned 401 as provider rejection.
+Native retry/error notifications do not accumulate as terminal auth evidence.
+See [native error source](codex-backend.md#error-source-and-recovery).
 
-Claude and Codex exec patterns are intentionally specific phrases ("invalid authentication
-credentials", "invalid x-api-key", "401 unauthorized", "invalid_grant",
-…) rather than a bare `401`, and detection is **gated on the turn having
-failed** (see §4), so a tool that merely *returns* a 401 to the model
-(which then continues to a normal result) never trips it.
-
-The ordinary App Server profile disables text-pattern auth detection. Its driver
-accepts only typed provider-auth failure from the exact bound root terminal.
-RPC, child/tool 401 and arbitrary stderr retain diagnostics without invalidating
-the credential. Native retry/error notifications are diagnostic even if another
-cause later fails the root; they do not accumulate as terminal auth evidence.
-See [native error source and recovery](codex-backend.md#error-source-and-recovery).
-
-## 4. Run-loop wiring (`server/sessions/turns.py`)
+<a id="4-run-loop-wiring-serversessionsturnspy"></a>
+## Run-loop wiring (`server/sessions/turns.py`)
 
 The original Owner classifies the failed attempt using its actual selected
 profile. It passes the terminal error code and, where that profile enables text
@@ -146,30 +135,18 @@ Detection reads the raw `HarnessEvent` stream directly (terminal event
 `content`/`raw` captured in the loop), not the WS/persistence mappers — so
 classification does not depend on frontend rendering or duplicate error bubbles.
 
-### 4a. Don't wait out the CLI's own 401 retries
+<a id="4a-dont-wait-out-the-clis-own-401-retries"></a>
+### Claude API retry rejection
 
-The Claude CLI retries a failed API call by itself and announces each
-attempt as `{"type":"system","subtype":"api_retry", "error_status":…}`. For
-429/5xx that's exactly right — stay out of its way and let the terminal
-failure fall through to the transient-retry path.
+`ClaudeEventParser` treats an attributed `api_retry` with `error_status: 401`
+or `error: authentication_failed` as fatal and ends the stream. The original
+Owner then classifies the failure and conditionally compares `CredentialUse`;
+classification alone does not mark a replacement or unproven credential.
+Other retry notifications remain subject to their source and transient rules.
+Parser regressions cover fatal rejection and nonfatal retry separately.
 
-A **401 is not retryable**: the credential is rejected, and the tenth attempt
-will be rejected too. But the CLI backs off exponentially across 10 attempts,
-so the turn sits there for roughly ten minutes — long enough that the idle
-watchdog trips first and the user gets "the turn timed out" instead of "your
-key was rejected".
-
-So `ClaudeEventParser` treats an `api_retry` carrying `error_status: 401` (or
-`error: authentication_failed`) as fatal: it emits an `error` event worded to
-match `_CLAUDE_AUTH_ERROR_PATTERNS` and ends the stream. §4's wiring then runs
-on the spot — credential flagged, re-authorize prompt surfaced — about a
-second after the first rejection instead of ten minutes later. Covered by
-`test_parser_api_retry_401_is_a_fatal_auth_error` (and its transient-stays-quiet
-sibling) plus the real-CLI
-`test_real_credential_with_bad_key_yields_auth_error`, which previously timed
-out waiting for the retry storm to end.
-
-## 5. Re-authorize in place + clear-on-success
+<a id="5-re-authorize-in-place--clear-on-success"></a>
+## Re-authorize in place + clear-on-success
 
 The durable affordance mirrors connectors: the sidebar credential shows a
 "needs reconnect" badge + "Re-authorize" button. Re-auth re-runs the same
@@ -197,7 +174,7 @@ valid and the flag clears.
 - **API key** (`PATCH /credentials/{id}` with a new secret): clears the
   flag too, so re-pasting a fresh key recovers an `api_key` credential.
 
-A brand-new login already creates `status=active`, so no change there.
+A new login creates `status=active`.
 
 ### Codex device operation ownership
 
@@ -286,7 +263,8 @@ old/new representation combinations through commit, resolver and renderer;
 `test_claude_diagnostic_ownership.py` and `test_harness_diagnostics.py` cover
 late process output and bounded, masked full logging.
 
-## 6. Frontend
+<a id="6-frontend"></a>
+## Frontend
 
 - `HarnessPage.tsx`: per-credential `needs_reconnect` → amber/destructive
   "needs reauth" badge + a "Re-authorize" button that opens the existing
@@ -335,22 +313,18 @@ late process output and bounded, masked full logging.
   write/GET ordering and deadlines are owned by the
   [frontend list contract](frontend-list-reconciliation.md#模型凭据列表).
 
-## 7. Real-CLI verification boundary
+<a id="7-real-cli-verification-boundary"></a>
+## Real-CLI verification boundary
 
 Real-runtime test selection, signed-in credential checks, isolation and this
 installation's provider scope are owned by [testing.md](../testing.md).
-The original bug showed why binary presence alone is not a signed-in precondition;
-that diagnostic lesson does not authorize probing another provider's live login.
 Hermetic protocol/refresh tests remain distinct from separately selected native
 sign-in or model calls. This document does not keep another gate policy.
 
-## 8. What this defers
+<a id="8-what-this-defers"></a>
+## Current behavior and limits
 
 - No automatic *retry* of the failed turn after re-auth — the user re-runs
   their prompt. (Connectors don't auto-retry either.)
 - Reactive detection complements the proactive refresh contract above; it does
   not add refresh retries or change directory-based login.
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/harness-credential-reauth.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

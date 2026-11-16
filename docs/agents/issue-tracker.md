@@ -21,9 +21,9 @@ directory takes precedence.
 
 Use the same task name in both roots when a grill task needs working artifacts.
 Link its `.scratch/` documents to the workspace evidence instead of duplicating
-files. For example, `.scratch/context-meter-compact/spec.md` stays in the
+files. For example, `.scratch/<task>/spec.md` stays in the
 repository, while verification logs and scripts use
-`<account-workspace>/context-meter-compact/`. Set output paths explicitly when
+`<account-workspace>/<task>/`. Set output paths explicitly when
 running from the repository or reading a `.scratch/` ticket.
 
 ## Placement
@@ -59,8 +59,9 @@ application/research output and private publication resources keep their owners.
 - “Publish to the issue tracker” means save these local files. “Fetch a ticket”
   means read its file. A bare number resolves only within an identified task;
   ask when the task or file reference is ambiguous.
-- Record clarification and evidence in the same ticket. Append conversations
-  under `## Comments` instead of creating a second copy of the ticket.
+- Maintain current decisions, acceptance criteria and blocking facts in the
+  same ticket. Link necessary evidence; do not copy conversation logs into
+  durable project knowledge.
 - Use the triage states in [triage-labels.md](triage-labels.md). For triage,
   record one category (`bug` or `enhancement`) and one triage state.
 - Small, well-defined work can proceed directly from the conversation. Creating
@@ -85,9 +86,9 @@ application/research output and private publication resources keep their owners.
 ## Lifecycle
 
 `.scratch/`, `docs/review/` and the account workspace are temporary. Before
-cleanup, put lasting decisions, their reasons and applicability, and concise
-regression evidence in the owning project document. Current contracts belong
-in `docs/implemented/`; unfinished formal plans belong in `docs/plans/`;
+cleanup, put current rules, necessary reasons and regression entry points in
+the owning project document. Current contracts belong
+in `docs/implemented/`; unmet needs and active-specification pointers belong in `docs/plans/`;
 verification policy belongs in `docs/testing.md`. A confirmed grill decision
 does not establish implemented behavior. Follow [domain.md](domain.md) for
 document consumption and placement.

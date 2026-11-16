@@ -33,8 +33,8 @@ AppAgent/backend/bridge、各 Harness 的 one-shot、登录、scheduler 与主�
 启动、终态回流和保存责任，已结束但清理未确认的任务仍阻塞。失败 Owner 只有原
 清理成功、原通知退出且没有保留输入时才能解除阻塞。空闲 held 模型宿主及 App
 server 可留到正常 shutdown 退休，不能仅因进程存活永久等待。
-准备失败的收束遵守原领域规则：[委派](agent-collaboration.md#1-invocation-and-identity)
-先完成引用准备再创建 child；[Research](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)
+准备失败的收束遵守原领域规则：[委派](agent-collaboration.md#invocation-and-identity)
+先完成引用准备再创建 child；[Research](native-deep-research.md#researchmanager-async-job-like-bgdelegationsscheduler)
 目录准备错误经原终态事务收束，确认后退休无叶执行的 task/context 注册。
 尚未确认的输入、提交或资源清理仍保留 blocker；它不是活模型或子进程的证明，
 也不能因数据库已有 failed 就绕过原 owner。
@@ -92,7 +92,7 @@ owner 纳入事实与退休，新增业务域才扩展安装层的显式组合�
 [service_health.py](../../server/service_health.py)。
 `tests/test_installation_drain.py`、`tests/test_installation_admission.py`、
 `tests/test_installation_storage_failure.py`覆盖领域阻塞、失败封口、原请求收据、
-存储失信和真实资源责任。源码核对不代表本次执行了这些测试。
+存储失信和真实资源责任。
 
 离线账户导出与发布都消费同一原请求交接结果，不各自猜测安全 idle。
 操作步骤分别归[账户搬迁](../backup-and-migrate.md#account-export-and-import)和

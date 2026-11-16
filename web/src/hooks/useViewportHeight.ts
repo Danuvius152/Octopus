@@ -1,24 +1,17 @@
 import { useEffect } from "react";
 
-/** Drives `--app-h` and `--app-top` — how tall the app is and where it starts.
+/** Sets app height and offset through `--app-h` and `--app-top`.
  *
- * What this exists for: on iOS the *layout* viewport does not shrink when the
+ * On iOS the layout viewport does not shrink when the
  * software keyboard (or the form-assistant bar an external keyboard brings)
  * covers part of the screen, so an absolutely-positioned root keeps its full
  * height and the composer ends up underneath the keyboard.
  *
- * The rule is deliberately NOT "the app is as tall as the visual viewport".
- * Visual-viewport height is only trustworthy while something is being typed
- * into: once the keyboard animates away iOS can leave a stale, smaller height
- * behind, and an app sized from it stops short of the bottom of the screen —
- * a band of dead page under the composer, which is exactly the bug this
- * replaces. So:
- *
- *   - **not editing** → the app is `innerHeight` tall, starting at 0. No
- *     keyboard can be up, so there is nothing to subtract, whatever the
- *     visual viewport currently claims.
- *   - **editing** → follow the visual viewport exactly (height + offset),
- *     which is what keeps the composer above the keyboard.
+ * While an editable element has focus, follow the visual viewport's height
+ * and offset to keep the composer above the keyboard. Otherwise use
+ * `innerHeight` and offset 0: iOS can retain a stale, smaller visual viewport
+ * after the keyboard closes. If visualViewport is unavailable, use that same
+ * innerHeight fallback.
  *
  * Syncs are re-run a few times after focus and orientation changes, because
  * the measurement that matters is the one at the END of the keyboard

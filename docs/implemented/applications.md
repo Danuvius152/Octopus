@@ -2,7 +2,8 @@
 
 > **Status:** implemented — 账户所属应用的独立构建、后端运行和分阶段删除。
 
-## 1. Product and ownership
+<a id="1-product-and-ownership"></a>
+## Product and ownership
 
 An application is an account-owned web app built by an agent, hosted from its
 managed directory and opened in an iframe. Static files work directly; an
@@ -10,7 +11,8 @@ executable `start.sh` enables a supervised backend under the
 [backend contract](application-backends.md). A running app can use the separate
 [agent conversation API](app-agent-access.md).
 
-## 2. Stored identity and directories
+<a id="2-stored-identity-and-directories"></a>
+## Stored identity and directories
 
 The builder uses an ordinary session (`origin='application'`). A new application
 gets its immutable `app_id` before allocating
@@ -33,7 +35,8 @@ Allocation holds resource coordination until its row is saved; completed
 deletion releases that claim only after its remaining effects and row removal.
 The rows remain the persistent authority; there is no second resource registry.
 
-## 3. Serving the app
+<a id="3-serving-the-app"></a>
+## Serving the app
 
 `GET /apps/{app_id}/{path}` streams a file out of `app_dir`:
 
@@ -57,17 +60,15 @@ from under the user. The apps are written by the user's own agent, which
 already has shell access to the host — the sandbox is a blast-radius limiter,
 not a trust boundary.
 
-## 4. Lifecycle
+<a id="4-lifecycle"></a>
+## Lifecycle
 
-```
-POST /api/applications           create row + dir + build session, send brief
-      ↓ (status=building)
-  agent's turn runs in the build session
-      ↓ original request completion with its recording/outcome facts
-ApplicationManager evaluates that build's entrypoint and outcome
-      ↓
-status = ready (entrypoint exists)  |  failed (it doesn't)
-```
+| Boundary | Build projection |
+| --- | --- |
+| New input admitted to the current builder | `building` |
+| Completion or outcome unconfirmed, or recording not committed | `failed` with the original diagnostic |
+| Committed outcome available, entrypoint exists | `ready`, including when the turn itself reports an error |
+| Committed outcome available, entrypoint absent | `failed`, using the available turn error |
 
 Creation is one Manager-owned task shielded from its HTTP waiter. Before any
 resource effect, the existing agent lifecycle owner checks active admission and
@@ -172,7 +173,7 @@ It holds no App projection lock across subscribers, so reentrant new input or
 delete can complete and the final notification reflects their newer fact.
 Backend retirement is separately owned and does not delay notification; an old
 terminal snapshot is not retained across its hook wait. Captured resource
-identity and retirement rules are in [backend lifecycle](application-backends.md#6-lifecycle).
+identity and retirement rules are in [backend lifecycle](application-backends.md#lifecycle).
 
 Each transition broadcasts `application_created` / `application_updated` /
 `application_deleted` over the same WS bus every client already listens to, so
@@ -193,7 +194,8 @@ failed Owner with queued input and steer, snapshot-external admissions, blocked
 hooks and reentrant/slow subscribers. They assert final consumer state as well
 as database state; a correct row alone does not prove notification ordering.
 
-## 5. REST surface
+<a id="5-rest-surface"></a>
+## REST surface
 
 | route | purpose |
 |---|---|
@@ -202,8 +204,10 @@ as database state; a correct row alone does not prove notification ordering.
 | `GET /api/applications/{id}` | one row |
 | `PATCH /api/applications/{id}` | rename / re-icon / change entrypoint |
 | `POST /api/applications/{id}/build` | another build turn (`{prompt}`) |
-| `DELETE /api/applications/{id}` | drop the row; `keep_files=true` keeps the dir |
+| `DELETE /api/applications/{id}` | close admission, retire original work, process files, then remove the row; `keep_files=true` skips only file removal |
 | `GET /apps/{id}/{path}` | the app itself (cookie/bearer/query auth) |
+
+## Deletion and retry
 
 `DELETE` is a server-owned operation. Concurrent requests share cleanup; a
 cancelled HTTP waiter does not cancel it, and conflicting `keep_files` choices
@@ -303,9 +307,11 @@ this lifecycle fact without restoring execution authority; see
 [storage handoff](current-storage-format.md) and [account transfer](../backup-and-migrate.md#account-export-and-import).
 Build histories remain readable and retain their ordinary archive/restore/input
 behavior after successful deletion. A later new instruction may recreate their
-working directory; this change retires original writers, not future human work.
+working directory. Deletion retires original writers; it does not forbid future
+explicit human work in the retained build history.
 
-## 6. Build brief and UI
+<a id="6-build-brief-and-ui"></a>
+## Build brief and UI
 
 `ApplicationManager.compose_build_prompt` specifies the entrypoint, code/data
 ownership, static serving and optional foreground backend/install scripts. A
@@ -327,10 +333,11 @@ Application creation freezes the complete editing form through creation and
 authoritative-list confirmation; failed confirmation offers a list refresh,
 never another creation. Cancel and navigation remain available. Iterate Enter
 respects native IME composition before submission, draft clearing or closing.
-The shared [keyboard and view ownership](frontend-list-reconciliation.md#前台键盘归属)
+The shared [keyboard and view ownership](frontend-interaction-state.md#前台键盘归属)
 contract also keeps its Escape from interrupting a hidden chat.
 
-## 8. Verification and limits
+<a id="8-verification-and-limits"></a>
+## Verification and limits
 
 Code: [ApplicationManager](../../server/applications.py),
 [routes](../../server/routers/applications.py),
@@ -343,7 +350,3 @@ Public publishing, application version rollback and permanent closure of retaine
 development conversations are not part of this contract. Successful deletion
 retires the original writers; a later human instruction in retained history can
 create new work and recreate its directory.
-
-## Historical evidence
-
-The [original design and evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/applications.md) retain their original version and conditions. Current verification follows [testing.md](../testing.md); this document does not establish production deployment.

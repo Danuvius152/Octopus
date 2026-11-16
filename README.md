@@ -1,23 +1,21 @@
 # Octopus
 
-**Octopus is a personal agent platform.** It turns **Claude Code** and **Codex**
-into durable, always-on AI agents that run on your own machine and work for you
-around the clock — reachable from your phone or any browser.
+Octopus is a personal agent platform for Claude Code and Codex. Agents run on
+your own machine and are reachable from your phone or any browser.
 
 One install can serve more than one trusted person. Each **account** owns its
 agents, sessions, applications, credentials, memory and workspace. This is
 application-level account scoping on a shared host; native tools execute with
 the server's OS authority. See the [trust boundary](docs/implemented/multi-tenancy.md)
 and [remaining hardening](docs/plans/multi-tenancy-gaps.md). Signup is invite-only, and the
-first account (created with the installation's setup proof) is the admin who mints the
-invites. It stays a *personal* product either way: there is no cross-account
-collaboration, no shared team space — just several private ones side by side.
+first account (created with the installation's setup proof) is the admin who mints
+the invites. Accounts have separate business state; cross-account collaboration
+is outside the product's scope.
 
 Each agent keeps its own persistent setup (prompt, model, tools, schedules,
 connectors), keeps work running in the background across turns, and can reach
 real third-party APIs. Octopus uses Claude stream-JSON and Codex App Server for
-ordinary interaction, so there's **no extra API cost** — it uses your existing
-Claude and ChatGPT subscriptions (or an API key you attach).
+ordinary interaction, using the backend login or API key you attach.
 
 ## How It Works
 
@@ -32,160 +30,53 @@ Phone / Browser
 
 ## Features
 
-- **Agents** — Each agent is a durable assistant with its own system prompt,
-  model, credential, tool policy, and connectors. Agents own their sessions,
-  and schedules; edit an agent and its open sessions pick up
-  the change on the next turn. The sidebar is two-pane: pick an agent, see its
-  sessions.
-- **Two backends** — Run an agent on **Claude Code** or **Codex**, selectable
-  per session. Same chat UX, schedules, and in-app tools either way.
-- **Connectors** — Give agents OAuth access to third-party APIs as tools, set
-  up entirely from the browser: built-in **GitHub** and **Gmail**, or define a
-  **custom** connector for any OAuth2 API. Enabled per agent; client config +
-  tokens encrypted at rest; the OAuth redirect URI is derived from your request
-  so it works behind a tunnel. ([setup guide](docs/connectors-setup.md))
-- **Credentials** — Store backend API keys / OAuth logins in-app, encrypted at
-  rest (Fernet, under your account's key), and attach them per agent. Only an
-  absent explicit binding can use the CLI's host login; an invalid explicit
-  binding fails instead of silently changing identity.
-- **Accounts & isolation** — Multiple trusted people on one install, with
-  account-scoped business state. Accounts sign in with a username + password (scrypt-hashed);
-  signup is **invite-only** (admins mint codes with a use count and TTL). Every
-  owned row — sessions, agents, applications, credentials, connectors, schedules
-  — carries a `user_id`; each account's secrets are encrypted under a
-  **per-user key** wrapped by the installation master key. This does not provide
-  an OS sandbox or protection from the operator. A session's working-directory
-  selection is **confined** to the
-  account's own workspace (a relative path means "inside my workspace"; admins
-  can grant extra roots), and each account gets its own concurrency quota.
-  Admin surface: invites, disable/enable people, operator-only Monitor. An empty
-  installation creates its first administrator and owned default agent through
-  **setup**. User business stays closed until an account bearer is available;
-  setup refuses retained business data.
-  Design: [`docs/implemented/multi-tenancy.md`](docs/implemented/multi-tenancy.md).
-- **Run from anywhere** — One command serves the API and web UI on a single
-  port; reach it from any browser or phone. `octopus serve --tunnel` gives
-  instant public HTTPS via Cloudflare Tunnel. Session-bearer auth that a browser
-  or phone remembers for 30 days; HTTPS/WSS behind tunnels and reverse proxies.
-- **Background & scheduled work** — Agents fire off shell commands that run in
-  the background **across turns** (the result arrives as a follow-up turn), and
-  recurring scheduled prompts run per agent into fresh, auto-archiving sessions.
-- **Codex context meter** — The ring beside Attach file shows remaining context
-  from the latest native root sample. Open its read-only details for tokens,
-  model and sampling information. Unknown or stale data stays explicit;
-  automatic compaction and model/credential changes update its validity.
-- **Agent-to-agent collaboration** — One agent can delegate to another by
-  name: "ask Vera to review this file" spawns Vera in her own session
-  under her own agent config (credentials, memory, tools, even a different
-  backend — `claude-code` agent can delegate to a `codex` agent), and her
-  reply lands back in the caller's session as a follow-up turn. The
-  model:
-  - **The principal-chain rule.** Every session has exactly one *caller*
-    (the human for root sessions, the parent agent's session for
-    delegations). Questions and replies always travel one hop — to the
-    caller. If Vera doesn't know something, she asks her caller; if the
-    caller is another agent and *it* doesn't know, it asks *its* caller;
-    only the top of the chain (the human) ever sees a question that
-    propagated all the way up.
-  - **Async by default**, like background tasks. The model calls
-    `mcp__ask_agent__ask`, gets a `delegation_id` immediately, ends its
-    turn; the reply (`[agent-reply:Vera …]`) arrives as a new turn when
-    Vera finishes. Multiple delegations in flight at once give you
-    parallel fan-out for free.
-  - **Same-session follow-ups** for iteration. Calling `ask` again with a
-    prior `delegation_id` continues that child session, so the delegated
-    agent keeps her own transcript for review rounds instead of starting
-    cold.
-  - **Cascade-cancel + nested chains.** Octo → Vera → Pete is supported
-    (depth-3 cap with cycle detection); cancelling Vera also cancels
-    Pete. Chat UI renders three card types — the in-flight delegation,
-    the reply when it lands, and a question that travelled back to you
-    — and the sidebar surfaces hidden delegation sessions on demand.
-  - Design: [`docs/implemented/agent-collaboration.md`](docs/implemented/agent-collaboration.md).
-- **In-app tools** — Every agent gets MCP tools Octopus injects: a
-  **background runner**, a structured **ask-the-user** prompt rendered as
-  a multiple-choice form in the UI, and the agent-to-agent **delegation**
-  tools described in the previous bullet.
-- **In-app file viewer** — `/showme <reference>` opens a file from the
-  session's working directory in a browser modal — markdown rendered,
-  images/PDFs inline, code highlighted. Exact paths short-circuit (no
-  model call); fuzzy references like `the readme` are resolved by a
-  one-shot model call that reads recent conversation. Browser-only by
-  design — the agent never opens files on its own, since it can't tell
-  whether anyone is at the screen.
-- **Built for long sessions** — Real-time WebSocket streaming with collapsible
-  tool blocks; work keeps running if the browser disconnects and re-syncs on
-  reconnect (with a `POST /api/sessions/{id}/reset` escape hatch); mid-turn
-  interrupt (Esc) + message queue; virtualized, lazy-loaded chat that stays
-  light on thousand-message sessions.
-- **Session branching** — Two commands for exploring alternatives without
-  losing context:
-  - **`/rewind`** — rewind a conversation to any prior user message and
-    re-issue it (edited, redone, or replaced). A sidebar tree shows branches; a
-    confirm popover discloses side effects (file edits, bg tasks, irreversible
-    tool calls) and optionally reverts file edits via `git stash` when the
-    working tree is clean. Design:
-    [`docs/implemented/session-rewind.md`](docs/implemented/session-rewind.md).
-  - **`/fork [name]`** — duplicate the **current** session onto an independent
-    full copy of its working directory, leaving the original untouched. The fork
-    resumes the real conversation history (native transcript copy), so the model
-    sees full context. Design:
-    [`docs/implemented/session-fork.md`](docs/implemented/session-fork.md).
-- **Native deep research** — `/research <question>` (or the
-  `mcp__research__deep_research` MCP tool, which agents can call themselves)
-  starts a multi-phase Octopus-orchestrated research job: scope decompose →
-  parallel web-search sub-turns per angle → dedup + rank → adversarial verify →
-  final synthesis into a cited report. Octopus owns the fan-out,
-  concurrency limits, cancellation, and persistence; web access comes from the
-  harness's own native tools (`WebSearch`/`WebFetch` for Claude; `web_search` for
-  Codex). A `ResearchCard` in the chat tracks phase progress and exposes a cancel
-  button; the final report arrives as a follow-up turn the agent can act on.
-  Design: [`docs/implemented/native-deep-research.md`](docs/implemented/native-deep-research.md).
-- **Applications** — Ask an agent to build you a web app and it lands in the
-  sidebar. Describe what you want, pick the agent, and it writes a
-  self-contained static site into a directory Octopus owns inside your account's
-  workspace; the moment the entry page exists, the app
-  renders in the main pane like a browser tab. Ask for changes right from that
-  pane — each request is another turn in the same build session, so the agent
-  keeps its context and the frame reloads itself when the rebuild lands. An app
-  that needs a server gets one: drop an executable `start.sh` at its root and
-  Octopus allocates a port, runs it, proxies `/apps/{id}/api/*` to it and stops
-  it when idle — with the app's own state in a directory a rebuild never
-  touches. A running app can also hold conversations with your agents through
-  its own scoped token.
-  Design: [`docs/implemented/applications.md`](docs/implemented/applications.md),
-  [`application-backends.md`](docs/implemented/application-backends.md),
-  [`app-agent-access.md`](docs/implemented/app-agent-access.md).
-- **Per-agent memory** — Each agent has its own memory directory that both
-  harnesses write to and read back across sessions, so an agent accumulates what
-  it learned about your setup instead of starting cold every time. Claude's
-  native auto-memory is pointed at it; Codex is told where it is. Auth and
-  `--resume` transcripts are untouched by this.
-  Design: [`docs/implemented/memory.md`](docs/implemented/memory.md).
-- **Native sub-agents, surfaced** — When a model spawns its own helpers
-  (Claude Code's `Task`, Codex's `spawn_agent`), the run shows up as a live card
-  with status and token counts rather than a tool call that sits there. An
-  Octopus agent can also bring its own named sub-agents.
-  Design: [`docs/implemented/native-subagents.md`](docs/implemented/native-subagents.md).
-- **Monitor** — A page for what the system actually did: request and turn
-  counts, error rates, per-process memory (PSS, so shared pages are not counted
-  twice), database and WAL size. Sampled continuously, kept 30 days, and an
-  empty section says "nothing recorded" rather than rendering blank — a blank
-  panel reads as a clean bill of health.
-- **Encryption at rest** — Secrets ride a key hierarchy: a server-held **master
-  key** wraps each account's data-encryption key (DEK), which encrypts that
-  account's credentials and connector tokens. A password only authenticates;
-  changing it preserves the DEK and can revoke other devices' bearers. Losing
-  the master key or the wrapped DEK makes the account's secrets unreadable.
-- **Local handoff** — `octopus handoff` imports local Claude Code sessions;
-  `octopus pull` exports a session as JSONL for local `claude --resume`.
-- **Persistence** — SQLite (WAL, batched commits per turn); accounts, invites,
-  sessions, messages, agents, credentials, connectors, and schedules survive
-  restarts.
+- Agents have their own prompt, model, credentials, tools, connectors and
+  schedules. Open sessions pick up saved agent changes on the next turn.
+  Claude Code and Codex support the same chat surface, with backend-specific
+  execution capabilities described in the [Harness contract](docs/implemented/harness-layer.md).
+  Both use one [per-agent memory directory](docs/implemented/memory.md).
+- Accounts use invite-only signup, password authentication, account-scoped
+  records, workspace selection and concurrency quotas. Credentials and connector
+  tokens are encrypted under an account key wrapped by the installation master
+  key. An invalid explicit credential binding fails instead of switching to the
+  host login. See [account boundaries](docs/implemented/multi-tenancy.md) and
+  [connector setup](docs/connectors-setup.md) for GitHub, Gmail and custom OAuth2 APIs.
+- Conversations stream over WebSocket, reconnect after browser disconnects,
+  support interruption and queued input, and load long histories on demand.
+  `/showme` opens local files in a browser viewer. `/rewind` branches from a prior
+  message; `/fork` copies the current workspace and supported native history.
+  Side effects and capability limits are covered by the
+  [rewind](docs/implemented/session-rewind.md) and
+  [fork](docs/implemented/session-fork.md) contracts.
+- Background commands return across turns. Scheduled prompts use a live origin
+  session when available or a temporary session otherwise. Structured questions
+  and named-agent delegations connect work back to its caller; follow-up rounds
+  can reuse the delegated session. See [background work](docs/implemented/background-tasks.md),
+  [schedules](docs/implemented/scheduled-runs.md) and
+  [collaboration](docs/implemented/agent-collaboration.md) for delivery and cancellation.
+- `/research` and the research tool produce cited reports using parallel native
+  web research, verification and synthesis. The
+  [research contract](docs/implemented/native-deep-research.md) owns its phases,
+  cancellation and persistence. [Native helper cards](docs/implemented/native-subagents.md)
+  expose status and token observations from the model runtime.
+- Applications render browser-loadable static pages and can use a supervised
+  backend for server work. Rebuilds preserve their separate data directory;
+  running apps can converse with agents using an application-scoped token.
+  See [applications](docs/implemented/applications.md),
+  [backend lifecycle](docs/implemented/application-backends.md) and
+  [agent access](docs/implemented/app-agent-access.md).
+- The Codex context meter shows the latest valid native root sample, keeping
+  stale or unknown readings explicit. The operator's Monitor shows request,
+  model-performance, process and database observations. See the
+  [performance contract](docs/implemented/codex-performance-monitor.md).
+- SQLite persists business state across restarts. Local CLI handoff imports
+  Claude sessions, and pull exports supported captured history. One port serves
+  API and UI; Cloudflare Tunnel provides optional remote HTTPS access.
 
 ## Quick Start
 
-The resolved Python snapshot targets CPython 3.14.4 on Linux x86_64. For another
+Python 3.12 is the declared minimum. The resolved Python snapshot targets
+CPython 3.14.4 on Linux x86_64. For another
 supported Python/platform combination, resolve and verify its own snapshot using
 the [environment guide](docs/local-wsl.md#环境重建).
 
@@ -233,49 +124,27 @@ Install development dependencies with
 constraint also applies inside pip's isolated build. Install into an isolated
 environment when a running service shares the existing venv.
 
-For a managed Linux/WSL installation, `scripts/setup-services.sh` previews a
-systemd user unit. After validation and natural drain, stop the existing
-service and run it with `--apply` to bind the configured data paths and install
-the unit. Setup never stops or starts a service. Use `systemctl --user start
-octopus.service` after installation; subsequent `octopus serve` calls use that
-unit. Configure ports, paths and tunnel settings in its environment before
-rerunning setup; conflicting CLI/environment settings are rejected.
-Setup captures the effective settings, including shell overrides, in the
-private `*.service.env` file beside the installation database (mode 0600).
-The unit and application both read that file; secrets are absent from the unit
-text. Change setup inputs and rerun setup after natural drain to update the
-service configuration. Setup rejects an outdated setup proof instead of
-replacing the active configuration.
-For `--manager=system`, run setup as `--service-user`; sudo is used only to
-install the unit and reload systemd, keeping private data owned by that user.
-
-The managed server owns an installation lock before recovery, requires a
-single main process in the configured unit, and rejects reload/multiple
-workers and direct ASGI launches outside that unit. `/health` reports liveness;
-`/ready` returns 200 only after startup recovery. Fresh standalone development
-remains available with isolated database, Wiki, uploads, applications, keys and
-provider homes. It does not provide systemd's cross-process cleanup guarantee.
-Isolation includes the default working directory, `CODEX_HOME` and `CLAUDE_CONFIG_DIR` (or their
-usual home-directory locations), as well as per-credential homes. A vault body
-range has one authoritative state directory; another account or installation
-cannot register the same root, an ancestor, or a descendant. Existing conflicting
-registrations block those writers before creating ownership references; opening
-order never selects an owner. Startup rejects retained first-account handoff
-evidence before preparing keys or business storage; preserve it for diagnosis
-using its original protocol version. Current startup does not adopt or move it.
-Range ownership assumes one mount namespace and canonical directory tree;
-bind-mount aliases and separate mount namespaces are outside this guarantee.
-If a vault root is offline, retained recovery status, saved plans and evidence
-exports remain readable. Planning and applying recovery require the live root
-and an admitted recovery owner.
-Moving an existing standalone install requires stopping and confirming all its
-old execution has ended before the first managed start.
+For a managed Linux/WSL installation, start with
+`scripts/setup-services.sh` in preview mode and follow the
+[installation lifecycle](docs/implemented/installation-lifecycle.md) and
+[local service procedure](docs/local-wsl.md#服务管理) before applying it. An
+existing installation requires validation, natural drain and confirmation that
+old execution has ended. Managed installations use their configured unit and
+reject direct ASGI, reload and multiple-worker launches. Startup compatibility,
+retained evidence and recovery follow the
+[storage contract](docs/implemented/current-storage-format.md).
 
 Compatibility bounds live in `pyproject.toml`, including `mcp>=1.30,<2` for
 the supported FastMCP API. Validate dependency updates in a separate virtual
 environment with `pip check`, server import and MCP/account isolation tests.
 
 ### Development mode
+
+These commands are for a separate standalone development environment. First
+configure isolated database, Wiki, uploads, applications, keys, workspace and
+provider homes (`CODEX_HOME`, `CLAUDE_CONFIG_DIR` and per-credential homes) using
+the [environment guide](docs/local-wsl.md#环境重建). Never point a reload server
+at the managed installation's state or provider homes.
 
 ```bash
 # Terminal 1 — backend (hot-reload)
@@ -302,18 +171,18 @@ local transcript. Supported formats and failure boundaries are described in the
 
 ## Tech Stack
 
-**Backend**: Python 3.12 · FastAPI · `claude` + `codex` CLI subprocesses ·
+**Backend**: Python 3.12+ · FastAPI · `claude` + `codex` CLI subprocesses ·
 aiosqlite · APScheduler · cryptography (Fernet) · MCP namespaces served
 in-process over streamable-HTTP
 **Frontend**: React 19 · TypeScript (strict) · Vite · zustand · Tailwind v4 · Radix
 
 ## Testing
 
-This WSL installation defaults to Codex. Claude is currently unavailable;
-Claude-only and mixed-provider live tests are not run and must not be reported
-as passed. Offline tests still cover both backends. See the
-[local validation scope](AGENTS.md#backend-validation-scope) before running the
-provider-specific CLI/browser checks.
+Offline correctness covers both backends. Live checks depend on the selected
+provider and isolated credentials; consult the
+[validation policy](docs/testing.md#markers-providers-and-isolation) and
+[local setup](docs/local-wsl.md#live-凭据与网络) instead of assuming a CLI is
+installed or logged in. Report unexecuted provider coverage accurately.
 
 Use [`testing.md`](docs/testing.md#test-coverage) for suite commands, provider
 selection and isolated test state. `./scripts/check.sh` runs the code-commit

@@ -29,7 +29,7 @@ manager 在任何 OS 命令执行前登记原启动责任并提交任务行；�
 stdout、stderr 并发读取，各保留最多 200 KiB 的尾部，超限丢弃最早字节并在
 最终文本插入截断标记，`truncated` 显式告知信息不完整。UTF-8 解码使用替代字符；
 这里不承诺还能读取被丢弃的原字节。REST 详情提供保留的完整尾部，事件/卡片可
-只带摘要；浏览器合并规则归[辅助读取](frontend-list-reconciliation.md#会话打开与辅助数据)。
+只带摘要；浏览器合并规则归[辅助读取](frontend-session-observation.md#会话打开与辅助数据)。
 
 `idle_timeout_seconds` 默认 60；stdout 或 stderr 任一流首次产生字节后，才开始
 以两流最近一次输出为基准检查共同静默。0 明确禁用 idle 检查。
@@ -90,5 +90,4 @@ cleanup，后续退休传播原错误，不以移除引用制造关停成功。
 [返回适配](../../server/sessions/turns.py)。
 `tests/test_bg_tasks.py`、`tests/test_bg_session_return.py` 和相关 BG 生命周期测试
 覆盖持久接纳、超时／输出、迟到 spawn、后代退休、终态返回及失败保全。
-测试选择与通过证据复用见[testing.md](../testing.md)；这里描述代码合同，不声明
-本次重跑了产品测试或生产已发布。
+测试选择与通过证据复用见[testing.md](../testing.md)。

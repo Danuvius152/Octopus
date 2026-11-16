@@ -54,7 +54,7 @@ Archive and hard deletion both reject a failed account-scoped lookup before
 mutation. `delete_agent` requires explicit account scope and returns the authorized
 original row for the deletion event. Missing or foreign targets cannot reach row
 or memory deletion. The detailed boundary and regression evidence belong to
-[account ownership](multi-tenancy.md#5-business-ownership).
+[account ownership](multi-tenancy.md#business-ownership).
 
 ## Related contracts and verification
 
@@ -70,7 +70,3 @@ Implementation: [AgentManager](../../server/agent_manager.py),
 Regression entry points: `tests/test_agents_api.py`,
 `tests/test_agent_configuration_startup.py`, `tests/test_agent_credential_bindings.py`
 and `tests/test_model_settings.py`.
-
-The [original refactor](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/agent-refactor.md)
-records the introduction of agents. Its single-user baseline, migration SQL,
-bridge rollout and then-future memory/connectors are historical, not current work.

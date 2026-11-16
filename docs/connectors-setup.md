@@ -43,11 +43,8 @@ exchange even if the callback arrives through another address.
 
 ## GitHub
 
-Provider-console steps and token/review policies in the GitHub and Gmail
-sections are inherited observations whose original date was not recorded.
-They were not revalidated during the 2026-11-02 documentation reorganization.
-Check the provider's current console and policy before using them; the
-redirect URI selection and per-agent enablement above describe Octopus.
+Register the OAuth client with the provider and copy the redirect URI displayed
+by Octopus. Provider console labels and approval policies may differ by account.
 
 In the Set up dialog, follow the steps (link goes to GitHub Developer settings):
 
@@ -56,12 +53,13 @@ In the Set up dialog, follow the steps (link goes to GitHub Developer settings):
 3. Register, then **Generate a new client secret**.
 4. Paste the Client ID + secret into Set up → **Save** → **Connect**.
 
-Octopus requests scopes `repo` and `read:org`. In the recorded GitHub setup,
-classic OAuth-App tokens did not expire and needed no periodic refresh.
+Octopus requests scopes `repo` and `read:org`. Expiry and refresh depend on the
+provider token response and grant settings; Octopus does not assign a universal
+GitHub token lifetime.
 
 ## Gmail (Google Cloud)
 
-Gmail is fussier — three things trip people up, in order:
+Complete these Google Cloud configuration steps:
 
 1. **Enable the Gmail API** for your project:
    `console.cloud.google.com/apis/library/gmail.googleapis.com` → **Enable**.
@@ -74,12 +72,11 @@ Gmail is fussier — three things trip people up, in order:
    credentials → **OAuth client ID → Web application** → add the redirect URI
    under **Authorized redirect URIs**. Paste the Client ID + secret into Set up.
 
-Octopus requests scope `gmail.modify` (read, label, draft, send). In the recorded
-setup, Google's "Testing" status caused refresh-token expiry after about 7 days;
-publishing and verification affected that policy. Treat those as historical
-observations, not a current expiry or review guarantee. If Octopus shows
-**needs reconnect**, reconnect to re-authorize. Transient refresh failures do
-not by themselves invalidate the grant; see
+Octopus requests scope `gmail.modify` (read, label, draft, send). Testing,
+publishing and verification settings can affect provider grant restrictions.
+Use the provider response and current grant settings to diagnose expiry. If
+Octopus shows **needs reconnect**, reconnect to re-authorize. Transient refresh
+failures do not by themselves invalidate the grant; see
 [token failure classification](implemented/connectors.md#token-failures-and-delayed-rejection).
 
 <a id="custom-connectors-any-oauth2-api"></a>

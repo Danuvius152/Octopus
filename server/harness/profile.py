@@ -256,7 +256,7 @@ class RuntimeProfile:
     # THIS backend's CLI error output (harness-credential-reauth.md §3). A
     # failed turn whose combined error text contains any of them is treated
     # as an expired/invalid credential; `Harness.is_auth_error` matches them.
-    # Empty tuple = no reactive auth detection for this backend.
+    # Empty tuple disables text matching; typed auth codes still apply.
     auth_error_patterns: tuple[str, ...] = ()
     transient_error_codes: tuple[str, ...] = ()
     # Web search/fetch capability for native deep research (§4); None = the

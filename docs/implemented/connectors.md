@@ -50,7 +50,7 @@ choosing a request host. No additional resolver, localhost fallback or persisten
 login state is maintained. Operator instructions belong to
 [Connector setup](../connectors-setup.md).
 
-The browser's [configuration draft lifetime](frontend-list-reconciliation.md#connector-配置表单实例)
+The browser's [configuration draft lifetime](frontend-interaction-state.md#connector-配置表单实例)
 owns setup reads and save tails independently of OAuth login observation.
 
 ## OAuth and lifecycle
@@ -88,10 +88,9 @@ replacement installation or partial secret update. A delayed resource rejection
 still uses the [original grant comparison](#token-failures-and-delayed-rejection),
 so it cannot mark a replacement authorization invalid.
 
-Archive, delete, ownership and refresh outcomes are checked at their current
-boundaries. The old second-pass audit's proposed provider revocation, host-login
-policy and other mechanisms must not be inferred from this contract; remaining
-proposals are [separately scoped](../plans/multi-tenancy-gaps.md).
+Archive, delete, ownership and refresh outcomes are checked at their actual
+boundaries. Remaining account-policy gaps are
+[separately scoped](../plans/multi-tenancy-gaps.md).
 
 A custom definition has an opaque process-local identity owned by the manager.
 Pending login retains the original connector captured before the first client
@@ -139,13 +138,10 @@ ID is refused without replacing the original authorization; ordinary Connect
 may create that distinct identity. Provider identity does not merge installations
 belonging to different Octopus accounts.
 
-Current main-format constraints and publication verification require this one
-representation. All interpretable historical `login:id` keys must cross the
-[finite offline handoff](current-storage-format.md#github-identity-and-finite-publication-handoff)
-before opening the new writer, including rows never actively reconnected.
-Conflicting or unknown source identities block publication for an explicit
-decision. Startup, ordinary reads, Connect and account import neither guess an
-old-key suffix nor rewrite legacy rows online.
+The [current storage format](current-storage-format.md) requires canonical
+numeric provider identities. Conflicting or unknown source identities block
+publication for an explicit decision. Startup, ordinary reads, Connect and
+account import neither guess an old-key suffix nor rewrite legacy rows online.
 
 ## Browser OAuth operations
 
@@ -446,8 +442,8 @@ routes, Context, three consumers and SQLite across provider HTTP failures,
 authorization replacement, deletion/disable and concurrent calls sharing Context.
 `tests/test_connector_manager.py` covers owned refresh across cancellation before
 response, at the save lock and during COMMIT, sharing, shutdown and real save
-failures. The previous waiter-owned path lost a received rotation when its caller
-left; regressions now reopen SQLite and require the saved original grant.
+failures. Refresh ownership survives waiter cancellation; regressions reopen
+SQLite and require the saved original grant.
 `tests/test_connector_custom_lifecycle.py` and the router tests cover deletion,
 rollback, binding order, same-slug replacement and stale client writers. Explicit
 NULL-identity reconnect also goes through enabled-Agent scope and the actual
@@ -459,7 +455,3 @@ endpoints and secrets, through the real HTTP exchange/refresh implementation:
 stale callbacks send nothing, in-flight old requests use only old credentials,
 and their late results cannot bind or save a replacement. These are local protocol
 and persistence checks, not live OAuth grants.
-
-The [original design](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/connectors.md)
-contains the superseded per-session model, Notion proposal and implementation
-phases. Those are historical evidence, not outstanding work or current contracts.

@@ -2,7 +2,22 @@
 
 > **Status:** implemented — 同账户异步协作、原回执完成、独立返回诊断与精确轮次取消。
 
-## 1. Invocation and identity
+## Identity and completion points
+
+| Fact | Identity and authority |
+| --- | --- |
+| Conversation | `delegation_id` names the retained child session. |
+| Work round | `work_id` names one initial/follow-up round. |
+| Accepted input | The original submission/request and its receipt prove admission. |
+| Execution | The actual carrier request and attempt prove which execution processed that input. |
+| Child completion | The original committed terminal/outcome closes that execution. |
+| Return admission | The stable terminal delivery input proves handoff to the parent. |
+| Parent processing | That input's carrier, original completion and acceptance evidence close the parent's owned-return obligation. |
+
+These facts do not prove the model understood or used every returned detail.
+
+<a id="1-invocation-and-identity"></a>
+## Invocation and identity
 
 `mcp__ask_agent__ask` accepts exactly one of `name` (new child conversation) and
 `delegation_id` (new round in the retained child). It returns immediately; results,
@@ -23,13 +38,10 @@ terminal preceding round. It can explicitly restore archived history but cannot
 reuse a hard-deleted child. Concurrent independent requests use separate children.
 The two modes share one tool to avoid a redundant model-facing interface.
 
-Dynamic admission already converges at `_require_caller`: initial work and
+Dynamic admission converges at `_require_caller`: initial work and
 follow-ups recheck the original caller at their actual boundaries. They retain
 different child-creation, compare-and-set and rollback preconditions. Request
 formatting also resolves file paths with I/O; it is not a shared pure formatter.
-Keep these rules in their existing entry points rather than introducing another
-validator/formatter service that callers must coordinate.
-
 Initial prompt/reference preparation finishes before creating a child, publishing
 its round or registering parent responsibility. File resolution uses `resolve`
 and `stat`: missing files retain a not-found annotation; symlink loops,
@@ -55,7 +67,7 @@ results. A round can span multiple executions; the first model output is not a
 deadline that permits ignoring those returns. Return admission proves handoff,
 not the receiving model's semantic understanding.
 
-The protocol describes the conditional [reply selection](#53-reply-delivery-the-original-request-completion):
+The protocol describes the conditional [reply selection](#reply-delivery-the-original-request-completion):
 valid final-answer references select only that answer; records without a reference
 retain their associated-fragment policy. It promises neither all commentary nor
 tool output. Tools and background work can contribute, but necessary results must
@@ -64,7 +76,8 @@ not resend an old reply; work that cannot be returned within the round must be
 reported as a limitation with a concrete follow-up request. Editing a saved
 persona or a documentation snapshot does not change this runtime protocol text.
 
-### 5.2 Sub-session lifecycle
+<a id="52-sub-session-lifecycle"></a>
+### Sub-session lifecycle
 
 A delegation child session keeps the ordinary session retention policy:
 
@@ -122,7 +135,7 @@ A delegation child session keeps the ordinary session retention policy:
   the model's semantic use of the reply.
 
 Otherwise: same harness, same MCP set, same credentials, same memory
-dir as Vera's other sessions. Memory writes from concurrent
+dir as the target Agent's other sessions. Memory writes from concurrent
 delegations to the same agent share the agent's memory dir — see
 [concurrency and rationale](#concurrency-rationale-and-verification).
 The split is reflected in `SessionManager`:
@@ -132,9 +145,10 @@ post-terminal archival (declared in [session base](../../server/sessions/base.py
 
 A persisted running round alone must not be read as proof of child execution.
 It can precede input admission, whose confirmed refusal and unknown outcome
-follow the [invocation rules](#1-invocation-and-identity).
+follow the [invocation rules](#invocation-and-identity).
 
-### 5.3 Reply delivery: the original request completion
+<a id="53-reply-delivery-the-original-request-completion"></a>
+### Reply delivery: the original request completion
 
 Each delegation round is a `DelegationRunState` with a stable `work_id`,
 parent/target identities and a confirmed round state. A follow-up creates a
@@ -242,11 +256,12 @@ callbacks and processes retain their original retirement owners.
 The broadcast listener only forwards `question_request` for the captured
 work and retires that question's relay observation on answer/close once its
 required diagnostic recording is settled.
-`assistant_text`, `result` and `error` are no longer parallel delegation
-completion writers. Progress and history remain visible through the normal
+`assistant_text`, `result` and `error` do not write delegation completion.
+Progress and history remain visible through the normal
 session surfaces.
 
-### 5.5 `mcp__ask_agent__answer` — closing the loop
+<a id="55-mcp__ask_agent__answer--closing-the-loop"></a>
+### `mcp__ask_agent__answer` — closing the loop
 
 The answer tool on the `ask_agent` server posts to
 `POST /api/sessions/{parent_sid}/delegations/{child_sid}/answer` with
@@ -333,7 +348,8 @@ as `needs_input`. Ordinary queued work remains paused; Resume cannot replay the
 expired solver. Stop during an already running solver uses the ordinary
 interruption/receipt path. No cross-Owner join or second cleanup task is added.
 
-### 5.6 `mcp__ask_agent__cancel` and `mcp__ask_agent__list`
+<a id="56-mcp__ask_agent__cancel-and-mcp__ask_agent__list"></a>
+### `mcp__ask_agent__cancel` and `mcp__ask_agent__list`
 
 `mcp__ask_agent__cancel(delegation_id, reason?)` →
 `POST /api/sessions/{parent_sid}/delegations/{child_sid}/cancel`.
@@ -389,9 +405,4 @@ Regression entry points: `tests/test_delegations.py` and the shared
 reused-child follow-up, seal/admission races and concurrent setup withdrawal;
 `test_delegation_state.py` covers one carrier processing multiple confirmed inputs.
 Native subagents have a separate [observation contract](native-subagents.md).
-Per-agent delegation allowlists and automatic memory-write locking are outside
-the current contract; adding them requires a concrete policy or concurrency need.
-
-## Historical evidence
-
-The [original design and evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/agent-collaboration.md) retain their original version and conditions. Current verification follows [testing.md](../testing.md); this document does not establish production deployment.
+There is no per-agent delegation allowlist or automatic memory-write lock.

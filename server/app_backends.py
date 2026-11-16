@@ -6,10 +6,9 @@ environment variables, runs the script, waits for the port to accept, and
 proxies `/apps/{id}/api/…` to it. It never learns what Python or Node is —
 `install.sh` does that, and the agent that wrote the app wrote it.
 
-What lives here is the lifecycle: install, lazy start, readiness, idle stop,
-restart on rebuild, crash reporting, and the logs that make a dead backend
-debuggable. Routing lives in `routers/applications.py`; the directory layout
-and the reasoning behind it are in the plan doc §3.
+This module owns install, lazy start, readiness, idle stop, restart on rebuild,
+crash reporting and logs. Routing lives in `routers/applications.py`; directory
+ownership and the host trust boundary are in docs/implemented/application-backends.md.
 """
 
 from __future__ import annotations
@@ -39,10 +38,8 @@ from .process_groups import drain_process_pipes, wait_group_exit
 
 logger = logging.getLogger(__name__)
 
-# Backend states, the second axis alongside the build status. An app can be
-# perfectly built with a crashed backend, or mid-rebuild while the old backend
-# still serves — one enum covering both would be wrong in one of those cases
-# (plan §9).
+# Backend state is independent of build status: a completed build may have a
+# failed backend, and an old backend may still serve during a rebuild.
 ABSENT = "absent"
 INSTALLING = "installing"
 STOPPED = "stopped"
@@ -103,10 +100,9 @@ def _port_accepts(port: int) -> bool:
 def script_env(app_id: str, app_dir: str, *, port: int | None = None) -> dict[str, str]:
     """The environment a backend script runs with.
 
-    Deliberately NOT `os.environ.copy()`. The server's environment holds the
-    Octopus auth token, credential material and tunnel config; a backend has no
-    business seeing any of it, and inheriting it wholesale is invisible until
-    it isn't (plan §4).
+    Only the listed variables are passed. The server's auth, credentials and
+    tunnel configuration stay out of the child environment. This limits secret
+    inheritance; backend processes still run with the host user's OS authority.
     """
     env = {
         "APP_ID": app_id,

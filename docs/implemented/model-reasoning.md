@@ -21,12 +21,12 @@ and a cleared agent uses Normal. Speed never changes the model or effort.
 ## Persistence and precedence
 
 `agents.reasoning_effort` and `sessions.reasoning_effort` are nullable TEXT
-columns. Existing rows remain NULL. Each field resolves independently as
+columns. NULL means no override. Each field resolves independently as
 session override → agent default → CLI configuration. Session model, effort
 and credential bindings can be cleared to NULL and survive a restart.
 `service_tier` is a separate nullable TEXT column on agents and sessions;
 its precedence is session override → agent default → Normal, regardless of
-Fast preferences saved in the CLI. Existing rows therefore use Normal.
+Fast preferences saved in the CLI. NULL at both levels resolves to Normal.
 Archived detail, restore, archive replacement, rewind and full-copy forks
 preserve the settings along with their existing ownership and resume state.
 
@@ -46,8 +46,9 @@ session's inherited settings temporarily incompatible; that does not veto the
 save. The session keeps its original backend, history and native resume identity.
 Overrides are not automatically added or converted to preserve compatibility.
 
-The chat header and `/model` show the selected session's effective settings and
-each field's source. The dialog can change credential and model controls in one
+The chat header and `/model` open the same dialog, which shows the selected
+session's effective settings and each field's source. The header uses a short
+Model/effort/Fast label. The dialog can change credential and model controls in one
 atomic PATCH, including when both an inherited credential and effort are
 incompatible. Clearing a credential restores inheritance. Its draft catalog
 describes the draft credential; it does not replace the current effective-value
@@ -80,17 +81,14 @@ result was pending cannot admit research from its retained configuration copy.
 Context-affecting changes follow [context binding](#上下文样本与配置绑定).
 
 `resolve_credential_by_id` in [credentials.py](../../server/sessions/credentials.py)
-already serves ordinary sessions, Research, files and Agent operations. It owns
+serves ordinary sessions, Research, files and Agent operations. It owns
 the account/credential refresh task, shields it from an individual waiter's
 cancellation, conditionally commits refreshed secrets and rechecks authorization
 after waiting. Manager/database shutdown drains those original tasks. An explicit
 invalid binding never falls back to the host login.
 
-Keep these two narrow boundaries: configuration capture owns request values;
-credential resolution owns secret freshness and current authority. A combined
-configuration/credential service would move initialization and drain obligations
-without removing a rule from its existing consumers. Add new settings through
-the existing precedence, validation and capture paths.
+Configuration capture owns request values; credential resolution owns
+secret freshness and current authority.
 
 ## Runtime metadata and validation
 
@@ -128,10 +126,12 @@ business input. Fast maps to native `priority`; Normal is explicit `default`,
 so a resumed thread cannot retain its previous Fast setting. Model-only changes
 keep the effort binding; effort is not converted into another model. The
 independent exec adapter can render `-m` and TOML effort/tier overrides, but
-Research currently forwards only the model: its manager, orchestrator and both
-leaf entry points omit selected effort/tier. Capturing the configured session
-therefore does not prove those controls reach a Research execution; see
-[the current Research limitation](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler).
+Research forwards the captured model, `reasoning_effort` and `service_tier`
+through [manager](../../server/research/manager.py),
+[orchestrator](../../server/research/orchestrator.py) and both
+[leaf entry points](../../server/research/leaf.py), into `RunConfig` or
+`OneShotContext`. This establishes parameter transmission; provider adoption
+and effects require the corresponding backend evidence.
 One-shot schedule parsing and file-reference resolution pass the selected
 settings to the text worker. No global Codex config or saved agent row is rewritten.
 
@@ -229,8 +229,10 @@ unknown行不在每次重启反复抹掉后来取得的新有效样本。归档�
 unarchive先对齐；fork沿新会话/原生身份建立自己的适用范围，不继承当前百分比。
 完整备份、搬迁和有限转换范围见[存储合同](current-storage-format.md#complete-record-projections)。
 
-界面展示与 HTTP/WS 合并归[会话读取合同](frontend-list-reconciliation.md#会话打开与辅助数据)，
-锁版字段与时序依据见[协议记录](../reference/context-meter-compact-g0.md)。
+界面展示与 HTTP/WS 合并归[会话读取合同](frontend-session-observation.md#会话打开与辅助数据)，
+字段与时序由 [Codex 协议](codex-backend.md#native-compaction)和
+[Claude compact](harness-layer.md#claude-native-compaction)分别定义；原始 JSON
+样本保留于 `docs/reference/`，其版本不构成当前现场验证。
 
 ## Verification
 
@@ -259,7 +261,3 @@ child environment precedence, process replacement, a stable resume id and
 preserved history. Agent/session UI tests cover saving Claude effort independently
 of model selection. This coverage does not establish live Claude or DeepSeek
 model behavior; this installation's live release checks remain Codex-only.
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/model-reasoning.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

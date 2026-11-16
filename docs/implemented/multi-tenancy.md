@@ -153,7 +153,8 @@ these boundaries, including legal account fallback and master-key failure.
 Secret rotation, current storage and release preparation follow
 [storage handoff](current-storage-format.md), not old migration SQL.
 
-## 5. Business ownership
+<a id="5-business-ownership"></a>
+## Business ownership
 
 Agents, sessions, schedules, installations and applications carry account identity.
 Routes resolve account scope, and referenced ownership/current authority belong
@@ -216,10 +217,11 @@ settings still undergo current authorization at spawn/write boundaries.
 
 Per-account turn limits and other admission limits are enforced by the owning
 execution paths. Host-default credential behavior must be read from the current
-resolver; this document does not promote the old audit's proposed host-login flag
-or global quota redesign to an implemented guarantee.
+resolver. Additional account policies belong to
+[remaining scope](../plans/multi-tenancy-gaps.md).
 
-## 6. Files and workspace
+<a id="6-files-and-workspace"></a>
+## Files and workspace
 
 `workspace.paths_for(user_id)` gives the account's workspace, agents, applications,
 attachments, large prompts and research roots. A new session without an explicit
@@ -299,7 +301,7 @@ This validates session directory selection. The local deployment runs trusted
 agents and applications under the host user; it is not an OS sandbox against
 hostile tenants or root. Per-tenant execution isolation would require a separate
 design. Application code, durable data and rebuildable dependencies have distinct
-[directory ownership](application-backends.md#3-three-directories-three-owners).
+[directory ownership](application-backends.md#three-directories-three-owners).
 
 ## 附件与长输入归属
 
@@ -342,14 +344,11 @@ or failure at the password, revocation and commit boundaries; `tests/test_auth_r
 checks real concurrent HTTP password changes, issuance races and the current-token
 exception. `tests/test_account_operations.py` uses driver/lock barriers and real
 SQLite trigger failures for atomic disable, proof invalidation, cancellation and
-restore/issuance ordering. The original same-proof race accepted both changes;
-the regression now requires one success and one conflict and checks subsequent
+restore/issuance ordering. Concurrent changes under the same proof require
+one success and one conflict; the regression checks subsequent
 login and bearer validity. `tests/test_attachments.py` covers upload and
 download of ASCII, Chinese and emoji filenames at the final byte boundary.
 
 SSO, self-service password recovery, billing and hostile-tenant sandboxing are
 not implied by account support. The current storage model validates a complete
 baseline; it does not replay the old first-account adoption/backfill workflow.
-The [original design](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/multi-tenancy.md)
-and [retired token rotation](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/token-rotation.md)
-remain historical evidence of those choices.

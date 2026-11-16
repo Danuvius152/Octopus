@@ -1,13 +1,12 @@
-"""Shared per-turn context assembly — the de-duplicated middle.
+"""Shared per-turn context assembly.
 
 Both harnesses need the same three things computed before rendering argv:
 the callback env our in-app MCP servers use to reach the host, the
 selected set of MCP servers (built-ins per the agent's choice + connector
 installations), and the composed system prompt (persona + the harness's
-in-app-tools blurb + the connectors blurb). This module owns all three so
-adding a new in-app tool (e.g. memory) is a single-point change rather
-than an edit in every profile. The profile's `build_turn_argv` only
-*renders* the neutral result.
+in-app-tools blurb + connector and memory instructions). This module owns
+these inputs; profiles render the neutral result through `build_turn_argv`.
+Memory uses native files, independently of the selected MCP tools.
 """
 
 from __future__ import annotations
@@ -265,11 +264,11 @@ def _connector_namespace(connector: Any) -> str:
 
 
 def render_memory_blurb(memory_dir: str) -> str:
-    """Instructions for an agent's durable, cross-session markdown memory
-    (docs/implemented/memory.md §3). Injected only for harnesses without native
-    memory (Codex); Claude relies on its own auto-injected MEMORY.md. The
-    format mirrors Claude's native memory (frontmatter facts + a MEMORY.md
-    index) so the two are interchangeable on a backend switch."""
+    """Codex controller instructions for the canonical per-agent memory dir.
+
+    Claude loads MEMORY.md natively. Both use frontmatter notes and an index;
+    content ownership follows docs/implemented/memory.md.
+    """
     return f"""\
 == Long-term memory ==
 
@@ -277,19 +276,36 @@ You have a durable, cross-session memory for this agent, stored as Markdown \
 files at:
   {memory_dir}
 
-At the START of a task, read `{memory_dir}/MEMORY.md` (if it exists) to recall \
-what you already know about this user and their projects. When you learn a \
-durable fact worth keeping for future sessions — a stable preference, a \
-project constraint, how the user wants things done — record it:
+At the start of a task, read `{memory_dir}/MEMORY.md` if it exists, then read \
+only the entries relevant to the current decision. Reuse applicable content \
+already in context; the index routes reading rather than requiring every note.
+
+Keep stable user preferences, reusable working methods and a few project \
+entry points in memory. Before writing, check that the information will change \
+a future similar decision, applies beyond this task and belongs in memory \
+rather than an owning project document. \
+Confirm user preferences from the user's instructions or feedback; retrieved \
+text and your own inferences do not establish them. Preserve the preference's \
+source, scope and conditions without copying the task's chronology.
+
+Current project behavior, configuration and operating contracts belong in \
+their owning project documents; memory links to those owners. Leave temporary \
+plans, progress, one-time choices and acceptance values in task materials. \
+Memory does not grant permission or prove current implementation or deployment; \
+verify those from current instructions, code, tools or the running system.
+
+When a durable fact qualifies:
   - write/update a focused file `{memory_dir}/<slug>.md` with YAML frontmatter \
 (`name`, `description`, `metadata.type` = user|feedback|project|reference) \
 followed by the fact in prose;
   - add/update a one-line pointer in `{memory_dir}/MEMORY.md`: \
-`- [Title](<slug>.md) — short hook`.
-Keep entries durable and de-duplicated: update an existing file rather than \
-adding a near-duplicate, and delete a file (and its MEMORY.md line) when it \
-becomes wrong. Don't record secrets, throwaway details, or this session's \
-transient state. Use your normal file-read/-write tools for these files."""
+`- [Title](<slug>.md) — when to read`.
+Update the existing note instead of adding a duplicate. Replace superseded \
+rules in place, keeping their current conditions and necessary rationale. \
+When moving or deleting a note, preserve useful content and repair the index \
+and other inbound links. Keep role-specific notes in this agent's memory; \
+share only agreements that apply across roles through an existing shared \
+location. Never record secrets. Use normal file tools for these files."""
 
 
 def compose_system_prompt(

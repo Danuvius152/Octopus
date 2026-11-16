@@ -60,8 +60,7 @@ Compatible upgrades and alternate builds use the same path; unsupported required
 methods, configuration or response shapes fail through the existing preparation
 or protocol boundary, preserving input evidence. The [official App Server
 protocol](https://learn.chatgpt.com/docs/app-server) defines the integration surface.
-The 0.166.0 G0 observations remain a historical validation baseline, not a runtime
-requirement. This default does not rewrite saved agents, credentials, model
+This default does not rewrite saved agents, credentials, model
 settings or backend identities.
 There is no second transport execution or automatic fallback after a failure.
 
@@ -103,7 +102,7 @@ late proof and manual recovery rules belong to
 [the input contract](input-reliability.md#codex-native-input-evidence);
 [current storage](current-storage-format.md#publication-boundary) owns the format
 and finite publication handoff. Acceptance does not prove model consumption.
-For [first-input replay](session-rewind.md#532-history-replay-and-first-turn-state),
+For [first-input replay](session-rewind.md#history-replay-and-first-turn-state),
 it also does not prove recoverable history was saved. The adapter separately
 checks the returned native history path for the exact saved session/start-turn
 and sent user text. Missing, incomplete or incompatible storage retains replay
@@ -151,10 +150,6 @@ Research's empty MCP table means no Octopus injection; native extra MCP can stil
 be visible in the selected CLI. The leaf remains read-only with no ordinary history
 resume/fork. Claude strict config and the tool-free text API worker have their
 own [mode boundaries](harness-layer.md#instruction-assembly).
-The [0.166.0 observations](../reference/runtime-resource-boundaries-20261103.md#mcp-configuration-and-discovery)
-cover thread-scoped discovery, residual authentication fields and two identities
-using the same native home without config writes.
-
 ## Controller history cost
 
 Ordinary App Server tool guidance comes from `_OCTOPUS_SYSTEM_PROMPT_CODEX`
@@ -184,13 +179,8 @@ loop. Compacted replacement history can still contain a large JSON line.
 Controller, rollback and thread checks remain authoritative on every resume;
 there is no persistent sidecar or mtime/size cache.
 
-The [bounded experiment](../reference/runtime-resource-boundaries-20261103.md#controller-scan-and-native-preparation)
-found no scan bottleneck requiring a cache in its ordinary 1–256 MiB samples.
-Native preparation reached the before-business boundary for 1–50 MiB; 256 MiB
-native resume exceeded the experiment's 512 MiB RSS stop and is not validated at
-that scale. The 20-second RPC timeout is per RPC, not an overall preparation SLA.
-These results do not establish production recovery latency or arbitrary large
-compacted-line safety.
+The 20-second timeout is per RPC, not an overall preparation SLA. Large
+history and compacted lines remain subject to actual memory and protocol limits.
 
 ## Native compaction
 
@@ -213,9 +203,13 @@ atomically install a reliable earlier recompute with its boundary; automatic
 items retain their completion-obligation policy. Effect survives failed or
 interrupted outcomes and finite Stop collection. Success without effect evidence
 is unconfirmed, never inferred no-op. Product chat keeps its messages plus a system
-maintenance outcome, with no final answer or copied summary. Version evidence is
-in [the G0 record](../reference/context-meter-compact-g0.md); product regressions
-use `tests/test_codex_compact.py`.
+maintenance outcome, with no final answer or copied summary. Product
+regressions use `tests/test_codex_compact.py`. The raw
+[`context-meter-compact-g0.json`](../reference/context-meter-compact-g0.json)
+retains 0.166.0/0.167.0 binary identities and contiguous protocol frames captured
+with a synthetic loopback provider. It proves frame shapes at that boundary,
+not a real-model result or deployment. ACK and state notifications have no
+required relative order; an empty compact ACK does not prove effect or no-op.
 Busy selection, pending-only cancellation and paused backlog remain with the
 original [input Owner](input-reliability.md#native-compaction-requests), rather
 than another backend queue.
@@ -248,9 +242,6 @@ ambiguous ImageGeneration retain conservative actual-result obligations;
 extension invocations are not excused by sharing a wire kind with sampling.
 Command, file-change, MCP and dynamic-tool results remain necessary. A cancelled
 collaboration wait may lack completion without proving every child finished.
-The [0.166.0 observation and source evidence](../reference/codex-app-server-g0.md#上游流重试遗留的未完成消息)
-explain why abandoned sampling does not make an otherwise complete root fail.
-
 The driver validates identity and supported payload before accounting or proof
 effects, including correlated userMessage acceptance when an ACK is missing.
 Complete snapshots without a start are saved; normalized duplicates are
@@ -265,15 +256,13 @@ If the accepted root has an unfinished `commandExecution`, retirement sends
 The same reader waits for the original thread/turn/item's complete event within
 the existing 0.5-second protocol-interrupt grace. The cleanup ACK only confirms
 submission; it cannot replace command output, exit code or complete-item evidence.
-The 0.166.0 observation established why this order matters: EOF detaches the
-notification subscriber before native shutdown terminates residual commands,
-so their completion can reach the rollout without reaching the client. No residual root command means no
+EOF can detach the notification subscriber before native shutdown terminates
+residual commands; rollout persistence alone cannot prove client receipt. No residual root command means no
 cleanup RPC. Stop uses the same retirement path; timeout or cleanup failure keeps
 the existing incomplete-recording failure and process-group retirement.
 A collected failed command remains an error tool result before the final result;
 it does not override the root's independently selected business outcome.
-The [locked-binary observation](../reference/codex-app-server-g0.md#residual-root-command-retirement)
-and `test_codex_app_server_completion.py` cover this boundary.
+`tests/test_codex_app_server_completion.py` covers this boundary.
 
 The original Owner chooses one business outcome. Normal success requires its
 necessary prefix and actual resource retirement. Stop and start-wait failure may
@@ -411,8 +400,8 @@ idle; false gives a known human question a 120-second creation deadline. The UI
 shows the final 60 seconds; active interaction can ask the original Owner to
 snooze, clearing that effective deadline and pausing idle after adjudication.
 Unknown legacy policy and MCP deadlines retain their own rules. The overall cap,
-Stop and original-call closure remain effective. The G0 Default-mode native-question capability emits false in the
-live smoke; it proves original-connection optional delivery, while explicit true
+Stop and original-call closure remain effective. The retained Default-mode
+live smoke emits false; it proves original-connection optional delivery, while explicit true
 frames exercise blocking/idle suspension in the controlled native protocol tests.
 
 Native item conversion is a pure boundary in `codex_items.py`; it does not rename
@@ -494,7 +483,7 @@ no recovery endpoint. The browser presentation removes one exact leading notice
 only when `tool_result` and `output_capture.state=head_tail` establish its origin;
 that display transformation never changes the saved record. This retention
 boundary is independent of
-[browser previews](frontend-list-reconciliation.md#浏览器有界预览与按需全文).
+[browser previews](frontend-transcript-view.md#浏览器有界预览与按需全文).
 Frame/media, pre-bind correlation and event handoff budgets still apply at their
 own boundaries: saved-body reduction cannot repair an earlier frame overrun and
 does not establish an RSS bound. Storage and old-record preservation belong to
@@ -583,7 +572,7 @@ parameter builders and frame encoder. It checks the controller, instruction
 injection and first-input frames independently. Explicit product controls are
 known; unresolved native model/effort use minimum-width fields and cannot
 establish the cwd's defaults or certify remaining space. The session's
-[rewind contract](session-rewind.md#532-history-replay-and-first-turn-state)
+[rewind contract](session-rewind.md#history-replay-and-first-turn-state)
 owns the reserve and conditional ready guarantee. The bound send encodes again
 with resolved controls and real identities.
 
@@ -673,7 +662,7 @@ reauth flow keeps its binding and login entry available.
 Permanent invalidation additionally requires actual adopted-material evidence.
 The current mutable Codex home cannot establish that fact, so typed unauthorized
 produces `auth_failed` and preserves the current credential under the
-[conditional rejection contract](harness-credential-reauth.md#4-run-loop-wiring-serversessionsturnspy).
+[conditional rejection contract](harness-credential-reauth.md#run-loop-wiring-serversessionsturnspy).
 
 Native error notifications retain original request/attempt/thread/turn and
 connection identity, including before ACK after correlation. `willRetry` and
@@ -703,7 +692,7 @@ unknown; an explicit InvalidRequest/InvalidParams rejection can prove
 nonacceptance. Neither old session identity alone nor missing output authorizes
 prompt replay, a new history or a fallback transport. The Owner retains budgets,
 backoff, deadline, authorization and the unique final result under
-[transient recovery](harness-transient-retry.md#4-recovery-evidence-in-the-original-owner).
+[transient recovery](harness-transient-retry.md#recovery-evidence-in-the-original-owner).
 The other shared policies remain in
 [credential reauth](harness-credential-reauth.md) and
 [turn safety](turn-safety.md).
@@ -712,8 +701,8 @@ The other shared policies remain in
 ## Single-call text contract
 
 `run_oneshot` performs one non-interactive text task without executable model
-tools. The Codex profile now launches `codex_text.py` with isolated Python
-(`-I`) under the common Harness, instead of starting `codex exec`. Schedule
+tools. The Codex profile launches `codex_text.py` with isolated Python
+(`-I`) under the common Harness. Schedule
 parsing, `/showme` reference resolution and research decomposition/synthesis
 keep their public interface; ordinary Codex turns still use the native CLI.
 
@@ -745,14 +734,11 @@ retirement, including native descendants, before reporting a clean stop.
 The reason for this separate worker is executable capability control: disabling
 public CLI features did not establish a complete tool-free native-agent request.
 The text worker has no executable-tool dispatcher and publishes only a successful
-text terminal. The original probe record retains the failed and corrected trials.
+text terminal.
 
 The native auth operation and subscription wire were checked against Codex
 0.164.0; they are not a promise about arbitrary future CLI releases. Protocol
 incompatibility fails visibly and cannot restore the executable-agent path.
-No OS keyring was provisioned for the original live validation; synthetic
-keystore cases cover bound/unbound behavior without claiming a live keyring test.
-
 ## Source and verification
 
 Code: [profile](../../server/harness/codex.py),
@@ -795,11 +781,3 @@ Versioned native probes with a controlled provider verify effective configuratio
 720,039-byte Chinese input, actual scoped MCP/connector callbacks, late child
 material reads and active owner revocation. Those probes establish native
 assembly and effects at the controlled boundary, not remote model capability.
-
-On 2026-11-07, installed Codex 0.167.0 passed this installation's Codex live and
-browser selections using the existing login. The versioned 0.166.0 fixtures
-remain protocol evidence; they do not restrict the executable used at runtime.
-
-## Historical evidence
-
-The [original design and evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/codex-backend.md) retain their original version and conditions. Current verification follows [testing.md](../testing.md); this document does not establish production deployment.

@@ -16,7 +16,7 @@ skills-lock.json
 AGENTS_pre.md
 .pytest_cache/
 /.scratch/
-docs/review
+docs/review/
 octopus.db*
 octopus-dev.db*
 *.egg-info/

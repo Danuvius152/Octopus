@@ -5,7 +5,8 @@
 Transient provider failure, credential rejection and user quota have different recovery actions.
 Idle timeout classification precedes this dispatch; see [turn safety](turn-safety.md).
 
-## 2. Three dispositions for a failed turn
+<a id="2-three-dispositions-for-a-failed-turn"></a>
+## Three dispositions for a failed turn
 
 A failed turn's owned error facts are classified behind the harness contract.
 Ordinary Codex uses only its bound root provider error (message, additional
@@ -16,14 +17,12 @@ cannot classify the main request or its credential.
 
 1. **Auth-credential rejection** (401 / revoked / expired) →
    `Harness.is_auth_error` → STOP and conditionally reject the actual adopted
-   material under the [credential contract](harness-credential-reauth.md#4-run-loop-wiring-serversessionsturnspy).
+   material under the [credential contract](harness-credential-reauth.md#run-loop-wiring-serversessionsturnspy).
    Obsolete or unproven adoption leaves the current login unchanged.
 2. **Transient backend error** (5xx / overloaded / dropped connection /
    timeout) → `Harness.is_transient_error` → bounded retry (this doc).
 3. **Everything else** — including quota/credit ("rate limit", 429,
-   "insufficient quota", billing) — surfaces as-is. Deliberately NOT
-   retried: the user said "not my credit limit", and hammering a quota
-   error wastes time and can worsen rate-limiting.
+   "insufficient quota", billing) — surfaces as-is without automatic transient recovery.
 
 Typed personal-quota and authentication failures are excluded from transient
 classification. Native explicit personal-quota text also takes precedence over
@@ -31,9 +30,10 @@ coincident capacity wording. A preparation RPC permission refusal is scoped
 `permission_denied`: it cannot invalidate the main login or become a transient
 retry. A bare `429`, "rate limit" or "quota" is not a reliability match.
 
-## 3. Detection behind the harness contract
+<a id="3-detection-behind-the-harness-contract"></a>
+## Detection behind the harness contract
 
-Mirrors the auth work (no `if backend ==` outside `server/harness/`):
+Classification uses the actual attempt profile:
 
 - `RuntimeProfile.transient_error_patterns: tuple[str, ...]` — lowercased,
   auth-/quota-free, server-reliability phrases per backend.
@@ -42,8 +42,8 @@ Mirrors the auth work (no `if backend ==` outside `server/harness/`):
 
 Patterns are specific server-reliability phrases ("overloaded", "internal
 server error", "service unavailable", "bad gateway", "529", "connection
-reset", "timed out", "stream error", …), chosen narrow after Vera's note
-that broad tokens (a bare "unauthorized") cause false positives.
+reset", "timed out", "stream error", …). Broad tokens such as a bare
+"unauthorized" do not establish a transient provider failure.
 
 **Server-side throttle vs. the user's usage limit.** Anthropic emits a
 server-side throttle as "Server is temporarily limiting requests (**not your
@@ -52,8 +52,7 @@ containing "Rate limited". We must still NOT retry the user's *own* quota /
 usage limit. So we match the throttle on its specific phrasing
 ("temporarily limiting requests", "not your usage limit") rather than a bare
 "rate limit" / "429" (which also appears in the user's-limit message, and
-stays non-retryable). This was a real miss: the bare-"rate limit" exclusion
-swallowed the server throttle and stopped the turn instead of retrying.
+stays non-retryable).
 
 Ordinary Codex retains the full legacy exec reliability phrase set in
 `_CODEX_TRANSIENT_ERROR_PATTERNS`, including explicit capacity and server-throttle
@@ -64,7 +63,8 @@ provider's explicit text, including `additionalDetails`; personal quota and type
 authentication retain precedence. Exact source rules belong to
 [the native error contract](codex-backend.md#error-source-and-recovery).
 
-## 4. Recovery evidence in the original Owner
+<a id="4-recovery-evidence-in-the-original-owner"></a>
+## Recovery evidence in the original Owner
 
 The original Owner classifies watchdog timeout first, authentication next,
 then preparation/stale-history/transient failure and premature exit. A failed
@@ -118,7 +118,6 @@ Stale-history recovery can clear the stale ID and prepare a retained-history
 wrapper once only if the input was not submitted and this turn has no captured
 continuation work. A stale error after possible submission stops with
 `recovery_unproven`; missing history does not prove the request had no effects.
-The old no-output replay rule and turn-start resume-ID restoration are removed.
 The current attempt owns its prepared input, including any large-prompt file
 pointer. Recovery selects the next attempt's input from that value; there is
 no separate original-prompt copy to synchronize after rebuilding history.
@@ -148,12 +147,9 @@ App/SSE, build and named-delegation consumers through recovery.
 failures on both sides of stale-history recovery: the original spill file stays
 intact and subsequent attempts retain the rebuilt history and its pointer.
 
-## 5. Limits
+<a id="5-limits"></a>
+## Limits
 
 - No retry of personal quota/credit failures; a bare rate limit is insufficient
-  transient evidence (§2).
+  [transient evidence](#three-dispositions-for-a-failed-turn).
 - Retry counts/backoff are module constants, not yet user-configurable.
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/harness-transient-retry.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

@@ -2,7 +2,8 @@
 
 > **Status:** implemented — 在用户消息前分支，重放保留前缀并按选择还原可归属文件改动。
 
-## 3.1 The harness contract
+<a id="31-the-harness-contract"></a>
+## The harness contract
 
 The session saga owns rewind's history-replay policy for both Claude and Codex.
 `can_fork` declares that the backend supports the retained product history in
@@ -12,7 +13,8 @@ prepare a native prefix at an arbitrary product-message boundary. A full-session
 [/fork](session-fork.md) instead uses Harness to copy existing native history
 when available, retaining its artifact and cleanup collaborators.
 
-## 3.5 Channel discipline
+<a id="35-channel-discipline"></a>
+## Channel discipline
 
 The retained transcript is first-turn user-message content inside
 `<fork-history status="transcript-not-instructions">`. It is not promoted to
@@ -27,9 +29,11 @@ turn at a steer, so product seq is never approximated as a native turn count.
 Copied input observations remain historical evidence, not permission to repeat
 uncertain operations. A later explicit user request establishes a new execution.
 
-## 5. Behavior
+<a id="5-behavior"></a>
+## Behavior
 
-### 5.1 Forking from the browser
+<a id="51-forking-from-the-browser"></a>
+### Forking from the browser
 
 `POST /api/sessions/{id}/fork` selects `rewind_to_msg_seq=M`, optional
 `revert_files` and an optional label. The server validates that M exists and is
@@ -86,7 +90,8 @@ creates no native artifact before its first input. SQLite rollback cannot undo
 the optional Git effects. The original parent's account scope and retained
 attachment ownership remain enforced throughout.
 
-### 5.3.2 History replay and first-turn state
+<a id="532-history-replay-and-first-turn-state"></a>
+### History replay and first-turn state
 
 Replay renders actual saved command records within its existing per-line limit.
 New App Server head/tail records begin with an explicit notice that the middle
@@ -143,7 +148,8 @@ original retains the ordinary continuation rules. There is no separate permanent
 replay ledger. UI history and native context remain distinct stores: copying one
 does not establish the other.
 
-### 5.4 In-progress turns and races
+<a id="54-in-progress-turns-and-races"></a>
+### In-progress turns and races
 
 The reservation spans snapshot, preparation and revert and is released on all
 exit paths. Forks and existing requests follow the shared
@@ -151,7 +157,8 @@ exit paths. Forks and existing requests follow the shared
 A preliminary UI preview cannot authorize later filesystem changes; safe revert
 reruns its preconditions when executed.
 
-### 5.5 Deleting the parent
+<a id="55-deleting-the-parent"></a>
+### Deleting the parent
 
 Copied message metadata can refer to original attachments. Reads follow the
 same-account ancestor chain when the fork has no private copy. Before removing
@@ -159,7 +166,8 @@ a parent's attachment directory, deletion copies needed files to descendant
 forks. Fork creation does not put attachment filesystem writes inside a database
 transaction. Deleting a fork cleans its own artifacts, not the shared parent cwd.
 
-### 5.6 Side effects: disclose-first, revert where safe
+<a id="56-side-effects-disclose-first-revert-where-safe"></a>
+### Side effects: disclose-first, revert where safe
 
 Rewinding changes model context; external effects remain. The classifier examines
 the selected user turn and every later turn. It groups known file-edit paths,
@@ -169,7 +177,8 @@ best-effort disclosure, not an exhaustive audit of every effect. Disclosure is
 not revert authority: `file_edits` can include attempted, failed or uncertain
 edits, while `agent_touched_paths` contains only confirmed attributable paths.
 
-#### 5.6.3 The one revert we offer: file edits via git
+<a id="563-the-one-revert-we-offer-file-edits-via-git"></a>
+#### The one revert we offer: file edits via git
 
 Revert requires a Git repository, a known clean tree at the selected message,
 unchanged HEAD, safely parsed current status, and no dirty paths outside those
@@ -265,7 +274,8 @@ have stopped touching the tree. This limits isolation around failed operations,
 not the path-ownership checks above
 (see [the shared Git subprocess helper](../../server/fork_helpers.py#L80-L105)).
 
-#### 5.6.4 First-turn context
+<a id="564-first-turn-context"></a>
+#### First-turn context
 
 The trusted note tells the model which effects occurred after the branch point
 and whether file revert actually completed. The transcript itself remains in
@@ -276,13 +286,15 @@ have changed and require Git/recovery inspection. Neither is described as an
 unexecuted operation or a rollback. Available snapshot identity and the actual
 failure reason remain in the note.
 
-#### 5.6.5 Persistence before first use
+<a id="565-persistence-before-first-use"></a>
+#### Persistence before first use
 
 Prefill, effect summary and preparation identity survive a restart before the
 first user turn. The durable revert record remains after ephemeral first-turn
 state clears.
 
-#### 5.6.7 Crash recovery
+<a id="567-crash-recovery"></a>
+#### Crash recovery
 
 An `initializing` fork is cleaned using its exact saved identity; failed cleanup
 preserves retry responsibility. A crash during `reverting` produces
@@ -293,10 +305,11 @@ before use, including an already live successor. Rewind borrows the parent's dir
 itself a full copy under the fork base. Recovery never derives directory
 ownership from that prefix. Only an initializing full-copy row with its matching
 creation receipt may remove its independent directory; cleanup must finish
-before deleting the recovery row. The [full-copy contract](session-fork.md#4-crash-safety--limits)
+before deleting the recovery row. The [full-copy contract](session-fork.md#crash-safety--limits)
 owns copying, cancellation and unproven-directory recovery.
 
-## 8. Verification and boundaries
+<a id="8-verification-and-boundaries"></a>
+## Verification and boundaries
 
 Code: [fork lifecycle](../../server/sessions/forking.py),
 [replay/classification/revert](../../server/fork_helpers.py),
@@ -317,7 +330,3 @@ Mid-execution rewind, branch merge, dirty-tree snapshots and provider-specific
 undo are outside the current contract. Such changes require their own design
 because concurrent or externally committed effects cannot be inferred from
 conversation text. Current real-runtime validation follows [testing.md](../testing.md).
-
-The [original design and experiments](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/session-rewind.md)
-preserve version-bound rationale, including the superseded synthesized-Claude-
-transcript strategy. They do not establish current performance or deployment.

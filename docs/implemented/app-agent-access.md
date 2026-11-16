@@ -2,7 +2,8 @@
 
 > **Status:** implemented — 按应用令牌授权的 Agent 对话、实时返回与原执行完成。
 
-## 2. The shape: one API, mounted where the app already lives
+<a id="2-the-shape-one-api-mounted-where-the-app-already-lives"></a>
+## The shape: one API, mounted where the app already lives
 
 ```
 /apps/{app_id}/agent/agents                      GET    who can I talk to
@@ -75,7 +76,7 @@ retirement. Per-conversation retirement errors propagate to application cleanup;
 they cannot be logged and skipped before files are removed. Archived conversation
 rows are deleted without restoring a model. Development histories are retained;
 application-owned conversations are removed. See the
-[application lifecycle](applications.md#5-rest-surface) for failure, retry and restart.
+[application lifecycle](applications.md#rest-surface) for failure, retry and restart.
 See the [original completion contract](input-reliability.md#原请求完成与失败交接)
 for the shared ownership and retirement rules. Deployment is verified separately.
 
@@ -153,20 +154,20 @@ original conversation/request. The authenticated module is served with no-store
 from the packaged source also exercised by the JS tests. It needs no package
 publication and does not migrate installed Apps.
 
-## 3. A conversation is a session
+<a id="3-a-conversation-is-a-session"></a>
+## A conversation is a session
 
-An app conversation is a real Octopus session (`origin='app'`, new nullable
-`sessions.app_id` naming its owner). Not a parallel mechanism, because every
-property we'd have to reinvent is already there: the transcript persists,
-the harness resumes it so turn 5 remembers turn 1, tools and MCP servers work,
-the broadcast bus already carries deltas and results, and you can open the
-thread in the normal chat view and read exactly what your app has been saying.
+An app conversation is an Octopus session (`origin='app'`, with nullable
+`sessions.app_id` naming its owner). It uses the shared transcript persistence,
+harness resume, tools, MCP servers and event bus. The normal chat view exposes
+the full conversation for inspection.
 
 `app_id` rather than an id encoded in `origin`: it's how a route proves a
 conversation belongs to the app that asked for it, how the sidebar filters
 them out, and how deleting an application takes its conversations with it.
 
-## 4. Two credentials, because two callers
+<a id="4-two-credentials-because-two-callers"></a>
+## Two credentials, because two callers
 
 The page inside the iframe already authenticates with the `octopus_app_token`
 cookie, so its `fetch("agent/ask", …)` needs nothing new.
@@ -176,14 +177,15 @@ A backend script gets a **scoped token** instead:
 with `OCTOPUS_AGENT_API` as the base URL. It opens exactly one application's
 `/apps/<id>/…` surface and is useless anywhere else in Octopus. This keeps the
 promise `script_env` already makes — the server's environment, and the master
-token in it, never reach app code (application-backends.md §4) — while still
+token in it, never reach app code (see [script environment](application-backends.md#what-the-scripts-are-given)) — while still
 letting a backend hold a conversation. It needs no storage: derived from the
 master key, so rotating that rotates every app's token with it.
 Signature-shape rejection and the legal account-token fallback follow the shared
 [scoped authentication contract](multi-tenancy.md#keys-and-secrets). A malformed
 App signature is an authentication failure, not a server comparison exception.
 
-## 5. What the agent is told
+<a id="5-what-the-agent-is-told"></a>
+## What the agent is told
 
 The first turn of a conversation carries a preamble naming the app, then every
 turn is `message` plus optional `context` (what the app wants the agent to look
@@ -197,7 +199,8 @@ because each is a way the conversation would otherwise go wrong:
   working dir, so files the agent writes land in the app's own state and
   survive a rebuild.
 
-## 6. Limits
+<a id="6-limits"></a>
+## Limits
 
 An app is a program; a program can loop. Each cap returns a specific error
 rather than letting Octopus absorb the cost:
@@ -210,20 +213,20 @@ rather than letting Octopus absorb the cost:
 | context | 200k chars | roughly 50k tokens; beyond this, summarize first |
 | `ask` wait | 300s | a real turn can be slow; a hung one shouldn't pin a socket |
 
-## 7. UI: chrome that gets out of the way
+<a id="7-ui-chrome-that-gets-out-of-the-way"></a>
+## UI: chrome that gets out of the way
 
-The application view carried a permanent composer bar under the page. It cost
-~60px of every app forever to serve something you do rarely, and the ask was
-explicit: put it away. The bar and the "Build session" button merge into one
-top-right **Iterate** control whose popover holds the change request, the
-build-session link and the last error. The page gets its space back.
+The top-right **Iterate** control opens a popover containing the change request,
+build-session link and last error. It leaves the application page available
+while the controls are closed.
 
 Conversations started by the app are *hidden* from the sidebar rails — an app
 that talks to an agent ten times an hour must not bury your own sessions — and
 reachable from the same header, so "what is my app saying to my agent?" is one
 click, not a mystery.
 
-## 8. Testing
+<a id="8-testing"></a>
+## Testing
 
 Backend: token derivation and scope (a token for app A opens nothing of app
 B's), the full route surface incl. every cap and every 4xx, a conversation
@@ -239,9 +242,8 @@ app's own conversations never appear in the sidebar.
 JSON/SSE routes and original result lookup. It injects ordinary/cancellation
 failures only in the required body callback, retains normal model events and
 checks explicit errors, saved outcomes, valid empty replies, no replay and
-capacity ownership after caller cancellation or stream disconnection. The old
-path reported success after losing body text; these cases now require a delivery
-error. Shared completion, notification-failure and held-publication regressions
+capacity ownership after caller cancellation or stream disconnection. Missing
+required body delivery must produce a delivery error. Shared completion, notification-failure and held-publication regressions
 also retain ordered business delivery, caller cancellation and diagnostics
 redacted with the original execution's credential context.
 
@@ -250,7 +252,8 @@ Response through header failure, pre-body cancellation, body failure and normal
 completion. It checks that a departed queue stays empty while the original
 execution remains counted and available through its original result lookup.
 
-## 9. What this defers
+<a id="9-what-this-defers"></a>
+## Current limits
 
 * **App question UI and attachments.** The stream carries questions. A deadline
   resolves one only when that product deadline is enabled; cancellation remains
@@ -262,7 +265,3 @@ execution remains counted and available through its original result lookup.
   multi-account product. A minimum App→Agent scope/allowlist and its policy UI
   belong to [the interface plan](../plans/octo-cli.md); Wiki client grants remain
   a separate permission boundary in [the Wiki plan](../plans/wiki-future-plan.md).
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/app-agent-access.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

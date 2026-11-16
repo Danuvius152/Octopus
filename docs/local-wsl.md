@@ -12,14 +12,13 @@
 | 管理服务、手机入口或发布 | [服务管理](#服务管理)、[手机公网入口](#手机公网入口)、[自动发布](#自动发布) |
 | 合并上游变化 | [同步原作者更新](#同步原作者更新) |
 
-这台机器运行 WSL2 / Ubuntu 26.04，已启用 systemd。项目使用 Ubuntu 自带的
-Python 3.14.4，满足 `pyproject.toml` 的 Python >=3.12 要求。虚拟环境通过
-`python3 -m venv .venv` 创建，依赖用 pip 安装；本机不使用 uv。
+本页描述 WSL2 / Ubuntu、用户级 systemd 服务与 Codex 的配置目标。先用
+`cat /etc/os-release`、`python3 --version`、`systemctl --user status octopus`
+确认现场；登录、依赖和运行状态不能从旧安装记录推断。项目支持 Python >=3.12，
+依赖约束的解析环境另有固定版本。虚拟环境用 venv 和 pip 管理。
 
-AI 后端使用已经登录 ChatGPT 的 Linux 版 Codex。`.env` 设置
-`OCTOPUS_DEFAULT_BACKEND=codex`，现有默认代理同样设为 `codex`。新建代理的
-界面和 API 都采用这个默认值，新建普通会话继承代理的后端；继续使用当前
-用户的 CLI 登录，无需复制或重新设置凭据。
+默认后端由 `.env` 的 `OCTOPUS_DEFAULT_BACKEND` 决定；新会话继承 Agent 配置，
+已有 Agent 不随环境默认值自动重写。模型登录须核对当前选定的 CLI home。
 
 ## 配置和数据
 
@@ -86,12 +85,10 @@ journal、配置、密钥和目录，使用原协议版本诊断现场。`comple
 
 ## 环境重建
 
-Ubuntu 的标准虚拟环境需要 `python3-venv` 软件包，本机已经安装。
-前端使用 Linux 版 Node.js 24.21.0（nvm 管理）和 Bun 1.4.2。
-`~/.bashrc` 已加载 nvm，默认 Node 版本为 24.21.0，同时包含 `~/.local/bin`
-的 PATH 配置。新开 WSL Bash 终端即可直接使用 `node`、`bun` 和 `codex`；
-当前交互终端可执行 `source ~/.bashrc` 生效。使用 nvm 加载默认版本，无需在
-`.bashrc` 中写死带版本号的 bin 路径。
+重建前安装 `python3-venv`，通过 nvm 选择项目兼容的 Node.js，并准备 Bun。
+用 `. scripts/toolchain-env.sh` 解析已安装工具，以 `node --version`、
+`bun --version` 和解释器版本确认实际环境。下例使用约束解析环境 Python 3.14；
+不要在运行服务共享的环境中试装。
 
 ```bash
 cd ~/Octopus
@@ -109,10 +106,9 @@ bun run build
 依赖边界由 [pyproject.toml](../pyproject.toml) 声明；
 [constraints-wiki.txt](../constraints-wiki.txt) 固定 Wiki 解析输入，
 [constraints-python.txt](../constraints-python.txt) 固定运行、test/dev 和构建工具的
-完整声明依赖闭包。该组合已在 CPython 3.14.4 / Linux x86_64 的全新验证及
-runtime-only 安装核对 `pip check`、服务导入和实际闭包，并通过验证环境的 mypy
-及账户/路由/WS 定向检查；不承诺跨平台相同 wheel 或位级相同构建。
-其他组合须独立验证，SQLite 和 Codex binary 仍按各自合同核对。
+完整声明依赖闭包，解析环境为 CPython 3.14.4 / Linux x86_64。其他组合须
+独立验证；约束不承诺跨平台相同 wheel 或位级相同构建，SQLite 和 Codex binary
+仍按各自合同核对。
 
 上面的验证安装用于新环境；运行安装把 `.[test,dev]` 换为 `.`，仍使用同一约束。
 `PIP_CONSTRAINT` 使用绝对路径，使 pip 的隔离构建也消费该快照。不要在运行服务
@@ -136,13 +132,10 @@ python scripts/python_environment.py lock --project "$PWD" --python /path/to/ver
 解析比较和候选实际消费证据。改变 Wiki 解析依赖还须重新核验原文/换行/坐标、检索
 等价和受影响基线；接口迁移同时核对 MCP 命名空间和账户隔离。
 
-本机使用 Windows 的 `http://127.0.0.1:7890` HTTP 代理。HTTP/HTTPS 的
-大写和小写代理变量均已持久写入 `~/.bashrc`，新终端不依赖上一终端的环境。
-服务使用同一代理地址，当前配置保存在受管 unit 的原生 Environment 中；旧
-`proxy.env` 不是当前加载来源。`~/.bashrc` 另补充明确的
-`localhost`、`127.0.0.1` 和 `::1` 绕过规则，Codex 的外网请求继续走代理。
-Windows 风格的 `127.*`
-不能代替 HTTPX 所需的明确地址，否则 MCP 回调和应用后端请求可能收到代理的 502。
+代理地址从当前 unit 环境与 `~/.bashrc` 查询；不要用历史笔记覆盖现有设置。
+服务使用受管 unit 的原生 Environment；旧 `proxy.env` 不作为当前加载来源。
+大小写代理变量需一致，本机 API/MCP 回调明确绕过 `localhost`、`127.0.0.1`
+和 `::1`。Windows 风格的 `127.*` 不能替代 HTTPX 所需的明确地址。
 
 ### 本地 Codex skills
 
@@ -184,16 +177,8 @@ CODEX_HOME="$octopus_skills_home" codex plugin list --marketplace mattpocock --j
 `$mattpocock-skills:grill-me`。自动发现不意味着所有技能都应自动触发。见
 [官方 skills 说明](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills)。
 
-本机仅保留一项 Matt 文本修正：`ask-matt/SKILL.md` 与
-`ask-matt/PHASE-BOUNDARIES.md` 的 smart zone 说明结合当前模型容量、宿主
-剩余上下文信号和实际工作质量判断，不设固定 token 阈值。修正在两个实际使用
-的插件安装中直接应用，不新增全局 `AGENTS.md`，不改变 Codex 的自动压缩配置。
-插件更新或重装可能覆盖这两处本地修改，更新时需重新核对。其余旧技能定制规则
-已退出，仅保留独立的 `find-code-simplifications` 与官方 `.system` 内容。
-
-2026-11-07 本机验收：终端 CLI 与 Octopus 当前凭据的原生 App Server
-`skills/list` 各发现 27 个启用的 Matt 插件技能，旧副本发现数均为 0；两个安装
-的技能文件相对上游仅有上述两处文本修正。
+私有技能的当前内容、局部修改和插件版本以实际文件及发现结果为准。更新或
+重装可能覆盖本地修改；本页不保存技能数量或某次安装验收结果。
 
 ## 临时任务目录
 
@@ -249,7 +234,7 @@ export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64
 
 research 实机测试需要目录式凭据：临时登录目录链接既有选定 credential 的
 `auth.json`，用 `OCTOPUS_CODEX_HOME_DIR` 指定目录根，并在临时 DB 登记对应
-凭据元数据。后台任务可能继承服务的另一份登录，必须显式传入本对话已核实的
+凭据元数据。后台任务可能继承服务的另一份登录，必须显式传入本次获授权验证选定的
 `CODEX_HOME` 并核对最终链接目标，不读取或复制认证内容。失败时核对实际目录、
 原模型结果和网络审计，不能仅凭退出码或只读接口成功认定通过或要求重新登录。
 CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式服务档位隔离验证，
@@ -382,11 +367,10 @@ WSL、登录或定时自启，进程退出后也不由 systemd 自动重启。�
 
 ### 安装与配置
 
-2026-10-30 已安装官方 `cloudflared 2026.10.6` Linux amd64 二进制到
-`~/.local/bin/cloudflared`，与官方发布的 SHA-256 校验一致。下载来源见
-[Cloudflare 下载说明](https://developers.cloudflare.com/tunnel/downloads/)及
-[该版本发布页](https://github.com/cloudflare/cloudflared/releases/tag/2026.10.6)。
-此方式无需 sudo；使用绝对路径启动，不依赖交互终端的 PATH。
+隧道程序入口为 `~/.local/bin/cloudflared`；用 `--version` 确认实际版本。
+下载来源见 [Cloudflare 下载说明](https://developers.cloudflare.com/tunnel/downloads/)。
+下方版本和校验值是一组固定重建输入，升级时须一起替换并重新核验。
+此方式无需 sudo；绝对路径启动不依赖交互终端 PATH。
 
 如需重建这份安装，先将下面的 `<账户工作区>` 替换为 Account 页面显示的
 workspace 绝对路径。升级时先查看官方发布与校验值，替换版本和摘要；安装前
@@ -508,7 +492,8 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
 版本、PID、路径等绑定由现有守卫核对，机制、所有权或协议变化才补受影响验证。
 [提交时复用 hook 结果](testing.md#full-checks-before-code-commits)，无需再跑一遍门禁。
 
-当前工具入口是 `~/.octopus/ops/publication/tools/README.md` 的“当前安装的发布入口”：
+私有工具入口是 `~/.octopus/ops/publication/tools/README.md` 的“当前安装的发布入口”；
+执行前读取现场文件核对适用版本，仓库文档不证明私有脚本已验证：
 原生 quiesce 使用 `local-deploy.py`；历史 callback/packet 流程不适用于当前服务。
 准备时同时确定上线、撤权和旧树退役的执行路径及权限；已有发布进程运行时只观察。
 正常只回报开始与最终结果，实际失败或阻塞才中断说明。

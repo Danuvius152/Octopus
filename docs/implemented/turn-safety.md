@@ -2,7 +2,8 @@
 
 > **Status:** implemented — 有界 idle 恢复、可选逻辑回合总期限及确认的进程组退休。
 
-## 2. Process-group reaping (both turns and `run_oneshot`)
+<a id="2-process-group-reaping-both-turns-and-run_oneshot"></a>
+## Process-group reaping (both turns and `run_oneshot`)
 
 - **Own process group:** use `start_new_session=True` in `prepare_spawn`
   ([run engine](../../server/harness/run.py)) — the single spawn seam shared by
@@ -18,7 +19,8 @@
   exit retains ownership and fails retirement. One-shot calls also confirm
   group retirement after success, failure, timeout and cancellation.
 
-## 3. Per-turn watchdog (idle + overall)
+<a id="3-per-turn-watchdog-idle--overall"></a>
+## Per-turn watchdog (idle + overall)
 
 OwnerRuntime tracks validated activity and the logical turn's start. Each
 attempt's captured deadline wakes its original Owner; managed reader/start
@@ -36,7 +38,7 @@ notice does not disable the watchdog, and no activity resets the overall start.
   start with `turn_max_seconds`. The Owner records the cause, closes steering
   and retires the original backend and in-flight I/O.
 - After an idle stop, recover automatically up to `turn_idle_max_retries`
-  times only when the [recovery evidence](harness-transient-retry.md#4-recovery-evidence-in-the-original-owner)
+  times only when the [recovery evidence](harness-transient-retry.md#recovery-evidence-in-the-original-owner)
   permits preparation or native continuation. Missing output never authorizes
   replay. Continuation tells the model to inspect existing effects and retain
   existing jobs/delegations; it does not guarantee exactly-once effects.
@@ -73,7 +75,8 @@ expiry. Unattended work instead records `needs_input` without a long human wait.
 The [original-work policy](input-reliability.md#原工作交互策略与等待) owns
 classification and inheritance; browser presence is not an input to it.
 
-## 4. Interaction with existing paths
+<a id="4-interaction-with-existing-paths"></a>
+## Interaction with existing paths
 
 - Auth-expiry / transient-retry classification and premature-exit recovery
   retain their own budgets. Captured conversation evidence survives attempts;
@@ -83,14 +86,12 @@ classification and inheritance; browser presence is not an input to it.
 - A retry cannot start until the original writer is proven retired. Stop or
   authorization revocation during backoff/retirement prevents another execution;
   independent background work keeps its own owner and queue rules.
-- `start_new_session=True` matches what `codex_login` and bg-tasks already do;
-  no behavior change for healthy turns beyond detaching into a pgroup.
-
-## 5. Testing
+<a id="5-testing"></a>
+## Testing
 
 - Reaping: a fake/scripted child that spawns a grandchild; assert the group is
   signalled (monkeypatch `os.killpg` to record, or spawn a real `sh -c 'sleep'`
-  tree and assert it dies). `prepare_spawn` now sets `start_new_session=True`.
+  tree and assert it dies). `prepare_spawn` sets `start_new_session=True`.
 - Watchdog: idle recovery with and without output on both backends, recovery
   budget exhaustion, unsafe resume rejection, a whole-turn cap across retries,
   manual interrupt during recovery, and the original disabled-retry behavior.
@@ -99,22 +100,11 @@ classification and inheritance; browser presence is not an input to it.
 - Applicable affected checks and commit/release gates follow
   [testing.md](../testing.md); this document does not maintain another suite policy.
 
-## 6. What this defers
+<a id="6-what-this-defers"></a>
+## Watchdog scope and ownership
 
-- **Actionable phase/progress UI** is conditional scope in
-  [observability and diagnostics](../plans/observability-and-diagnostics.md).
-  Presentation cannot renew the execution watchdog without original valid
-  activity. Research already surfaces its own pipeline progress.
-- Per-tool / per-MCP timeouts (finer-grained than the turn) — not needed for
-  the hang; revisit only if a specific tool class warrants it.
-
-## 预算协调的归属
-
-Owner 的预算同时影响活动计时、timer 唤醒、问题等待暂停、观测字段和实际退休。
-只抽取到期布尔值仍让调用者协调这些联动；迁走 `_decide` 则连持久结算与重试
-副作用一起迁走。当前无独立消费者或重复纯策略，因此仍由原 Owner 协调，
-不新增预算接口。各等待政策见[输入合同](input-reliability.md#原工作交互策略与等待)。
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/turn-safety.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.
+Owner coordinates the activity clock, timer wakeup, question suspension, observed
+budget fields and execution retirement. Display updates and progress polling do
+not renew the watchdog without original valid activity. Research and BG retain
+their own task limits; these turn limits are not per-tool/MCP deadlines.
+Question waiting follows [the input contract](input-reliability.md#原工作交互策略与等待).

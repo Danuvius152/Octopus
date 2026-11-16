@@ -16,26 +16,26 @@ verification and repository actions.
   behavior, ownership, limits and necessary reasons. Revise the owning contract
   when behavior changes; code/doc disagreement needs investigation, not a move
   based only on an old plan's completion label.
-- `plans/` owns unfinished changes (`proposed`, `in-progress` or `paused`), their
-  dependencies and completion conditions. On completion, integrate the current
-  contract and rationale into `implemented/` and remove the superseded plan;
-  a mixed document must be split before moving it.
+- `plans/` records current unmet needs (`proposed`, `in-progress` or `paused`)
+  and pointers to authorized active specifications. Unselected implementation
+  designs belong in task materials, not the current architecture. On completion,
+  integrate the verified contract and necessary rationale into `implemented/`
+  and remove the superseded execution material.
 - [testing.md](testing.md) owns verification policy; [local-wsl.md](local-wsl.md)
   owns local operating procedures. Link to their details from other documents.
-- `reference/` holds version-bound protocol observations and experiments. State
-  their version, method, observed result and limits; link current contracts.
-  Historical evidence does not determine today's implementation or deployment.
+- `reference/` describes protocol fields and compatibility used by current
+  drivers. Retain version and provenance for raw fixtures consumed by tests;
+  keep behavior and resource ownership in the corresponding current contract.
 - `review/`, repository `.scratch/` and the account workspace are temporary.
   Only grill documents and their derived specs/tickets use `.scratch/`;
   logs, scripts and all other temporary artifacts use the account workspace,
   including those from grill tasks. Follow
   [local task conventions](agents/issue-tracker.md). Preserve active paths until
   their consumers can be updated safely. Test state has separate roots.
-  Transfer useful decisions, reasons, applicability and regression evidence to
+  Transfer current rules, necessary reasons and regression entry points to
   their durable owner before cleanup. Preserve active tasks and recovery state.
-  Use `post-mortems/` selectively for incidents whose causal evidence helps
-  future diagnosis. Git preserves superseded timelines; dated evidence does not
-  establish current behavior or deployment.
+  Remove superseded development narratives instead of keeping another archive,
+  post-mortem or lessons directory. Git retains the development history.
 - Persona owns role and collaboration behavior. Memory owns stable user
   preferences, role methods and a few project entry points, kept with the
   responsible role. Detailed project navigation belongs in `docs/README.md`. Shared
@@ -64,10 +64,22 @@ verification and repository actions.
   and reasons rather than enforcing a line-count limit.
 - Preserve conditions, exceptions, negative guarantees and useful rationale
   when shortening. Remove repetition and implementation-session narration.
+- All project documentation and code comments describe current behavior,
+  constraints, applicability and necessary reasons. Do not retain AI development
+  or modification history: temporary task phases, ticket labels, review rounds,
+  approval stories, change timelines or chains of corrective appendices.
+  For example, a task's temporary `phase1` through `phase5` plan leaves no phase
+  labels or execution narrative in maintained documentation or code comments;
+  describe the resulting code and project state directly.
+- When a confirmed decision B supersedes decision A, rewrite the owning
+  explanation for B and remove A's obsolete rules and the A-to-B change story.
+  Keep B's necessary current rationale; Git retains the modification history.
 - Ordinary fixes update their existing owner when needed; they do not require
   a separate plan, decision record, post-mortem and memory entry each time.
-- Check current behavior against code and evidence. Label proposals and
-  unverified claims; distinguish implementation, validation and deployment.
+- Check code, confirmed requirements and runtime evidence separately. If code
+  differs from a confirmed requirement, state the discrepancy and its impact;
+  an implementation deviation does not become a business rule through editing.
+  Distinguish implementation, validation and deployment.
 - Use source or existing generators for exhaustive API/configuration lists.
   Keep relationships and decision guidance in authored prose.
 - Repair inbound links in the same change as a move, rename or deletion.

@@ -549,7 +549,7 @@ class ForkingMixin(SessionManagerBase):
                     "The copy destination must be outside the source working directory",
                     reason="invalid_copy_destination", status_code=400,
                 )
-            # Snapshot the transcript AFTER claiming `_forking` (Vera review):
+            # Snapshot the transcript after reserving the parent against turns:
             # loading it earlier risks a fast turn slipping in between the read
             # and the guard, which would copy a post-turn working dir against a
             # pre-turn message list. With the guard held, both are consistent.
@@ -559,7 +559,8 @@ class ForkingMixin(SessionManagerBase):
             # only to locate the backend's on-disk transcript store for the copy
             # + cleanup — Codex needs its CODEX_HOME; Claude needs none (→ None).
             # require_auth=False: the rollout must be locatable even if the login
-            # later lapses, and we make no API call here (Vera review).
+            # later lapses. Fork preparation makes no model inference call;
+            # a native backend may use management RPCs to copy its history.
             agent = await self._load_agent(parent)
             eff_cred_id = source.credential_id or (
                 agent.get("credential_id") if agent else None

@@ -10,7 +10,7 @@
 | 问题回答、到期或无人值守等待 | [问题结算](#问题结算)、[交互策略](#原工作交互策略与等待) | MCP 清理归[Harness](harness-layer.md#mcp-question-retirement)，原生写帧归[Codex](codex-backend.md#native-question-control) |
 | BG/Research/委派返回 | [公共返回接管](#公共返回接管) | 改来源材料、重试或恢复才读对应领域合同 |
 | compact | [原生维护输入](#native-compaction-requests) | 协议及效果证据归[Codex](codex-backend.md#native-compaction)或[Claude](harness-layer.md#claude-native-compaction) |
-| 聊天或应用修改框刷新恢复 | [浏览器文本草稿](#browser-text-drafts) | App 回执及弹层寿命归[列表与视图合同](frontend-list-reconciliation.md#应用修改草稿与视图寿命)，聊天归[共享聊天稿](frontend-list-reconciliation.md#共享聊天文字与操作寿命) |
+| 聊天或应用修改框刷新恢复 | [浏览器文本草稿](#browser-text-drafts) | App 回执及弹层寿命归[列表与视图合同](frontend-interaction-state.md#应用修改草稿与视图寿命)，聊天归[共享聊天稿](frontend-interaction-state.md#共享聊天文字与操作寿命) |
 
 The database owns the complete accepted input and its execution status.
 SessionOwner decides when it can run. Acceptance commits the text,
@@ -70,7 +70,7 @@ the ordinary queue under its original identity and order; unknown inputs stay
 out of automatic dispatch. Details and target qualification follow
 [the native input contract](#codex-native-input-evidence).
 
-First-input [history replay](session-rewind.md#532-history-replay-and-first-turn-state)
+First-input [history replay](session-rewind.md#history-replay-and-first-turn-state)
 has a separate installation fact. The original input recorder commits matching
 resumable identity, delivery and replay consumption in one transaction, preserving
 its business outcome and durable fork evidence. Native acceptance alone does not
@@ -123,7 +123,7 @@ its own version. Refresh never restores busy/error or an old operation's rights,
 and never sends or replays work. This browser text copy is separate from saved
 accepted inputs, unknown submission observation and explicit input recovery;
 it cannot establish whether a build was accepted or completed. App submission
-and view ownership follow the [App draft contract](frontend-list-reconciliation.md#应用修改草稿与视图寿命).
+and view ownership follow the [App draft contract](frontend-interaction-state.md#应用修改草稿与视图寿命).
 
 Ordinary message sending clears the composer and its saved text synchronously.
 Its rejected/unknown receipt and attachment recovery remain separate business
@@ -142,7 +142,7 @@ and deliberate clearing during identity/metadata waits take precedence. Historic
 editing in another conversation does not disable a newly selected fork's prefill.
 The one current prefill target survives view remounts, without persisting a task
 or building a per-session draft map. Details follow the
-[chat view contract](frontend-list-reconciliation.md#共享聊天文字与操作寿命).
+[chat view contract](frontend-interaction-state.md#共享聊天文字与操作寿命).
 
 Denied reads, quota failures or failed writes/removals leave editing and sending
 available and show a visible save warning. When storage refuses access, recovery
@@ -155,7 +155,7 @@ Unresolved archived-session restoration identities are a separate tab-local
 record, not text drafts or input receipts. Unlike draft namespaces, they survive
 local sign-out/reload so a late restore POST cannot be forgotten. Their sealing,
 current-account adoption and retirement rules belong to
-[session restoration](frontend-list-reconciliation.md#归档恢复的原操作确认).
+[session restoration](frontend-session-observation.md#归档恢复的原操作确认).
 
 ## 原请求完成与失败交接
 
@@ -172,8 +172,8 @@ Owner 串行修改活动状态；慢准备、spawn、stdin、reader 和退休由
 写入校验、配置适用性和存储失败边界见[上下文绑定](model-reasoning.md#上下文样本与配置绑定)。
 
 单轮结算由原 Owner 的 `OwnerRuntime.settle(execution)` 使用原 Execution、
-settlement 和发布上下文完成。Manager 不再回取 `runtime.current/frames` 解释
-旧结果，负责入口、注册、跨会话配额、闲置外部通知协调和故障接管。重复结算返回原选定事件；
+settlement 和发布上下文完成。Manager 负责入口、注册、跨会话配额、闲置外部通知协调和故障接管；
+原结果由其 Execution 与 settlement 解释。重复结算返回原选定事件；
 不把旧终态重新选择给后来的请求。Database 仍拥有输入和 terminal 的短事务，
 原 publisher 仍拥有有序交付；慢通知和资源退出不阻塞命令处理。
 
@@ -208,7 +208,7 @@ Owner 的交接成员，不是持久执行状态或资源退出证明。App 的 
 用其中精确 ID 排除遗留 pending/running；集合外输入仍受原事务门禁，已提交
 outcome／recording_state 不因附带此信息改变，也不授予 hook 或完成时间更新。
 无快照的旧完成路径保留自身／已确认 carrier 关联规则。其消费者边界见
-[应用构建投影](applications.md#4-lifecycle)。
+[应用构建投影](applications.md#lifecycle)。
 
 | 接口事实 | 保证与限制 |
 | --- | --- |
@@ -234,7 +234,7 @@ live 与已归档会话的删除均由 Manager 的原生命周期捕获删除前
 
 归档和 rewind 共用原 reservation、退休期限及失败释放。Owner 退出由 Manager
 接管原对象与预留；关系冲突不免除已捕获 work 的清理。资源确认后仍需 seal/join
-原 publisher；不能确认退休时保留原引用并进入真实故障出口。回复正文丢失的来源处置见[委派合同](agent-collaboration.md#53-reply-delivery-the-original-request-completion)。
+原 publisher；不能确认退休时保留原引用并进入真实故障出口。回复正文丢失的来源处置见[委派合同](agent-collaboration.md#reply-delivery-the-original-request-completion)。
 
 mailbox、控制入口及顺序 publisher 按实际内容计预算，背压到达 producer。
 合法大命令可独占空控制通道；未接纳的容量等待者取消后不执行，Owner 失败释放
@@ -332,7 +332,7 @@ seq。Owner 只在完整根 `final_answer` item 已提交后纳入引用；comme
 委派初始与显式 follow-up 的实际送模协议沿上述条件说明正文选择，不承诺全部
 commentary 都会回传，也不改变本节的关联与校验规则。原工作可能经必要后代
 返回触发多次执行，不能把首次输出结束当成整轮完成。自足回复、结果收集及
-会话与轮次的区别归[委派合同](agent-collaboration.md#1-invocation-and-identity)。
+会话与轮次的区别归[委派合同](agent-collaboration.md#invocation-and-identity)。
 
 实时消费保留事件流，不强制改为事后 DB 查询；重建 receipt 不虚构 delivered。
 新原生正文的共同格式为忽略空片段、按双换行连接后整体 strip；完整记录仍保留
@@ -367,7 +367,7 @@ expired、closed；显式关闭保留 `question_closed` 和 reason，系统到�
 来源沿认证 principal 表达 account 或 agent；父代理路径另带真实委派/父会话关系。
 账户认证不证明自然人亲答，HTTP URL 与客户端自报 source 也不证明来源。内部缺少
 可信调用来源时保持 unknown，系统到期和内部关闭记录 system。历史和实时消息携带
-同一结构，正常 Question UI 不加步骤；这是对原先宽松 HTTP/WS 非法输入的明确收紧。
+同一结构，HTTP/WS 入口按该合同校验输入，正常 Question UI 不加步骤。
 
 回答、到期和关闭只处置一次，晚答不能消费新 attempt。claim 后保存失败走原 Owner/
 存储故障边界，不发布或返回未保存的成功答案，不用撤回 claim 处理普通校验错误。
@@ -496,14 +496,14 @@ delivery、不重新执行来源；接管未确认也不等于 `RequestCompletio
 
 BG 的 `deliver_bg_result` 转换原身份、材料及辅助说明，manager 保有命令结果、
 诊断与业务重试。Research 正常注入使用公共操作，启动恢复只读原持久接纳与完成，
-不唤醒或重新接纳；恢复分类归[Research 合同](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)。报告、
+不唤醒或重新接纳；恢复分类归[Research 合同](native-deep-research.md#researchmanager-async-job-like-bgdelegationsscheduler)。报告、
 queued/processing/processed、浏览器收讫及父处理仍分别由其原 owner 维护。
 委派 `_inject_terminal` / `_inject_question` 保留原轮次和问题的重入保护、round
 CAS / child notice 诊断写入及原 completion 观察，只消费公共接管的三类结果。
-其精确正文、问题关闭及材料删除语义见[委派合同](agent-collaboration.md#53-reply-delivery-the-original-request-completion)。
+其精确正文、问题关闭及材料删除语义见[委派合同](agent-collaboration.md#reply-delivery-the-original-request-completion)。
 
-来源不再组合 `source_receipt`、恢复、`start_message` 或读取准入私有字段来解释
-一次接管；生命周期恢复只保留会话模块内部 `_restore_task_return`。Wiki/schedule
+BG/Research/委派来源通过公共返回操作解释一次接管；生命周期恢复使用
+会话模块内部 `_restore_task_return`。Wiki/schedule
 仍可使用 `source_receipt` 和通用 `start_message`；Wiki outbox、schedule 首次
 触发、App、人工输入保持各自入口。本操作不引入通用任务框架、执行表、持久队列、
 恢复机制或 provider 迁移，现有输入、导出及恢复表示不变。独立返回按成功接纳

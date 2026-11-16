@@ -2,9 +2,10 @@
 
 > **Status:** implemented — 按会话作用域创建、列出、改期和暂停所属 Agent 的计划。
 
-## 2. The recurrence is stated, not parsed
+<a id="2-the-recurrence-is-stated-not-parsed"></a>
+## The recurrence is stated, not parsed
 
-`/schedule` reads English, because a human typed it: `schedule_ai` tries a
+`/schedule` interprets natural-language requests: `schedule_ai` tries a
 rigid `<interval> <prompt>` fast path and otherwise spends a one-shot model
 call turning "summarize my unreads every morning at 9" into a cron.
 
@@ -26,15 +27,13 @@ Pass exactly one of `cron`, `interval_seconds` or `run_at` (got: cron, interval_
 
 These validation errors describe a refused candidate that the caller can correct.
 They are distinct from a later registration error, where the definition may
-already be saved and creation must not be blindly repeated (§6).
+already be saved and creation must not be blindly repeated; see
+[list observations](#the-list-moves-while-you-watch).
 
-**Timezone.** The browser sends its own zone with `/schedule`, so a human's
-"9am" is their 9am. An agent has no browser, and defaulting to UTC would
-quietly move every clock-time schedule. So an omitted zone means the
-*host's* zone (`local_timezone()`: `TZ`, then `/etc/timezone`, then
-`/etc/localtime`, then UTC), and a zone that *is* passed and isn't a real
-IANA name is an error rather than a silent fallback to UTC — substituting a
-different time without saying so is worse than refusing.
+**Timezone.** Browser `/schedule` requests include the browser zone.
+An explicit zone must be a valid IANA name; invalid explicit input is refused.
+When omitted, `local_timezone()` checks `TZ`, `/etc/timezone`, `/etc/localtime`,
+then UTC. See [`schedule_ai.py`](../../server/schedule_ai.py).
 
 **One-time admission.** A new `run_at` must be strictly later than the server's
 current time plus five seconds. An offset-bearing datetime keeps its offset;
@@ -48,7 +47,7 @@ COMMIT, is the admission decision; expiration during those waits rolls back
 without registering a trigger or announcing a saved definition. Time spent
 waiting for COMMIT confirmation or trigger registration does not turn an
 admitted write into a reversible refusal. Registration uncertainty retains its
-[separate result](#6-the-list-moves-while-you-watch).
+[separate result](#the-list-moves-while-you-watch).
 
 **Labels.** `describe_cron` puts the common shapes into words — "Weekdays at
 09:00", "Every 15 minutes", "Every Fri at 17:00" — because the label is what
@@ -95,14 +94,13 @@ The Runner registers one business job, so branch overlap produces one fire per
 instant. Timezone and DST follow the existing `CronTrigger` behavior, including
 distinct UTC instants in a repeated local hour.
 
-**Calendar compatibility.** The range and day-combination corrections change
-future dates for affected stored expressions as well as new ones. Stored cron
-text retains its original stars and list order across reloads. The Schedules
-list and API `next_run_at` read the registered trigger's corrected next date;
-they do not use a separate preview calculation. Previously missed periodic
-dates are not backfilled. This does not change overdue one-shot recovery.
+**Calendar behavior.** Stored cron text retains its leading stars and
+list order. The list/API `next_run_at` comes from the registered trigger, not a
+separate preview. Missed periodic dates are not backfilled by calendar changes;
+overdue unconsumed one-shot recovery has its own admission rule.
 
-## 3. Four tools
+<a id="3-four-tools"></a>
+## Four tools
 
 Named for what they do to a schedule, not to the API:
 
@@ -113,19 +111,14 @@ Named for what they do to a schedule, not to the API:
 | `mcp__schedule__update(schedule_id, …)` | Pause/resume, re-word, re-time |
 | `mcp__schedule__delete(schedule_id)` | Remove it |
 
-Two things in the docstrings are load-bearing, because they are the only
-place the model learns them:
+The prompt must be self-contained and include the context needed when it
+fires. A necessary missing decision follows the unattended question policy;
+execution cannot invent an answer. Pausing uses `update(enabled=False)` and
+retains the definition; deletion removes it. Source markers and execution
+semantics belong to [scheduled runs](scheduled-runs.md).
 
-* **The prompt must be self-contained.** When it fires, this conversation's
-  context is gone and nobody is at the keyboard — "do the thing we
-  discussed" fires into the void. (The fire itself says so too: it arrives
-  prefixed `[scheduled:<name> — <recurrence>]` with "nobody is waiting to
-  answer questions" — scheduled-runs.md §3.)
-* **Pausing is not deleting.** "Stop doing X for now" means
-  `update(enabled=False)`; a paused schedule stays in the list and can be
-  resumed, a deleted one has to be rebuilt.
-
-## 4. The route: the agent is derived, never passed
+<a id="4-the-route-the-agent-is-derived-never-passed"></a>
+## The route: the agent is derived, never passed
 
 The shim POSTs to `/api/sessions/{sid}/schedules`, alongside
 `…/delegations` and `…/research`. The session id comes from
@@ -157,25 +150,25 @@ Schedules page currently exposes enable/disable, deletion and Wiki-mode
 controls; a general prompt/recurrence editor remains a
 [management proposal](../plans/schedule-management.md).
 
-## 5. Where a fire lands
+<a id="5-where-a-fire-lands"></a>
+## Where a fire lands
 
 `in_session` (default true) sets `origin_session_id` to the conversation the
 agent set the schedule up in, so each fire appends there and the user sees
 the run where they asked for it. `in_session=False` gives each fire its own
 throwaway session — the right choice for a noisy routine that shouldn't
-fill a chat. Both modes, and the overlap guard that keeps fires from
-stacking, are unchanged from scheduled-runs.md §1-2.
+fill a chat. The mode-specific overlap checks and their contract discrepancy
+are described in [scheduled runs](scheduled-runs.md#overlap-checks-and-one-shot-admission).
 
-## 6. The list moves while you watch
+<a id="6-the-list-moves-while-you-watch"></a>
+## The list moves while you watch
 
 After a schedule mutation commits and trigger reconciliation succeeds, the Runner
 attempts `{"type": "schedules_changed"}` and the client refetches through
 `schedules.refresh()` in the
-[schedule list module](../../web/src/lib/scheduleList.ts). Without it, a schedule an agent
-sets mid-conversation is invisible until the user reloads — which looks
-exactly like the tool having failed. The payload is deliberately empty:
-one code path, whether the change came from this browser, another tab, or
-an agent. This invalidation currently broadcasts globally, not just to the
+[schedule list module](../../web/src/lib/scheduleList.ts). The empty invalidation
+uses the same path for browser and Agent writes, so other views refresh without
+a page reload. This invalidation currently broadcasts globally, not just to the
 owning account; the subsequent list fetch remains account-scoped. It carries
 no schedule content but still reveals that some schedule changed.
 
@@ -208,7 +201,8 @@ isolated by the original expected-definition CAS; conflict rereads protect a
 replacement definition. Unexpected storage/registration failures retain their
 separate unconfirmed result rather than being disguised as bad user timing.
 
-## 7. On by default
+<a id="7-on-by-default"></a>
+## On by default
 
 `schedule` joins `ask`, `bg`, `ask_agent` and `research` in the default
 per-agent MCP set, in the `CREATE TABLE` default for new databases, in the
@@ -216,7 +210,8 @@ UI's `BUILTIN_MCP` list for newly created agents. Existing agents keep their
 saved tool choices across startup and upgrades; users enable additional tools
 explicitly in their agent configuration.
 
-## 8. Tests
+<a id="8-tests"></a>
+## Tests
 
 * **The tool surface** (`test_schedule_mcp.py`) — request shape, the session
   id coming from the env, unset arguments omitted so the server's
@@ -243,21 +238,13 @@ explicitly in their agent configuration.
   moves without a reload or a navigation, and the row is on the Schedules
   page with the right recurrence.
 
-## 9. Limits
+<a id="9-limits"></a>
+## Limits
 
-* **Natural language in the tool.** `create` takes a recurrence, not
-  "every other Tuesday". A model that can't express something in cron can
-  say so; adding the AI parse here would put a second model call inside
-  every tool call to cover a case we haven't seen.
-* **Schedules for *other* agents.** The scoping is deliberate: an agent
-  arranges its own work. Delegation already exists for asking someone else
-  to do something, and "schedule Vera for 9am" raises questions about who
-  owns and can cancel it that nothing yet needs answered.
+* **Natural language in the tool.** `create` requires a structured recurrence.
+  The tool does not invoke a second model to parse natural-language timing.
+* **Schedules for other agents.** Each agent manages only its own schedules.
 * **General editing from the Schedules page.** PATCH accepts prompt and
   recurrence changes, while the page exposes enable/disable, deletion and
   Wiki-mode controls. Prompt/recurrence editing and its conflict/unknown-result
   behavior belong to the [management plan](../plans/schedule-management.md).
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/schedule-tool.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

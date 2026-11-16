@@ -2,15 +2,19 @@
 
 > **Status:** implemented — 被动用量与 TPS、原生根及子任务范围、Owner 计时与资源退休阶段。
 
-## 1. Decision
+<a id="1-decision"></a>
+## Passive observation
 
-Monitor compares models using ordinary Octopus Codex sessions. It sends no benchmark requests. The user approved **effective output TPS (including reasoning)** after reviewing other tools. This replaces the earlier Q2/Q7 restriction to a proven server generation clock. No server decoder or isolated hidden-reasoning speed is claimed.
+Monitor compares ordinary Octopus Codex sessions using effective output TPS,
+including reasoning. It sends no benchmark requests. The metric uses a client
+response window; it does not expose a server decoder clock.
 
 The composer's [context sample](model-reasoning.md#上下文样本与配置绑定) is a
 separate current-window observation. It neither replaces cumulative usage nor
 adds another counted model response, and Monitor totals do not feed the ring.
 
-## 2. Formula
+<a id="2-formula"></a>
+## Formula
 
 ```text
 response effective TPS = output tokens / client response window seconds
@@ -19,18 +23,8 @@ window weighted TPS   = Σ timed response output tokens / Σ matching response s
 
 Provider output includes reasoning, answer and tool-call tokens. Input/cached-input tokens are excluded; reasoning is a subset of output and is never added again. Total input+output consumption is useful context, not the TPS numerator. Windows include input processing, queue/network delay and first-token waiting; tools, background execution and human pauses are outside them. Concurrent responses retain their own denominators, rather than dividing combined output by wall time.
 
-## 3. Evidence and precedents
-
-These are implementation examples, not an industry standard or a popularity claim:
-
-- [adenta/codex-tps](https://github.com/adenta/codex-tps#what-effective-tps-means) uses effective output TPS. Its [boundary test](https://github.com/adenta/codex-tps/blob/main/analysis_test.go#L62-L78) excludes a long tool run even when usage arrives after the tool result.
-- [alicanselcuk/codex-tps-hook](https://github.com/alicanselcuk/codex-tps-hook/blob/main/turn-metrics-reader.ps1#L174-L190) exposes effective TPS and a separate approximate decode metric.
-- [pszemraj/codex_speed.py](https://gist.github.com/pszemraj/f8fe69ff5002c3bd0825edfd02001635#file-codex_speed-py-L428-L479) distinguishes effective and streaming client estimates and rejects collapsed streaming windows.
-- [dongyue-19/codex-statusbar](https://github.com/dongyue-19/codex-statusbar#1-the-three-primary-metrics--strict-definitions) uses timed reasoning/answer items; [codex-model-benchmarks](https://github.com/zakmandhro/codex-model-benchmarks#what-is-measured) measures visible delivered output. Neither definition should be silently substituted for effective TPS.
-
-An existing completed local Codex 0.163.0 record had output=63, reasoning=49, a 3.315s effective client window, turn duration=6613ms and turn TTFT=5967ms. The reasoning item lasted 0ms: item display duration cannot measure hidden inference. 63/3.315≈19.005 effective TPS is interpretable. Dividing 63 by the 578ms visible-answer item is not a reliable reasoning-inclusive decoder metric. No extra model request was sent for this investigation.
-
-## 4. Collection boundary
+<a id="4-collection-boundary"></a>
+## Collection boundary
 
 Ordinary App Server attempts use one response-accounting source: the existing verified rollout observer in metadata-only mode. It checks native thread identity, file header, secure opening, inode continuity, freshness and bounded incremental reads. It starts at the existing file's EOF; a new thread's not-yet-created file can appear later, while disappearance after verification invalidates the source. Monitor never scans private logs on HTTP requests or backfills historical sessions. The parser projects only timestamps, record types, model/settings, usage and response identity; prompts, reasoning text, arguments and tool outputs are skipped and never persisted in the metrics store.
 
@@ -44,7 +38,8 @@ Rollout persistence can precede typed root/child acceptance. The Driver temporar
 
 Coverage means timed samples / observed response usage records, not every provider request on the host. Source availability, collection completeness and capacity loss are also reported, so missing observations are not presented as zero consumption. Observation drain and close share a one-second deadline; a late file worker closes its descriptor but cannot publish after invalidation. Optional read/close/finish failures cannot change the confirmed process-retirement result.
 
-## 5. Persistence and queries
+<a id="5-persistence-and-queries"></a>
+## Persistence and queries
 
 Sanitized `model_measurement` observations are internal; they bypass the necessary output queue and do not enter transcripts, WebSocket messages or liveness signals. The original HarnessRun writes through the existing bounded disposable Monitor sink with captured session/request/attempt/work/run identity and backend; this native path does not attach an agent ID. Slow or failing metering cannot fail the request. Separate response and native turn-latency records retain their proper scope. Unique response/turn identities make persistence idempotent; provider snapshots update their own identity instead of multiplying on replay.
 
@@ -71,7 +66,8 @@ legacy samples without labels remain valid. A confirmed absence of engines is
 valid zero. Latency percentiles use nearest rank, `ceil(n*p)-1` bounded to the
 sample range, with null for no valid samples.
 
-## 6. UI
+<a id="6-ui"></a>
+## UI
 
 Monitor displays a Codex effective output TPS table. Weighted value is primary, latest measured response is secondary. State distinguishes measured, partial timing and missing timing; missing is `—`, never 0 TPS. Values are completed observations held during tools/waits, with their measurement timestamp. Expandable logical-request detail carries settings and usage context without complicating main model grouping.
 
@@ -82,20 +78,20 @@ Unknown resource readings display `—`.
 
 Refresh every 5s only while the page is visible; resume immediately when visible. Requests do not overlap, including manual Refresh; stale responses or errors cannot overwrite a changed window/token. A current refresh error is visible alongside retained data. This is passive performance observation across differing prompts, context sizes, caches, effort and tier, not a controlled model/provider ranking.
 
-## 7. Interpretation limits
+<a id="7-interpretation-limits"></a>
+## Interpretation limits
 
 A client log window is an estimate of response latency, not a server inference clock. Millisecond batching, transport and CLI versions affect it. First-token delay is available at native-turn scope and labelled accordingly; it is not copied onto every response. Missing usage cannot be reconstructed from text, and unknown model/settings are never backfilled from current configuration.
 
-## 8. Accepted test seams and review baseline
+<a id="3-evidence-and-precedents"></a>
+<a id="8-accepted-test-seams-and-review-baseline"></a>
+## Verification
 
-The user confirmed Codex event parsing, Monitor HTTP API and Monitor UI/browser as test seams. `tests/test_monitor.py`, `tests/test_codex_native_observations.py`, `tests/test_codex_app_server_monitor.py` and `MonitorPage.test.tsx` cover windows, deduplication, cold history, actual root/child association races, anomalies, finite close, optional failures, queue pressure, permissions and rendering. Live native activity, fresh-thread and nested/followup cases verify source reachability through the original Owner and Monitor without a benchmark task. Verification policy and browser entry points belong to [testing.md](../testing.md).
+Verification covers Codex event parsing, Monitor HTTP API and Monitor UI/browser. `tests/test_monitor.py`, `tests/test_codex_native_observations.py`, `tests/test_codex_app_server_monitor.py` and `MonitorPage.test.tsx` cover windows, deduplication, cold history, actual root/child association races, anomalies, finite close, optional failures, queue pressure, permissions and rendering. Live native activity, fresh-thread and nested/followup cases verify source reachability through the original Owner and Monitor without a benchmark task. Verification policy and browser entry points belong to [testing.md](../testing.md).
 
-## 9. What this defers
+<a id="9-what-this-defers"></a>
+## Metric boundaries
 
 - Server decoder TPS and isolated hidden-reasoning TPS need a separately proven clock covering those tokens; client log timing does not supply it.
-- Controlled benchmark rankings and extra paid probes are outside the approved passive-observation scope.
+- Controlled benchmark rankings and extra paid probes are outside this passive-observation feature.
 - Unobserved or unsupported native records remain outside coverage; this view does not assert host-wide accounting.
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/codex-performance-monitor.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

@@ -1,6 +1,6 @@
 # 当前存储格式与发布交接
 
-> **Status:** implemented — 现行完整格式、发布期存量核验与有限转换；验证和生产部署分别取证。
+> **Status:** implemented — 当前格式准入、持久资源、完整记录与离线交接不变量。
 
 The main database uses format **11**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
@@ -19,9 +19,7 @@ are never recreated as caches.
 
 Empty Wiki creation prepares jobs before their dependent grants, selection and
 event guards, then installs maintenance projections once. All steps share the
-creation transaction; the Registry publishes only the completed ledger. There
-is no separate no-jobs layout or later job attachment. This assembly change
-uses the complete current declarations and protocol set.
+creation transaction; the Registry publishes only the completed ledger. The Registry does not publish a partial no-jobs layout.
 
 ## 事务与失信边界
 
@@ -52,115 +50,44 @@ receipt、正文、来源、当前任务或未决效果。实际清理另受当�
 删除物理列或接口要同步真实生产者、消费者与测试，不按同名字段全局删除，
 不把旧 rejected/unknown 改成可执行或已成功事实。
 
-## GitHub identity and finite publication handoff
+## Persistent resources and their owners
 
-Format 9 requires every GitHub installation's `external_account_id` to be the
+| Resource | Authority | Preservation and reconstruction |
+| --- | --- | --- |
+| Main SQLite | `server/db/schema.py`, domain DB modules | Full backup preserves all rows; account transfer selects stable account-owned data |
+| Registered Wiki originals and ledger | `server/wiki/schema_ddl.py`, Wiki registry/store | Originals, jobs, receipts, sources and identity history are durable; only declared projections are rebuildable |
+| Private/shared memory, owned keys and credentials | `agent_memory.py`, `crypto.py`, credential stores | Account transfer preserves supported stable relationships and rewraps owned secrets |
+| App code / `.data` / `.runtime` | `applications.py`, `app_backends.py` | Code and data have distinct lifetimes; dependencies are rebuildable, runtime logs are diagnostic |
+| Chats, input receipts, BG/Research/delegation history and provider transcripts | Their domain owners and provider homes | Complete backup includes configured roots; account transfer excludes execution history |
+| Monitor metrics | `server/monitor/` | Separate bounded store, not input or execution authority |
+| Process handles, callbacks, capacity claims and browser drafts | Original process or browser lifetime | Not restored as pending execution or permission |
+
+The exact collection and exclusions are maintained in
+[backup and account transfer](../backup-and-migrate.md#account-export-and-import).
+Archive affects visibility; it is not a uniform age-based data deletion policy.
+
+## Current field representations
+
+Every GitHub installation's `external_account_id` must be the
 provider's positive numeric ID in canonical ASCII decimal text. Login is a
 display label. The current table CHECK and complete verifier reject NULL,
 `login:id` and other noncanonical keys; other connector kinds retain their
 existing identity rules. Per-account/kind uniqueness is unchanged, including
-the existing shared uniqueness scope for NULL and empty account IDs. This
-changes no collection root or Wiki format. Online behavior belongs to the
+the existing shared uniqueness scope for NULL and empty account IDs. Online behavior belongs to the
 [Connector contract](connectors.md#github-identity).
-
-This installation's format-8-to-9 handoff is complete. Its finite helper and
-exclusive source fixtures have retired. Application resource-family checks remain in
-read-only preflight, missing-history recovery and offline pre-cutover verification,
-including archived applications and unscoped rows. Conflicts do not authorize
-moving resources. The following records the completed handoff's safety rules,
-not an entry point for admitting old formats.
-
-Source admission checked a frozen complete catalog and two explicitly known
-full physical layouts, including every table's `table_xinfo`, integrity, foreign
-keys and retained typed facts. A normalized declaration alone did not prove
-column order, and per-table mixtures of the known layouts remained unrecognized.
-Read-only preflight and the write transaction shared that admission check.
-
-Before quiescing the old service, read-only inspection enumerated all GitHub
-installations, including disabled accounts and NULL owners. Only recognized
-`login:positive-ID` keys can map to current IDs. Unrecognized keys, unaddressable
-installation identities or owners, and duplicate target IDs within the existing
-account scope block publication with the affected installation/account/key
-details. Different accounts may retain the same provider ID. The helper neither
-chooses a token or owner nor merges or deletes conflicting installations.
-It performs no conversion during preflight or missing-history recovery.
-
-The publisher converted only after the original writer retired, starts were
-masked and offline installation ownership was held. Inside `BEGIN IMMEDIATE`
-it repeated source/fact/resource checks, created the new installation table,
-copied by explicit column names while applying the ID mapping, dropped the old
-table, renamed the new one and recreated indexes. It never renamed the old parent
-first. FK enforcement was disabled only on that private offline connection before
-the transaction to prevent cascading removal during reconstruction. Independent
-column-by-column installation, secret-ciphertext and Agent-link comparisons,
-foreign-key checks and the complete current verifier were required before COMMIT.
-Only intended GitHub keys could change; metadata, constraints and marker 9
-committed together. IDs, labels, created times, enablement, other kinds and grants
-remained.
-
-Confirmed rollback retained format 8. Unconfirmed COMMIT kept business closed;
-a fresh attempt under the same plan inspected actual committed facts. Complete
-format 9 was verified without replaying the mapping or resetting later writes;
-only complete known format 8 could convert within the original offline boundary.
-Strict current main/Wiki verification preceded switching and starting the
-candidate and ran again afterward. Startup, ordinary reads, Connect and
-account import provide no old-key conversion. The finite helper and exclusive
-fixtures have retired after publication, acceptance and forward-recovery
-responsibilities closed. There is no permanent old-format route. Operator steps
-belong to [local publication](../local-wsl.md#自动发布).
 
 ## Complete record projections
 
-Format 10 appends private nullable `messages.git_ignored_baseline TEXT`. Version-1
+The private nullable `messages.git_ignored_baseline TEXT` stores version-1
 JSON contains the complete then-existing ignored path coverage from the original
 turn-start observation; the full UTF-8 JSON budget is 262144 bytes. NULL means
-unknown, including every historical message at the handoff. An empty collection
+unknown. An empty collection
 is distinct complete evidence. Complete reads, saved-message copies, rewind
 history and consistent full backups preserve the raw value; ordinary browser
 messages omit it. The current verifier rejects malformed, oversized or
 unsupported evidence without repairing it. Account transfer excludes it with
 chats; there is no new collection root. Permissions and failure semantics belong
-to [safe rewind](session-rewind.md#563-the-one-revert-we-offer-file-edits-via-git).
-
-This installation's finite 9→10 handoff has completed production conversion and
-publication acceptance. Its private frozen input admitted only the complete declared format-9 layout or the
-complete observed format-9 physical layout, plus their fully verified format-10
-results. Per-table mixtures, unknown catalog objects, column orders, integrity
-failures, broken foreign keys and invalid retained facts refused admission.
-Read-only preflight checked committed WAL and verified an in-memory conversion
-before original-writer retirement. Application startup still rejects format 9.
-
-Under the publisher's existing writer-retirement, start-mask and offline-lock
-boundary, one `BEGIN IMMEDIATE` repeated admission, added the nullable column and
-marker 10, then checked the complete candidate, foreign keys and typed row
-multisets of every original column, rowid and sequence before COMMIT. Only NULL
-was initialized; no historical ignored-path observation was fabricated. Confirmed
-rollback retained format 9. Unconfirmed COMMIT/ROLLBACK kept business closed;
-fresh reentry inspected actual committed facts, converted only a recognized 9 or
-verified 10 without resetting subsequent writes. Failure retained the original
-credential and recovery material; cleanup did not reopen an uncertain store
-for token writes. A receipt-bearing offline resume needed no new credential
-before storage admission and candidate readiness. Every reentry validated the
-original frozen helper, candidate and settings, then reloaded the start mask
-before acquiring the offline owner. Other retained ledgers also had to pass
-before candidate start. No old database replaced a newer one. The
-finite input and exclusive fixtures remain until publication, acceptance and
-forward-recovery responsibilities close, then retire together. This is not a
-startup migration route or a permanent chain of old-format support.
-
-Natural-drain timeout preserved the original request identity. A later live,
-unmasked original with freshly admitted storage and a confirmed ready response
-could replace only its own database-confirmed expired maintenance credential.
-A stopping response for the same request instead recovered the original receipt
-without token writes. Unknown handoff state refused rotation. After candidate
-readiness, an expired credential could likewise retire before notification;
-offline conversion uncertainty never entered either write path.
-
-Immutable environment/profile inputs excluded the managed unit: masking and
-restoration intentionally change that file. Its original fingerprint and frozen
-unit remained separate phase guards. Treating it as an immutable environment
-input would reject the publisher's own mask before conversion, rather than
-establish configuration drift. This boundary also applies to later publications.
+to [safe rewind](session-rewind.md#the-one-revert-we-offer-file-edits-via-git).
 
 App Server command `tool_input.output_capture` uses existing message JSON.
 Completed content stores the actual retained output, with command retention
@@ -172,7 +99,7 @@ missing metadata establishes no full-log guarantee, and historical body copies
 are not removed. Account archives continue to exclude chats under the existing
 [portability scope](../backup-and-migrate.md#account-export-and-import).
 
-Format 8 adds nullable `sessions.context_state` JSON and
+The schema includes nullable `sessions.context_state` JSON and
 `agents.context_settings_revision INTEGER NOT NULL DEFAULT 0`. The typed
 ContextState verifier checks complete retained facts; Agent revisions must be
 nonnegative integers. Session positional reads and Agent record projections
@@ -191,12 +118,6 @@ raw local-command run/outcome JSON alongside its native reason. Full backup and
 history reads preserve those facts, including failed/interrupted + applied;
 account transfer still excludes them with chats. No new format version or
 conversion is required for this JSON addition.
-
-The completed format-7→8 publication handoff added both fields and marker 8 in
-one transaction, preserving original facts and initializing only NULL and 0.
-It fabricated no historical context sample. That finite converter and its
-exclusive fixtures have retired; they are not a route for opening format 7
-with current code or a step in a permanent migration chain.
 
 Complete-record SELECTs for agents, applications, background tasks, research
 jobs, connector installations, custom connectors and credentials use explicit
@@ -221,47 +142,14 @@ eligibility, reservation and publication boundaries. `tests/test_archive_reads.p
 checks real public consumers, query growth, empty/gapped/duplicate histories and
 account isolation.
 
-## Message range index and finite 10→11 handoff
+### Message range index
 
-Format 11 removes only the redundant nonunique `idx_messages_session` index.
 `messages_unique_sequence(session_id,seq)` retains uniqueness and serves both
 forward and reverse range reads, offsets and previous-page existence queries;
-terminal indexes remain. Existing rows, sequence allocation and saved evidence
-do not change. New databases create this complete declaration directly; startup
-and account import still refuse format 10.
+terminal indexes remain. There is no separate nonunique `idx_messages_session` index.
+Startup and account import require the complete current format.
 
-The finite publication helper admits the frozen complete format-10 catalog and
-one whole known canonical or observed physical column-order profile. Per-table
-mixtures, unknown objects/orders, invalid retained facts, broken foreign keys
-or integrity failures refuse admission. Read-only preflight takes a committed
-snapshot including WAL and verifies the conversion in memory without changing
-the source. After original-writer retirement, every offline reentry reloads the
-start mask before acquiring installation ownership. One `BEGIN IMMEDIATE`
-repeats admission, drops the redundant index and advances the marker, verifies
-the complete target, and compares streaming typed values, rowids, row counts
-and sequence state for every retained table before COMMIT.
-
-Confirmed rollback retains 10. Unknown COMMIT/ROLLBACK keeps business closed;
-fresh reentry under the same candidate and frozen inputs admits the actual
-committed 10 or verifies 11 without replaying conversion or resetting later
-writes. Other retained ledgers must also pass before start. Credential creation,
-rotation and cleanup require admitted storage, the bound actual process and
-readiness before opening a credential connection. A receipt-bearing offline
-resume does not create a token before admission; uncertain conversion preserves
-original credentials and recovery material. There is no independent ungated
-cleanup command in this publication path.
-
-Both known source profiles complete independent account export/import after
-conversion, preserving login, DEK, grants, Agent settings and Wiki originals,
-identity/history while retaining chat/token/foreign-account exclusions. Current
-database tests verify duplicate-seq refusal and plans of actual public range
-queries. Private finite fixtures cover process loss, committed WAL, rollback and
-lost acknowledgments; they and their frozen helper inputs retire after actual
-publication, acceptance and forward-recovery responsibilities close. This does
-not add a permanent old-format route or establish production acceptance from
-isolated tests. Operator steps remain in [local publication](../local-wsl.md#自动发布).
-
-## Publication boundary
+## JSON facts and unknown values
 
 `ForkRevertRecord.stash_ref` keeps its existing nullable string representation.
 New recovery snapshots store a verified full commit OID; legacy `stash@{n}`
@@ -270,7 +158,7 @@ The OID is stable across later stash pushes, but does not guarantee retention
 after object deletion or garbage collection. There is no schema conversion,
 new backup root or historical backfill. Existing session JSON, API projection
 and complete backup retain the original value. Creation, verification and
-uncertain effects belong to [safe rewind](session-rewind.md#563-the-one-revert-we-offer-file-edits-via-git).
+uncertain effects belong to [safe rewind](session-rewind.md#the-one-revert-we-offer-file-edits-via-git).
 
 Question resolution uses the existing nullable message `tool_input` JSON:
 `question_resolution.version=1` carries original form/execution association,
@@ -357,7 +245,7 @@ results, duplicate input receipts or prove parent processing. Empty diagnostics
 do not authorize replay. Live question delivery controls stay with the original
 round/question and are not a new persistent queue.
 
-The same `sessions.delegation_state` JSON now retains `child_work_ids` and an
+The same `sessions.delegation_state` JSON retains `child_work_ids` and an
 optional successful `candidate_request_id`. These are the outstanding parent-work
 responsibilities and final-candidate identity that cannot be reconstructed from
 the child's current round after follow-up. Original `client_submissions` payload,
@@ -409,7 +297,7 @@ clock projections do not add a main-database column or alter the main format. Th
 not restore input or execution authority. Their collection and deduplication
 contract belongs to [Monitor](codex-performance-monitor.md).
 
-New App Server outcomes add nullable `final_answer` and `native_status` within
+App Server outcomes contain nullable `final_answer` and `native_status` within
 existing result-message JSON. `final_answer` contains the bound root thread/turn
 and ordered original message seqs; it stores no copied body. `native_status`
 retains completed/failed/interrupted provider evidence independently of the
@@ -479,59 +367,30 @@ the remaining phase. Application HTTP, process, cold-open and account-snapshot
 regressions cover these facts in `tests/test_applications.py` and
 `tests/test_delegation_work.py`.
 
-The existing private publisher under `~/.octopus/ops/publication/tools/` owns
-this sequence:
+## Publication boundary
 
-1. Inspect installation resources read-only before consuming the original
-   process's single permit. A failed preflight leaves that service running.
-2. Confirm natural drain and the original process's handoff permit, mask starts
-   and wait for the original process and unit to retire.
-3. Acquire offline installation ownership and keep starts masked while checking
-   retained data, applying this release's finite conversion if needed, and
-   strictly verifying the candidate's current contract. Do not advance the
-   release pointer before these checks pass.
-4. Switch the prepared release pointer under the offline lock only after all
-   resources pass, then release the lock, install/unmask and start the candidate.
-   Verify actual readiness, current domain reads/writes and recovery, assets and the
-   installation binding through the existing release acceptance.
-5. Retire the finite conversion and its exclusive fixtures after acceptance and
-   all recovery duties finish. Preserve decision rationale and regression evidence.
+Retire original writers and block starts before taking offline installation
+ownership. Inspect committed data, including WAL, against the complete admitted
+source and candidate declarations. The candidate's read-only verifier checks
+structure, integrity, foreign keys and typed retained facts; a matching marker
+alone is insufficient.
 
-Unchanged formats still receive real read-only verification. Conversion, target
-constraints and marker share one database transaction. Independent databases and
-files do not form a global transaction: partial completion or an uncertain commit
-keeps business closed. Reentry uses the original candidate/permit and fresh
-inspection of committed facts; it does not trust an older success receipt, restore
-old databases or replay model/tool effects. An already running candidate is
-verified without another conversion or restart.
+An authorized finite conversion commits its intended values, constraints and
+marker together and compares all other retained facts. Unknown COMMIT/ROLLBACK
+keeps business closed. Reentry inspects actual committed facts under the same
+candidate and frozen inputs; it must not overwrite newer files/databases or
+replay model/tool effects. Runtime callbacks cannot be restored from JSON.
 
-### Wiki dispatch generations
+Only verified current storage permits candidate start and credential writes.
+Do not rotate or clean credentials by opening an uncertain store. A running
+candidate is verified without repeating a conversion. Finite helpers and their
+exclusive fixtures retire only when publication, acceptance and recovery duties
+have ended. There is no permanent ladder of old-format startup migrations.
+Operator commands belong to [local publication](../local-wsl.md#自动发布).
 
-Fresh current jobs start at generation zero.
-
-An accepted explicit retry or scope re-admission advances
-the generation and subscribes its actual entry in the same writer transaction.
-Worker claims, automatic recovery, completed-result retrieval, ordinary reuse
-and control replay do not advance it. Prior generations retain their effects
-and cards but cannot automatically report a later dispatch.
-
-An account-scoped in-process admission gate orders explicit dispatch transfer
-against automatic return acceptance. It is held only through these bounded
-admissions, never model execution; no registry lock or database transaction is
-held across the asynchronous session submission. Cold restart relies on durable
-generations and existing source receipts. Native cancellation joins the captured
-control writer before releasing that gate. Aggregation and operation counts only
-include current subscriptions; the return identity remains stable for the original
-request even when a transferred member leaves the group, preventing a second
-report after a lost ACK. Already accepted return inputs remain original facts.
-Only an actual structure or semantic change changes a format marker. Developer
-intermediate layouts do not create support obligations. A later format-changing
-release supplies its own bounded conversion and verification, then retires it;
-there is no permanent older-version ladder or promise to open retired backups
-with the newest binary. This storage-format convergence was independent of
-the historical account-portability work. Current offline export/import is
-implemented; its collection and restoration contract is maintained in
-[account portability](../backup-and-migrate.md#account-export-and-import).
+Wiki dispatch generation, return admission and effect recovery belong to the
+[Wiki contract](wiki-development-summary.md); storage preserves their original
+identities without creating a second execution authority.
 
 ## Wiki 任务表示与恢复资料
 
@@ -541,10 +400,6 @@ implemented; its collection and restoration contract is maintained in
 和语义改写仍撤销失效证明。bound 创建证明、applied/indexed、正文及仍需的来源
 和 receipt 独立保全。任务实体缺失时原聊天只保留已提交摘要，不另存请求档案；
 旧 attempt 控制冲突为409。
-
-12/13格式准备、旧标志转换和旧编码任务清退属于一次性历史发布范围，见
-[固定原文](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/implemented/wiki-development-summary.md#L197-L201)。
-终态或日期不授予清理权限；现行格式准入与转换见本文的发布边界。
 
 ## 账户搬迁的开发约定
 
@@ -562,92 +417,15 @@ implemented; its collection and restoration contract is maintained in
 导入先核验，再私有暂存、重绑明确的系统路径和本机身份，持久化后启用。不以单库
 一致性冒充跨资源快照，不扫描改写任意正文/第三方代码，不把源执行过程搬到目标。
 
-账户搬迁专项的隔离验收覆盖首次导出、增长后再次导出、源端离线后的独立导入、
-原账户登录、agent 配置/memory/Wiki、应用依赖重装后的数据读写，以及中断拒绝。
-专项用例、夹具和审查副本按用户要求退役；这是保留的历史验收结论，未来语义变更
-仍需当次验证，不免除现行权限、完整性与恢复测试，也不证明生产曾执行搬迁。
+## Verification
 
-
-## Regression coverage and retired assertions
-
-| Previous assertion | Current coverage |
+| Boundary | Current source or regression entry |
 | --- | --- |
-| Main 0–3 upgrades, retired columns/modes/requests and historical message guards | Their success matrices and frozen constructors/SQL are removed. Minimal mismatched-marker refusal remains, including nonempty zero and real WAL. |
-| Current account/configuration, credentials, messages, input recovery, pins, schedules, attachments, applications, forks and delegations prepared through old fixtures | The same domain assertions use owned current data; current DEKs, password changes, unknown inputs and successor relationships remain covered. |
-| Full current structure/constraint checks during startup | Publication tests retain missing indexes, quoted SQL constraints, extra structures, lost origin/source/grant/selection authority and read-only refusal. |
-| Wiki 12/13 preparation, no-jobs layouts, old emitters and task retirement | Old success matrices and frozen DDL are removed. Current grants/material ingestion, creation receipts, blob roots, notifications and metadata recovery use registered current Wiki fixtures. |
-| Wiki format history | One current marker; mismatch rejection, current reopening and derived-index recovery. Current tasks are retained. |
-| Startup performs release upgrades | Private publication tests verify retirement before conversion, masked failures, fresh reentry, actual SQLite process loss/commit acknowledgment loss, partial completion across two Wiki ledgers and current service behavior after handoff. |
+| Exact current marker, empty initialization and incompatible-format refusal | `server/db/schema.py`, `server/wiki/schema.py`, `tests/test_database_format.py` |
+| Full retained catalog, constraints and typed facts | `server/storage_verification.py`, `server/wiki/storage_verification.py` |
+| Current messages, native evidence and committed outcome references | `tests/test_native_input_evidence.py`, `tests/test_session_results.py` |
+| Archived projections and range reads | `tests/test_archive_reads.py`, `server/db/sessions.py` |
+| Collection, exclusions and restoration | `server/portability.py`, `server/db/portability.py`, `server/wiki/portability.py` |
 
-Targeted checks precede the repository commit gates. Gate definitions and live
-provider scope remain in [AGENTS](../../AGENTS.md#verification); deployment follows
-[the existing local procedure](../local-wsl.md#自动发布). Passing isolated conversion
-or startup tests does not establish that production was converted or released.
-
-## Historical evidence
-
-The following handoff examples are frozen implementation/validation evidence
-recorded by source revision `fd7ab9c9bf312c1366eaa111d887c120cebb5e6f`.
-Statements about an observed installation or unconverted production database
-refer to those original checks; they are not a current deployment inspection.
-The finite converters and temporary fixtures are owned by that release/recovery
-work, not ordinary startup or a permanent migration API.
-
-### Main 6→7 example and retained-fact verification
-
-A format-6 installation requires this release's finite publication conversion
-after its original writers retire: append only `native_inputs` as `[]` and commit
-marker 7 in the same SQLite transaction. Ordinary startup never performs it.
-Read-only preflight checks complete declarations, integrity, foreign keys and
-exact `table_xinfo` against the declared baseline and the four verified historical
-column orders. The writer transaction repeats those checks, preserves original
-column metadata and compares every original table's typed row multiset, including
-duplicate counts and NULL/TEXT/BLOB/numeric distinctions. The candidate's complete
-verifier runs before COMMIT. Format-7 reentry verifies and retains already committed
-native evidence; uncertain COMMIT keeps the publisher closed for fresh inspection
-without restoring old data or replaying inputs. This conversion does not admit
-arbitrary historical/intermediate layouts or revive deleted conversations.
-
-The 6→7 boundary was checked on an isolated fresh snapshot of the actual retained
-installation; all twenty original tables preserved their metadata and typed facts.
-Temporary private checks cover populated canonical/historical layouts, malformed
-baseline refusal, process loss before COMMIT, lost COMMIT acknowledgment, current
-reentry and the real preflight entry before consuming a publication permit.
-Current regressions cover native proof validity, terminal/restart preservation,
-fresh creation and mismatch refusal. These are implementation/validation facts;
-the production database has not been converted by this development task.
-
-### Earlier Wiki 16→17 dispatch-return example
-
-The preceding dispatch-return release started from the observed main 4 / Wiki 16
-installation. Main has no physical format change. The finite Wiki handoff adds
-`dispatch_generation` to the existing job state and subscription uniqueness,
-preserves subscription IDs, snapshots and ACKs, and commits marker 17 with
-notification protocol 4. The observed installation has only completed jobs,
-acknowledged notices and settled automatic return inputs. The bounded handoff
-rechecks these facts, retains historical subscriptions in generation zero and
-initializes the completed jobs' current generation to one without a subscriber.
-This closes consumed return scopes without relabelling their original identities
-or guessing historical dispatchers. A new caller explicitly retrieves the saved
-result; unfinished legacy owners block this handoff and retain their actual
-recovery responsibility.
-
-The handoff checks the original declarations read-only, compares exact retained
-facts before/after, and verifies the current layout in the conversion transaction.
-The original source and finite private script remain until actual acceptance;
-implementing this code does not itself convert the running installation.
-
-### Earlier main 5→6 evidence
-
-
-The 2026-10-31 main 5→6 handoff check used a fresh read-only backup of the actual
-running installation, including nonempty BG records and a persisted delegation
-round. Conversion touched only the isolated copy. All twenty original tables
-retained their column metadata and typed row multisets under the declared round
-JSON projection; an independent comparison removed only the new null
-`terminal_delivery_error` and checked every original JSON field. The copy was
-deleted after validation. This supplies retained-data evidence alongside the
-finite interruption/commit-ack tests; actual production conversion and release
-remain facts of the publication receipt.
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/current-storage-format.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.
+Verification policy lives in [testing](../testing.md). An isolated storage check
+does not establish that a running installation was converted or released.

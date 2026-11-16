@@ -25,6 +25,11 @@ Claude live checks are not a pending gate for this installation.
 
 ## Existing tests when adding a transport
 
+Fixtures preserve the business assertion and the boundary that owns it. A failure
+injection must reach that boundary; refusal during unrelated setup is not evidence
+for rollback or retirement. Isolated installation tests bind the real producer
+identity and restore only their own copies.
+
 The transport matrix retains Claude stream-JSON, ordinary Codex App Server and
 the independent Codex exec leaf/text worker. Keep each existing test's business guarantee
 and choose its fixture from what it tests:
@@ -201,14 +206,6 @@ Finish the release matrix during validation. The delivery owner then commits,
 pushes and follows the linked publication procedure using the same evidence;
 routine preparation opens no additional review or approval round.
 
-## Conditional automation work
-
-`scripts/check.sh` runs browser E2E only with `--e2e`. Before making it automatic,
-choose frequency, isolation and acceptable measured cost; ensure visible failures
-without live models or production state. This does not change release gates.
-The remaining automation goal comes from the
-[fixed upstream polish plan](https://github.com/archeryue/Octopus/blob/fd18c3407a7c61fb19074f475b357871edf1dabb/docs/plans/polish-2026-09.md).
-
 ## Test Coverage
 
 Use `.venv/bin/pytest tests/ --collect-only -q` with the relevant marker/opt-in
@@ -234,7 +231,7 @@ boundaries to verification without maintaining a second per-file inventory.
 | Changed boundary | Contract | Representative checks |
 | --- | --- | --- |
 | E2E ownership and runner selection | [Browser ownership](#browser-ownership-and-execution) | `resource-isolation.spec.ts`, `e2eOwnership.test.ts`, `e2eExecution.test.ts`, `e2eUI.test.ts`: real account isolation, concurrent pin writes, visible cleanup errors and native selection. |
-| Secure browser IDs and archive recovery | [Original-operation confirmation](implemented/frontend-list-reconciliation.md#归档恢复的原操作确认), `web/eslint.config.js` | `secureIdLint.test.ts` checks the production `randomUUID` restriction and helper/test exceptions; helper tests retain secure randomness and local failure. Archive management retains direct archived navigation, first-generation overlap, original-ID confirmation and a single POST. |
+| Secure browser IDs and archive recovery | [Original-operation confirmation](implemented/frontend-session-observation.md#归档恢复的原操作确认), `web/eslint.config.js` | `secureIdLint.test.ts` checks the production `randomUUID` restriction and helper/test exceptions; helper tests retain secure randomness and local failure. Archive management retains direct archived navigation, first-generation overlap, original-ID confirmation and a single POST. |
 | Native start, delivery and recovery | [Codex](implemented/codex-backend.md), [input evidence](implemented/input-reliability.md#codex-native-input-evidence) | `test_codex_app_server_submission.py`, `test_codex_native_recovery.py` |
 | Context sample, native compact and busy selection | [Samples](implemented/model-reasoning.md#上下文样本与配置绑定), [compact Owner](implemented/input-reliability.md#native-compaction-requests), [Claude](implemented/harness-layer.md#claude-native-compaction) | `test_session_context.py`, `test_claude_context.py`, `test_codex_compact.py`, `test_claude_compact.py`, `test_queued_compact.py`, `context-meter.spec.ts`, `queued-compaction.spec.ts` |
 | Original request settlement and failure takeover | [Completion](implemented/input-reliability.md#原请求完成与失败交接) | `test_terminal_recording.py`, `test_session_owner_failure.py` |
@@ -244,7 +241,7 @@ boundaries to verification without maintaining a second per-file inventory.
 | Reads, WS, reconnect and deletion | [Frontend](implemented/frontend-list-reconciliation.md), [socket delivery](implemented/multi-tenancy.md#websocket-delivery) | `test_ws_delivery.py`, `sessionList.test.ts`, `session-deletion.spec.ts` |
 | MCP original-command/waiter retirement | [MCP retirement](implemented/harness-layer.md#mcp-question-retirement) | `test_mcp_question_cancellation.py`, `test_ask_mcp.py` |
 | Exact cancelled-input exception and root presentation | [Root completion](implemented/codex-backend.md#root-completion-and-selected-answer) | `test_mcp_input_completion.py`, `test_codex_app_server_completion.py` |
-| Page question draft and answer association | [Question drafts](implemented/frontend-list-reconciliation.md#页面问题草稿与原回执), [settlement](implemented/input-reliability.md#问题结算) | `QuestionLifecycle.test.tsx`, `test_question_resolution.py`, `question-interaction.spec.ts` |
+| Page question draft and answer association | [Question drafts](implemented/frontend-interaction-state.md#页面问题草稿与原回执), [settlement](implemented/input-reliability.md#问题结算) | `QuestionLifecycle.test.tsx`, `test_question_resolution.py`, `question-interaction.spec.ts` |
 | Interaction policy, deadline, pause and missing decision | [Original-work policy](implemented/input-reliability.md#原工作交互策略与等待), [parent opportunity](implemented/agent-collaboration.md#unattended-questions) | `test_work_interaction_policy.py`, `test_unattended_parent_questions.py` |
 | App response timeout and served client | [App access](implemented/app-agent-access.md) | `test_app_response_recovery.py`, `web/tests/appAgentClient.test.ts` |
 | Wiki HTTP lifecycle and effect recovery | [Wiki](implemented/wiki-development-summary.md#恢复与效果核验) | `test_wiki_test_runtime.py` and the changed operation's API/job tests |
@@ -274,7 +271,8 @@ evidence under the reuse policy above.
   immediately. Final EOF delivers new complete frames exactly once and advances
   the offset. `test_native_protocol_framing.py` uses real append/pipe/RPC barriers
   without sleeps. This proves fixture framing, not product work identity;
-  version-bound outcomes are linked under [validation evidence](#fixed-version-validation-evidence).
+  retain fixture version and provenance with the raw evidence; see
+  [native protocol fixture scope](#native-protocol-fixture-scope).
 - `tests/session_fork_support.py` owns the function-scoped fork source, SQLite
   and HTTP fixture; `tests/session_held_process.py` owns the original live
   process, readers and their teardown for rewind and failed-Owner tests.
@@ -331,8 +329,8 @@ evidence under the reuse policy above.
   evidence does not imply ordinary Default-mode tool availability. HTTP MCP
   questions remain a separate guarantee; recovered attempts retain the original
   question owner and every original attempt must retire.
-  G0 emitted `isBlocking:false` in the live Default-mode run; assert optional
-  delivery explicitly rather than treating the tool name as blocking evidence.
+  The retained live Default-mode fixture carries `isBlocking:false`; assert
+  optional delivery rather than treating the tool name as blocking evidence.
   Human blocking/idle suspension uses explicit true frames plus a controlled
   question clock in `test_work_interaction_policy.py`; it is not a live-provider
   blocking observation. The unattended live case retains the actual partial
@@ -344,19 +342,9 @@ evidence under the reuse policy above.
   outage; capacity or media-generation observations prove only their observed
   stages. Saved artifact, row and file effects remain independently verifiable.
 
-## Fixed-version validation evidence
-
-Earlier fixture and delivery validations retain their original version, failures,
-environment and limits in the fixed snapshot: [fixture remediation](https://github.com/Danuvius152/Octopus/blob/5899c51d8f3b8fd513084e768e089c4a53f6af1a/docs/testing.md#test-fixture-remediation-evidence),
-[delivery and interaction retirement](https://github.com/Danuvius152/Octopus/blob/5899c51d8f3b8fd513084e768e089c4a53f6af1a/docs/testing.md#session-delivery-and-interaction-retirement-verification)
-and [draft/input/App recovery](https://github.com/Danuvius152/Octopus/blob/5899c51d8f3b8fd513084e768e089c4a53f6af1a/docs/testing.md#question-draft-input-cleanup-and-app-recovery-verification).
-The latter includes an unexplained reconnect failure followed by passing unchanged
-repetitions; it is not a resolved product cause or a new passing run. Current
-regression requirements remain in the topic table and shared-fixture rules.
-
 ## App, login and delegation ownership regressions
 
-CR-01–CR-03 use public entry points, controlled peers and real SQLite/files:
+Use public entry points, controlled peers and real SQLite/files:
 
 - App/Wiki request-lifetime tests cover target loss, capacity, effects, 202 handoff
   and failed cleanup. Proxy lock/body barriers require original-request retirement
@@ -379,12 +367,11 @@ an effect/retirement receipt.
 
 ## Optional resource experiments
 
-The [2026-11-03 resource and MCP experiments](reference/runtime-resource-boundaries-20261103.md)
-are optional, fixed-version observations, outside default gates. Their recipes
-use synthetic files and isolated native homes; configuration/discovery probes do
-not send model input. Repeating measurements requires explicit resource stop
-conditions. Small boundary/correctness regressions remain in the hermetic suite;
-this does not add a permanent benchmark platform or resume paused Wiki evals.
+Resource measurements use synthetic files and isolated native homes, outside
+default gates. Configuration/discovery probes send no model input. Before a
+measurement, fix the source, CLI, dependency versions, workload and resource stop
+conditions. Retain raw inputs, responses, failures and environment metadata.
+Small boundary/correctness regressions remain in the hermetic suite.
 
 实际输入成本与质量基线也属于明确委托的可选测量，不加入日常、提交或发布
 门禁。固定源码、CLI／依赖、有效模型配置、来源、调用预算、样本数及历史／缓存
@@ -416,8 +403,7 @@ external `?raw` import pass: patched Vite checks those raw reads more strictly.
 The `vite-filesystem` browser regression verifies that the development server
 still rejects both the shared backend fixture and backend configuration outside
 the web roots. Vitest and its V8 provider keep the same exact locked version when
-applying security updates; the older coverage baseline below retains its original
-measurement versions.
+applying security updates. Record measurement versions with coverage artifacts.
 
 After a transitive security update, audit every locked copy. A patched hoisted
 package can coexist with an older copy retained by a parent's exact pin. Prefer
@@ -452,18 +438,9 @@ export COVERAGE_FILE="$octopus_coverage_root/.coverage"
 (cd web && bun run test:coverage --coverage.reportsDirectory="$octopus_coverage_root/frontend")
 ```
 
-The 2026-11-02 follow-up established the following baseline on Python 3.14.4,
-pytest-cov 7.1.0 / coverage 7.17.0 and Vitest/V8 4.0.18. Backend observations
-combine the full initial offline run and affected-module reruns with unchanged
-production sources; first failures remain recorded. Frontend results use the
-successful full unit run after the KaTeX upgrade, with test-only fixtures
-excluded at measurement time. These are observations, not a release threshold
-or a claim about live-provider coverage.
-
-| Scope | Executable lines | Branches |
-| --- | --- | --- |
-| Backend offline | 34,287 / 37,527 — **91.37%** | 10,733 / 13,072 — **82.11%** |
-| Frontend unit | 4,144 / 4,981 — **83.19%** | 4,333 / 5,668 — **76.44%** |
+Record coverage with the source revision, dependency versions, selection and
+excluded fixtures. Line and branch coverage describe that run; neither proves
+live-provider behavior or establishes a release threshold.
 
 ## Markers, providers and isolation
 

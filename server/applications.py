@@ -1174,9 +1174,8 @@ class ApplicationManager:
     ) -> str:
         """The brief handed to the agent on the first build turn.
 
-        The constraints aren't stylistic — they're what makes the result
-        renderable at all: Octopus serves the directory as static files inside
-        an iframe, with no build step and no server (applications.md §6).
+        Octopus loads the static entry directly in an iframe without a frontend
+        build step. Optional backend scripts follow application-backends.md.
         """
         extra = (instructions or "").strip()
         extra_block = f"\n\nAdditional instructions from the user:\n{extra}" if extra else ""
@@ -1185,18 +1184,19 @@ class ApplicationManager:
             f"What the user wants:\n{description}{extra_block}\n\n"
             f"Build it in this directory (it already exists and is your "
             f"working directory):\n  {app_dir}\n\n"
-            f"How it will be run — this is a hard contract, not a preference:\n"
+            f"Runtime contract:\n"
             f"- Octopus serves this directory as STATIC FILES and renders it "
-            f"inside an iframe. There is no build step, no dev server, and no "
-            f"backend.\n"
+            f"inside an iframe. The frontend loads directly without a build "
+            f"step or dev server. Optional backend scripts are described below.\n"
             f"- The entry point MUST be `{entrypoint}` at the root of that "
             f"directory, loadable directly by a browser.\n"
             f"- Plain HTML/CSS/JS (ES modules are fine). Any library must come "
             f"from a CDN <script>/<link> tag or be vendored as a file in the "
             f"directory. Never require `npm install`, bundling, or a "
             f"transpile step.\n"
-            f"- Persist state in the browser (localStorage) — there is no "
-            f"server to talk to.\n"
+            f"- For a static app, persist state in the browser (localStorage). "
+            f"For server-side persistence, use the backend's `$APP_DATA_DIR` "
+            f"as described below.\n"
             f"- It is rendered at whatever size the pane happens to be, so it "
             f"must look right on both a wide desktop pane and a ~400px phone "
             f"width.\n"

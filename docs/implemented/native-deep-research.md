@@ -6,7 +6,8 @@
 [Research 工作流计划](../plans/ai-research-workflow.md)。当前可恢复返回观察，
 不代表流水线能从任意中间阶段续跑；未知外部效果不自动重放。
 
-## 1. Responsibility and rationale
+<a id="1-responsibility-and-rationale"></a>
+## Responsibility and rationale
 
 Octopus owns research orchestration, bounded concurrency, progress, cancellation,
 report persistence and caller delivery. Native harness web tools own search and
@@ -14,7 +15,8 @@ fetch. Reasoning steps use `run_oneshot`; web steps use isolated native runs.
 This keeps independent research jobs from depending on an interactive provider
 workflow or the lifetime of the caller's initial model turn.
 
-## 3. Pipeline
+<a id="3-pipeline"></a>
+## Pipeline
 
 Scope decomposition produces angles, parallel web leaves gather findings, Python
 deduplicates/ranks, independent leaves try to refute claims, then a tool-free
@@ -66,7 +68,8 @@ never changed into new addresses. Shortening or omission is disclosed. The
 saved envelope is limited to 256 KiB. These limits bound retained material;
 they do not increase search or voting budgets or establish content quality.
 
-## 4. Web leaves
+<a id="4-web-leaves"></a>
+## Web leaves
 
 Web capability is supplied by the selected profile. The leaf executor uses a
 scratch cwd, no native resume ID, a minimal persona, empty MCP and connector lists,
@@ -87,14 +90,16 @@ Leaves are not delegation sessions: stateless extraction does not need named-age
 conversations, parent questions, retained memory or collaboration UI. Each leaf is
 bounded and its original process remains owned until retirement is confirmed.
 
-## 5. Reasoning leaves
+<a id="5-reasoning-leaves"></a>
+## Reasoning leaves
 
 `OneShotContext` and `Harness.run_oneshot` perform decomposition and synthesis
 without executable tools. The [Codex text worker](codex-backend.md#single-call-text-contract)
 owns its narrower implementation. Provider failures retain error evidence;
 cancellation and unconfirmed cleanup propagate to the job owner.
 
-## 6. ResearchManager (async job, like bg/delegations/scheduler)
+<a id="6-researchmanager-async-job-like-bgdelegationsscheduler"></a>
+## ResearchManager (async job, like bg/delegations/scheduler)
 
 A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
 / `delegation_manager`). It:
@@ -112,18 +117,18 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   database and actual retirement failures retain their existing fatal or owned
   failure boundaries. It emits no successful completion or report injection;
   a placeholder is not a completed report.
-- Owns a **hard overall timeout** and an **idle/heartbeat** — the gap that let
-  the CLI Workflow hang forever simply cannot happen here because we control
-  the loop and never block on an unbounded external stream.
+- Bounds the pipeline with `research_job_timeout_seconds` and each leaf with
+  its own timeout. Progress/heartbeat is observation; timeout still requires
+  cancellation and confirmed cleanup of the original resources.
 - Is **cancellable**: cancellation joins the original leaf and fetch operations.
   One-shot subprocesses remain owned by their registry Harness through confirmed
   retirement, including late spawn and private-settings cleanup. An unconfirmed
   cleanup remains visible to installation drain; a returned waiter is not proof
   that its process has exited.
 - Persists to a `research_jobs` table, with **completion and delivery tracked
-  separately** (Vera): `status`/`phase`/`completed_at` AND `injection_status`/
+  separately**: `status`/`phase`/`completed_at` AND `injection_status`/
   `injected_at`/`error`/`report_path` and `delivery_receipt.error`. Because the report is delivered
-  through the shared `admit_return` operation (§7), a job can be `completed` while
+  through the shared `admit_return` operation (see [invocation and files](#invocation-files-and-verification)), a job can be `completed` while
   its report still sits behind an active user turn — the card/DB must show
   completion separately from admission. `injection_status=delivered` is a
   legacy admission fact, not evidence the model processed the report.
@@ -148,7 +153,7 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   owns actual leaf/fetch retirement. Cancellation after completion returns the
   completed job and preserves its report and delivery. The card consumes this
   response directly through its existing state merge. A boot sweep marks running jobs
-  `interrupted`; v1 does NOT resume mid-pipeline.
+  `interrupted`; startup does not resume mid-pipeline.
 
 Before admitting a job, Research captures the session overrides and Agent defaults
 through SessionManager's short configuration boundary, resolving the effective
@@ -266,7 +271,8 @@ EOF without that terminal remains diagnostic material and supplies neither
 search findings nor verification votes. Cleanup failures retain the original
 run and its result evidence separately from the retirement error.
 
-## 7. Invocation, files and verification
+<a id="7-invocation-files-and-verification"></a>
+## Invocation, files and verification
 
 The research tool and `/research` command admit the same account/session-owned
 job. Progress and the report card are projections of that job. Within the account
@@ -282,7 +288,6 @@ the size limit, and requires every v1 field, including nested reasons, condition
 and sources. Old jobs without a summary, missing or damaged files and unsupported
 versions yield explicit unavailable evidence, clearing the card's cached summary.
 Missing material after completion does not revise the committed job outcome.
-This adds no database field, pipeline replay or second lifecycle owner.
 
 Session deletion cascades job rows but follows the existing policy of retaining
 account research files. The [account archive](../backup-and-migrate.md#account-export-and-import)
@@ -295,7 +300,7 @@ processing. The route checks the original account/session and an existing file
 under that account's research root, including archived sessions. Missing material
 is a 404; the path does not confer another account's access.
 Creation receipts, snapshots, browser confirmations and control feedback follow
-the [frontend observation contract](frontend-list-reconciliation.md#辅助任务的读取与事件合并).
+the [frontend observation contract](frontend-session-observation.md#辅助任务的读取与事件合并).
 
 Source: [manager](../../server/research/manager.py),
 [orchestrator](../../server/research/orchestrator.py),
@@ -317,6 +322,13 @@ follows [account scope](multi-tenancy.md); settlement follows
 [original completion](input-reliability.md#原请求完成与失败交接), and resource exit
 follows [Harness retirement](harness-layer.md#execution-and-resources).
 
-## Historical evidence
+## Evidence limits
 
-The [original design and evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/native-deep-research.md) retain their original version and conditions. Current verification follows [testing.md](../testing.md); this document does not establish production deployment.
+The report includes bounded verification reasons, contrary evidence, uncertainty
+conditions and search-failure diagnostics from the current evidence schema.
+Pipeline success, saved artifacts, caller admission and caller processing remain
+separate completion points. A parseable or syntactically complete report does
+not establish independent sources, full-text reading or coverage of the original
+question. Empty search results are not evidence against a claim. Effective
+provider model/effort/tier behavior requires provider observation in addition to
+the captured configuration and offline propagation checks.

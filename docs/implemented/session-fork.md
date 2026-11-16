@@ -2,7 +2,8 @@
 
 > **Status:** implemented — 原生历史复制或 API fork、创建不确定性与显式重放降级，保留原会话和文件。
 
-## 1. What & why
+<a id="1-what--why"></a>
+## What & why
 
 `/rewind` branches the *conversation* (goes back to a message, archives the
 parent, optionally reverts files in place). `/fork` is the **filesystem fork**: it
@@ -11,7 +12,8 @@ duplicates the CURRENT session — full conversation history — onto an
 session and its directory completely untouched. Use it to try changes on a
 throwaway copy of the project without disturbing the original.
 
-## 2. Behavior
+<a id="2-behavior"></a>
+## Behavior
 
 Planning resolves the source, destination and existing symlink ancestors before
 session insertion, directory creation or copying. An equal destination or one
@@ -26,20 +28,20 @@ for the original application's resources or deletion.
   <name>`, default `"<parent name> (fork)"`).
 - Working dir = a **literal full copy** of the parent's working dir at
   `~/.octopus/fork/<basename>-<forkid>/` (incl. .git/node_modules/.venv — the
-  user chose the literal copy; created with `mkdir -p`).
+  copy includes the full directory). Parent directories may exist; the
+  destination itself is created exclusively and must not already exist.
 - **History carried over (native-copy)**: the fork **resumes the parent's real
   conversation**, not a replay. `harness.prepare_fork_copy` copies the backend's
   native history into an independent resume identity at the fork's location, so the fork's
   first turn continues with genuine context:
   - **Claude**: copy `~/.claude/projects/<parent-slug>/<id>.jsonl` →
     `<dest-slug>/<new-id>.jsonl`, rewriting each line's `cwd`→dest and
-    `sessionId`→new id. (Empirically the CLI resumes a copied *real* transcript
-    fine — the old "No conversation found" was specific to *synthesized* ones.)
+    `sessionId`→new id.
   - **Codex App Server**: use native `thread/fork` in the same home,
     save its actual returned identity and retire its short management host before
     installing the branch. This supports both old exec and native source histories;
     branch creation sends no model input. [Native protocol details](codex-backend.md#native-history-branching).
-    New Codex branches no longer copy rollout identities by hand. Saved legacy
+    New Codex branches use the native fork identity. Saved legacy
     initializing forks without a `native_fork` key retain their original file
     cleanup strategy. A present but malformed native checkpoint preserves the
     recovery row and files; it cannot select legacy deletion by omission.
@@ -49,11 +51,8 @@ for the original application's resources or deletion.
     a later validation failure cannot lose it. Claude's typed cleanup adapter
     explicitly rejects a native checkpoint rather than silently ignoring it.
   - **Fallback**: if the parent has no native transcript yet (never ran a turn),
-    `prepare_fork_copy` returns `needs_replay=True` and we use the old replay
-    path — history is tiny/empty then, so no transcript-dump problem.
-  This replaced the original whole-history *replay*, which dumped the entire
-  transcript into the first prompt — for a large session that spilled to a file
-  the model then mis-read as a task list and went off doing the wrong thing.
+    `prepare_fork_copy` returns `needs_replay=True`; the retained product
+    history is installed through the explicit replay path.
 - The **Octopus `messages` table** (UI history) is copied independently
   (`create_fork_session`) and is unrelated to the native transcript: the DB
   feeds the sidebar/chat, the transcript feeds the model. Both are snapshotted
@@ -68,15 +67,14 @@ for the original application's resources or deletion.
 - **Parent untouched**: NOT archived. The fork has `forked_from_session_id` set
   (lineage → nests under the parent in the sidebar). `fork_after_seq` stays set
   to the last copied seq — it doubles as the HISTORY_REPLAY cutoff, so nulling
-  it would make the first backend turn replay zero context (Vera review). The
+  it would make the first backend turn replay zero context. The
   UI instead suppresses the "@msg" badge / renders "full copy of the working
   dir" via a `fork_is_full_copy` flag derived from `fork_metadata.full_copy`.
 
-## 3. Implementation
+<a id="3-implementation"></a>
+## Implementation
 
-- `SessionManager.duplicate_session(parent_id, *, label)` — mirrors the
-  `fork_session` saga MINUS the rewind/validate-target and the parent-archive,
-  PLUS the dir copy:
+- `SessionManager.duplicate_session(parent_id, *, label)` owns this sequence:
   1. SessionOwner reserves the fork, excluding closed admission, paused dispatch,
      active work and active delegation. The reservation excludes competing input.
   2. snapshot the transcript (`load_messages` + `last_seq`) AFTER claiming the
@@ -127,7 +125,8 @@ for the original application's resources or deletion.
   the store + switch to it (parent stays). Distinct from `/rewind`. Other tabs
   fetch the full SessionInfo on the `session_forked` event.
 
-## 4. Crash safety / limits
+<a id="4-crash-safety--limits"></a>
+## Crash safety / limits
 
 A crash mid-copy retains the existing initializing row and its exact directory
 creation receipt. Startup uses the same artifact → owned copy → recovery row
@@ -138,7 +137,8 @@ sessions are outside this recovery sweep. There is no general orphan-directory
 sweeper. Destination-allocation errors also release the parent's reservation.
 Literal full copy remains the user's explicit choice and retains its size cost.
 
-## 5. Tests
+<a id="5-tests"></a>
+## Tests
 
 - duplicate_session: dest dir created + is a real copy; all messages copied;
   parent row/dir untouched (not archived); resume state set; `fork_after_seq`
@@ -167,7 +167,3 @@ Literal full copy remains the user's explicit choice and retains its size cost.
   deletion, product-seq steer rewind and real Git patch/rename restoration.
   `test_codex_app_server_real.py` verifies independent source/branch continuation
   and filesystem effects for both exec-origin and native-origin history.
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/session-fork.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

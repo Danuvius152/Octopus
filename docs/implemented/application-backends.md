@@ -2,7 +2,8 @@
 
 > **Status:** implemented — 应用脚本、端口、代理与进程组监督，保留代码、数据和依赖的不同归属。
 
-## 2. The contract: two scripts, not a manifest
+<a id="2-the-contract-two-scripts-not-a-manifest"></a>
+## Backend declaration and scripts
 
 **An Application has a backend if it contains an executable `start.sh` at its
 root.** That is the whole declaration.
@@ -14,25 +15,17 @@ start.sh      required for a backend — start the server in the FOREGROUND,
               listening on 127.0.0.1:$PORT.
 ```
 
-The obvious alternative is a manifest (`octopus.json` with `cmd`, `runtime`,
-`port`), which is what the original request proposed. A manifest forces Octopus
-to understand runtimes: which interpreter, which dependency file, which install
-command, which lockfile, what to do when a project needs two of them. That is
-the bulk of the work, and it is work we would be doing *on behalf of* an agent
-that already knows the answer — it just wrote the app.
-
-A script inverts that. The agent knows it needs `pip install -r
-requirements.txt` or `npm ci`; it writes that line. Octopus never learns what
-Python is. Our surface stays: allocate a port, set some environment, run two
-scripts, supervise one process, proxy one path prefix.
+The builder chooses the interpreter, dependency commands and lockfiles in
+these scripts. Octopus allocates the port, supplies environment variables,
+supervises the process group and proxies requests.
 
 **`start.sh` must not daemonize.** The process it execs is the process we
-supervise; a script that forks and returns leaves us supervising a corpse and
-the real server unowned. This is the one rule an agent is most likely to get
-wrong, so it goes in the build prompt in those words, and the readiness check
-(§6) catches it in practice.
+supervise; a script that forks and returns leaves the serving process unowned.
+The build prompt requires foreground execution; [readiness checks](#lifecycle)
+also require the supervised process to remain alive.
 
-## 3. Three directories, three owners
+<a id="3-three-directories-three-owners"></a>
+## Three directories, three owners
 
 ```
 <applications_dir>/<slug>--<app_id>/          code    — the agent's output, rewritten by a rebuild
@@ -41,7 +34,7 @@ wrong, so it goes in the build prompt in those words, and the readiness check
 ```
 
 These are newly allocated paths under the
-[application identity contract](applications.md#2-stored-identity-and-directories).
+[application identity contract](applications.md#stored-identity-and-directories).
 For existing applications, use the stored code address and its actual siblings.
 
 The split exists because the three have different lifetimes and different
@@ -53,7 +46,7 @@ subdirectory is inside what a rebuild may clobber.
 
 The runtime directory is separate from data because a `.venv` or `node_modules`
 is **derived**, not application state. This keeps rebuildable packages out of a
-data-only backup. Runtime also contains diagnostic logs (§8), however: removing
+data-only backup. Runtime also contains [diagnostic logs](#logs), however: removing
 it loses those logs, and removal is not a safe way to stop a live backend.
 Confirm retirement and preserve any needed diagnostics before clearing runtime
 files; use the supervised reinstall action for ordinary dependency preparation.
@@ -61,7 +54,8 @@ files; use the supervised reinstall action for ordinary dependency preparation.
 Neither `.data` nor `.runtime` is ever served statically — only the code directory
 is reachable through `/apps/{id}/…`, exactly as today.
 
-## 4. What the scripts are given
+<a id="4-what-the-scripts-are-given"></a>
+## What the scripts are given
 
 Both scripts run with `cwd` = the code directory and this environment:
 
@@ -100,7 +94,8 @@ exec "$APP_RUNTIME_DIR/venv/bin/python" -m server --port "$PORT"
 pid we supervise is the server itself and a signal reaches it rather than a
 shell that has stopped listening.
 
-## 5. Dependency installation
+<a id="5-dependency-installation"></a>
+## Dependency installation
 
 `install.sh` runs:
 
@@ -109,16 +104,13 @@ shell that has stopped listening.
   dependency), and
 * on an explicit "reinstall" from the UI.
 
-It runs **with a timeout and its output captured** (§8). A failed install is a
-first-class state, not an exception: the app shows `install failed` with the
-last lines of output, because "it doesn't work" with no log is the failure mode
-the original request specifically called out as miserable.
+It runs with a timeout and captured output. A failed install shows
+`install failed` with the last lines of output in the Backend panel.
 
-Install has network access. That is not a new capability — the building agent
-already has it — but it is worth being explicit that this is the one place
-Octopus itself runs a network fetch on an app's behalf.
+Install has network access.
 
-## 6. Lifecycle
+<a id="6-lifecycle"></a>
+## Lifecycle
 
 **Start is lazy.** The backend starts on the first request that needs it, not
 when the app row is created and not at server boot. A workspace with a dozen
@@ -130,10 +122,10 @@ server has `/health`, and a port that accepts is the thing the proxy actually
 needs. A backend that never binds is reported as such, with its log — this is
 what a daemonizing `start.sh` looks like from the outside.
 
-**Idle stop.** After `APP_BACKEND_IDLE_TIMEOUT` (default 15 minutes) with no
-active request or transferred work, the process is stopped. The next request starts it again.
-Same reasoning as the CLI-process reaper in `inline-steering.md` §7, and the
-same hard bound: at most four admitted backend lifecycles, including startup,
+**Idle stop.** With no active request or transferred work retaining a use,
+the process stops after 15 minutes. This is the current `IDLE_TIMEOUT_S` constant
+in [app_backends.py](../../server/app_backends.py), not an environment setting.
+The next request starts it again. The admission bound is at most four admitted backend lifecycles, including startup,
 running processes and unconfirmed retirement. The supervisor reserves a slot
 atomically on its event loop before spawn; only confirmed spawn failure or
 retirement of the original process group, output readers and request cleanup releases it.
@@ -240,7 +232,7 @@ Application deletion seals install/start admission before joining the original
 backend state. A late spawn, unconfirmed group exit or undrained reader keeps
 deletion in its retirement phase, preserving files and the application row.
 The supervisor's original handle and slot remain available for retry. The
-[application lifecycle](applications.md#5-rest-surface) owns the persisted
+[application lifecycle](applications.md#rest-surface) owns the persisted
 unfinished-deletion fact; startup and app routes keep it closed until explicit
 retry, including when files are being retained.
 
@@ -264,7 +256,8 @@ broken.
 spawned children (a `git` process, a worker) must not outlive the server, for
 the same reason the harness terminates groups rather than pids.
 
-## 7. Routing
+<a id="7-routing"></a>
+## Routing
 
 ```
 /apps/{id}/api/…   → proxied to 127.0.0.1:$PORT/api/…   (backend)
@@ -322,7 +315,8 @@ binds `127.0.0.1`, so it is not directly exposed on the network; the tunnel expo
 Octopus, not its port. Same-host processes can still connect directly, and
 Octopus does not enforce the script's bind address with an OS sandbox.
 
-## 8. Logs, because a dead backend with no output is useless
+<a id="8-logs-because-a-dead-backend-with-no-output-is-useless"></a>
+## Logs
 
 Every `install.sh` and `start.sh` invocation appends to the same
 `<slug>--<app_id>.runtime/logs/backend.log`, alongside supervisor lifecycle messages.
@@ -361,66 +355,43 @@ to the existing process/group grace periods, including a concurrent stop joining
 idle reaping that already holds the lifecycle lock. A later stop can join late
 cleanup.
 
-## 9. Status: two axes, not one
+<a id="9-status-two-axes-not-one"></a>
+## Build and backend status
 
-Today `status` is `building | ready | failed`, derived from whether the
-entrypoint exists. That stays exactly as it is — it describes the *build*.
+| Fact | States and authority |
+| --- | --- |
+| Application build | `building / ready / failed`; the original committed completion and entrypoint check, as defined in [applications](applications.md#lifecycle) |
+| Backend | `absent / installing / stopped / starting / running / failed`; supervised installation and process lifecycle |
 
-The backend needs its own axis (`absent | installing | stopped | starting |
-running | failed`) rather than being folded into the same field. An app can be
-perfectly built and have a crashed backend, or be mid-rebuild with a backend
-still serving the old code. Collapsing those into one enum produces a status
-line that is wrong in one of the two cases.
+A ready build can have a failed backend. A backend can still serve earlier code
+while a build is running. Neither state substitutes for the other.
 
-## 10. Security posture, stated plainly
+<a id="10-security-posture-stated-plainly"></a>
+## Host execution and account authorization
 
-`start.sh` runs arbitrary code as the Octopus user. This is **not** a new trust
-boundary: the agent that wrote the script already runs with
-`--dangerously-skip-permissions` in that same account, and could have run the
-same command directly. The honest summary is that Octopus runs code from trusted account owners; API ownership checks
-do not provide an operating-system sandbox.
+Managed scripts run as the Octopus service host user. Account and route
+authorization do not provide OS process isolation; a process can access files
+available to that user. See [account trust boundaries](multi-tenancy.md).
 
-What this design does add, and what it deliberately does not:
+Scripts receive a minimal environment, bind loopback and use an authenticated
+proxy. Data/runtime directories are per application and are not served as static
+files. Stop joins the original process group and readers; uncertain retirement
+retains the handle and capacity claim. There is no per-app OS sandbox or
+independent CPU/memory quota.
 
-* **Adds:** the backend contract requires loopback binding and provides an
-  authenticated remote proxy; scripts get a minimal environment, not the server's;
-  the data and runtime directories are per-app and never served statically.
-  Stop joins the supervised process group and readers; unconfirmed retirement
-  retains its handle and slot rather than claiming cleanup succeeded.
-* **Does not add:** a sandbox. No namespaces, no seccomp, no resource limits
-  beyond the process cap. An application can read the user's home directory if
-  it tries. Anyone deploying this multi-tenant needs a container per app, and
-  that is a different design — noted in §12 rather than half-done here.
+<a id="11-what-agents-are-told"></a>
+## Build instructions and current limits
 
-## 11. What agents are told
+The actual builder instructions live in
+[`ApplicationManager.compose_build_prompt`](../../server/applications.py).
+They describe the static browser entrypoint and optional managed scripts.
+The frontend loads without a build step. Static applications use browser
+storage; optional backends use executable scripts and keep persistent state in
+`APP_DATA_DIR` under the lifecycle described above.
 
-`compose_build_prompt` includes the entrypoint and backend rules:
+<a id="12-what-this-defers"></a>
+There is no independent application-secret configuration interface. Backend
+port selection does not support a server that ignores the supplied `PORT`.
 
-> If the app needs server-side work — running a program, talking to a service
-> that blocks browser requests, or storing more than a few megabytes — write an
-> executable `start.sh` at the root that starts a server **in the foreground**
-> on `127.0.0.1:$PORT` (use `exec`, don't background it). Put dependency
-> installation in `install.sh`, installing into `$APP_RUNTIME_DIR`. Keep the
-> app's own data in `$APP_DATA_DIR` — a rebuild rewrites your code, never that
-> directory. The frontend reaches the backend at `api/…`, relative to the page.
-
-## 12. What this defers
-
-* **A sandbox per application.** §10. Real isolation means a container or a
-  user namespace per app, plus an image story; it is a larger design and the
-  single-user posture doesn't force it yet.
-* **Fallback routing** (serve static if present, else proxy), which would let a
-  framework own every path. §7 explains why the fixed prefix is the safer
-  default; this needs a real app that wants it.
-* **Multiple processes per app** (a worker alongside the server). One script,
-  one process; a second one is a manifest by another name.
-* **Declared resource limits** (memory/CPU per backend). The process cap bounds
-  the count, not the appetite.
-* **Secrets for backends** — an app needing an API key or an SSH key has no way
-  to get one that isn't checked into its own directory. This is the next thing
-  worth building, and it is deliberately not smuggled into this design: it needs
-  its own storage, its own UI, and a decision about what the agent sees.
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/application-backends.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.
+Implementation and regressions: `server/app_backends.py`,
+`tests/test_app_backend_start_retirement.py`, `tests/test_app_backend_capacity.py`.

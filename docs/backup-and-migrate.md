@@ -50,7 +50,7 @@ content and applications. It does not use a fixed instance-specific file list.
 | Schedules and execution | Exclude recurring/one-shot definitions, enablement, pending triggers and live process/PID/socket/lease state; no post-import schedule activation step |
 | Login state | Exclude model CLI subscription tokens, refresh tokens and authentication caches wherever stored; target credentials require reauthorization. Octopus account password/key material remains included; sign in again on the target |
 | Browser text drafts | Current-tab `sessionStorage` text is browser-local and excluded from account archives and server backups. Import does not collect or restore it; [draft recovery](implemented/input-reliability.md#browser-application-text-drafts) grants no submission or execution authority. |
-| Browser restoration identities | Unresolved archived-session operation IDs and service generations in current-tab `sessionStorage` are excluded from account archives and server backups. They contain no token or text and are not collected or restored on import. Server restoration records last only for their service generation; [original-operation confirmation](implemented/frontend-list-reconciliation.md#归档恢复的原操作确认) requires sealing or actual writer-retirement proof, not copying a browser record to a new installation. |
+| Browser restoration identities | Unresolved archived-session operation IDs and service generations in current-tab `sessionStorage` are excluded from account archives and server backups. They contain no token or text and are not collected or restored on import. Server restoration records last only for their service generation; [original-operation confirmation](implemented/frontend-session-observation.md#归档恢复的原操作确认) requires sealing or actual writer-retirement proof, not copying a browser record to a new installation. |
 | Host network entry | Host-level tunnel binaries, systemd units and proxy settings outside account roots are not account resources. Reinstall them separately; importing an account does not open a public tunnel |
 
 Knowledge history and source/effect evidence are not executable work and must
@@ -69,7 +69,7 @@ installation ID, encrypted grant and Agent links through export/import. The
 importer rejects an older main marker before creating the target; it does not
 convert `login:id` keys or restore pending OAuth work. A historical installation
 must first complete its authorized source-side publication handoff under the
-[storage contract](implemented/current-storage-format.md#github-identity-and-finite-publication-handoff).
+[storage contract](implemented/current-storage-format.md#publication-boundary).
 
 Wiki source stability, archive byte integrity and restored local projections
 are checked separately. A PDF with `revision_kind=stat` is an excluded body
@@ -96,115 +96,30 @@ collection. Session and `research_jobs` history remain excluded: import preserve
 the original files without restoring task cards or execution authority. Session
 deletion likewise retains these account files; unavailable or malformed summaries
 are not permission to delete them. A complete backup preserves the existing rows
-and matching research tree together. See the [Research file contract](implemented/native-deep-research.md#7-invocation-files-and-verification).
+and matching research tree together. See the [Research file contract](implemented/native-deep-research.md#invocation-files-and-verification).
 
-Agent context-setting revisions belong to the source comparison authority,
-not the user's model configuration: account import preserves the settings and
-rebuilds each target Agent's `context_settings_revision` as 0. Session
-`context_state` follows the existing exclusion of chats and native continuity.
-A complete consistent backup instead preserves both fields and their original
-binding/revision relationships. Neither restoration path revives an attempt or
-permits replay; there is no additional collection root. See
-[context storage](implemented/current-storage-format.md#complete-record-projections).
+### Record and artifact restoration boundaries
 
-Compact payloads, native ACK/root evidence and effect-bearing maintenance outcomes
-follow existing sessions/messages/client_submissions ownership. Complete backups
-preserve them; account archives exclude them with old chats. Neither restoration
-path resumes or replays compaction, and no new collection root is introduced.
-This includes Claude's original command UUID, raw local-command outcome and
-failure reason; a restored maintenance result retains its separate effect and
-business status rather than authorizing another native operation.
+The following facts belong to the existing records and roots above; none adds
+a separate collection root. Account archives exclude chat/execution history.
+A complete backup must preserve consistent records **and** their referenced
+files after writers retire. Restoring facts never restores live callbacks,
+leases, waiters, threads, writers or permission to replay an operation.
 
-Private `messages.git_ignored_baseline` follows that same chat exclusion. A
-complete consistent backup preserves the raw nullable versioned JSON with its
-original message, HEAD and clean observation. Account transfer neither collects
-a new root nor restores this proof. Format-9 history receives NULL during the
-finite publication handoff; restoration never invents original absence evidence
-or grants permission to replay a file revert. See
-[safe rewind](implemented/session-rewind.md#563-the-one-revert-we-offer-file-edits-via-git).
-
-Structured Question resolutions live in existing chat-message JSON, with no
-additional collection root. They follow the same chat exclusion in account
-archives. A complete consistent backup retains that JSON and its original form
-associations; restoring it does not revive callbacks or infer missing legacy
-structure/provenance from text. Compatibility is described in the
-[current storage contract](implemented/current-storage-format.md#publication-boundary).
-
-Original-work interaction policy stays inside existing input/task/schedule
-context JSON. Question wait mode, answer target, MCP call association and
-`needs_input` closure stay in existing message JSON. Collect or exclude them
-with their owning records above: account archives still exclude chat/execution
-and schedule history; a consistent complete backup keeps their original
-associations, and the Wiki ledger retains its existing domain facts. No extra
-root, migration object or restoration step is introduced. Missing legacy policy
-remains unknown. Restoring saved facts does not recreate MCP handlers, command
-Futures, REST waiters, parent callbacks or permission to answer an old question,
-and never automatically resumes a fire or replays missing-decision work.
-
-Delegation's existing session JSON also retains outstanding child-work references
-and its successful candidate request. Complete backup preserves them together
-with the original submissions, carriers and terminals. Account archives exclude
-these round/execution facts with chats; restore does not infer consumption from
-the latest request or restart an unsealed round. No additional collection root
-or transfer/import step is introduced. Derived credential-use and Connector grant
-comparison evidence is not a persistent revision service or a new backup resource.
-
-Device-login staging, target reservations, in-flight commit/cleanup tasks and
-original credential-deletion proofs are process-local and are not transferred or
-restarted. Completed credential metadata retains its existing collection rules;
-model subscription authorization remains excluded from account archives. A
-complete backup requires retired writers and matching DB/provider-home files;
-capturing a login's uncommitted staging or an uncertain cross-file/DB publication
-does not create a recoverable login. This adds no root or import step; see the
-[credential publication boundary](implemented/harness-credential-reauth.md#codex-device-operation-ownership).
-
-App Server native source, child text/tool messages, `native_subagent` status
-facts and original question bindings use the same existing chat-message JSON
-and follow that same archive exclusion. Complete backup/restore retains their
-original request/attempt/thread/turn/item and question associations without
-creating another body or storage root. Restoring those facts does not revive
-reply eligibility, run leases, pending native work or the in-memory card cache.
-Native result `final_answer` references and `native_status` also stay within that
-message JSON. A complete backup keeps original seqs and their referenced rows;
-account archives exclude them with the chat. No new collection root is added,
-and an unavailable reference is not recovered from another session's history.
-
-Native item status/failure, hook source and generated-image metadata in
-`tool_input.native_item` follow that same chat exclusion. Inline image bytes are
-not stored; a file ID or size/hash cannot restore the image. `savedPath` remains
-the original path, with no historical snapshot guarantee. Ordinary files inside
-included account roots retain their existing collection rules; this adds no
-provider/media root to account transfer. A complete backup that needs those
-images must also preserve their actual referenced files and verify access after
-restoration. See the [native image contract](implemented/codex-backend.md#native-generated-images).
-
-App Server input evidence belongs to `client_submissions` in the main database,
-with no new filesystem root. Account archives exclude it with the owning chat;
-import does not restore a native writer or pending execution. A complete backup
-retains the evidence, original input/attempt/RPC/thread/turn associations and the
-matching provider history. Restoration preserves unknown acceptance and preparation
-changes; it does not infer consumption from a saved terminal or automatically
-replay an input. An absent original transcript remains a visible resume failure.
-
-Fork `copied_input` observations, copied terminal keys and native creation
-checkpoints also belong to existing message/session records. Account archives
-exclude them with chats; import does not restore an unfinished fork, writer or
-replay right. A complete backup retains those rows plus their selected native
-home and copied working directory while recovery still depends on them. Restore
-keeps unknown creation unknown and uses only the saved actual artifact identity
-and confirmed non-executing retirement qualification for cleanup. A missing or
-false qualification retains the recovery material after restore; an ACK alone
-cannot supply it. Restore does not substitute a preallocated hint or the target's
-current transport for the original fork strategy.
-
-The full-copy directory creation receipt in `fork_metadata.owned_copy_dir` uses
-that same existing session JSON and chat exclusion. Complete backup retains an
-initializing row, its receipt and the referenced independent directory while
-recovery depends on them. Missing or mismatched creation evidence preserves the
-directory; restoring or relocating a working directory does not manufacture new
-cleanup permission. Neither transfer nor backup restores the original copy
-thread. The [fork recovery contract](implemented/session-fork.md#4-crash-safety--limits)
-owns the artifact, directory and recovery-row ordering.
+| Resource | Account transfer | Complete backup and restoration conditions |
+| --- | --- | --- |
+| Agent context revisions | Preserve settings; rebuild each target `context_settings_revision` as 0. Exclude session `context_state`. | Preserve both fields and original binding/revision relationships. See [context storage](implemented/current-storage-format.md#complete-record-projections). |
+| Compact payload and native effect evidence | Exclude with chats. | Preserve ACK/root evidence, Claude command UUID/local-command result/failure and maintenance effect/business status separately. Do not replay compaction. |
+| `messages.git_ignored_baseline` | Exclude with chats. | Retain raw nullable versioned JSON with original message, HEAD and clean observation. Missing evidence stays missing; restoration grants no file-revert permission. See [safe rewind](implemented/session-rewind.md). |
+| Structured Question resolution | Exclude with chats. | Retain original form, question, source, answer and close-reason associations. Legacy text cannot reconstruct missing structure/provenance. |
+| Original-work interaction policy | Exclude chat/execution and schedule context; retain existing Wiki ledger facts. | Preserve human/unattended policy, question wait mode/answer target/MCP call and `needs_input` closure with their records. Missing legacy policy stays unknown. Do not resume fires or missing-decision work. |
+| Delegation round and return processing | Exclude with chats. | Preserve outstanding child `work_id` references, successful candidate request, submissions, carriers and terminals. The latest request does not prove return consumption or seal an unfinished round. Derived credential/grant comparison evidence is not a persistent revision resource. |
+| Device-login staging and publication | Exclude model subscription authorization; completed credential metadata follows the existing account rules. | Staging, reservations, commit/cleanup tasks and deletion proofs are process-local. Require retired writers and matching DB/provider-home files. Uncommitted staging or uncertain cross-file/DB publication cannot restore a login. See [credential publication](implemented/harness-credential-reauth.md#codex-device-operation-ownership). |
+| Native child messages and result references | Exclude with chats. | Retain original request/attempt/thread/turn/item/question and seq associations, `native_subagent`, `native_status` and `final_answer` references. Invalid references cannot borrow another session's text. Restore does not revive reply eligibility or the card cache. |
+| Native tool/image metadata | Exclude message metadata with chats; ordinary files follow included-root rules. | Retain `tool_input.native_item` status/failure/hook/image metadata and actual referenced image files. Inline image bytes are not stored; ID/hash/size cannot reconstruct an image. `savedPath` has no historical snapshot guarantee. See [native images](implemented/codex-backend.md#native-generated-images). |
+| App Server input evidence | Exclude `client_submissions` with chats. | Preserve original input/attempt/RPC/thread/turn associations and matching provider history. Unknown acceptance and preparation changes stay unknown; saved terminals do not establish consumption. Missing native history remains a resume failure. |
+| Fork creation and copied history | Exclude fork message/session records and work trees collected solely for excluded conversations. | Preserve `copied_input`, copied terminal keys, native creation checkpoints, selected native home and copied cwd while recovery depends on them. Unknown creation stays unknown. Cleanup requires saved actual artifact identity and confirmed non-executing retirement; an ACK, preallocated hint or current transport cannot substitute. |
+| Fork-owned copy directory | Same session-JSON exclusion. | Keep the initializing row, `fork_metadata.owned_copy_dir` receipt and referenced independent directory while recovery depends on them. Missing/mismatched proof preserves the directory; relocation does not grant cleanup rights. Restore does not recreate the copy thread. See [fork recovery](implemented/session-fork.md#crash-safety--limits). |
 
 ### Prepare and export
 
@@ -372,8 +287,8 @@ not synchronize Wiki, application state, work trees or provider files.
 Verify the effective master key can unwrap saved DEKs **without creating a new
 key**. `crypto.master_key()` may create one when absent and is not a read-only
 backup check. Use the read-only publication verifier for retained current
-storage; normal initialization can start writers or projection repair even
-though it no longer performs historical upgrades. Keep keys out of logs and Git.
+storage; normal initialization can start writers or projection repair. It does
+not convert historical formats. Keep keys out of logs and Git.
 
 ### Resolve target bindings and restore
 

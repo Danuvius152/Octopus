@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 检索、正文窗口或阅读留证 | [查询和证据](#查询和证据)、[查询投影](#查询投影与性能) | 字节拒绝查[资源政策](#文档字节支持与资源拒绝) |
 | 维护接纳、内容操作或派发 | [维护](#维护和日常增量)、[受保护入口](#受保护操作与入口)、[Worker](#wikijobs-与-worker-的协作) | 改内容规则再查[受控操作](#内容与受控操作) |
-| 恢复、取消或效果核验 | [恢复与效果](#恢复与效果核验) | 格式改变查[存储](current-storage-format.md)，界面查[前端](frontend-list-reconciliation.md#wiki-卡片详情与控制回执) |
+| 恢复、取消或效果核验 | [恢复与效果](#恢复与效果核验) | 格式改变查[存储](current-storage-format.md)，界面查[前端](frontend-session-observation.md#wiki-卡片详情与控制回执) |
 
 <a id="2-最终产品选择及其理由"></a>
 ## 范围、产品选择及其理由
@@ -29,7 +29,7 @@
 | 不按 AI/人工作者限制维护资格 | 人工改过的文章可以继续纠错；只在当前版本定点修改，不认领作者、不重新生成整篇正文。 |
 | 复用有价值的知识页 | Concept/Topic/Synthesis 可直接支撑适用问题；精确数字、引文、冲突或来源更新再追必要原文，不每问重读全部来源。 |
 | 维护范围明确到对象 | 有依据的 `[[关联]]`、派生反向关系及必要导航入口配套允许；关联不赋予旧页正文重写权。专题正文更新保持指定对象，新知识页按有限创建范围处理。 |
-| Markdown 为本期搜索和新维护范围 | `.md/.markdown` 兼容大小写；非 Markdown 原件和历史保全，支持字节范围内的已知 HTML/TXT 可直接读取；PDF 自动理解未交付。 |
+| Markdown 为当前搜索和新维护范围 | `.md/.markdown` 兼容大小写；非 Markdown 原件和历史保全，支持字节范围内的已知 HTML/TXT 可直接读取；PDF 自动理解未交付。 |
 | 按需要增加知识和技术 | 不为每篇材料强造 Concept，不定期让模型扫描全库所有句子，不无条件上向量、重排或图数据库。 |
 
 <a id="4-当前运行合同"></a>
@@ -103,6 +103,10 @@ question/overview 在严格候选为空时可使用既有 topic fallback。简�
 
 worker 写前读当前任务所需范围；整体整理和复核读全文，局部修订读相关位置与必要上下文。终稿冷读覆盖该 job 的全部最终新增/修改区段、标题和必要邻接上下文，后续再改正文便重新覆盖，旧任务阅读不跨任务继承。未选字节由程序保全，含义与表达仍由模型检查。
 
+终稿回读是 worker 指南要求。`settle_item` 不直接验证模型已覆盖全部终稿回读区段；
+job completed 不能单独证明这项语义检查已经完成。来源确认与阅读回执也不自动证明
+来源独立、外部事实正确或问题覆盖完整；同版覆盖须按实际返回的正文范围判断。
+
 当前代码的 HTTP 批读和维护入口分别是 `/api/wiki/read-many`、`/api/wiki/maintain`；
 绑定 App 使用 `/apps/{id}/wiki/read-many`、`/apps/{id}/wiki/maintain`，复用相同授权
 和受理检查。旧 HTTP/App `read_many`、`submit` URL 不再注册，不提供重定向；MCP
@@ -123,9 +127,9 @@ worker 先按需加载 worker 基础合同，再按需加载 maintenance/article
 
 首次日常复核由保留的 review 无基线事实识别，检查适用摘要、分类、标签、相关材料比较及已有导航；增量复核按当前变化做必要检查。真实 no_change 保留具体不变理由，检索索引就绪不代替知识整合。通知按 job、原请求和目标分别订阅；同一原请求的提交权限退出且最终准入事务排空后，等待该组任务返回终态，再通过原会话的持久输入汇总回传。回传继承该次执行中已确认接纳的人工追加要求；未确认追加或执行、关闭会话、账户不可用及接纳后重启保留卡片、说明或已保存输入，不自动重跑模型。进度卡片、汇报输入接纳及实际回复分别核验；completed_with_attention、取消和索引待恢复如实报告，样本省略仍汇总全部未决录制和取消结算，同一次 attempt 的普通状态更新只更新卡片。
 
-Codex 控制指令的当前交付生命周期见[Codex 当前契约](codex-backend.md#interactive-execution)：正常续聊和重启恢复复用最新稳定检查点，规则真正变化才更新；本轮来源要求与一次性分叉说明单独交付。历史 A02 的每轮 full snapshot 不再作为当前交付策略，原有过期 Wiki 禁令迁移能力继续保留。
+Codex 控制指令的当前交付生命周期见[Codex 当前契约](codex-backend.md#interactive-execution)：正常续聊和重启恢复复用最新稳定检查点，规则真正变化才更新；本轮来源要求与一次性分叉说明单独交付。现有过期 Wiki 禁令的兼容处理仍由控制指令装配入口负责。
 
-内部任务只捕获文档及创建预留身份，卡片中的路径从当前 grant 投影，不另存旧路径或新页布尔授权镜像。原位整理保留单一目标；App 的准备和跟随任务分别由 task→owner 字典登记，失败任务与真实 writer 退休语义保留。后继选定修复沿用这些简化，并补齐持久通知、原执行交接与 owner 恢复，不扩展其他条件项。
+内部任务只捕获文档及创建预留身份，卡片中的路径从当前 grant 投影，不另存旧路径或新页布尔授权镜像。原位整理保留单一目标；App 的准备和跟随任务分别由 task→owner 字典登记，失败任务与真实 writer 退休语义保留。持久通知、原执行交接与 owner 恢复分别由原 owner 负责。
 
 ## 受保护操作与入口
 
@@ -191,7 +195,7 @@ History 和收据效果结束。
 撤权先提交则旧操作没有正文、历史或回执效果，A→B→A 也不恢复旧资格；写入先
 取得完整保护则先完成，改绑等待，不回滚已完成内容。等待网络正文时不持有 Store、
 文件锁或 App 效果保护。App 删除接纳与真实效果退出由
-[应用生命周期](applications.md#5-rest-surface)协调；已退休的原 Store 可以拒绝操作，不能
+[应用生命周期](applications.md#rest-surface)协调；已退休的原 Store 可以拒绝操作，不能
 重取新 Store 或重试身份来继续写入。账户人工入口不额外要求 App 代次；human-only、维护 grant/publish 与
 revision 冲突分别沿用原规则，审计 actor 不授予权限。
 
@@ -201,7 +205,7 @@ client 给既有 follower，后续每次 poll 验证原 target，直到实际工
 确认才释放。主动 abort 只等原进程退出证明，完整退休另等消费者，避免自身等待；
 传输观察失败与清理失败分别留诊断，后者继续阻塞 drain。没有新增任务队列或租约
 服务。原 backend 身份、异步 job 接管、失败及清理责任见
-[应用后端合同](application-backends.md#7-routing)。
+[应用后端合同](application-backends.md#routing)。
 
 隔离真实文件与 HTTP/App/MCP 路径回归覆盖准备后撤权、重绑、旧借用退出、最终
 事务失败、原 key 找回并唤醒、原控制重放及退休证明；入口参数、模型回包预算、
@@ -229,18 +233,15 @@ flowchart LR
 
 `executing` 与 `cancellations` 各保留一个所有者；跨线程 wake 进入原事件循环。
 恢复先于生产者开闸，cancel 的撤权、持久状态、结算和实际退休分别取证，verify
-继续核验原效果。简单移动 Worker 类仍保留这些双向依赖，不能减少调用方的生命周期
-义务；显式 verify 的临时 Worker 恢复入口也有原 manager 前提。当前保留文件布局，
-不以局部 import、第二 registry 或新协调服务掩盖依赖。
+继续核验原效果。显式 verify 的临时 Worker 恢复入口要求原 manager 可用。
 
 ## 文档字节支持与资源拒绝
 
 当前支持的 Markdown/TXT/HTML 文本读取、解析及受控写入统一支持至
 **256 KiB（262144 字节，含边界）**。
 这是保守的产品支持政策，独立于一次返回的字符数；不是实验推导的最大安全值。
-密集 Markdown 在较小样本也比普通 TXT/HTML 昂贵，当前采用共同阈值而非按扩展名
-建立资源保证。[固定版本实验](../reference/runtime-resource-boundaries-20261103.md#wiki-store-cost-and-admission)
-记录方法、现存文件影响、样本与未覆盖边界。PDF 仍排除正文处理，不新增解析器。
+不同文本结构的解析成本不同；共同阈值不构成按扩展名或生产时延的保证。
+资源测量方法归[评测指南](../wiki-evaluation.md#wiki-evaluation-method)。PDF 不支持正文处理。
 
 Store 的 `read_document_bytes` 在同一打开 handle 上先 fstat 快速拒绝，再最多读
 limit+1 字节；未知大小和读取中增长也受界限约束。`require_document_bytes` 检查
@@ -323,9 +324,9 @@ readmit 后，原聊天可显示同一 job 的新 attempt；旧 dispatch 的自�
 任务、主库卡片或通知正文。换库、任务缺失或当前权限不可用时，只保留原获准摘要，
 显示“当前状态不可用”并关闭依赖当前权限的详情和控制，不披露新诊断。可读性变化
 不要求 job 版本递增，任务事实仍按版本单调合并。前端读取与回执恢复规则归
-[列表合同](frontend-list-reconciliation.md#wiki-卡片详情与控制回执)。
+[列表合同](frontend-session-observation.md#wiki-卡片详情与控制回执)。
 
-卡片展开、收起和重连展示归[前端合同](frontend-list-reconciliation.md#wiki-卡片详情与控制回执)。
+卡片展开、收起和重连展示归[前端合同](frontend-session-observation.md#wiki-卡片详情与控制回执)。
 
 取消由原任务唯一的取消工作关闭 scope，等待已捕获的后端、Research、BG 进程及
 文件线程退出；一个清理失败仍等待其余清理，最后报告失败，HTTP 等待超时仍为
@@ -367,7 +368,7 @@ I/O 错误保留存储失败；读取与 GC 交错只返回原字节或明确不
 
 存活原会话仍有录制阻塞时，再准入继续返回 409。先确认原执行和后台清理已退出、没有待调度请求，再通过原会话的 `dispatch/resume?resume_queue=false` 对账录制，保持原调度状态；存储仍未确认时返回 503，不进入再准入或重跑模型。对账成功后，显式再准入和原请求恢复继续各自校验，再准入仍保留全部排队、后台清理和实际写入退休检查。
 
-主库正文唯一，保留正常按文档有限历史与必要任务/失败证据，不默认长期整库备份，也不自动 Git 提交知识库。Sapphire 继续负责文件、附件和 Git 体验；本机此前一次主库 Git 保存不授权以后每次保存都提交/推送。
+主库正文唯一，保留正常按文档有限历史与必要任务/失败证据，不默认长期整库备份，也不自动 Git 提交知识库。文件、附件和 Git 操作由相应应用或操作者负责；commit 或 push 依据当前明确授权。
 
 完整布局、订阅身份/ACK 与发布交接归[存储合同](current-storage-format.md)。
 未知结构或缺失持久账本保留资料并拒绝，运行时不重造身份或解释旧格式。
@@ -416,7 +417,7 @@ I/O 错误保留存储失败；读取与 GC 交错只返回原字节或明确不
 的优先性。词项流中的距离不代表真实文本间距，因此不以 bigram 流 NEAR
 承诺正文邻近；文档身份、局部内容和阅读窗口各自承担上述职责。
 
-原无约束的“任意一个词即可接纳”退路已移除。候选收集仍沿原 FTS，最终接纳、
+候选收集使用 FTS，最终接纳、
 去重、total、分页及 compact/full 使用同一集合。`match_mode` 与
 `match_explanation` 区分精确身份、完整组覆盖、比较及主题放宽，并说明实际
 限制。完整概念在同一窗口内也可能属于不同话题，近义表达不会自动互换，
@@ -499,11 +500,17 @@ HTTP info 默认 full，MCP info 默认 compact，显式 full 可查询完整诊
 准入，不从样本长度推断健康。不新增持久计数或样本缓存，COUNT 仍有实际扫描成本。
 
 <a id="5-实现的权威入口"></a>
+## 阅读证据的成本边界
+
+同版来源确认历史可能增加覆盖核对工作；调用次数、重复扫描和实际耗时需要分别
+测量。已有代码形态不是生产瓶颈证明，也不允许以省调用为由跳过当前版本、
+授权和实际返回区段的核验。测量方法见[评测指南](../wiki-evaluation.md)。
+
 ## 实现的权威入口
 
 | 职责 | 入口 |
 | --- | --- |
-| 接管、执行、持久终态、通知 | [sessions](../../server/sessions/)、[harness](../../server/harness/)、[逻辑轮次计划](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/runtime-log-repair-20261013.md)、[接口修补计划](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/runtime-interface-repair.md) |
+| 接管、执行、持久终态、通知 | [sessions](../../server/sessions/)、[harness](../../server/harness/)、[原请求完成](input-reliability.md#原请求完成与失败交接)、[Harness 合同](harness-layer.md) |
 | HTTP / MCP 与真实参数 | [router](../../server/routers/wiki.py)、[MCP](../../server/mcp_servers/wiki.py)、[contracts](../../server/wiki/contracts.py) |
 | 权限、命令选择、维护观察与接纳 | [tasks](../../server/wiki/tasks.py)、[maintenance_observation](../../server/wiki/maintenance_observation.py)、[maintenance_admission](../../server/wiki/maintenance_admission.py)、[maintenance_state](../../server/wiki/maintenance_state.py) |
 | 注册、索引与文件事件 | [registry](../../server/wiki/registry.py)、[store](../../server/wiki/store.py)、[events](../../server/wiki/events.py) |
@@ -536,44 +543,3 @@ body fields），不再另存一份请求模型/可空性映射。`verify` 缺�
 共享本机依赖，不提供 OS 级 App/agent 文件隔离。取消等待不证明底层线程停止，索引 ready
 不恢复未观测历史。完整来源谱系、自动独立证据计数、多账户压力及所有语言/题材的最佳
 效果均未获普遍认证。历史成本测量不证明重新准入性能、整项性能或生产 SLA。后续产品条件见[未来计划](../plans/wiki-future-plan.md)。
-
-## 固定版本的成本与回归观察
-
-以下是2026-10-27记录的隔离样本与当次回归，保留其语料、范围和不能外推的边界；
-不表示本次重跑，不是当前门禁数量，也不证明生产时延或召回质量。
-
-2026-10-27 定向回归为 181 passed、1 deselected，覆盖待处理意图冲突、跨目标复用、
-原始换行、旧索引重开、裁剪和现行授权边界。两个约7.5万字符样本中，完整导航
-请求观测到的 SQLite 行字符串数据为151446字节，两页 compact 共1226字节；
-前者包含完整导航的依赖读取。这是有界数据传输对照，不表示整体时延收益。
-
-隔离小样本中，两次未变化读取仍读取 100 字节、执行 4 次 hash，变更行数由 6 降至
-0；独立于该写入优化，location 读取由 2 次／100 字节降至 1 次／50 字节。
-搜索和列表的健康摘要构造由每响应 2 次降至 1 次。这些是确定性成本对照，
-不代表生产延迟、真实召回率或 token 节省；正确性与成本回归进入默认离线层。
-
-## Historical evidence
-
-2026-10-31 的第一阶段验收使用固定100篇合成语料、seed 20261030、Python 3.14.4、
-SQLite 3.46.1 和[解析约束](../../constraints-wiki.txt)。[冻结参考](../../tests/fixtures/wiki-baseline-reference.json)
-保留50份旧版页面、55组旧观察及最初54套计时上限；稳定 vault 身份保证 UID、同分
-顺序和错误样本可重建，full 页面只按明确合同补入准确 count。最终候选55项测量
-齐全，50页严格等价，54套原阈值全部通过。早先版本的尾部失败仍是失败，不能
-用后一次成功追认；参考保留其出处及适用机器条件，不构成可移植 SLO。
-
-普通无 NUL 长文的 lexical 文字搬运由2803738降至188168字节，exact 由280702
-降至1817字节；这些数值是 SQLite 交给 Python 的文字单元，不是物理 IO。诊断
-错误从3增至300时，search 操作总返回行保持30行、诊断 Python peak为242181至
-242185字节；其中错误样本始终三行。list 在50至300错误时总行数保持51行、peak
-为199757至199759字节。peak不是RSS，也不以某项改善抵消其他场景的阈值失败。
-
-模型证据固定 `gpt-6.1-sol/max/default`，包含普通聊天和专用查询：改前八类题中
-七题完成并通过人工语义评阅，一题240秒超时，失败与部分用量保留。七题可核对的
-CLI input/output 合计1385351/16372；超时题另有部分原生用量16773/422，不能据此
-补造完整总量。调用指南更新后四个代表题（含保留题）完成并通过人工评阅，合计
-528610/5138；两批问题不同，不能当作整体 A/B 收益。实际原生 developer 注入和
-指南正文/digest均经核对，全文题同版覆盖无缺口；没有观察到 `read_many` 的实际
-调用，不能宣称批读收益。原报告 `not_reviewed` 与单列人工结论分别保留，native
-tier和完整USD未知。具体复现、留证和清理要求归[验证方法](../wiki-evaluation.md#wiki-evaluation-method)。
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/wiki-development-summary.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

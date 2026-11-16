@@ -22,8 +22,7 @@ silently changing backend or dropping a requested tool restriction.
 
 The wire and database field remains `backend`, and the shared resume field is
 still named `claude_session_id`. The latter stores either backend's native
-identity; its old spelling does not make consumers Claude-specific. These names
-avoid a persistence/API migration for a vocabulary-only change.
+identity; the field name does not restrict it to Claude.
 
 Login drivers also identify their original unpublished credential or unfinished
 deletion cleanup, and own deletion through binding removal and local cleanup.
@@ -53,8 +52,8 @@ MCP configuration is specific to each execution mode:
 | Text worker | API request uses `tools=[]` and `tool_choice="none"`; it does not launch an ordinary CLI host. |
 
 The [Codex contract](codex-backend.md#native-mcp-configuration) owns merge and
-conflict details; [fixed-version experiments](../reference/runtime-resource-boundaries-20261103.md)
-separate effective config from actual thread tool discovery. Tool visibility
+conflict details. Effective configuration and actual thread tool discovery
+are separate observations. Tool visibility
 does not grant an Octopus effect: each endpoint still verifies its current scope.
 
 `compose_system_prompt` combines framework tool guidance, saved Agent persona,
@@ -70,15 +69,13 @@ an unattended root. Policy controls waiting, without creating permission or a
 new Harness execution state. Human native blocking pauses question/idle expiry;
 Stop, execution termination and the whole-turn cap still close the original
 attempt. See [question ownership](input-reliability.md#原工作交互策略与等待)
-and [watchdogs](turn-safety.md#3-per-turn-watchdog-idle--overall).
+and [watchdogs](turn-safety.md#per-turn-watchdog-idle--overall).
 
 Claude renders the composed instructions into its native invocation and can
 conditionally retain a compatible host; ordinary Codex applies controller
 instructions at thread start/resume and updates a resumed thread without changing
 saved Agent settings. The constrained exec leaf and tool-free worker keep their
-own narrower assembly. The historical fresh-process observation in
-[prompt notes](../reference/cli-system-prompt-notes.md) does not override current
-reuse, injection or tool authority.
+own narrower assembly.
 
 ### Execution and resources
 
@@ -133,7 +130,7 @@ The shared run checks authority immediately before spawn and business writes,
 and owns readers, backpressure, process groups and retirement. Moving wire
 operations into drivers does not add a second resource owner or settlement path.
 
-For pending [fork replay](session-rewind.md#532-history-replay-and-first-turn-state),
+For pending [fork replay](session-rewind.md#history-replay-and-first-turn-state),
 the original run records possible delivery before business I/O and asks its
 driver for saved opening-input evidence at result, EOF and retirement boundaries.
 The original recorder commits the native continuation and replay consumption
@@ -215,12 +212,12 @@ An associated terminal without result text retains its valid string-list
 No-op requires the advertised command, matching start/input/session, a complete
 protocol stream, successful native command terminal, no local failure/boundary
 and the affirmative reason `Not enough messages to compact.` It preserves the
-prior sample and clears activity. This is a conditional documented contract:
-the saved 2.1.319 empty-history producer actually failed, so it is not evidence
-that that version produced a successful no-op. EOF/Stop without confirmed
+prior sample and clears activity. The raw 2.1.319 fixture
+`claude-context-compact-2.1.319.json` contains an empty-history failure,
+not evidence of a successful no-op. EOF/Stop without confirmed
 boundary/no-op keeps unknown effects and invalidates the old sample. The Owner's
 business outcome stays independent of effect. See the
-[version observations](../reference/context-meter-compact-g0.md) and
+[Claude protocol fields](../reference/claude-cli-protocol.md) and
 [sample contract](model-reasoning.md#上下文样本与配置绑定).
 
 For a reusable host, Wiki scopes bind through its original live run lease so
@@ -368,7 +365,7 @@ registering an execution, refreshing authentication, starting a CLI or writing
 spill files. Native defaults not yet resolved for the cwd remain unknown;
 real execution still resolves them and checks current authority and actual
 bytes. The session saga owns the snapshot, refusal timing and conditional
-[ready guarantee](session-rewind.md#532-history-replay-and-first-turn-state).
+[ready guarantee](session-rewind.md#history-replay-and-first-turn-state).
 
 退休责任覆盖启动时捕获的整个进程组；直接 child 退出或管道 EOF 不证明重定向
 输出的后代 writer 已停止。未确认退出仍保留原 backend owner 和配额；请求、
@@ -453,6 +450,15 @@ saga still owns reservation, saved identity and compensation ordering; moving it
 into another manager would not reduce a caller's responsibility.
 
 ### Complete typed transcript export and local pull
+
+| Operation | Current support |
+| --- | --- |
+| Product complete message export / raw transcript audit export | Both backends, using saved product records |
+| CLI `handoff` import | Claude transcript codec |
+| CLI `pull` reconstructs native transcript | Claude; Codex has no `transcript_codec` and is refused before output creation |
+
+Product export does not establish native pull capability. The selectors live in
+[`server/cli.py`](../../server/cli.py) and the backend profiles.
 
 `GET /api/sessions/{id}/message-export` supplies complete `MessageContent`
 records to a restoring codec. It is separate from browser message windows and

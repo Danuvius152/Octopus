@@ -3,26 +3,20 @@
 本文针对 `/home/jack/Octopus` 这套 WSL + Codex 安装，按当前源码和本机配置整理。
 手机访问采用[项目 README 推荐的 Cloudflare Tunnel](../README.md#quick-start)。
 
-## 1. 当前安装状态
+## 1. 本机配置入口
 
-2026-10-30 核对结果：
-
-| 项目 | 本机情况 |
+| 项目 | 配置目标或检查入口 |
 | --- | --- |
-| 运行环境 | Windows 上的 WSL / Ubuntu，已启用 systemd |
 | 项目目录 | `/home/jack/Octopus` |
-| 服务代码 | `/home/jack/.octopus/releases/current` 指向已发布工作树 |
-| Python 环境 | 项目内 `.venv`，使用 pip |
-| 默认 AI 后端 | Codex，Linux CLI 已使用 ChatGPT 账户登录 |
-| 后台服务 | 用户级 `octopus.service`，已启用且正在运行 |
-| 后端监听 | `127.0.0.1:8000`，`/health` 返回 `{"status":"ok"}` |
-| Windows 访问 | <http://localhost:8000> |
-| 前端 | 已构建，后台服务直接提供 `web/dist` |
-| Octopus 登录 | 已有账户，电脑和手机均使用用户名、密码 |
-| 手机隧道 | 已安装 `cloudflared`，独立的 `octopus-tunnel.service` 仅在明确要求时手动启动 |
+| 发布代码 | `/home/jack/.octopus/releases/current`；用 `readlink -f` 检查实际工作树 |
+| Python | 项目 `.venv`；重建方法见 [本机手册](local-wsl.md) |
+| 模型后端 | 本机验证政策使用 Codex；CLI 登录状态须现场检查 |
+| 后台服务 | 用户级 `octopus.service`；用 `systemctl --user status octopus` 检查 |
+| Windows 访问 | 默认 <http://localhost:8000>；监听地址以服务配置为准 |
+| 手机隧道 | 独立的 `octopus-tunnel.service`；仅在明确要求时启动 |
 
-这些是核对时的状态。隧道不自启、退出后不自动重启；当前是否开放公网入口，
-以第 6 节的状态检查为准。
+当前运行、登录、构建和公网入口状态由现场命令确认。`/health` 表示 HTTP 存活，
+`/ready` 表示准入准备状态；恢复或排空判断使用后者。
 
 ## 2. 日常启动和关闭
 
@@ -42,10 +36,10 @@ systemctl --user start octopus
 systemctl --user status octopus --no-pager
 curl --noproxy '*' --fail --silent --show-error \
   --retry 30 --retry-connrefused --retry-delay 2 --max-time 5 \
-  http://127.0.0.1:8000/health
+  http://127.0.0.1:8000/ready
 ```
 
-看到 `active (running)`，且健康检查返回 `{"status":"ok"}` 后，在 Windows
+看到 `active (running)`，且 `/ready` 确认服务已就绪后，在 Windows
 浏览器打开 <http://localhost:8000>。服务已经运行时，`start` 不会再启动第二份。
 日常使用不需要重新安装依赖或构建前端。
 
@@ -100,14 +94,14 @@ Resume 和 Dismiss 都不能绕过它。
 受管服务完成启动清场和恢复后，旧代输入仍保留 unknown，但缺失历史进程信息不再
 阻止新工作。同代执行仍须由原 Owner 确认资源退役；隐藏提示不会跳过这项检查。
 非受管的 standalone 启动没有同样的清场证明，仍保留保守的退出检查。
-这项修复须随已验证版本发布后生效，源码更新不表示运行服务已经部署。
-升级前没有保存的排队原文无法补回；已保存的聊天历史继续保留。
+运行版本须支持上述恢复合同；源码更新不表示服务已部署。未保存的排队原文
+无法补回，已保存的聊天历史继续保留。
 
 ## 3. 登录、工作目录和智能体设置
 
 ### 登录 Octopus
 
-当前安装已有账户，电脑和手机都使用同一个用户名、密码登录。
+已有账户时，电脑和手机可使用同一用户名、密码登录。
 管理员可以在 Account 页面创建邀请，供其他人注册独立账户。
 
 全新空安装首次进入时，开户页才会要求配置中的 `OCTOPUS_AUTH_TOKEN` 作为
@@ -116,8 +110,8 @@ setup 证明，同时设置首个管理员的用户名和密码。证明只用�
 时会拒绝开户，不能用“认领安装”绕过。配置来源见第 8 节，令牌不要写入文档
 或提交到 Git。
 
-Octopus 网页登录与 Codex 模型登录是两回事。本机已登录 Codex，新会话选择
-**Codex** 并沿用已有 CLI 登录即可。
+Octopus 网页登录与 Codex 模型登录是两回事。使用 Codex 前检查 CLI 登录状态，
+新会话选择 **Codex**；凭据配置见[本机手册](local-wsl.md#live-凭据与网络)。
 
 ### 给任务选择正确的工作目录
 
@@ -135,7 +129,7 @@ Octopus 网页登录与 Codex 模型登录是两回事。本机已登录 Codex�
 
 所有路径都以运行 Octopus 的 WSL 文件系统为准。例如 Windows 的
 `D:\Notes\Vault` 对应 WSL 的 `/mnt/d/Notes/Vault`。Weber 的实际 vault 路径
-尚未确定，首次交给它知识库任务时应提供完整路径。
+应从当前 Wiki 注册和 Agent 配置查询；文档示例不证明实际绑定。
 
 ### 保存 One-line role 和 System prompt
 
@@ -154,6 +148,8 @@ Octopus 网页登录与 Codex 模型登录是两回事。本机已登录 Codex�
 `agents.system_prompt` 中。修改文档中的示例不会自动更新已保存的智能体配置。
 
 ## 4. 四个智能体怎样配合
+
+以下是角色配置示例，实际职责以 Agent settings 中保存的配置为准。
 
 | 智能体 | 适合交给它的任务 |
 | --- | --- |

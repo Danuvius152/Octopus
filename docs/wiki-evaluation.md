@@ -3,7 +3,8 @@
 以下用于明确委托的质量或效率评测；日常、提交和发布门禁仍由
 [Test Coverage](testing.md#test-coverage) 选择，不自动运行可选评测。
 执行前使用[本机隔离、凭据与网络约束](local-wsl.md#本机测试)。
-优先测量用户关心的单库约100篇规模，长文、大批次和多库只作增长诊断。
+默认合成语料由 `tests/wiki_baseline.py` 定义为单库100篇；按任务选择真实工作负载，
+长文、大批次和多库用于相应增长诊断，不把100篇当作所有 Wiki 的固定规模。
 质量与原文保全合格后，统计完整任务端到端耗时和全部输入、输出 token，包含
 错误、纠错、绕路与重试。调用数、轮数和缓存明细用于解释结果，不单独设下降门槛；
 不要求每次严格新旧 A/B，也不从提示词字数推算实际 token 收益。
@@ -85,8 +86,7 @@ as well as a stable seed: regenerated UUIDs can change UID spelling, rank ties,
 error samples and cursors even when the source text is identical.
 
 `tests/fixtures/wiki-baseline-reference.json` retains the reproducible old-code
-pages and the original timing limits. Its provenance separates observations,
-the first limit capture and the explicit full-response count addition. It
+pages, complete response-count fields and timing limits with their provenance. It
 contains synthetic data and relative source identities, without private runtime
 paths. Absolute timing limits describe the recorded machine. On another
 environment, establish its baseline before changing the implementation; keep

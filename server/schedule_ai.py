@@ -110,12 +110,9 @@ def derive_name(prompt: str) -> str:
 def local_timezone() -> str:
     """The host's IANA timezone name.
 
-    The browser sends its own tz with `/schedule`, so a human's "9am" is
-    their 9am. An agent calling the schedule tool has no browser, and
-    defaulting to UTC would quietly turn "every day at 9am" into 9am UTC —
-    on this box, eight hours out. The host clock is the honest default;
-    resolution mirrors what the OS itself reads, and UTC is only the answer
-    when none of it is legible.
+    The browser supplies its timezone for `/schedule`. Structured tool calls
+    without an explicit timezone use the host's IANA configuration, falling
+    back to UTC when no valid host setting can be resolved.
     """
     candidates: list[str] = [(os.environ.get("TZ") or "").strip()]
     try:
@@ -322,12 +319,9 @@ def build_explicit_schedule(
 ) -> ParsedSchedule:
     """Validate a recurrence that was stated outright, with no AI in the loop.
 
-    `/schedule` has to read English because a human typed it. A model calling
-    the schedule tool doesn't: it can write the crontab field itself, and
-    having it do so keeps a tool call free of a second model call — no extra
-    latency, no extra cost, no second parse to fail. The checks are the ones
-    `validate_parsed` runs on the AI's JSON, applied to arguments instead, and
-    every message is written to be read by whoever passed the bad value.
+    `/schedule` accepts natural language through the parsing model. The agent
+    tool supplies recurrence fields directly, using the same `validate_parsed`
+    checks without another model call.
     """
     prompt = (prompt or "").strip()
     if not prompt:

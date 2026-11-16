@@ -26,32 +26,18 @@ and publication handoff belong to [storage](implemented/current-storage-format.m
 
 ## System Overview
 
-```
-             Phone / Browser
-              │  REST + WebSocket
-              ▼
-        ┌──────────────────────────────────┐
-        │  FastAPI server (uvicorn) :8000   │  serves API + built SPA on one port
-        │  ┌─────────────┐                  │
-        │  │ REST routers│                  │
-        │  │  + /ws      │                  │
-        │  └─────┬───────┘                  │
-        │        │                          │
-        │        ┌──────▼───────┐            │
-        │        │SessionManager│            │  session entry points and quota
-        │        └──────┬───────┘            │
-        │        ┌──────▼───────┐            │
-        │        │ SessionOwner │            │  one mutable execution owner per session
-        │        └──────┬───────┘            │
-        │        ┌──────▼───────┐            │
-        │        │   Harness    │            │  RuntimeProfile per backend kind
-        │        └──────┬───────┘            │
-        └───────────────┼────────────────────┘
-                        │ checked process I/O and retirement
-            ┌───────────┴────────────┐
-            │  claude --print …      │   or   codex app-server (RPC)
-            │  + scoped MCP tools    │        + scoped MCP tools
-            └────────────────────────┘
+```mermaid
+flowchart TD
+  B[Browser / Phone] -->|REST + WebSocket| HTTP[FastAPI routes / built SPA]
+  HTTP --> M[SessionManager: admission and quota]
+  M --> O[SessionOwner: mutable request state]
+  O --> H[Harness / RuntimeProfile]
+  H --> R[HarnessRun: process I/O and retirement]
+  R --> C[Claude stream JSON]
+  R --> X[Codex App Server RPC]
+  C --> T[Scoped MCP endpoints]
+  X --> T
+  T --> D[Domain owners: BG / delegation / Research / schedules / Wiki]
 ```
 
 An optional HTTPS tunnel sits in front of the server's browser/API port.
@@ -102,6 +88,11 @@ authority per call. A signed retired scope grants no new effect. These entries
 hand commands to domain owners rather than settle work themselves. Contract:
 [account delivery and scope](implemented/multi-tenancy.md#websocket-delivery).
 Source: `routers/`, `deps.py`, `mcp_http.py`, `mcp_identity.py`.
+
+Synchronous MCP tools run through the worker-thread wrapper with a copied calling
+context, preserving the authenticated scope without blocking the event loop.
+Cancellation waits for that original worker; asynchronous tools retain their
+own operation lifetimes. Thread dispatch is not a new authorization boundary.
 
 ### Sessions and original requests
 
@@ -157,7 +148,7 @@ Source: `wiki/registry.py`, `wiki/history.py`, `wiki/job_execution.py`.
 ApplicationManager projects a build's original completion plus actual entrypoint
 to status. Entrypoint PATCH uses the same terminal projection checks for active
 inputs, original completion and preparation ownership; saving metadata alone
-cannot end an active build. See the [application lifecycle contract](implemented/applications.md#4-lifecycle).
+cannot end an active build. See the [application lifecycle contract](implemented/applications.md#lifecycle).
 AppAgent owns scoped
 conversations, original ask/SSE/status and request slots. BackendSupervisor owns process instances, active uses and confirmed cleanup;
 code, durable data and rebuildable runtime have different lifetimes. Failed
@@ -337,15 +328,15 @@ owns that question-bound lifetime.
 | --- | --- | --- |
 | BG shell work | Persistent ownership before spawn, bounded output, deadlines, captured process-group retirement and original-result return | [Background tasks](implemented/background-tasks.md) |
 | Named-agent delegation | Same-account conversation and work rounds, nested questions/relay, original completion and exact-work cancellation | [Agent collaboration](implemented/agent-collaboration.md) |
-| Research | Pipeline/report completion, bounded native web leaves, captured configuration (effort/tier forwarding is incomplete), follow-up processing and retirement | [Native Research](implemented/native-deep-research.md) |
+| Research | Pipeline/report completion, bounded native web leaves, captured model/effort/tier forwarded to both leaf types, follow-up processing and retirement | [Native Research](implemented/native-deep-research.md) |
 | Scheduled run | Agent-owned definition and fire snapshot, overlap/one-shot admission and original run completion | [Scheduled runs](implemented/scheduled-runs.md), [schedule tools](implemented/schedule-tool.md) |
 | Native helper | Provider-owned root/child activity and saved observations within the original resource lifetime | [Native subagents](implemented/native-subagents.md) |
 | Application build | Current build session's original completion plus real entrypoint verification | [Applications](implemented/applications.md) |
 | Running App→Agent conversation | Scoped per-app access, original ask/SSE/status and independent response/driver lifetimes | [Agent access](implemented/app-agent-access.md) |
 
-Native root success does not prove every helper result was consumed. Arbitrary
-post-final recursive continuation remains a [paused increment](plans/runtime-execution-scope.md),
-with version-bound positive and negative evidence in [G0 observations](reference/codex-app-server-g0.md).
+Native root success does not prove every helper result was consumed.
+Arbitrary post-final recursive continuation is not guaranteed by the current
+[Codex](implemented/codex-backend.md) and [native-helper](implemented/native-subagents.md) contracts.
 
 ## Deployment and data boundaries
 
@@ -426,8 +417,7 @@ their operating instructions are in [connector setup](connectors-setup.md).
 [The documentation index](README.md) routes by task; [the roadmap](roadmap.md)
 orders unfinished choices. Current source contracts do not establish deployment.
 [Testing](testing.md) owns commands, fixture isolation, evidence reuse and release
-gates. Version-bound protocol observations remain in [reference](reference/);
-selected causal incidents remain in [post-mortems](post-mortems/).
+gates. Protocol fields and fixture provenance are in [reference](reference/).
 
 ## Design decisions and evidence
 
@@ -439,9 +429,4 @@ multiple collections or locks alone do not justify a unified task bus or new
 session authority. Add a mechanism only for a demonstrated requirement that the
 current owner cannot satisfy; this is not a permanent technology blacklist.
 
-The [earlier decision comparison](https://github.com/Danuvius152/Octopus/blob/5899c51d8f3b8fd513084e768e089c4a53f6af1a/docs/implemented/architecture-contract.md#既有领域接口的取舍)
-retains the original alternatives and costs. The
-[Owner scope incident](post-mortems/session-owner-scope-creep.md) and
-[account setup retirement](post-mortems/account-setup-retirement.md) retain causal
-evidence. Budget coordination rationale belongs to [turn safety](implemented/turn-safety.md#预算协调的归属).
-These records establish their recorded revision and scope, not current deployment.
+Budget timing and waiting are owned by [turn safety](implemented/turn-safety.md).

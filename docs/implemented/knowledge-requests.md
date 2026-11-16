@@ -31,7 +31,8 @@
 
 新的 API、MCP 与界面控制只接受 `auto`、`read`、`maintain`；携带 `wiki_mode=off` 的新 POST 返回 422，在接管对话、任务或执行前拒绝。缺少或无法验证的计划合同保留并停用，不从正文或旧控制重建权限。
 
-当前启动只接受现行完整主库格式或真正空库，不执行旧格式0–3升级到4的历史流程。当前格式声明、发布期有限转换与资料保全归[存储合同](current-storage-format.md)。旧 `off` 展示值、旧请求清退及当时的转换取舍查[固定历史版本](https://github.com/Danuvius152/Octopus/blob/fd7ab9c9bf312c1366eaa111d887c120cebb5e6f/docs/knowledge-requests.md)；不能把旧转换条件当成当前启动能力。
+当前启动只接受现行完整主库格式或真正空库；格式准入与资料保全归
+[存储合同](current-storage-format.md)。
 
 `previous_writers_retired` 仍由受管安装的原生命周期提供，并参与当前输入和 Wiki 任务恢复：它只证明原代 writer 已退出，不证明模型消费、历史通知 ACK 或未知效果成功。独立来源返回仍按自己的身份和合同完成交付。任务恢复与原引用的使用见[Wiki合同](wiki-development-summary.md#恢复与效果核验)和[安装生命周期](installation-lifecycle.md)。
 

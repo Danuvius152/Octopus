@@ -2,15 +2,8 @@
 
 > **Status:** implemented — 自动收起抽屉、16px 输入、触摸目标与安全区布局。
 
-## 1. Why this is not "responsive CSS"
-
-Octopus is used from a phone as much as from a laptop, often on the *same*
-session — you start something at the desk and check on it from a bus. So the
-phone isn't a degraded desktop: it's the second primary surface, and the
-things that break on it break the product, not the layout.
-
-Three different triggers, deliberately kept apart, because conflating them is
-how a "mobile fix" breaks a desktop with a touchscreen:
+<a id="1-why-this-is-not-responsive-css"></a>
+## Viewport, input and hardware conditions
 
 | trigger | what it governs |
 |---|---|
@@ -18,26 +11,19 @@ how a "mobile fix" breaks a desktop with a touchscreen:
 | `hover: none` | **input** — hit areas, and hover-only affordances, which follow the *selection* instead |
 | `env(safe-area-inset-*)` | **hardware** — the notch and the home indicator |
 
-## 2. The drawer has to put itself away
+<a id="2-the-drawer-has-to-put-itself-away"></a>
+## Drawer navigation
 
-The worst bug found on a phone: picking a session left the drawer open, so
-every navigation ended with the thing you'd just chosen hidden behind the menu
-you'd chosen it from. You had to tap the dimmed strip to see your own choice.
+`sessionStore.sidebarOpen` closes in the same update as navigation through
+`setActiveSessionId`, `openApplication`, `openApplicationCreate`, `openAgentForm`,
+`openManage` and `showChat`. Desktop layout ignores this flag.
 
-The fix isn't in the sidebar components — it's in the store. `sidebarOpen`
-moved out of `App`'s local state and into `sessionStore`, and every action
-that changes what the main pane shows (`setActiveSessionId`, `openApplication`,
-`openApplicationCreate`, `openAgentForm`, `openManage`, `showChat`) closes it
-in the same `set()`. There is no call site that can forget, including ones
-written later. Desktop ignores the flag entirely.
+The drawer width is `min(270px, 84vw)` and its hidden displacement derives from
+that width. The remaining overlay provides dismissal. Desktop collapse and
+mobile drawer visibility remain independent.
 
-The drawer is `min(270px, 84vw)` so a 320px phone keeps a strip of the app
-visible — the affordance that says "tap here to dismiss" — and its closed
-position is derived from that width rather than hard-coded. The old rule had
-`left: -260px` against a 270px sidebar, which left a 10px sliver of the
-sidebar on screen at all times.
-
-## 3. Typing
+<a id="3-typing"></a>
+## Typing
 
 * **Fields are 16px on phones.** iOS zooms the page whenever a focused field
   is smaller, and never zooms back out. This is the one rule in the file that
@@ -50,7 +36,8 @@ sidebar on screen at all times.
 * The token field on the login screen turns off autocapitalize, autocorrect
   and spellcheck — it's a secret, not prose.
 
-## 4. Headers shed context, not function
+<a id="4-headers-shed-context-not-function"></a>
+## Headers shed context, not function
 
 A 390px header can't hold a breadcrumb chain, a status pill, a credential
 chip, a connection pill and four icon buttons. What goes, in order:
@@ -69,40 +56,22 @@ chip, a connection pill and four icon buttons. What goes, in order:
 Everything that *does* something is still on the header. Nothing moved into a
 hidden menu.
 
-## 5. Touch targets and hover-only affordances
+<a id="5-touch-targets-and-hover-only-affordances"></a>
+## Touch targets and hover-only affordances
 
-Sidebar archive/unpin actions and the per-agent "+" are `opacity-0` until hover — invisible on
-a touchscreen, where there is no hover. The first answer here was "then show
-them always", and it was wrong in a way only a phone reveals: a removal button on
-*every* session and *every* application at once, all of them under the thumb,
-and a sidebar louder than the thing it lists.
-
-A touchscreen has no hover but it does have a **selection**, which carries the
-same meaning hover does — tapping a session or an application is how you say
-"this one", and unfolding an agent is how you say "I'm working in here". So
-under `hover: none` the sidebar's row actions appear on the row already chosen
-(`.session-item.active`, `.application-item.active`, `.agent-item.expanded`) and
-nowhere else. Nothing becomes unreachable: pick the row, then the action — two
-taps for something destructive, which is the right number.
+Under `hover: none`, sidebar row actions appear on the selected session
+or application and the expanded Agent (`.session-item.active`,
+`.application-item.active`, `.agent-item.expanded`). Other rows keep them hidden.
 
 The current session action archives; Agent/App sidebar actions unpin. These
 library actions do not hard-delete, while credential and schedule deletion
 retain their separate semantics. The behavior owner is
-[sidebar pins](sidebar-pins.md#6-the-pages).
+[sidebar pins](sidebar-pins.md#the-pages).
 
-Outside those lists the reveal stays unconditional. A credential card, a
-schedule row, a notifier entry has no selection to hang it on, and one delete
-button per item is what the list is *for*. `.btn-delete` is shared by all of
-them, so this is two rules — reveal, then take it back for an unpicked sidebar
-row — rather than one selector list. Narrowing it to the sidebar alone is a
-mistake worth naming: it silently made deleting a credential impossible on a
-phone, and the e2e caught it.
-
-Pinned by an e2e test that sets `isMobile` / `hasTouch`, not just a narrow
-viewport. That distinction is why the first version shipped wrong: resizing the
-window triggers the `max-width` rules but leaves `(hover: none)` unmatched, so
-no existing test could see this rule at all. The test asserts
-`matchMedia("(hover: none)")` first, for the same reason.
+Credential, schedule and notifier rows have no equivalent selection;
+their delete buttons remain visible on touch. Browser verification must set
+`isMobile`/`hasTouch` and assert `matchMedia("(hover: none)")`; narrowing the
+viewport alone does not activate touch rules.
 
 Hit areas grow past the button's box with a pseudo-element (`inset: -10px`)
 rather than by resizing the button: the console's density is deliberate, and
@@ -111,7 +80,8 @@ an 18px icon with a 38px target is the combination that keeps both. Rows get
 `touch-action: manipulation` so a tap isn't held for 300ms waiting to see
 whether it was a double-tap zoom.
 
-## 6. Notch, home indicator, status bar
+<a id="6-notch-home-indicator-status-bar"></a>
+## Notch, home indicator, status bar
 
 `viewport-fit=cover` lets the page use the whole screen, which also means it
 extends under the hardware. `.app-layout` pays back the top and side insets;
@@ -119,9 +89,7 @@ the bottom inset is paid by the two surfaces that sit on that edge (the
 composer and the sidebar's account bar) so they still extend under the home
 indicator instead of leaving a dead strip above it.
 
-The iOS status bar style changed from `black-translucent` to `default`.
-Translucent means iOS draws the clock and battery *over* the page in white,
-and Octopus's header is white — they disappeared.
+The iOS status bar uses `default` to retain contrast against the light header.
 
 These compose with the visual-viewport hook (`--app-h` / `--app-top`, which
 tracks the keyboard): insets are hardware, the visual viewport is software,
@@ -146,38 +114,26 @@ zone without lifting the composer by the entire 34pt inset. The composer uses
 that padding and the adjusted safe area wins. The exact rule lives in
 [index.css](../../web/src/index.css).
 
-## 7. Long strings
+<a id="7-long-strings"></a>
+## Long strings
 
-Paths, ids and URLs are everywhere in this app, and grid/flex children size
-to their longest unbreakable word — one absolute path in a schedule's prompt
-was enough to widen a column past the screen. Page bodies (and the schedule
-prompt at every width) break instead.
+Long paths, IDs and URLs wrap inside page bodies and schedule prompts;
+grid/flex children must not widen the viewport to their longest token.
 
-## 8. Testing
+<a id="8-testing"></a>
+## Testing
 
 E2E at phone width: the drawer closes when a session is picked, the closed
 drawer is entirely off-screen, no surface scrolls horizontally, and every
 field is at least 16px. Unit: the store's navigation actions close the drawer.
-The original manual verification reported zero overflow at
-320 / 390 / 412 / 810 / 844×390 on chat, applications, schedules, connectors,
-harness, the agent form and dialogs. That is version-bound evidence, not
-certification of current devices, browser versions or deployment.
 [useViewportHeight.test.ts](../../web/src/hooks/useViewportHeight.test.ts) covers
 focused-field sizing and stale viewport recovery; simulated viewport events do
 not establish every physical iOS keyboard/browser-toolbar transition.
 
-## 9. What this defers
+<a id="9-what-this-defers"></a>
+## Browser and operating limits
 
-* **Gestures.** A left-edge swipe to open the drawer collides with iOS
-  Safari's back-swipe, and a custom drag would have to beat the browser's own
-  handling to be reliable. The hamburger and the dimmed overlay are
-  unambiguous.
-* **A phone-specific information architecture** (bottom tab bar, per-surface
-  back stack). The drawer plus a single main pane is coherent on both sizes;
-  a second navigation model would be a second thing to keep correct.
-* **Offline / service worker.** Octopus is a client for a machine you own; it
-  is useless offline, and a stale-cached shell would be worse than the error.
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/mobile.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.
+The current navigation uses the hamburger, drawer and dismissal overlay. There
+is no custom edge-swipe navigation or offline/service-worker execution. Device
+keyboard and browser-toolbar behavior requires actual-browser verification;
+simulated viewport events cover only their explicit inputs.

@@ -2,7 +2,8 @@
 
 > **Status:** implemented — 计划 fire 的独立身份、重叠保护、触发标记与原执行入口。
 
-## 1. Two modes, unchanged
+<a id="1-two-modes-unchanged"></a>
+## Execution modes
 
 A fire runs the schedule's prompt in one of two places under the
 [Agent lifecycle](agent-refactor.md#creation-names-and-lifecycle):
@@ -13,19 +14,31 @@ A fire runs the schedule's prompt in one of two places under the
 * **a throwaway session** under the agent, auto-archived on idle, when there
   is no origin (continuity across fires comes from agent memory).
 
-Completion uses the original submission receipt and execution retirement before
-updating the completion timestamp and attempting automatic archive. For native
-App Server, a root terminal freezes execution while its original resources retire;
-that interval is not another parent computation. Empty final text and helper
-partials do not replace the root outcome or require a result-text query. Failed
-notification leaves the committed outcome intact. Stop pauses dispatch and keeps
-that conversation visible under the existing archive policy.
+Temporary-session completion waits on the original submission receipt and
+execution retirement before attempting automatic archive. Empty final text and
+helper partials do not replace the root outcome. Failed notification leaves the
+committed outcome intact. Stop pauses dispatch and keeps the conversation visible
+under the archive policy.
+
+### Time fields and contract discrepancy
+
+| Mode | Current write boundary | Stored value |
+| --- | --- | --- |
+| Origin session | `start_message` returns an accepted receipt, without waiting for completion | `last_run_at=now`, captured at fire entry; `last_run_session_id` is the origin |
+| Temporary session | Save the session ID before submission; update time only after `_completion_recorded` confirms committed completion and execution retirement | The same fire-entry `now`, not the later completion time |
+
+The completion-time and single-outstanding-fire requirements are not jointly
+implemented by these branches. The meaning of `last_run_at` and
+the scope of overlap prevention require a product decision. The behavior above
+is an implementation observation, not approval of a weaker guarantee. Consumers
+should use the original request completion and execution evidence to determine
+completion, rather than inferring it from this timestamp.
 
 ### Definition controls and shutdown
 
 The Runner owns each create, update and deletion before its first database
 wait. The owned task commits the definition with permission, expected-definition and
-[new once admission](schedule-tool.md#2-the-recurrence-is-stated-not-parsed)
+[new once admission](schedule-tool.md#the-recurrence-is-stated-not-parsed)
 checks, then reconciles the trigger under the registration
 lock. Reconciliation rereads the current definition, so an overtaken edit cannot
 restore a later deletion or re-enable a disabled schedule. Deletion commits
@@ -48,7 +61,7 @@ from the current row instead of disabling or recreating the old definition.
 
 A registration failure is observed with the original schedule ID and cause;
 the saved definition remains authoritative. There is no automatic business replay
-or compensating create. The [tool contract](schedule-tool.md#6-the-list-moves-while-you-watch)
+or compensating create. The [tool contract](schedule-tool.md#the-list-moves-while-you-watch)
 defines whole-second, storage and actual first-fire validation for intervals.
 New timing definitions and re-enabling are checked in the writer transaction;
 registration uses the same constructed interval trigger. Known invalid stored
@@ -98,30 +111,19 @@ target/input admission transaction still compares its captured definition with
 the current row before consuming it. An edit, pause or deletion before that
 transaction can refuse admission. Once accepted, its original input, completion
 and resource retirement have their own identities. The
-[one-shot recovery boundary](#2-a-schedule-never-has-two-runs-outstanding) remains
-unchanged; periodic history is not backfilled by calendar corrections.
+[one-shot recovery boundary](#overlap-checks-and-one-shot-admission) remains
+in force; periodic history is not backfilled by calendar corrections.
 
-## 2. A schedule never has two runs outstanding
+<a id="2-a-schedule-never-has-two-runs-outstanding"></a>
+## Overlap checks and one-shot admission
 
-A schedule that runs every 5 minutes and takes 10 used to start a second run
-on top of the first, then a third — until the box gave out. Nothing noticed,
-because each fire was its own session.
-
-The guard is per mode, because "busy" means different things:
-
-* **Throwaway mode**: the previous fire's session is recorded
-  (`last_run_session_id`, written *before* the turn starts so an in-flight fire
-  is visible to the next tick). If that session is still running or has a
-  queue, the tick is skipped and logged. A session that is gone, or idle, is
-  never a reason to skip — the guard must not be able to wedge a schedule.
-* **Origin mode**: queuing behind the *user's* turn is the design, so a
-  running session is fine. Queuing behind a *previous fire* is a pile-up, so a
-  tick is skipped when the session already has something waiting.
-
-Skipping keeps the schedule's cadence rather than shifting it: the next tick
-tries again. (VM0 answers the same situation with "Previous run is still
-active"; the difference is that Octopus can queue in the chat case, so it only
-refuses the second one.)
+For periodic schedules, [Runner](../../server/scheduler.py) checks each mode
+separately. Temporary mode checks the previous session's status, pending queue,
+request and execution. Origin mode checks only the pending queue: an active
+fire with an empty queue does not block the next fire. A pending human input
+also makes that check true; it does not identify which input is a prior fire.
+These checks cannot establish a universal single-outstanding-fire guarantee.
+A skipped periodic tick retains the ordinary cadence.
 
 One-time schedules use a different admission rule: a human backlog retains
 the fire rather than skipping it. The target session, complete input and
@@ -135,12 +137,10 @@ no earlier than five seconds later; it does not directly reinstall a captured
 trigger outside the Runner's owned control path.
 See [input reliability](input-reliability.md) for the shared input contract.
 
-## 3. A scheduled turn says it is one
+<a id="3-a-scheduled-turn-says-it-is-one"></a>
+## A scheduled turn says it is one
 
-Every other machine-injected turn in Octopus announces itself —
-`[bg-task-result]`, `[agent-reply:<name>]`, `[app:<name>]`. A schedule's did
-not, so an agent woken at 07:00 could not tell its own daily run from
-something the user had just typed. It now arrives as:
+Each scheduled input has a source marker:
 
 ```
 [scheduled:<name> — <recurrence>]
@@ -167,26 +167,20 @@ can supply a new explicit input, and recurring schedules retain their next
 ordinary trigger. A model's successful final response is not proof of the
 requested external effect.
 
-## 4. "Last run" opens the run
+<a id="4-last-run-opens-the-run"></a>
+## "Last run" opens the run
 
-`last_run_session_id` is also what the UI needed: the Schedules page could say
-*when* a schedule last fired but not *what happened*, which is the actual
-question. The row is now a link into that session — for throwaway fires, the
-auto-archived session the turn ran in.
+`last_run_session_id` links the schedule row to its latest session. Temporary
+runs remain readable through that link after automatic archival; origin runs
+link to the continuing origin session.
 
-## 5. What this defers
+<a id="5-what-this-defers"></a>
+## Current limits
 
-* **Per-fire history.** One pointer, to the latest run. A real run list means
-  a `schedule_runs` table; the sessions themselves already hold the history,
-  and nothing yet needs to page through it.
+* **Per-fire history.** The schedule stores only its latest session pointer;
+  there is no dedicated per-fire history view.
 * **Catch-up for recurring fires.** Recurring schedules wait for the next
   tick instead of replaying every tick missed during downtime. A backlog
   policy for recurring work remains a separate product choice; unaccepted
   one-time schedules retain their original fire as described above.
-* **A skipped-fire signal in the UI.** The skip is logged; surfacing it means
-  deciding whether a skipped tick is worth a badge, which needs a real case of
-  someone being surprised by one.
-
-## Historical evidence
-
-The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/scheduled-runs.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.
+* **Skipped-fire visibility.** Skips are logged and have no dedicated UI signal.

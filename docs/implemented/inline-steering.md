@@ -94,22 +94,17 @@ recovery rules belong to the
 On Claude, the input row commits before its asynchronous stdin write, while
 `steered` is published only after that write finishes. Output persisted meanwhile
 can therefore be broadcast first. The browser accepts an unseen lower seq and
-merges durable rows by seq; seeing N+1 no longer discards N. Snapshot coverage
+merges durable rows by seq, including an unseen N arriving after N+1. Snapshot coverage
 and current-window duplicate detection are separate facts. Full merge, streaming
 identity, settled-question and older-page rules belong to the
-[frontend contract](frontend-list-reconciliation.md#实时历史身份与流缓冲).
+[frontend contract](frontend-transcript-view.md#实时历史身份与流缓冲).
 
-The original writer and stdout reader remain independent. The fix neither
-publishes `steered` before write confirmation nor pauses stdout to force display
-order. A visible row proves neither provider receipt nor semantic consumption;
-an unknown delivery is not permission to repeat input. Controlled real Claude
-JSONL/driver tests hold stdin with a 1 MiB correction: N is durable and N+1
-published while N is not yet `steered`; releasing the pipe confirms N, while a
-lost drain acknowledgement retains the original unavailable result without a
-`steered` claim. Actual snapshot/broadcast content and identity are compared with
-the shared `steeringReplay.json` fixture, then consumed by the production browser
-reducer. Claude and Codex frontend interleavings are covered offline; this is not
-a claim of a reproduced native Codex stdin failure or a new live-provider result.
+The original writer and stdout reader remain independent. `steered` is
+published only after write confirmation; stdout continues independently. A visible
+row proves neither provider receipt nor semantic consumption. Unknown delivery
+does not authorize repeating input. Controlled driver and browser regressions use
+`steeringReplay.json` to check durable lower-seq input, later output, write
+confirmation and lost drain acknowledgment through real consumers.
 
 ## Output and process lifetime
 
@@ -132,10 +127,8 @@ The [native output contract](native-subagents.md) owns that observation boundary
 
 ## Rationale and verification
 
-The original Claude experiments showed that tool boundaries can consume streamed
-input while uninterrupted generation may postpone it. That motivated an explicit
-delivery protocol rather than a promise of instantaneous interruption. Their
-latencies and cache measurements are version-specific, not current SLAs.
+Streamed input can wait for a runtime consumption boundary; the delivery
+protocol does not guarantee instantaneous interruption.
 
 Code: [Owner runtime](../../server/sessions/owner_runtime.py),
 [presentation](../../server/sessions/presentation.py),

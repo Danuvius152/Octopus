@@ -1,172 +1,116 @@
-# Wiki 重派后，旧聊天仍应能观察当前进度（2026-11-04）
+# Wiki 重派后，旧聊天的卡片停在旧进度（2026-11-04）
 
-状态：历史复盘。调查窗口为 2026-10-04 至 2026-11-04（Asia/Shanghai），固定代码
-基线为 `0f1570877be4e2ed5903377fe93955c454f43906`。依据 Git 差异、该版本实现、
-合同和回归源码；未取得本文全部故障发生于生产的记录。原历史调查只做文档核查，
-未运行产品套件、真实模型或发布；下列历史测试是回归入口，后续组合核对另列。
+状态：下列效果、派发和观察缺口已有修复。调查窗口为
+2026-10-04 至 2026-11-04（Asia/Shanghai），固定历史基线为
+`0f1570877be4e2ed5903377fe93955c454f43906`。
 
-本文从[证据、范围与恢复复盘](wiki-evidence-scope-recovery.md)拆出异步
-任务专题，回答三个问题：实际效果怎样结算，谁接收之后的自动汇报，旧聊天怎样
-观察当前进度。权限、原文保全、来源确认及阅读证据的因果仍归原文。
+## 摘要
 
-## 发生了什么
+A 聊天提交 Wiki 任务，用户从 B 重派后，后续自动汇报应转给 B，A 中的卡片却仍需
+允许用户查看当前进度。旧实现把自动返回资格、持久通知摘要和人的当前观察混在
+一起：限制旧订阅者副作用后，也可能让旧卡片永远停在原 attempt。
 
-A 聊天提交一个 Wiki job，任务进入需要处理的状态后，用户从 B 聊天显式发起
-retry/readmit。B 拥有之后的自动结果返回；用户打开 A 时，仍可在当前
-权限下看到同一 job 的新 attempt。旧 A 不应因 B 的工作再次自动生成汇报，也不应
-因失去自动返回资格，永远停在旧卡片。
+修复把执行 attempt、派发代次与只读观察分开。读取当前状态不重新订阅或唤醒旧
+模型；效果恢复也沿原收据核对，不为补通知重新生成文章。
 
-仅按 attempt 过滤，不能完整表达本次派发的接收者；仅从主库“最后接收的通知”
-恢复卡片，也不能回答当前状态。通知全部 ACK 后可以没有待投递事件，但任务仍然
-存在。反过来，若为了刷新卡片重新订阅或重送模型输入，就把观察变成了执行。
+## 影响与证据
 
-这条链路更早还有另一种事实混用：正文已存在、job 已取消、模型已退出，都不能
-独立证明原执行已成功录制、文件效果已确认及原资源已退休。失去回执不等于失去
-效果；以“重新运行一次”补通知或录制，可能重复生成或覆盖后来的人工修改。
+旧代码与回归构造显示，用户可能看不到重派后的当前进度；ACK 丢失又可能使一组
+结果重复汇报。更早的结算缺口还允许把文件存在、取消状态或模型退出当成原执行
+成功，恢复时可能重复生成或覆盖后来人工修改。
+
+证据来自 Git 差异、固定版本实现和回归源码，未取得全部故障发生于生产的记录。
+本次文档改写没有运行产品套件、真实模型或发布；下列测试是机制与观察点的入口。
+
+## 关键时间线
+
+| 日期 / 提交 | 修正的事实 |
+| --- | --- |
+| 10-17 `8132a07`、10-23 `93122cb` | 保留原录制引用，分开核原 request terminal、recording、资源 retired 和文件效果。 |
+| 10-25 `494fa95` → 10-27 `cf98ecb` | 增加结果自动返回后，以 dispatch_generation 表达显式重派，与返回接纳协调排序。 |
+| 10-31 `159723d` → 11-04 `4f1418d` | 原资源按证明退役；旧聊天通过持久关联和当前权限读取当前快照。 |
+| `65b5918`、`26aa78f` | 入队提交后丢失唤醒，queued 重放继续推进；running 重放不再唤醒。 |
+
+新增自动返回是产品扩展；后来的派发与观察修复补齐其消费者，不能仅按提交顺序
+认定为同一个 bug 重现。
+
+## 根因与修复
+
+### 1. 自动返回接收者不能决定谁能查看当前状态
+
+复现顺序是 A 留下持久卡片、B 显式 retry/readmit、新 attempt 推进、全部通知 ACK，
+再从 A 的真实 HTTP 入口读取卡片。最后通知不再待投递，但任务仍存在；靠通知恢复
+只能得到旧摘要，重新订阅又会给旧聊天制造副作用。
+
+修复通过原账户/session/vault/job 关联发现任务，以当前身份、注册和权限读取 Wiki
+事务快照。A 仍能取得新的 attempt、state_version 和 status，保留 origin_request_id，
+但 GET 不创建订阅、通知或模型输入。换库、任务缺失或无当前权限时只保留原获准
+摘要，标明 current_state unavailable，不披露新诊断或开放当前控制。
+
+[重派回传](../../tests/test_wiki_retry_return.py)验证只给当前派发者返回；
+[卡片刷新](../../tests/test_wiki_card_refresh.py)在全部 ACK 后读取旧聊天，并覆盖
+换库、缺任务与撤权。两边必须同时成立，不能只测 B 收到了结果。
+
+### 2. 返回已接纳，ACK 丢失不能制造第二份汇报
+
+一组 job 的返回接纳后，ACK 抛错；此时再转交其中一项并重送剩余通知，组成员和
+attempt 已变化。若重新拼去重身份，就会提交第二份汇报。
+
+修复保留原 delivery 身份，只补通知。重派与返回接纳共享明确顺序；已接纳输入
+不被后来的转交撤回。旧 control 响应丢失后的重放，也不订阅之后的新派发。
+
+[回传回归](../../tests/test_wiki_retry_return.py)用
+`test_lost_group_ack_and_member_transfer_never_create_a_second_report` 和
+`test_return_acceptance_and_retry_have_one_admission_order` 注入这两个窗口，
+检查主库原输入只有一份。
+
+### 3. 原效果未知时，恢复没有重新生成的依据
+
+在 replace 前、或 replace 后 applied 标记前中断，再人工编辑或还原字节，当前
+文件都无法证明历史有没有写过。候选和收据保留不确定性；候选过期也不撤销收据，
+更不授权再生成。已保存但索引失败只修派生索引，录制未知则查原 session/request
+持久终态；取消状态不允许新 attempt 与尚未退休的原 work 并行写。
+
+[jobs.py](../../server/wiki/jobs.py)以同一结算规则检查原效果、applied、输出身份、
+revision、索引与原请求成功终态。[任务恢复](../../tests/test_wiki_jobs.py)分别覆盖
+未知发布、已发布输出和录制失败，观察模型轮数仍为一、publication 不重复、人工
+字节保留及 attention；[退役准入](../../tests/test_wiki_retirement_admission.py)
+验证原资源不能因 live map 缺失就被视为退出。
+
+原生根请求有合法成功终态也不能代替 Wiki 效果。[组合回归](../../tests/test_mcp_input_completion.py)
+的 `test_native_input_gap_does_not_replace_wiki_effect_receipt` 在纯输入缺项已本地
+清理、但没有 publication receipt 时，仍保留 item attention、原文不变和一次模型执行。
+它验证效果门槛，没有证明实际发布或终稿语义。
+
+### 4. 幂等复用成功，还需要推进原 queued 工作
+
+准入事务已提交、worker.wake 前失败，再提交同一操作。只返回相同 job 能防重复，
+若跳过唤醒，原任务仍不前进。修复依据 queued 状态补唤醒，移除多余 created 镜像；
+running 不重复唤醒。
+
+[操作边界回归](../../tests/test_wiki_operation_boundaries.py)覆盖单项和批量入口，
+检查身份不变、一条任务、queued 重放唤醒及 running 重放无额外动作。恢复推进和
+不重做内容并不冲突，选择取决于原阶段和已确认效果。
 
 ## 为什么前一次修复还不够
 
-这些修改补的是不同消费者所需的事实。新增自动返回是产品扩展，不计作旧功能
-再次回归；其后的派发和观察缺口也不能仅凭提交顺序判成同一不变量被反复破坏。
+先前测试分别证明了任务结算、B 收到返回或卡片存在，没有把“A 无新副作用，但在
+所有 ACK 后仍可读取当前 attempt”放在同一对照里。文件存在、通知 ACK、进程退出
+和用户可读性各属不同消费者，不能用其中一个替代其余事实。
 
-| 节点 | 当时建立的保证 | 后续消费者需要的另一事实 |
-| --- | --- | --- |
-| 10-17 [8132a07][commit-recording] | 取消／立即重试交错中，原录制未确认引用仍能保存，不覆盖用户选择的 job 状态 | 当前 job 状态不能证明原请求终态或文件效果 |
-| 10-23 [93122cb][commit-settlement] | 原 request terminal、recording、retired 分别保留；正常、取消及恢复共用效果结算规则 | 原执行结算不回答之后由哪个入口接收返回 |
-| 10-25 [494fa95][commit-return] → 10-27 [cf98ecb][commit-dispatch] | 先增加向原请求汇总结果，再用独立 dispatch_generation 表达显式重派，并与结果接纳串行化 | 自动返回资格不能决定人查看历史卡片时能否读取当前事实 |
-| 10-31 [159723d][commit-retirement] → 11-04 [4f1418d][commit-observation] | 退役按原 work 的资源证明；原聊天通过持久关联在当前授权下读取当前不可变快照 | 进程内引用缺失、通知 ACK 与当前状态可读性，均不能替代各自权威 |
+原执行成功、效果结算、资源退休、返回接纳、模型处理与人的观察继续分别取证。
+通知 receipt/ACK 不证明模型采用内容；当前快照也不授予写权。相关实现入口为
+[执行与退休](../../server/wiki/job_execution.py)、
+[返回派发](../../server/wiki/job_returns.py)和[当前观察](../../server/wiki/job_observation.py)。
 
-10 月 27 日与 11 月 4 日的修正并不矛盾。前者限制旧订阅者的副作用，后者恢复
-人的只读观察；读取不撤回派发交接，也不改写原来已经接纳的返回事实。
+## 教训与适用边界
 
-## 推翻旧解释的反例
+- 限制副作用时，同时验收合法只读观察；不能靠删除历史关系解决旧订阅者问题。
+- 恢复先确认原效果和阶段：通知丢失补通知，queued 丢失唤醒补推进，未知发布保留核验。
+- 观察、执行和派发分别使用原身份，历史关联仍须通过当前授权。
 
-### 1. 重派后旧聊天不自动汇报，但仍能读当前 attempt
-
-触发顺序：A 留下原持久卡片 → 原任务结束并需要处理 → B 显式重派 → 新 attempt
-推进 → 所有通知已 ACK → 从 A 的真实 HTTP 入口读取卡片。
-
-权威观察应同时检查两边：A 没有新增自动返回输入；A 读取到的 attempt、
-state_version、status 与 Wiki 当前 job 一致，且保留原 origin_request_id。
-GET 不得创建订阅或新通知。仅断言“B 收到了结果”漏掉 A 的副作用；仅断言“旧卡片
-存在”漏掉当前事实不可达；依赖待投递事件的实现则在全部 ACK 后失去更新材料。
-
-这组对照由[重试回传](../../tests/test_wiki_retry_return.py)中的
-`test_retry_in_another_chat_returns_only_to_the_current_dispatcher` 与
-[当前卡片](../../tests/test_wiki_card_refresh.py)中的
-`test_old_chat_reads_current_attempt_after_human_retry_and_all_notifications_are_acked`
-共同固定。后一用例参数化 retry/readmit，确认旧持久通知摘要不变，而 GET 已取得
-新状态。它不依赖重新唤醒旧模型来刷新卡片。
-
-### 2. 返回已经接纳，ACK 丢失只补通知，不再生成一份汇报
-
-在一组 job 的返回输入接纳后，让通知 ACK 抛错，再转交其中一个 job 并重送剩余
-通知。应保留原 delivery 身份，主库返回输入仍只有一份；不能因组成员或 attempt
-变化，重新拼一个去重身份制造第二次汇报。若重派与接纳同时发生，两者必须有
-明确的接纳顺序，不能一边通过旧资格检查，一边将新归属提交。
-
-[重试回传](../../tests/test_wiki_retry_return.py)中的
-`test_lost_group_ack_and_member_transfer_never_create_a_second_report` 和
-`test_return_acceptance_and_retry_have_one_admission_order` 分别注入 ACK 失败与
-接纳交错。旧 control 重放另由 `test_old_control_replay_does_not_subscribe_to_a_later_dispatch`
-检查：原操作响应丢失，不应使重放者订阅后来的派发。
-
-### 3. 原效果未知或录制未确认，恢复不能重新生成
-
-在文件原子替换前，或替换后但 applied 标记前中断；随后人工编辑甚至恢复成原字节。
-恢复先保留原候选、收据和不确定性，不能用当前字节猜历史没有写过。候选字节仍按
-历史保留期管理，过期不撤销收据所记录的不确定性，也不授权重新生成。若效果已保存
-但索引失败，只恢复派生索引；若原请求录制未知，核对原 session/request 的持久
-终态。取消状态已提交也不能授权新 attempt 与尚未退休的原 work 并行写入。
-
-[任务恢复](../../tests/test_wiki_jobs.py)中的
-`test_uncertain_publication_receipt_never_starts_another_model_turn`、
-`test_published_item_recovery_never_generates_again_or_consumes_reread_budget`、
-`test_recording_failure_retry_verifies_original_without_new_model` 分别检查未知发布、
-已发布输出和原录制。观察点包括模型轮数仍为一、原 publication 不重复、人工字节
-保留及 attention 状态，而不是只看最终存在一篇文章。原资源退役另见
-[再准入回归](../../tests/test_wiki_retirement_admission.py)。
-
-### 4. 入队已提交，丢失唤醒后重放还要继续推进
-
-在准入事务提交后、worker.wake 前抛错，再提交相同操作。幂等命中同一 job 只证明
-没有重复创建；如果复用路径跳过唤醒，原 queued 工作仍不会推进。
-[65b5918][commit-wake] 补上唤醒，[26aa78f][commit-queued] 再直接依据 queued
-状态，移除多余 created 镜像。已 running 的任务不应再次唤醒。
-
-[操作边界测试](../../tests/test_wiki_operation_boundaries.py)中的
-`test_lost_wake_recovers_original_checked_job_on_replay` 对单项／批量入口注入该
-失败，检查 job 身份不变、仅有一条任务且 queued 重放唤醒，running 重放不唤醒。
-这与“效果未知时不重做内容”可以同时成立：恢复推进取决于原阶段和已确认效果。
-
-## 在固定基线下怎样成立
-
-| 事实 | 权威与提交／读取边界 | 消费者及保证上限 |
-| --- | --- | --- |
-| effect receipt、change.applied、输出 revision 与索引 | writer 留下效果证据；jobs.settle_item 匹配原执行并核验实际输出 | 正常／取消／恢复共用结算；文件存在不等于原执行成功 |
-| 原 request terminal 与 recording | 原 session/request 的已提交执行事实 | worker 对账原执行；最终答案字符串不代替录制 |
-| 原 work retired | 原工作资源 owner；job_execution 核原引用与退休证明 | retry/readmit 准入；live map 缺失不证明资源已退出 |
-| dispatch_generation | Wiki 控制事务提交派发代次与订阅；接纳 gate 协调转交和返回 | 后续自动返回；不撤回已接纳输入，也不授予只读观察权 |
-| notification receipt／ACK | 原通知接纳与确认记录 | 去重与重送；不证明模型已处理，更不证明文章质量 |
-| state_version／current_state | 主库原卡片发现关联；当前注册、权限和 Wiki 读事务取得不可变快照 | 人的当前观察；不创建订阅、模型输入或新派发 |
-
-源码入口为固定版本的[效果结算][src-settlement]、[原执行与退休][src-execution]、
-[派发返回][src-returns]及[当前卡片读取][src-observation]。这些维度有不同消费者，
-不能用一个 is_complete 合并；本次也不因此引入新的 owner 或工作流引擎。
-
-观察关联以原账户/session/vault/job 发现任务，仍检查当前身份、注册及权限。
-换库、任务缺失或当前无权读取时，只保留原获准摘要，标明 current_state unavailable，
-不披露新诊断，也不开放依赖当前权限的控制。[当前卡片测试](../../tests/test_wiki_card_refresh.py)
-另用 `test_unreadable_current_job_keeps_only_its_original_summary` 覆盖这三类情况。
-历史关联不能成为任意查询其他任务的凭据。
-
-当前控制和展示的完整规则继续由[共享 Wiki 合同](../implemented/wiki-development-summary.md)
-及[前端列表合同](../implemented/frontend-list-reconciliation.md#wiki-卡片详情与控制回执)
-持有；本篇保留固定基线下的错误假设、反例和因果，不另存一份动态状态机。
-
-## 后续核对：输入清理不替代 Wiki 效果
-
-后续原生完成整改允许精确关联、取消且本地清理已确认的纯输入缺项不单独阻断
-合法请求成功，同时保留原始记录不完整。该例外不会自动结清 Wiki item：
-[组合回归](../../tests/test_mcp_input_completion.py)中的
-`test_native_input_gap_does_not_replace_wiki_effect_receipt` 取得原 worker 的
-成功终态，但没有 publication receipt，item 仍为 attention，原文不变，模型只运行
-一次。它证明完成分类没有绕过效果门槛，不是一次实际发布成功或终稿冷读验收。
-
-已有发布的恢复仍按上文核对原效果、录制与退休；未知写入、reader 截断和未确认
-清理不享受纯输入例外。当前判断继续归 Wiki 结算及
-[跨模块完成合同](../implemented/input-reliability.md#原请求完成与失败交接)。
-
-## 仍存边界
-
-- **模型流程义务与程序保证。** completed 不认证终稿冷读覆盖或语义理解，具体证据
-  见[原文的边界说明](wiki-evidence-scope-recovery.md#终稿冷读是流程义务不是-completed-的程序硬门槛)。
-  不为消除措辞边界自动新增状态或持久阅读账本。
-- **设计取舍。** 当前状态不可读时保留获准历史摘要；它不代表最新状态。观察不提供
-  自动返回资格，也不替代有当前权限和原资源退休前提的显式控制。
-- **验证范围。** 已确认的是上述代码路径、差异和回归构造，没有由此确认新的生产
-  故障，也没有重新完成全产品、真实模型或部署验收。来源确认的成本候选及未来
-  产品能力归[原文](wiki-evidence-scope-recovery.md#仍存边界流程义务与性能候选)
-  和已有 [Wiki 计划](../plans/wiki-future-plan.md)，不混入本次运行时结案。
-
-## 可迁移的经验
-
-1. **沿消费者定义完成。** 效果已确认、原执行成功、原资源退休、返回接纳及当前
-   可观察分别举证；控制状态或队列现象不能替代原操作的事实。
-2. **把限制副作用与保留观察成对验收。** 测 B 收到返回时，也测 A 不被唤醒而仍能
-   读当前状态；只修一边，容易用删除历史关系或重新订阅补出下一条缺口。
-3. **先确认效果，再选择恢复阶段。** queued 重放需要推进，通知丢失只需重送，
-   效果未知必须保留核验；不让一种“重试”默认重做所有阶段。
-
-[commit-recording]: https://github.com/Danuvius152/Octopus/commit/8132a0764b56966f9344a6dba09ca865fec52a23
-[commit-settlement]: https://github.com/Danuvius152/Octopus/commit/93122cbb41ac06f83e6f6b542747481548313104
-[commit-return]: https://github.com/Danuvius152/Octopus/commit/494fa95522b15afc7710bd1386d67f0568e4a0ae
-[commit-dispatch]: https://github.com/Danuvius152/Octopus/commit/cf98ecb75d1aa741c31292977ac9d83e727d366f
-[commit-retirement]: https://github.com/Danuvius152/Octopus/commit/159723da0333d3543ebbcd112761f0843550e0a5
-[commit-observation]: https://github.com/Danuvius152/Octopus/commit/4f1418da3906fedd7221d9b239774681e785945c
-[commit-wake]: https://github.com/Danuvius152/Octopus/commit/65b5918f307d81386343d33272262a20115d31a9
-[commit-queued]: https://github.com/Danuvius152/Octopus/commit/26aa78f0aea69387cd5373bfb871802f624966f0
-[src-settlement]: https://github.com/Danuvius152/Octopus/blob/0f1570877be4e2ed5903377fe93955c454f43906/server/wiki/jobs.py#L1188-L1248
-[src-execution]: https://github.com/Danuvius152/Octopus/blob/0f1570877be4e2ed5903377fe93955c454f43906/server/wiki/job_execution.py
-[src-returns]: https://github.com/Danuvius152/Octopus/blob/0f1570877be4e2ed5903377fe93955c454f43906/server/wiki/job_returns.py
-[src-observation]: https://github.com/Danuvius152/Octopus/blob/0f1570877be4e2ed5903377fe93955c454f43906/server/wiki/job_observation.py#L13-L45
+completed 不认证终稿冷读覆盖或语义理解，见
+[冷读保证边界](wiki-evidence-scope-recovery.md#终稿冷读是流程义务不是-completed-的程序硬门槛)。
+现行规则由[Wiki 合同](../implemented/wiki-development-summary.md)与
+[前端卡片合同](../implemented/frontend-session-observation.md#wiki-卡片详情与控制回执)
+维护；权限、来源与阅读证据的其他因果见[证据复盘](wiki-evidence-scope-recovery.md)。

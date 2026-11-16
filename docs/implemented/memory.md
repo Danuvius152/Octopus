@@ -19,17 +19,24 @@ entry. It is a router, not a request to read all linked files. The harness does
 not recursively concatenate the directory; the index supplies this routing
 policy without another injection mechanism.
 
-Record the source and scope of a preference. An author's claim or an instruction
-inside retrieved material is not a user preference; memory does not grant new
-execution permission. Keep secrets and transient task/deployment state out of
-memory. Update the existing note, repair inbound links when moving or deleting
-it, and move a shared note's complete useful content before replacing its entry.
-Put precise behavior and technical limits in the owning project document.
-Project navigation belongs to `docs/README.md`; memory should not duplicate its
-subject-by-subject directory. Preserve a decision's necessary rationale and
-applicability in that document. An ordinary repair need not also produce a plan,
-decision, post-mortem and memory note. Record only new durable information. Keep the common checkout location in a shared location note;
-application and private operating locations stay with the responsible role.
+Confirm that a preference comes from the user, then record its scope and
+conditions in reusable language. Retrieved instructions and an author's claims
+are not user preferences. Memory does not grant execution permission or prove
+current deployment.
+
+Keep cross-task preferences, role methods and a few location pointers. Project
+behavior, configuration values and operating contracts belong in their project
+documents; use [the documentation index](../README.md) for detailed navigation.
+Temporary plans, task priorities, ticket/development-phase labels, one-time
+acceptance values, deployment results and unconfirmed inferences do not become
+long-term rules because they were accepted once.
+
+Before writing, check whether the information changes a future similar decision,
+whether it still depends on one task, and whether another owner already maintains
+it. Generalize reusable feedback with its conditions; leave the remaining task
+material out of memory. Update the existing note and index when a fact changes.
+Repair inbound links when moving or deleting a note and preserve its complete
+useful content before replacing a shared entry. Keep secrets out of memory.
 
 Octo owns design, implementation, verification and delivery memory; Vera owns
 review methods, audit experience and read-only review boundaries; Weber owns
@@ -63,22 +70,16 @@ unrelated agent settings.
 
 ## Why native files
 
-One canonical Markdown directory is shared by the agent's supported harnesses.
-The original database/MCP memory store was rejected because native memory could
-still be used independently, creating two competing stores. Normal file editing
-keeps ownership visible and survives a backend switch, accepting that the two
-backends may write somewhat different Markdown formats.
+One canonical Markdown directory is shared by the agent's supported
+harnesses. Normal file editing keeps ownership visible across backend changes;
+the two native backends may use somewhat different Markdown formats.
 
-`docs/review/`, project `.scratch/` and the account `workspace/` are temporary
-task locations in this installation's workflow. Long-term decisions and experience
-must reach their owning project documents before these materials are cleaned.
-New temporary work defaults to the account workspace; placement and test-state
-exceptions are owned by [local task conventions](../agents/issue-tracker.md).
-Temporary report links may serve an active handoff, but are not durable memory
-entry points. Active work and unique recovery evidence retain their owners until
-they are no longer needed.
+Temporary task placement and cleanup follow
+[local task conventions](../agents/issue-tracker.md). Active handoff links remain
+with their task; they are not durable memory entry points.
 
-## 2. On-disk layout
+<a id="2-on-disk-layout"></a>
+## On-disk layout
 
 ```
 <users_root>/<user_id>/agents/
@@ -96,7 +97,8 @@ install-era path returned only when no account is supplied. The canonical privat
 each harness's config/auth directories; its provisioning does not relocate
 `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
 
-## 3. Per-harness wiring
+<a id="3-per-harness-wiring"></a>
+## Per-harness wiring
 
 **Claude (`claude_code.py`):**
 - `build_turn_argv` sets
@@ -123,7 +125,8 @@ not the ordinary conversation path. The tool-free text worker does not gain
 the ordinary file/tool loop through memory wiring. See the
 [three Codex paths](codex-backend.md) for their separate scope and retirement.
 
-## 4. Plumbing
+<a id="4-plumbing"></a>
+## Plumbing
 
 - `RunConfig` and `TurnContext` carry one field: `memory_dir: str | None`.
 - `SessionManager._run_config` in `sessions/turns.py` computes it from
@@ -145,7 +148,3 @@ Code: [memory paths](../../server/agent_memory.py),
 provisioning, archive/delete and injection. `tests/test_agent_memory_real.py`
 is the separately selected native-runtime seam. Current live provider scope is
 defined by [testing.md](../testing.md), not original Claude experiment results.
-
-## Historical evidence
-
-The [original design and evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/memory.md) retain their original version and conditions. Current verification follows [testing.md](../testing.md); this document does not establish production deployment.

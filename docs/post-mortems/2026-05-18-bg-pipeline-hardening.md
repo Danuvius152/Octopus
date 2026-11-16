@@ -1,181 +1,120 @@
-# Hardening the bg-task → model-turn pipeline (2026-05-18)
+# Background results could fail before the model received them (2026-05-18)
 
-Four interlocking bugs were hitting the `mcp__bg__run` →
-`deliver_bg_result` → `claude` CLI path. All four are now fixed.
-This is the historical post-mortem; the fixes, test counts and timings below
-describe that delivery, not the current installation's verification.
+Status: the four failure paths below were fixed. This report records the
+2026-05-18 incidents; present behavior is maintained in the linked contracts.
 
-> **Path note (post-refactor):** this is a dated record. The `server/backends/*`
-> modules it cites (e.g. `subprocess_jsonl.py`) were later folded into the
-> harness layer under `server/harness/` (`run.py`). Session execution and
-> return admission subsequently moved into `server/sessions/`; the historical
-> method names below are not a current call map. See the current follow-up at
-> the end of this report.
+## Summary
 
-## 1. E2BIG on bg-task-result delivery
+Background output could exceed Linux's argument limit before Claude started.
+Other turns stopped after tool use or failed while reading a large JSONL event.
+A separate teardown leak left a completed pytest command alive, so its BG chip
+never left `running`. Each boundary had its own limit or completion signal, but
+the pipeline treated output, process exit and a completed model turn as if they
+were interchangeable.
 
-**Symptom.** A `bun run test:e2e` bg task produced ~140 KB of
-stdout. `render_delivery_prompt` wrapped it in framing and
-`start_message` queued it as a synthesized user prompt. The Claude
-CLI was then spawned with that prompt as a single positional argv
-element. `execve(2)` returned `E2BIG` because Linux's
-`MAX_ARG_STRLEN` is 131 072 bytes per arg.
+## Impact and evidence
 
-**Root cause.** The bg pipeline is structurally capable of
-producing argv elements above the kernel's per-arg cap whenever a
-task's stdout+stderr framing exceeds ~128 KB. `MAX_STREAM_BYTES`
-in `bg_tasks.py` is 200 KB per stream, so worst case is ~400 KB
-of prompt — over 3× the cap.
+A `bun run test:e2e` command produced about 140 KB of stdout and its result could
+not be delivered. A pytest command printed `408 passed in 63.77s` but remained
+running for more than six minutes until manually cancelled. Claude invocations
+also ended after tool use without a result, or lost their stdout reader on a
+line above 64 KB. These observations explain the failures below; the test
+summary describes that historical run, not today's installation.
 
-**Fix.** New module `server/large_prompts.py`:
-`spill_if_large(session_id, prompt)` writes any prompt over
-`LARGE_PROMPT_THRESHOLD_BYTES` (100 KB) to
-`~/.octopus/large-prompts/<session>/<uuid>.txt` and returns a small
-pointer message instructing the model to `Read` the file. Wired in
-at `session_manager.send_message`; cleanup hangs off
-`delete_session`. Preserves the `[bg-task-result]` marker for the
-frontend's auto-badge.
+## Root causes and fixes
 
-Tests: `tests/test_large_prompts.py` (12 cases).
+### 1. A background result exceeded the kernel's per-argument limit
 
-## 2. CLI premature-exit-after-tool-use
+`render_delivery_prompt` framed stdout/stderr as a synthesized user prompt.
+The CLI received the whole prompt as one argv element. Linux's per-argument
+`MAX_ARG_STRLEN` was 131,072 bytes, so `execve(2)` rejected the approximately
+140 KB result with `E2BIG`. The BG capture allowance was 200 KB per stream;
+bounded capture therefore did not make a single argument safe.
 
-**Symptom.** Periodically the `claude --print` invocation would emit
-a `tool_use` event, run the tool, and then exit *without* re-invoking
-the model or emitting a `result` event. The chat just went silent.
-(Forensic notes from the original investigation were captured in
-`docs/cli-resume-synthetic-pair.md` and removed once this fix shipped;
-this section is now the authoritative reference.)
+The fix spilled prompts above 100 KiB to a file and passed a small read pointer,
+preserving the `[bg-task-result]` marker used by the UI. Regression coverage in
+[test_large_prompts.py](../../tests/test_large_prompts.py) checks the threshold,
+verbatim bytes, marker and actual session submission path.
 
-**Fix.** `session_manager._run_backend` is now a loop. We track
-`saw_result` and `saw_tool_use` across the event stream. If the
-stream ends without a `result` after a `tool_use` AND we have a
-resume id, we respawn the CLI once with prompt `"continue"` and
-keep yielding events. Bounded by `_MAX_RECOVERY_ATTEMPTS = 1`. The
-recovery turn surfaces as a small system marker `(auto-resumed
-after CLI exited mid-turn)` so the user sees what happened.
+### 2. CLI premature-exit-after-tool-use
 
-Also added: a `session_started` BackendEvent emitted on the CLI's
-`init` event so the resume id is captured *before* `result`
-(which can be the missing event).
+Some `claude --print` invocations emitted `tool_use`, ran the tool and exited
+without another model response or a `result`. EOF alone was not a successful
+turn. The continuation ID had to be captured from `init`, because the expected
+result event might never arrive.
 
-Tests: `test_session_manager.py` —
-`test_run_backend_auto_respawns_on_premature_exit_after_tool` plus
-three guard tests.
+The fix allowed one continuation with `continue` when tool use had occurred,
+no result had arrived and the original conversation could be resumed. It also
+emitted a visible auto-resume marker. Clean completion, no-tool crashes, missing
+resume identity and an exhausted recovery budget did not qualify.
+[test_session_manager.py](../../tests/test_session_manager.py), including
+`test_run_backend_auto_respawns_on_premature_exit_after_tool`, covers recovery
+and its guards. This is a Claude-specific workaround, not a general permission
+to repeat work after an uncertain result.
 
-## 3. Bg orchestration camping on chip-`running` after the shell goes idle
+### 3. A successful test summary did not mean the shell had exited
 
-**Symptom.** A `pytest tests/ -q` bg task would print
-"408 passed in 63.77s" and then sit in the `running` state for
-6+ minutes. The shell wrapping pytest didn't actually exit — pytest
-seemingly hung in atexit (likely an aiosqlite worker thread not
-joining). `proc.wait()` blocked. Only a manual cancel got the chip
-to finalize.
+The initial symptom was pytest hanging during teardown. Investigation found
+that `Database._ensure_connected` silently opened a new aiosqlite connection
+after `close()`. Pending message tasks got one last turn during event-loop
+teardown, called `flush()` and created worker threads after the fixture had
+closed the database. Those threads could outlive the loop and prevent exit.
 
-**Fix.** Two things in `server/bg_tasks.py`:
+The database fix removed silent reconnection and rejected access after close.
+Fixtures were also changed to close every database they created. A tunnel
+reader had a separate cancellation leak: `except Exception` did not catch
+`CancelledError`; `finally` took ownership of both reader tasks' cleanup.
 
-- **Idle watchdog.** A background task tracks the wall-clock time
-  of the last byte read on either stdio pipe. If
-  `IDLE_AFTER_OUTPUT_TIMEOUT_SECS` (60s) of silence elapses *after*
-  the command has produced at least one byte AND the proc is
-  still alive, we SIGTERM the pgrp. Commands that never produce
-  output (e.g. `sleep 300`) are exempt — the clock only starts on
-  first byte.
-- **`interrupted` status.** Distinguishes "killed by external
-  signal we didn't initiate" from "the command itself exited
-  non-zero". The status string already existed for orphaned-on-
-  startup tasks; we now also use it for signal-killed-with-no-
-  internal-flag. The chip label is now honest about what happened.
+BG gained an idle watchdog as a separate orchestration safeguard. After the
+first output byte, 60 seconds of silence could terminate the process group;
+commands that had never produced output did not arm that clock. External
+signal termination without an internal stop reason was classified as
+`interrupted`. The watchdog bounded the symptom; repairing the database
+lifecycle removed the demonstrated teardown cause.
 
-Mirrors the pattern from VM0's `cli/termination.rs` (we keep a
-forced-termination grace machine; they arm theirs on protocol
-events like `type=result`, we arm ours on stdio-quiet because bg
-tasks don't have a protocol signal).
+[test_bg_tasks.py](../../tests/test_bg_tasks.py) retains the silent-process,
+quiet-command and external-SIGTERM regressions. Tests must await actual process
+exit as well as inspect the command's summary.
 
-Tests: `test_bg_tasks.py` —
-`test_idle_watchdog_terminates_proc_that_goes_silent`,
-`test_idle_watchdog_does_not_fire_on_quiet_short_command`, and
-`test_external_sigterm_yields_interrupted_status`.
+### 4. A valid JSONL event exceeded asyncio's default line budget
 
-## 4. asyncio `StreamReader` 64 KB per-line cap
+`asyncio.create_subprocess_exec` used the default 64 KiB StreamReader limit.
+A large tool result in one JSONL line raised `LimitOverrunError` and killed the
+stdout reader. Increasing the subprocess line budget to 4 MiB admitted those
+events; it did not remove flow control or make event size unbounded.
 
-**Symptom.** During an unrelated turn, the Claude CLI emitted a
-single stream-json event larger than 64 KB. asyncio raised
-`LimitOverrunError: Separator is not found, and chunk exceed the
-limit`, the stdout reader crashed, and the turn died abnormally.
-Auto-respawn (fix #2) caught it, but every recurrence wasted a
-CLI invocation.
+The reader now lives in [harness/run.py](../../server/harness/run.py).
+[test_harness_core.py](../../tests/test_harness_core.py) exercises the subprocess
+reader, and [stream pressure tests](../../tests/test_session_owner_stream_pressure.py)
+cover bounded downstream consumption.
 
-**Root cause.** `asyncio.create_subprocess_exec` defaults
-`StreamReader._limit` to `2 ** 16` bytes per line. Anything larger
-between newlines raises. Tool-result blocks carrying big `Read`
-outputs routinely exceed this.
+## Why the earlier checks missed the failures
 
-**Fix.** `server/backends/subprocess_jsonl.py`: pass
-`limit=_STDOUT_LINE_LIMIT_BYTES` (4 MiB) to
-`create_subprocess_exec`. Backpressure on the pipe still bounds
-memory; we just stop crashing on legitimately big lines.
+The pytest summary was visible before fixture teardown and process exit, so it
+could not establish that BG had finished. The argv and stream incidents also
+show why validation must cross the actual size and protocol boundaries. The
+incident record does not reconstruct every earlier test run; it cannot support
+a claim that all earlier suites were green or used a particular fixture shape.
 
-## Follow-ups closed after this commit set
+The regressions therefore need the real submission or subprocess path, explicit
+missing-terminal streams, large individual events and teardown that waits for
+the original resources. Increasing the number of small successful cases would
+not expose these mechanisms.
 
-- **Pytest atexit hang.** True root cause was a latent bug in
-  `server/database.py:_ensure_connected`: it silently reconnected
-  (calling `aiosqlite.connect()`, spawning a fresh
-  `_connection_worker_thread`) whenever `self._conn` was None —
-  i.e., after `close()`. pytest-asyncio's per-function teardown
-  runs `loop.run_until_complete(tasks.gather(*to_cancel))`, which
-  gives pending `_consume_message` tasks one last chance to run;
-  those tasks hit `db.flush()` → `_ensure_connected()`, the
-  reconnect fired *after* the test's `db.close()`, and the new
-  worker thread was orphaned right before the loop died. With
-  enough such threads piling up, the process never exited at
-  atexit. Fixed by adding a `_closed` flag to `Database` (set in
-  `close()`), having `_ensure_connected` raise
-  `asyncio.CancelledError` once closed, and removing the silent
-  reconnect entirely. Net effect: `pytest tests/ -q` finishes in
-  ~68 s and exits 0.
-- **`tests/test_session_manager.py` and `tests/test_large_prompts.py`
-  cleaned up.** The `manager` fixture was `return`-style (no
-  teardown hook); two inline tests also allocated
-  `Database(":memory:")` without closing. Converted to `yield` and
-  added `try/finally: await db.close()`. Not the atexit-hang trigger
-  on their own (the reconnect was), but leaking in tests is wrong
-  regardless and these now exercise the closed-DB code path.
-- **`server/tunnel.py:_read_until_url` hardened en route.** Its
-  cleanup used `except Exception`, which doesn't catch the
-  `CancelledError` raised when the outer `asyncio.wait_for` times
-  out (CancelledError inherits from `BaseException` since Python
-  3.8), so the two stream-reader tasks could leak past the test.
-  Switched to `try/finally`. Not the atexit-hang cause, but a real
-  latent bug — kept the fix.
-- **`docs/cli-resume-synthetic-pair.md` removed.** This section is
-  now the authoritative reference for the premature-exit bug;
-  in-tree pointers (code comments + neighbouring docs) were
-  redirected here.
+## Lessons and present ownership
 
-## Current follow-up (2026-11-04)
+- Measure bytes at the boundary that consumes them: capture size, argv size and
+  JSONL line size are separate budgets.
+- Distinguish tool output, provider completion and resource retirement. A test
+  summary or EOF cannot stand in for all three.
+- Repair the lifecycle cause as well as bound its symptoms; a watchdog cannot
+  make a database safe to reopen after close.
 
-The original failure modes still explain why byte limits, exact input identity
-and actual cleanup matter. Their present owners have changed:
-
-- Large argv prompts spill under the verified account's
-  `large-prompts/<session>/` root. Native Codex sends input over its protocol,
-  so the argv workaround is not a universal input rule. Original spill files
-  can remain referenced after session deletion and are retained without proof
-  that those references ended; deletion no longer implies spill cleanup.
-- BG returns use the session's receipt-first `admit_return` operation. A lost
-  acknowledgment queries the original input rather than repeating shell work.
-  The BG result, return admission and model processing remain separate facts.
-- Premature-exit recovery is backend-specific. A valid native root terminal
-  with a missing tool result is diagnosed as incomplete recording, not as a
-  missing terminal and not as permission to run the request again. An exact,
-  locally retired pure-input cancellation can explain only its own native gap;
-  it cannot discharge an unknown write or a still-owned runner.
-
-Current behavior belongs to [background tasks](../implemented/background-tasks.md),
-[input and retirement](../implemented/input-reliability.md#原请求完成与失败交接)
-and [Codex](../implemented/codex-backend.md). The original process and prompt
-regressions remain useful; the mounted-input and consumer cases in
-[test_mcp_input_completion.py](../../tests/test_mcp_input_completion.py) exercise
-the later distinction. Neither a tool response nor a test summary proves
-provider consumption or resource retirement.
+Current spill paths are account-owned, and retained references can outlive a
+session; session deletion does not imply spill cleanup. Native Codex uses its
+protocol for input rather than the argv workaround. BG return admission follows
+the original receipt after a lost acknowledgment instead of rerunning the shell
+command. Those contracts belong to [background tasks](../implemented/background-tasks.md),
+[input completion and retirement](../implemented/input-reliability.md#原请求完成与失败交接)
+and [Codex](../implemented/codex-backend.md). Historical method names above are
+evidence of the incident, not a current call map.
