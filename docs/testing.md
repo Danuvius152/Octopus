@@ -98,6 +98,49 @@ Successful evidence remains valid while its code, configuration, dependencies
 and environment are unchanged. State which change or concrete failure hypothesis
 requires a rerun. Read the actual test summary or build artifacts.
 
+For combined commit gates, use `./scripts/check.sh --output <new-directory>`
+to retain evidence in the current task's account-workspace directory. The
+directory must be new and outside the checkout, or Git-ignored. `--e2e` can
+be combined with it; omitting `--output` keeps terminal-only execution.
+The [runner](../scripts/check_runner.py) owns one command table in both modes.
+It records actual argv, cwd, selection scope, exit code, duration and a combined
+stdout/stderr log per gate. Ordinary failures do not suppress later checks.
+
+`results.json` starts as `incomplete`, updates atomically after each gate and
+becomes `complete` only after execution and final input capture. Consume it as
+passing evidence only when `state=complete`, `success=true` and the runner
+exited zero. Each sequential gate requires Linux subreaper support, default
+`SIGCHLD` handling and no preexisting children of the runner. Ignoring/reaping
+child signals externally can lose the true exit status and is rejected before
+spawn. On success, failure or cancellation, the
+runner terminates and reaps that gate's remaining descendants, including orphans
+and inner sessions, before completing it. Cancellation remains pending through
+cleanup, leaves `interrupted` and suppresses later gates. The original subreaper
+setting is restored after confirmed retirement; unconfirmed retirement fails
+the run. An abruptly killed run remains incomplete. The runner adds no process
+group: an outer BG owner retains its original group, but that alone cannot reap
+inner groups after the runner is killed. Log short writes, flush/fsync failures
+and result-write failures fail the runner. No previous evidence is overwritten
+or automatically reused.
+
+In evidence mode, pytest emits JUnit and Vitest emits its native JSON in the
+same execution as the terminal reports. Their counts come from those files;
+other gates have no count. Missing or invalid test reports leave counts unknown
+and make otherwise successful execution fail evidence generation. Gate exit
+codes and failed reports remain available without being rewritten as passed.
+
+Input records include HEAD, tracked and untracked source contents, file modes
+and symlink targets, configuration hashes, Python's actual installed packages,
+the installed frontend dependency tree and tool versions. Only named non-secret
+environment selectors are included. Changed before/after inputs make the run
+unusable as passing evidence. Continue to keep inputs fixed: matching endpoint
+hashes cannot detect an intermediate edit that was later reverted, and package
+versions do not certify every installed dependency byte. Reviewers still apply
+the relevance and reuse policy above; the record is not a cache decision.
+Inherited `PYTEST_ADDOPTS` is recorded with the effective scope and input identity.
+The complete pytest gate cannot certify a full run with this variable set;
+unset it for full-gate evidence. Its real execution and exit code are retained.
+
 Reuse installed tools, browser binaries and caches. Provision a missing required
 version once; isolate mutable state rather than reinstalling dependencies.
 During final validation keep the source fixed, especially while Vite watches it:
@@ -176,6 +219,11 @@ Install Git hooks with `./scripts/setup-hooks.sh`; `--check` verifies installati
 without changing it. Hooks source `scripts/toolchain-env.sh` so noninteractive Git
 can resolve the local JS toolchain. Missing or stale hooks fail the full gate.
 Python edits under `scripts/` also trigger backend lint, tests and import checks.
+Hook patterns include direct children and nested files. Frontend checks also
+cover E2E/tooling tests, imported JSON fixtures, root configuration and dependency
+inputs, plus the explicit cross-directory inputs consumed by those tests. The
+[selection regression](../tests/test_check_hooks.py) exercises the installed
+Lefthook scheduler; unrelated guide edits do not run product checks.
 
 The pins gate checks runtime + `test` + `dev` against `constraints-python.txt`,
 including Python/platform. Runtime-only installations need not contain test

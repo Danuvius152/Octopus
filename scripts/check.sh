@@ -4,6 +4,7 @@
 # Usage:
 #   ./scripts/check.sh          # includes the full hermetic backend suite
 #   ./scripts/check.sh --e2e    # also run Playwright (needs signed-in CLIs)
+#   ./scripts/check.sh --output <new-directory>  # logs and machine-readable evidence
 #
 # Runs every gate even after one fails, so you get the full picture in one
 # pass instead of discovering problems one commit at a time. Exit status is
@@ -32,74 +33,4 @@ ROOT="$PWD"
 # Unbuffered output keeps progress visible and the run alive.
 export PYTHONUNBUFFERED=1
 
-FAILED=()
-PASSED=()
-
-run_gate() {
-  local name="$1"; shift
-  printf '\n\033[1m── %s\033[0m\n' "$name"
-  if "$@"; then
-    PASSED+=("$name")
-  else
-    FAILED+=("$name")
-  fi
-}
-
-gate_pytest() {
-  # Full correctness excludes live providers, answer evaluation and Wiki benchmarks.
-  # Keep each file on one worker; a crashed worker fails without replacement.
-  "$ROOT/.venv/bin/pytest" tests/ -m "not real and not knowledge_eval and not wiki_perf" \
-    -n 4 --dist=loadfile --max-worker-restart=0 -q
-}
-
-gate_vitest() { cd "$ROOT/web" && bun run test; }
-
-gate_tsc() { cd "$ROOT/web" && bun run typecheck; }
-
-gate_contracts() { "$ROOT/scripts/check-contracts.sh"; }
-
-# docs/catalog.md's contract and plan tables come from each document's Status line
-# so a new contract or plan cannot be added without appearing in the index.
-gate_docs_index() { "$ROOT/.venv/bin/python" "$ROOT/scripts/gen-docs-index.py" --check; }
-
-gate_python_environment() {
-  "$ROOT/.venv/bin/python" "$ROOT/scripts/python_environment.py" check --extra test --extra dev >/dev/null
-}
-
-gate_ruff() { "$ROOT/.venv/bin/ruff" check .; }
-
-gate_test_imports() { "$ROOT/.venv/bin/python" "$ROOT/scripts/check_test_imports.py"; }
-
-gate_mypy() { "$ROOT/.venv/bin/mypy"; }
-
-gate_eslint() { cd "$ROOT/web" && bun run lint; }
-
-gate_e2e() { cd "$ROOT/web" && bun run test:e2e; }
-
-run_gate "Python dependency pins"              gate_python_environment
-run_gate "commit hook installed"               "$ROOT/scripts/setup-hooks.sh" --check
-run_gate "backend lint (ruff)"                 gate_ruff
-run_gate "test support imports"                gate_test_imports
-run_gate "backend types (mypy)"                gate_mypy
-run_gate "backend unit (hermetic release selection)" gate_pytest
-run_gate "frontend lint (eslint)"              gate_eslint
-run_gate "frontend unit (vitest)"              gate_vitest
-run_gate "typecheck (tsc -b)"                  gate_tsc
-run_gate "generated contracts in sync"         gate_contracts
-run_gate "docs indexes in sync"                gate_docs_index
-
-if [ "${1:-}" = "--e2e" ]; then
-  run_gate "e2e (playwright)" gate_e2e
-else
-  printf '\n\033[2mskipped: e2e — run ./scripts/check.sh --e2e (needs signed-in CLIs)\033[0m\n'
-fi
-
-printf '\n\033[1m── summary\033[0m\n'
-for g in "${PASSED[@]}"; do printf '  \033[32mpass\033[0m  %s\n' "$g"; done
-for g in "${FAILED[@]}"; do printf '  \033[31mFAIL\033[0m  %s\n' "$g"; done
-
-if [ ${#FAILED[@]} -gt 0 ]; then
-  printf '\n%d of %d gates failed.\n' "${#FAILED[@]}" "$((${#PASSED[@]} + ${#FAILED[@]}))"
-  exit 1
-fi
-printf '\nAll %d gates passed.\n' "${#PASSED[@]}"
+exec "$ROOT/.venv/bin/python" -m scripts.check_runner "$@"

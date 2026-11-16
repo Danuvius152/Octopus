@@ -9,7 +9,7 @@
 #
 # What it does, by what you touched:
 # - Python in server/ or tests/  → ruff, mypy, and the full hermetic pytest tier
-# - TS in web/src/               → eslint, typecheck, and the vitest suite
+# - frontend code, fixtures/config/lock → eslint, typecheck, and vitest
 # - routes or pydantic models    → the generated contracts.ts drift check
 # - a plan doc or docs/catalog.md → the generated plans index drift check
 # - nothing relevant             → nothing runs
@@ -28,37 +28,57 @@ pre-commit:
   commands:
     test-support-imports:
       tags: backend
-      glob: "{server,tests,scripts}/**/*.py"
+      glob: &python_inputs
+        - "{server,tests,scripts}/*.py"
+        - "{server,tests,scripts}/**/*.py"
+        - "pyproject.toml"
+        - "constraints-python.txt"
+        - "lefthook.yml"
+        - "scripts/{check,toolchain-env,setup-hooks}.sh"
       run: .venv/bin/python scripts/check_test_imports.py
       fail_text: "Move reusable helpers into support modules; do not import new test case modules."
 
     ruff:
       tags: backend
-      glob: "{server,tests,scripts}/**/*.py"
+      glob: *python_inputs
       run: .venv/bin/ruff check .
       fail_text: "Ruff found problems. Run '.venv/bin/ruff check .' (many are auto-fixable with --fix)."
 
     mypy:
       tags: backend
-      glob: "server/**/*.py"
+      glob:
+        - "server/*.py"
+        - "server/**/*.py"
+        - "pyproject.toml"
+        - "constraints-python.txt"
       run: .venv/bin/mypy
       fail_text: "mypy found type errors. Run '.venv/bin/mypy' for detail."
 
     eslint:
       tags: frontend
-      glob: "web/{src,e2e}/**/*.{ts,tsx}"
+      # Lefthook's glob requires a slash for **/: list direct children too.
+      # These fixtures/scripts are read by frontend tests across directories.
+      glob: &frontend_inputs
+        - "web/{src,e2e,tests}/*.{ts,tsx,js,jsx,json}"
+        - "web/{src,e2e,tests}/**/*.{ts,tsx,js,jsx,json}"
+        - "web/*.{ts,js,json}"
+        - "web/bun.lock"
+        - "tests/fixtures/wiki-command-cases.json"
+        - "server/app_agent_client.js"
+        - "lefthook.yml"
+        - "scripts/toolchain-env.sh"
       run: cd web && bun run lint
       fail_text: "ESLint found problems. Run 'cd web && bun run lint' for detail."
 
     tsc:
       tags: frontend
-      glob: "web/src/**/*.{ts,tsx}"
+      glob: *frontend_inputs
       run: cd web && bun run typecheck
       fail_text: "TypeScript errors. Run 'cd web && bun run typecheck' for detail."
 
     vitest:
       tags: frontend
-      glob: "web/src/**/*.{ts,tsx}"
+      glob: *frontend_inputs
       run: cd web && bun run test
       fail_text: "Frontend tests failed. Run 'cd web && bun run test' for detail."
 
@@ -66,19 +86,25 @@ pre-commit:
       tags: backend
       # Full hermetic backend verification at a Python code commit. Live model
       # tests, knowledge evaluation and Wiki benchmarks are selected separately.
-      glob: "{server,tests,scripts}/**/*.py"
+      glob: *python_inputs
       run: .venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -q --tb=short
       fail_text: "Backend tests failed. Run './scripts/check.sh' or the failed test file for detail."
 
     architecture-nag:
       tags: backend
-      glob: "server/**/*.py"
+      glob:
+        - "server/*.py"
+        - "server/**/*.py"
       run: ./scripts/nag-architecture.sh
 
     docs-index:
       tags: docs
       # Current contracts and unfinished plans each own their index metadata.
-      glob: "{docs/catalog.md,docs/implemented/**/*.md,docs/plans/**/*.md,scripts/gen-docs-index.py}"
+      glob:
+        - "docs/catalog.md"
+        - "docs/{implemented,plans}/*.md"
+        - "docs/{implemented,plans}/**/*.md"
+        - "scripts/gen-docs-index.py"
       run: .venv/bin/python scripts/gen-docs-index.py --check
       fail_text: "Documentation indexes are stale or invalid. Run '.venv/bin/python scripts/gen-docs-index.py'."
 
@@ -86,6 +112,6 @@ pre-commit:
       tags: backend
       # web/src/api/contracts.ts is generated from the OpenAPI schema; these
       # are the files that can invalidate it.
-      glob: "server/{models.py,main.py,routers/**/*.py}"
+      glob: "server/{models.py,main.py,routers/*.py,routers/**/*.py}"
       run: ./scripts/check-contracts.sh
       fail_text: "contracts.ts is stale. Run 'cd web && bun run generate:contracts'."

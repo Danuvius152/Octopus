@@ -3,11 +3,12 @@
 import json
 import subprocess
 import time
+from dataclasses import replace
 
 import pytest
 
 from server.crypto import encrypt
-from server.harness import codex_rpc
+from server.harness import codex_rpc, get_harness
 from server.oauth_providers import get_provider
 from server.sessions import ForkError
 from server.sessions.client_submissions import submit_client_message
@@ -84,6 +85,9 @@ async def test_encoded_reserve_boundary_and_first_turn_after_restart(native_runt
 
     manager, db, parent, mode, _, _ = native_runtime
     mode[0] = "replay_installed"
+    # This boundary measures replay encoding, independently of tool prose size.
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, tools_prompt="Replay boundary fixture."))
 
     async def seed(session):
         await manager.update_session_configuration(session.id, {"model": "fixture", "reasoning_effort": "low"}, session.user_id)
@@ -113,6 +117,8 @@ async def test_encoded_reserve_boundary_and_first_turn_after_restart(native_runt
     # The peer uses short synthetic thread IDs; budget the real UUID width.
     sent["params"]["threadId"] = "11111111-1111-7111-8111-111111111111"
     reserve_frame = (json.dumps(sent, ensure_ascii=False) + "\n").encode()
+    startup = next(frame for frame in captured if frame.get("method") == "thread/start")
+    assert len(reserve_frame) > len((json.dumps(startup, ensure_ascii=False) + "\n").encode())
     sent["params"]["input"][0]["text"] = delivered.replace("x" * 4096, "")
     assert len(reserve_frame) - len((json.dumps(sent, ensure_ascii=False) + "\n").encode()) == 4096
 

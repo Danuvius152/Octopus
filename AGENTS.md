@@ -155,6 +155,9 @@ snapshot: restarting the service does not publish the development tree.
 
 ## Conventions
 
+- Read known paths directly. When a path is uncertain or stale, discover it
+  with a scoped `rg --files` or content search before reading; broaden to
+  hidden or ignored files only when the task needs them.
 - Python 3.12+, type hints and async/await; React 19, strict TypeScript and zustand.
 - Use selectors to subscribe to state needed by rendering. Use
   `useSessionStore.getState()` for a one-time current-state read in an event or

@@ -26,18 +26,32 @@ and publication handoff belong to [storage](implemented/current-storage-format.m
 
 ## System Overview
 
-```mermaid
-flowchart TD
-  B[Browser / Phone] -->|REST + WebSocket| HTTP[FastAPI routes / built SPA]
-  HTTP --> M[SessionManager: admission and quota]
-  M --> O[SessionOwner: mutable request state]
-  O --> H[Harness / RuntimeProfile]
-  H --> R[HarnessRun: process I/O and retirement]
-  R --> C[Claude stream JSON]
-  R --> X[Codex App Server RPC]
-  C --> T[Scoped MCP endpoints]
-  X --> T
-  T --> D[Domain owners: BG / delegation / Research / schedules / Wiki]
+```
+             Phone / Browser
+              │  REST + WebSocket
+              ▼
+        ┌──────────────────────────────────┐
+        │  FastAPI server (uvicorn) :8000   │  serves API + built SPA on one port
+        │  ┌─────────────┐                  │
+        │  │ REST routers│                  │
+        │  │  + /ws      │                  │
+        │  └─────┬───────┘                  │
+        │        │                          │
+        │        ┌──────▼───────┐            │
+        │        │SessionManager│            │  session entry points and quota
+        │        └──────┬───────┘            │
+        │        ┌──────▼───────┐            │
+        │        │ SessionOwner │            │  one mutable execution owner per session
+        │        └──────┬───────┘            │
+        │        ┌──────▼───────┐            │
+        │        │   Harness    │            │  RuntimeProfile per backend kind
+        │        └──────┬───────┘            │
+        └───────────────┼────────────────────┘
+                        │ checked process I/O and retirement
+            ┌───────────┴────────────┐
+            │  claude --print …      │   or   codex app-server (RPC)
+            │  + scoped MCP tools    │        + scoped MCP tools
+            └────────────────────────┘
 ```
 
 An optional HTTPS tunnel sits in front of the server's browser/API port.
