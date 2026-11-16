@@ -7,6 +7,7 @@ is the reason the store is dimensional SQL rather than a step-series.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -36,7 +37,8 @@ def _percentile(sorted_vals: list[float], p: float) -> float | None:
     it is fragile even where, as here, the call is immediate."""
     if not sorted_vals:
         return None
-    return round(sorted_vals[min(int(len(sorted_vals) * p), len(sorted_vals) - 1)], 1)
+    rank = max(0, min(math.ceil(len(sorted_vals) * p) - 1, len(sorted_vals) - 1))
+    return round(sorted_vals[rank], 1)
 
 
 async def turns(conn: aiosqlite.Connection, window: str = "7d") -> list[dict[str, Any]]:
@@ -127,11 +129,14 @@ async def resources(conn: aiosqlite.Connection, window: str = "24h") -> list[dic
     it should be 0 now that the namespaces are served in-process (§4 B1)."""
     return await _rows(
         conn,
-        "SELECT metric, COUNT(*) n, "
+        "WITH readings AS ("
+        " SELECT metric, CASE WHEN json_extract(labels, '$.available') IS NOT 0 THEN value END value, "
+        " ROW_NUMBER() OVER (PARTITION BY metric ORDER BY ts DESC, rowid DESC) position "
+        " FROM samples WHERE ts >= ?) "
+        "SELECT metric, COUNT(value) n, COUNT(*) - COUNT(value) missing, "
         "       ROUND(AVG(value), 2) avg, ROUND(MAX(value), 2) peak, "
-        "       (SELECT ROUND(value, 2) FROM samples s2 "
-        "        WHERE s2.metric = samples.metric ORDER BY ts DESC LIMIT 1) latest "
-        "FROM samples WHERE ts >= ? GROUP BY metric ORDER BY metric",
+        "       ROUND(MAX(CASE WHEN position = 1 THEN value END), 2) latest "
+        "FROM readings GROUP BY metric ORDER BY metric",
         (_since(window),),
     )
 
@@ -298,10 +303,6 @@ async def overview(conn: aiosqlite.Connection, window: str = "24h") -> dict[str,
         "resources": await resources(conn, window),
         "codex": await codex(conn, window),
         "codex_turns": await codex_turns(conn, window),
-        "codex_runs": await codex_runs(conn, window),
-        "codex_retirement": await codex_retirement(conn, window),
-        "codex_native_usage": await codex_native_usage(conn, window),
-        "codex_steers": await codex_steers(conn, window),
         "codex_anomalies": await codex_anomalies(conn, window),
     }
 

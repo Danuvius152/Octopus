@@ -9,6 +9,8 @@ test("opens Monitor, renders recorded metrics and refetches another window", asy
   await expect(page.locator(".agent-list-header h2")).toHaveText("Agents");
   await page.locator("button.btn-manage-monitor").click();
   await expect(page.getByText(/last 24h/)).toBeVisible();
+  await expect(page.getByText("Native execution phases", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Native counters and input timing", { exact: true })).toHaveCount(0);
   for (const title of ["event samples", "Connector logical resource requests", "turns", "top error event samples", "resources"]) {
     await expect(page.getByText(title, { exact: true })).toBeVisible();
   }

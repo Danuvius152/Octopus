@@ -2156,16 +2156,11 @@ class OwnerRuntime:
         for other in manager._session_owners.values():
             other.wake()
         if not session._dispatch_paused and not session._pending_queue and not session._admission_closed:
-            # These coordinators only submit concrete owner commands and
-            # perform subscriber/notifier I/O; they never write Session state.
             captured = capture_configuration(session)
-            async def became_idle() -> None:
-                await manager._enforce_held_cap(keep_session_id=captured.id)
-                if execution.request.operation == "message":
-                    await manager._fire_session_idle_notification(captured)
-                if captured.origin in manager._AUTO_ARCHIVE_ORIGINS:
-                    await manager.auto_archive_scheduled_session(captured.id)
-            self._idle_action = self.task(became_idle(), f"session-idle-{session.id}")
+            self._idle_action = self.task(manager._enforce_held_cap(keep_session_id=captured.id),
+                                          f"session-held-cap-{session.id}")
+            manager._start_idle_delivery(session, captured, self._idle_action,
+                                         notify=execution.request.operation == "message")
 
     def _retire_request_context(self, execution: Execution) -> None:
         """Release the original request's grants after its resources retire."""

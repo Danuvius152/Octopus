@@ -1,5 +1,5 @@
 import { selectSession } from "../lib/selectSession";
-import { observeDelegations } from "../lib/delegationReads";
+import { refreshDelegations, watchDelegation } from "../lib/delegationReads";
 /**
  * Inline card rendered next to a `mcp__ask_agent__ask` tool_use. The
  * tool_use itself shows the model's call shape (target agent name,
@@ -16,7 +16,7 @@ import { observeDelegations } from "../lib/delegationReads";
  * Every association uses the canonical call and its exact round receipt.
  */
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   IconCheck,
   IconExclamationCircle,
@@ -81,6 +81,7 @@ export function AgentDelegationRequestCard({
   continued?: boolean;
 }) {
   const token = useSessionStore((s) => s.token);
+  const account = useSessionStore((s) => s.accountGeneration);
   const connected = useSessionStore((s) => s.connected);
   const generation = useSessionStore((s) => s.dispatchGeneration);
   const messages = useSessionStore((s) => s.messages[sessionId]);
@@ -95,37 +96,17 @@ export function AgentDelegationRequestCard({
   const state = match?.state;
   const displayName = match?.target_agent_name || agentName || "agent";
 
-  // A confirmed receipt names a round already created by the manager. One
-  // authoritative missing-round response ends polling; it cannot become the
-  // newer round. Network failures have a bounded retry and one in-flight fetch.
+  const terminal = Boolean(state && state !== "running");
+  const observationKey = JSON.stringify([sessionId, delegationId, workId, account, token, connected, generation]);
+  const [unavailable, setUnavailable] = useState<string | null>(null);
+  // The session coordinator owns transport and retry budget; this card owns
+  // only demand for its exact receipt and its publication lifetime.
   useEffect(() => {
-    if (!delegationId || !workId || (state && state !== "running")) return;
-    let observation: ReturnType<typeof observeDelegations> | undefined;
-    let cancelled = false;
-    let failures = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const fire = async () => {
-      let again = false;
-      try {
-        observation = observeDelegations(sessionId);
-        const data = await observation.done;
-        if (cancelled) return;
-        if (Array.isArray(data)) {
-          again = data.some((item: Delegation) => item.delegation_id === delegationId && item.work_id === workId && item.state === "running");
-          failures = 0;
-        } else again = true; // An obsolete observation is no missing-round fact.
-      } catch {
-        again = ++failures < 3;
-      }
-      if (!cancelled && again) timer = setTimeout(() => { void fire(); }, 2000);
-    };
-    void fire();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      observation?.cancel();
-    };
-  }, [delegationId, workId, state, sessionId, token, connected, generation]);
+    if (!delegationId || !workId || terminal) return;
+    const observation = watchDelegation(sessionId, { delegation_id: delegationId, work_id: workId },
+      (failed) => setUnavailable(failed ? observationKey : null));
+    return observation.cancel;
+  }, [delegationId, workId, terminal, sessionId, observationKey]);
 
   const openChild = async () => {
     if (!delegationId) return;
@@ -170,7 +151,12 @@ export function AgentDelegationRequestCard({
         <div className="text-muted-foreground truncate" title={request}>
           “{request}”
         </div>
-        <TaskControlFeedback control={control} onRefresh={() => { void control.refresh(() => observeDelegations(sessionId)); }} />
+        <TaskControlFeedback control={control} onRefresh={() => { void control.refresh(() => refreshDelegations(sessionId)); }} />
+        {unavailable === observationKey && !terminal && <div className="mt-1">
+          <div role="alert">Delegation status could not be confirmed.</div>
+          {!control.result && <button type="button" className="text-primary underline disabled:opacity-50" disabled={control.pending}
+            onClick={() => { void control.refresh(() => refreshDelegations(sessionId)); }}>Refresh status</button>}
+        </div>}
         {returnLabel && (
           <div className="text-muted-foreground">
             <div>{returnLabel}</div>

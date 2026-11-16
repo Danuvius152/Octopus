@@ -2,7 +2,7 @@
 
 from pathlib import PurePosixPath
 
-from . import format, resolver, source_bindings, source_confirmations, uids
+from . import resolver, source_bindings, source_confirmations, uids
 from .links import note_name
 from .references import ParsedReference, local_references
 
@@ -70,13 +70,14 @@ def finish(db):
     if state and not state[0] and not db.execute("SELECT 1 FROM catalog_dirty LIMIT 1").fetchone() and not db.execute("SELECT 1 FROM wiki_uid_dirty LIMIT 1").fetchone():
         return
     dirty_keys(db, (("uid", value) for value in uids.finish(db)))
+    targets = resolver.TargetDocuments(db)
     for source in db.execute("SELECT source_doc FROM catalog_dirty ORDER BY source_doc").fetchall():
         row = db.execute("SELECT d.*,m.metadata AS managed_metadata FROM documents d LEFT JOIN managed_notes m ON m.path=d.path WHERE d.id=?", (source[0],)).fetchone()
         if row is not None:
             import json
 
             metadata = json.loads(row["metadata"]) | json.loads(row["managed_metadata"] or "{}")
-            resolve_edges(db, row, metadata)
+            resolve_edges(db, row, metadata, targets=targets)
         else:
             source_bindings.retire(db, source[0])
             db.execute("DELETE FROM wiki_edges WHERE source_doc=?", (source[0],))
@@ -85,14 +86,15 @@ def finish(db):
     db.execute("UPDATE catalog_state SET pending=0 WHERE singleton=1")
 
 
-def resolve_edges(db, row, metadata):
+def resolve_edges(db, row, metadata, *, targets=None):
     db.execute("DELETE FROM wiki_edges WHERE source_doc=?", (row["id"],))
     db.execute("DELETE FROM wiki_edge_lookups WHERE source_doc=?", (row["id"],))
     parent = PurePosixPath(row["path"]).parent.as_posix()
-    parsed = format.parse(row["text"])
+    targets = targets if targets is not None else resolver.TargetDocuments(db)
+    parsed = targets.parsed(row)
     refs = [(ParsedReference.restore(entry["reference"]), entry.get("recorded_revision"), entry.get("label"), resolved)
             for entry, resolved in source_bindings.index(db, row, metadata)]
-    refs.extend((reference, None, None, resolver.resolve(db, reference, parent, source_doc=row["id"], source_parse=parsed))
+    refs.extend((reference, None, None, resolver.resolve(db, reference, parent, source_doc=row["id"], source_parse=parsed, documents=targets))
                 for reference in local_references(row["text"], parsed=parsed))
     for ordinal, (reference, recorded, label, resolved) in enumerate(refs):
         resource, relation, location = reference.raw_resource, reference.relation, reference.fragment

@@ -33,10 +33,11 @@ AppAgent/backend/bridge、各 Harness 的 one-shot、登录、scheduler 与主�
 启动、终态回流和保存责任，已结束但清理未确认的任务仍阻塞。失败 Owner 只有原
 清理成功、原通知退出且没有保留输入时才能解除阻塞。空闲 held 模型宿主及 App
 server 可留到正常 shutdown 退休，不能仅因进程存活永久等待。
-当前仍有“未执行却保留 blocker”的准备失败缺口：
-[Research scratch 创建失败](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)和
-[Delegation 引用循环 symlink](agent-collaboration.md#52-sub-session-lifecycle)。
-因此 blocker 不是活模型或子进程的证明，也不能因数据库已有 failed 就绕过原 owner。
+准备失败的收束遵守原领域规则：[委派](agent-collaboration.md#1-invocation-and-identity)
+先完成引用准备再创建 child；[Research](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)
+目录准备错误经原终态事务收束，确认后退休无叶执行的 task/context 注册。
+尚未确认的输入、提交或资源清理仍保留 blocker；它不是活模型或子进程的证明，
+也不能因数据库已有 failed 就绕过原 owner。
 
 one-shot 在首次可能挂起前由原 Harness 登记，公共调用超时或二次取消后仍持有
 迟到 spawn、原进程组和私有配置清理。只有真实退出与清理都确认才解除 blocker；

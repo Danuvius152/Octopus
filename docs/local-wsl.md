@@ -216,18 +216,16 @@ workspace，测试数据库、账户、服务安装资源和 CLI 输出仍须与
 
 ## 本机测试
 
-测试命令、门禁和可选评测统一见 [testing.md](testing.md#test-coverage)：离线覆盖
-Claude Code 与 Codex，日常实机仅 Codex；文档整理只做链接、索引和差异检查。
+测试命令与范围见 [testing.md](testing.md#test-coverage)，浏览器资源和服务复用见
+[执行规则](testing.md#browser-ownership-and-execution)。本节只说明本机环境。
 
 ### 离线目录与浏览器
 
-全量离线使用四个按文件分组的 pytest worker。WSL 的 `/tmp` 是容量有限的 tmpfs；
-需要磁盘空间或运行真实 Codex 时，在 `~/.cache/octopus-tests/` 下创建本轮独立目录，
-将 `TMPDIR` 指向它。不要放进 `~/.octopus` 或账户工作区：子目录仍继承受管安装归属。
-浏览器公共入口自动使用这一缓存根，每轮隔离全部临时状态并在退出后清理运行目录，
-审计回执单独保留；已安装依赖和浏览器仍复用。局部回归和 Codex 实机保持串行，
-公共测试配置不自动开启并行。
-CLI 登录目录与 `TMPDIR` 放在同一本轮运行根下的平行目录，避免辅助程序安装限制。
+WSL 的 `/tmp` 是容量有限的 tmpfs；需要磁盘空间或运行真实 Codex 时，在
+`~/.cache/octopus-tests/` 创建独立运行根，将 `TMPDIR` 指向其中的临时目录，CLI
+home 放在同根下的平行目录。浏览器入口自动准备；直接运行其他测试时按需设置。
+运行根须在受管安装及账户工作区之外，避免继承归属。复用既有依赖和浏览器，
+缓存残留可以保留；运行记录与审计仍须可定位。
 
 仓库锁定的 Playwright 1.58.2 尚未提供 Ubuntu 26.04 平台包，本机使用它的
 Ubuntu 24.04 Chromium 构建，并已安装官方浏览器依赖。运行浏览器测试前须完成
@@ -241,7 +239,7 @@ systemd 服务通过 unit 的原生 Environment 获取 PATH 和代理设置；�
 隧道使用自己的私有代理文件，见[手机公网入口](#手机公网入口)。
 
 ```bash
-export PATH="$HOME/.nvm/versions/node/v24.21.0/bin:$HOME/.local/bin:$PATH"
+. scripts/toolchain-env.sh  # 从仓库根目录执行，解析已安装工具
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
 export no_proxy="$NO_PROXY"
 export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64
@@ -504,65 +502,54 @@ Cloudflare Tunnel，固定域名也需要正式隧道。见
 
 ## 自动发布
 
-本节适用于已授权、完成本机门禁并推送 main 的代码交付；“发布”或“上线”即
-授权执行，用户本次指令优先。提交范围及纯文档动作见
-[根仓库规则](../AGENTS.md#repository-and-upstream-maintenance)。
-在验证阶段完成[发布门禁](testing.md#release-and-documentation-checks)，复用有效
-测试和审查，只补缺失或失效项，通过后直接进入以下流程。版本、PID、路径、配置
-和摘要按本轮实际值捕获，由现有守卫核对；仅绑定变化不触发复审或全套重测，
-排空机制、所有权或协议变化则须在验证阶段完成定向检查和必要审查。
+用于已授权、通过[发布门禁](testing.md#release-and-documentation-checks)的 main
+代码交付；用户本次限制优先，纯文档动作见[根规则](../AGENTS.md#repository-and-upstream-maintenance)。
+同一交付者负责提交、推送、上线和退役，使用一份验收记录。有效检查及审查直接复用；
+版本、PID、路径等绑定由现有守卫核对，机制、所有权或协议变化才补受影响验证。
+[提交时复用 hook 结果](testing.md#full-checks-before-code-commits)，无需再跑一遍门禁。
 
-准备连续执行：启动独立发布进程，从本地 packet 回执取得并立即执行本轮管理员
-校验操作，随后结束模型回合，让发布进程自行排空、验收；不靠后台通知接续准备。
-正常只回报开始与结果，缺项、失败或阻塞才中断说明，不重复请求已有授权。
+当前工具入口是 `~/.octopus/ops/publication/tools/README.md` 的“当前安装的发布入口”：
+原生 quiesce 使用 `local-deploy.py`；历史 callback/packet 流程不适用于当前服务。
+准备时同时确定上线、撤权和旧树退役的执行路径及权限；已有发布进程运行时只观察。
+正常只回报开始与最终结果，实际失败或阻塞才中断说明。
 
-1. 为已验证提交创建 `releases/main-<commit>` 的独立工作树，连接本机配置和
-   共享依赖，先在候选快照执行 `cd web && bun run build`，再运行
-   `/path/to/verify/bin/python scripts/validate-release.py <候选快照> --python /home/jack/Octopus/.venv/bin/python`
-   核验 JS/CSS 引用及实际 ExecStart 解释器的依赖闭包；`--python` 以当轮 unit
-   为准，不能猜用候选 `.venv`。prepare 由验证环境运行并记录验证解释器、Python
-   回执与摘要；切换前、上线后及前向恢复复用该入口。比较资产与必要依赖事实，
-   无关包诊断不参与门禁；漂移时保留服务，不在准备阶段向共享环境安装依赖。
-2. 用不依赖当前模型回合继续存活的独立发布进程等待自然排空，包括主控会话、
-   队列、CLI 和待交付的后台/委托回报。已有发布进程运行时只观察，不叠加切换
-   或重启。停写前只读核对真实资料与本次完整源格式、物理布局及冲突准入条件，
-   失败保留原服务。切换前再确认目标和准入条件仍有效。要求不变的环境/profile
-   清单不包含会转为 `/dev/null` mask 的受管 unit；unit 由原指纹、冻结计划及
-   mask／恢复的阶段核验单独保护，不能让自身的合法替换被误判为配置漂移。
-3. 原服务确认自然排空并交出单次许可后，屏蔽启动并等待原进程及 unit 全部退出。
-   确认没有剩余进程或启动任务，取得安装离线锁，再执行本次存量检查、必要的
-   有限转换和当前格式完整核验；通过后才原子替换 `current`、安装/解除屏蔽并幂等
-   启动候选。任一库未准备、提交结果未知或跨库部分完成时保持业务关闭，按同一
-   发布计划和实际提交事实前向继续。候选只接受[当前完整格式](implemented/current-storage-format.md)，
-   不在启动时转换；不变格式也须只读完整核验。首次受管安装完成上文 unit/profile
-   过渡，前端产物随候选一次切换。本安装已完成 main10 的有限9→10交接和生产
-   验收，Wiki保持17。正常启动只接受当前完整格式；有限工具及专属夹具按本节
-   第5步退出，不作为今后的旧格式兼容入口。
-   [交接约束与保全理由](implemented/current-storage-format.md#github-identity-and-finite-publication-handoff)
-   不构成重新接纳旧格式的入口。
-4. 验证存活与就绪接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
-   本次提交及 MainPID、工作目录、cgroup、配置绑定，`/health` 为 ok、`/ready`
-   为 ready。在服务快照运行
-   `/path/to/verify/bin/python scripts/validate-release.py <服务快照> --python /home/jack/Octopus/.venv/bin/python --base-url http://127.0.0.1:8000`
-   比对实际 HTML/JS/CSS 的 SHA-256。用本轮捕获的受管 Settings/provider 环境
-   清理旧目录空壳，运行 `scripts/check-storage-layout.py` 确认；独立维护用
-   `--prune`。只删除属于本安装、没有数据/链接/已保存工作目录引用的空壳，不递归
-   强删或继承模型测试环境。全局 attachments/large-prompts 须在旧 writer 退休、
-   账户新写入接管后，确认仅剩归属标记且无引用才清退整个空壳，不能只删 marker；
-   后续上传、长输入、配置核验和重启不得重建它们。保留账户目录、旧附件及凭据。
-   只读核对实际数据库、Wiki schema 与持久协议；验收失败仅在旧构建仍兼容时恢复
-   旧指向并重启验证，否则保留现状前向修复。不回灌旧 DB、不清理诊断所需快照，
-   保留历史与会话设置。本次临时发布凭据须按原 hash 精确撤销，事务结束后用新
-   数据库连接确认 `auth_tokens.revoked_at`；确认前保留原凭据以便重试，确认后
-   删除原文件并同步目录。cleanup 自报或原文件消失均不能作为撤权证据。
-   最终发布成功必须包含该数据库事实和原文件清退；候选检查通过单独记录。
-   通知接纳、实际交付和部署验收分别记录，不等待发布进程自身通知。
-5. 验收全部通过且旧工作树干净、没有进程继续使用后，用 `git worktree remove`
-   退役旧源码，不强制删除脏工作树。交接及发布验收、恢复责任全部完成后，
-   同时退出本次有限转换和仅服务本次转换的测试材料；未完成时保留原计划及所需
-   材料，不保留长期旧版支持链。账户、数据库、工作区、Wiki、登录及共享
-   配置/依赖保留。记录实际部署提交与结果到相应任务产物；必要时更新现有文档，
-   不为补验收记录再造一次文档提交或发布。
+1. **固定交付。** 核对验收范围与工作树，提交并推送；将提交号关联到已有验证记录。
+   绑定本轮实际候选、原 PID/启动身份、unit 环境/profile、配置和通知会话。
+   沿用受审模板与配置捕获入口，只更新绑定；旧凭据、请求和 permit 均不可复用。
+2. **准备候选。** 创建 `releases/main-<commit>`，连接共享配置/依赖，在候选中构建
+   一次；同候选已有有效产物直接复用。用验证环境运行
+   `scripts/validate-release.py <候选> --python <实际 ExecStart 解释器>`，保存资产与
+   Python 依赖闭包回执。漂移时保留原服务，环境修复走[环境重建](#环境重建)。
+   运行本轮 `local-deploy.py preflight`，只读预检存储/资源，并固定旧树收尾计划、
+   提前确认进程读取权限；复用工具入口，不临时编写退役脚本。
+3. **自然交接。** 独立 publisher 继承原 unit 解析后的环境，等待会话、队列、CLI
+   及后台/委托回报自然排空。材料准备完再启动并结束模型回合；启动后继续唤醒
+   模型查询或补写材料仍会阻塞排空。原生入口交出本轮单次许可后，publisher
+   才 mask 原 unit、等待原进程与启动任务退出，取得安装离线锁。
+   离线核验通过后原子替换 `current` 并启动匹配的后端与资产。unit 的合法 mask
+   由冻结计划校验，不列入要求字节不变的环境/profile 输入。
+4. **验收与撤权。** 核对实际 PID/cwd/cgroup、配置、`/health`、`/ready`、登录页和
+   真实浏览器；以同一 verifier 加 `--base-url http://127.0.0.1:8000` 比较线上资产。
+   核对当前存储、消息及保存设置保全。按原 hash 精确撤销本次发布凭据，事务后用
+   新数据库连接确认 `auth_tokens.revoked_at`，再删除原凭据并同步目录。
+   `candidate-result.json` 只证明候选验收；包含撤权事实和原文件清退的
+   `release-result.json` 才证明上线完成。通知接纳与实际到达分别核对。
+5. **自动收尾。** publisher 在上线及撤权回执落盘后，自动复核旧树身份、干净状态、
+   当前服务和进程/共享依赖/保存路径引用，以普通 `git worktree remove` 退役旧树，
+   最终通知同时报告上线及退役结果。脏树、引用或检查不可读时保留旧树，写
+   `old-source-retirement.json` 的具体阻塞；解决后只运行本轮 `local-deploy.py finish`。
+   已有最终上线回执时，`resume` 也只补收尾，不重跑构建、门禁、取凭据或重启。
+   回执补入原验收记录；无需二次委托、文档提交或发布。
+
+存储格式变化才进入[有限交接合同](implemented/current-storage-format.md)；格式不变仍
+做当前完整格式的只读核验。未知格式、提交未知或跨库部分完成时保持业务关闭，沿
+同一计划按提交事实前向恢复；只有旧构建仍兼容时才可恢复旧指向，保留数据库及诊断
+材料。交接、验收与恢复责任结束后，退出本轮专属转换材料。
+
+布局变化或发现待退出的旧空壳时，用捕获的受管 Settings/provider 环境运行
+`scripts/check-storage-layout.py`，仅清退本安装无数据、链接或保存路径引用的空壳
+（独立维护用 `--prune`）。附件/长输入的旧 writer 必须先退休；账户资料、旧附件、
+Wiki、登录和共享依赖保留，范围不扩展到其他工作树或测试缓存。
 
 ## 同步原作者更新
 

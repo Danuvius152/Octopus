@@ -13,7 +13,7 @@ from ..storage_verification import _reader, verify_wiki
 from . import job_events, protocols
 from . import store as document_storage
 from .event_inbox import read_state
-from .store import WikiStore, file_revision
+from .store import WikiStore, file_revision, stat_revision
 
 
 def _within(root: Path, name: str) -> Path:
@@ -23,7 +23,7 @@ def _within(root: Path, name: str) -> Path:
     return path
 
 
-def _stable(db: sqlite3.Connection, registration: dict, root: Path, state: Path, *, source_identity: bool = False) -> None:
+def _stable(db: sqlite3.Connection, registration: dict, root: Path, state: Path, *, source: bool = False) -> None:
     verify_wiki(db, registration)
     reception = read_state(db, registration["root"], registration["vault_id"])
     pending = (reception["received_seq"] != reception["applied_seq"] or reception["armed_epoch"] or reception["uncertain"]
@@ -33,15 +33,28 @@ def _stable(db: sqlite3.Connection, registration: dict, root: Path, state: Path,
                or db.execute("SELECT 1 FROM wiki_job_state WHERE settlement_phase='pending' LIMIT 1").fetchone())
     if pending or (state / "external-change.json").exists() or (state / "external-change.json").is_symlink():
         raise ValueError("Wiki has unfinished writes or filesystem reception; settle them on the source before exporting")
-    for row in db.execute("SELECT path,revision,json_extract(metadata,'$.resource_error') FROM documents"):
+    for row in db.execute("SELECT path,revision,json_extract(metadata,'$.resource_error'),json_extract(metadata,'$.revision_kind') FROM documents"):
         path = _within(root, row[0])
         # This projection explicitly has no accepted current revision. Archive
         # manifests verify the actual bytes independently; don't make a retained
         # oversized original or an empty error projection unportable.
         rejected = path.is_file() and row[2] == "document_too_large" and path.stat().st_size > document_storage.MAX_DOCUMENT_BYTES
-        if not path.is_file() or (not rejected and file_revision(path) != row[1]):
+        if not path.is_file():
             raise ValueError("Wiki content requires source reconciliation before exporting")
-    if source_identity:
+        if rejected:
+            continue
+        if row[3] == "stat" and path.suffix.lower() == ".pdf":
+            # Import already verified the manifest's original bytes. New local
+            # stats cannot certify the source revision; rebind invalidates the
+            # projection so the ordinary refresh rebuilds it before use.
+            if not source:
+                continue
+            current = stat_revision(path.stat())
+        else:
+            current = file_revision(path)
+        if current != row[1]:
+            raise ValueError("Wiki content requires source reconciliation before exporting")
+    if source:
         for path, key in db.execute("SELECT path,file_key FROM document_identities WHERE path IS NOT NULL"):
             target = _within(root, path)
             if not target.is_file() or key != WikiStore.file_key(target.stat()):
@@ -61,7 +74,7 @@ def inspect_wiki(state: Path) -> dict:
     """Read-only source admission; no recovery or key/ledger creation."""
     registration = protocols.read_registration(state)
     with _reader(state / "index.sqlite3") as db:
-        _stable(db, registration, Path(registration["root"]), state, source_identity=True)
+        _stable(db, registration, Path(registration["root"]), state, source=True)
     return registration
 
 

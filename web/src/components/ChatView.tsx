@@ -289,6 +289,10 @@ export function ChatView({
   const [requiredAttachmentCount, setRequiredAttachmentCount] = useState(0);
   const submittedDrafts = useRef(new Map<string, { sessionId: string; text: string; attachments: PendingAttachment[] }>());
   const [submissionError, setSubmissionError] = useState("");
+  const [archiveFeedback, setArchiveFeedback] = useState<{
+    intent: { account: number; sessionId: string }; version: number;
+    observation: SessionObservation; message: string;
+  } | null>(null);
   const [rejectedDrafts, setRejectedDrafts] = useState<{
     id: string; sessionId: string; text: string; attachments: PendingAttachment[];
     reason: string;
@@ -1520,6 +1524,10 @@ export function ChatView({
     if (trimmed.toLowerCase() === "/archive") {
       setInput("");
       const start = useSessionStore.getState();
+      const intent = { account: start.accountGeneration, sessionId: activeSessionId };
+      viewing.current = intent;
+      const version = textDraft.store.getState().version;
+      setArchiveFeedback(null);
       const tracked = sessionList.observe(activeSessionId, start, "archive");
       const { observation } = tracked;
       let foreground = start.activeSessionId === activeSessionId && start.mainView === "chat";
@@ -1528,17 +1536,48 @@ export function ChatView({
       });
       const stop = () => { foreground = false; unsubscribe(); };
       archiveObservers.current.add(stop);
+      const current = () => mounted.current && foreground && viewing.current === intent &&
+        sessionList.current(observation) && textDraft.current() && textDraft.store.getState().version === version;
+      const feedback = (message: string) => {
+        if (current()) setArchiveFeedback({ intent, version, observation, message });
+      };
       try {
-        const token = useSessionStore.getState().token;
-        const res = await fetch(
-          `${window.location.origin}/api/sessions/${activeSessionId}/archive`,
-          {
-            method: "POST",
-            headers: { Authorization: `Bearer ${token}` },
+        let fresh: SessionInfo | null;
+        try {
+          const res = await fetch(`${window.location.origin}/api/sessions/${activeSessionId}/archive`, {
+            method: "POST", headers: { Authorization: `Bearer ${start.token}` },
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            const detail = body?.detail;
+            const reason = typeof detail === "string" ? detail : detail?.message ?? detail?.reason;
+            feedback(`Archive refused (HTTP ${res.status})${reason ? `: ${reason}` : "."}`);
+            return;
           }
-        );
-        if (!res.ok) return;
-        const fresh = await res.json();
+          if (res.status === 204) fresh = null;
+          else {
+            fresh = await res.json() as SessionInfo;
+            if (!fresh || typeof fresh.id !== "string" || !fresh.id || fresh.id === activeSessionId) {
+              throw new Error("Invalid archive response");
+            }
+          }
+        } catch {
+          feedback("Archive result is unknown. Checking the session list; the command will not be sent again.");
+          const confirmed = await sessionList.confirmArchive(activeSessionId, observation);
+          if (!confirmed?.archived) {
+            feedback("Archive result is still unknown. Refresh the session list before trying again.");
+            return;
+          }
+          cancelFork(activeSessionId);
+          if (confirmed.successor && current()) {
+            await selectSession(confirmed.successor.id, confirmed.successor.agent_id);
+          } else feedback("Archive confirmed. Viewing the archived conversation.");
+          return;
+        }
+        if (fresh === null) {
+          if (sessionList.archive(activeSessionId, observation)) cancelFork(activeSessionId);
+          return;
+        }
         // The `session_archived` WS broadcast also updates the
         // sessions list for any other clients — and may have already
         // landed in this tab before the HTTP response. Dedupe by id
@@ -1548,9 +1587,7 @@ export function ChatView({
         if (!accepted || !sessionList.current(observation)) return;
         // The archived session is going away — drop any deferred /fork for it.
         cancelFork(activeSessionId);
-        if (foreground) await selectSession(fresh.id, fresh.agent_id);
-      } catch {
-        // A selected replacement exposes any snapshot acquisition failure.
+        if (current()) await selectSession(fresh.id, fresh.agent_id);
       } finally {
         tracked.finish();
         stop();
@@ -2095,6 +2132,10 @@ export function ChatView({
   const savedDrafts = <div className="shrink-0 max-h-72 overflow-auto px-6">
           {saveError && <p role="alert" className="mb-2 text-sm text-destructive">{saveError}</p>}
           {submissionError && <p role="alert" className="mb-2 text-sm text-destructive">{submissionError}</p>}
+          {archiveFeedback && viewing.current === archiveFeedback.intent &&
+            archiveFeedback.intent.account === accountGeneration && archiveFeedback.intent.sessionId === activeSessionId &&
+            textDraft.store.getState().version === archiveFeedback.version && sessionList.current(archiveFeedback.observation) &&
+            <p role="alert" className="mb-2 text-sm text-destructive">{archiveFeedback.message}</p>}
           {activeSessionId && <QuestionDraftRecovery sessionId={activeSessionId}
             composerOccupied={input.length > 0 || pendingAttachments.length > 0 || isArchived}
             onContinue={(key, content, attachments) => {

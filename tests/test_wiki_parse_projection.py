@@ -9,7 +9,7 @@ from server.wiki import catalog, format, search_index
 from server.wiki.curation import WikiCuration
 from server.wiki.extract import extract
 from server.wiki.references import local_references
-from server.wiki.store import WikiStore
+from server.wiki.store import WikiError, WikiStore
 
 TEXT = "---\ntitle: Fixture\n---\n# Fixture\n\nVisible body [self](#fixture).\n"
 
@@ -121,5 +121,72 @@ def test_link_validation_reuses_candidate_parse_for_metadata(tmp_path, monkeypat
         calls = count_parses(monkeypatch)
         WikiCuration(store).validate_links("note.md", candidate)
         assert calls == [candidate[format.metadata_end(candidate):]]
+    finally:
+        store.close()
+
+
+def test_catalog_batch_parses_a_repeated_anchor_target_once_and_recomputes_next_operation(tmp_path, monkeypatch):
+    root = tmp_path / "vault"
+    root.mkdir()
+    target = "# Target\n\n## Anchor\n\nOriginal evidence.\n"
+    (root / "target.md").write_text(target)
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
+    try:
+        source = "# Source\n\n" + "[reference](target.md#anchor)\n" * 30
+        (root / "first.md").write_text(source)
+        (root / "second.md").write_text(source)
+        calls = count_parses(monkeypatch)
+        store.refresh()
+        assert calls.count(target) == 1
+        for path in ("first.md", "second.md"):
+            graph = store.graph(path)
+            assert len(graph["edges"]) == 30
+            assert {edge["status"] for edge in graph["edges"]} == {"resolved"}
+        changed = "# Target\n\n## Renamed\n\nUpdated evidence.\n"
+        (root / "target.md").write_text(changed)
+        calls.clear()
+        store.refresh()
+        # One indexing parse and one parse shared by the entire new catalog batch.
+        assert calls.count(changed) == 2
+        assert calls.count(target) == 0
+        assert {edge["status"] for edge in store.graph("first.md")["edges"]} == {"missing_anchor"}
+    finally:
+        store.close()
+
+
+def test_validation_reuses_current_target_bodies_and_keeps_uri_duplicate_and_overlay_anchors(tmp_path, monkeypatch):
+    from server.wiki import curation
+
+    root = tmp_path / "vault"
+    root.mkdir()
+    target = "# Target\n\n## Repeat\nFirst.\n\n## Repeat\nSecond.\n\n## 中文\nEvidence.\n"
+    other = "# Other\n\n## Section\nSecond target.\n"
+    (root / "target.md").write_text(target)
+    (root / "other.md").write_text(other)
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
+    try:
+        candidate = ("# Candidate\n\n## Overlay only\n\n[self](#overlay-only)\n" +
+                     "[Repeated](target.md#repeat-1) [Encoded](target.md#%E4%B8%AD%E6%96%87)\n" * 15 +
+                     "[Other](other.md#section)\n" * 4)
+        calls = count_parses(monkeypatch)
+        reads = []
+        original_read = curation.read_document_bytes
+
+        def counted_read(path, **kwargs):
+            reads.append(path.name)
+            return original_read(path, **kwargs)
+
+        monkeypatch.setattr(curation, "read_document_bytes", counted_read)
+        WikiCuration(store).validate_links("candidate.md", candidate)
+        assert calls.count(target) == calls.count(other) == calls.count(candidate) == 1
+        assert reads == ["target.md", "other.md"]
+        (root / "target.md").write_text("# Target\n\n## Repeat\nOnly one now.\n")
+        store.refresh()
+        calls.clear()
+        reads.clear()
+        with pytest.raises(WikiError, match="New local anchor does not exist"):
+            WikiCuration(store).validate_links("candidate.md", candidate)
+        assert target not in calls
+        assert reads == ["target.md"]
     finally:
         store.close()

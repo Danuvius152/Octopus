@@ -254,12 +254,12 @@ def test_graph_failure_rolls_back_before_acknowledging_filesystem_receipts(store
     original = store.read("a.md")
     resolve = catalog.resolve_edges
 
-    def fail(db, row, metadata):
+    def fail(db, row, metadata, *, targets=None):
         if row["path"] == "consumer.md":
             # Exercise a classified logical query error. Unknown/physical
             # storage failures use the subprocess exit contract instead.
             db.execute('SELECT * FROM "controlled graph publication failure"')
-        return resolve(db, row, metadata)
+        return resolve(db, row, metadata, targets=targets)
 
     write(store, "a.md", "# A\nNew evidence.\n")
     with monkeypatch.context() as patch:

@@ -90,6 +90,7 @@ function command(text: string) {
 
 function server() {
   let finish!: (response: Response) => void;
+  let fail!: (reason: Error) => void;
   let saved = false;
   let result: SessionInfo = child;
   let holdList = false;
@@ -102,7 +103,7 @@ function server() {
     const url = new URL(input, window.location.origin);
     if (init?.method === "POST") {
       if (url.pathname.endsWith("/archive")) result = { ...child, forked_from_session_id: null, fork_prefilled_prompt: null };
-      return new Promise<Response>((resolve) => { finish = resolve; });
+      return new Promise<Response>((resolve, reject) => { finish = resolve; fail = reject; });
     }
     if (url.pathname.endsWith("/wiki-jobs")) return Response.json([]);
     if (url.pathname.endsWith("/submissions")) return Response.json({ items: [] });
@@ -128,6 +129,7 @@ function server() {
     setRows: (next: SessionInfo[]) => { rows = next; },
     failList: (fail: boolean) => { listFailure = fail; },
     complete: async (response?: Response) => { saved = true; await act(async () => finish(response ?? Response.json(result))); },
+    loseResponse: async () => { saved = true; await act(async () => fail(new TypeError("Network connection lost"))); },
     refuse: async () => { await act(async () => finish(Response.json({ detail: { message: "Rewind refused" } }, { status: 409 }))); },
     holdList: () => { holdList = true; },
     listPending: () => finishLists.length > 0,
@@ -137,6 +139,83 @@ function server() {
     confirmDetail: async () => { heldDetail = undefined; await act(async () => finishDetail?.()); },
   };
 }
+
+it("reports an archive refusal with its server reason and never confirms or retries the write", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  await api.complete(Response.json({ detail: "Archive permission denied" }, { status: 403 }));
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive permission denied");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname === "/api/sessions")).toHaveLength(0);
+});
+
+it.each(["network", "json", "shape", "null"])("confirms an unknown %s archive by reading without replaying the command", async (failure) => {
+  const api = server();
+  mount();
+  command("/archive");
+  api.holdList();
+  if (failure === "network") await api.loseResponse();
+  else await api.complete(failure === "json" ? new Response("invalid JSON") : Response.json(failure === "null" ? null : {}));
+  await waitFor(() => expect(api.listPending()).toBe(true));
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  await api.confirmList();
+  expect(useSessionStore.getState().archivedSessions.map((row) => row.id)).toContain(a.id);
+  // A list proves archive, but does not identify a successor by name or agent.
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed");
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("confirms a lost archive reply through a fresh read after an older GET, preserving the explicit successor", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  api.holdList();
+  const oldRead = sessions.refresh(true);
+  await waitFor(() => expect(api.listPending()).toBe(true));
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
+  const readsBefore = api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname === "/api/sessions").length;
+  await api.loseResponse();
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname === "/api/sessions")).toHaveLength(readsBefore + 1);
+  await api.confirmList();
+  await oldRead;
+  await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("retains an unknown archive result when confirmation fails, without a write retry", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  api.failList(true);
+  await api.loseResponse();
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Archive result is still unknown"));
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it.each(["draft", "leave-return", "token"])("retires late archive feedback after %s", async (boundary) => {
+  const api = server();
+  mount();
+  command("/archive");
+  act(() => {
+    if (boundary === "leave-return") {
+      useSessionStore.getState().setActiveSessionId(b.id);
+      useSessionStore.getState().setActiveSessionId(a.id);
+    }
+    if (boundary === "token") {
+      useSessionStore.getState().setToken("replacement-account");
+      useSessionStore.setState({ sessions: [a, b], activeSessionId: a.id });
+    }
+  });
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Current draft" } });
+  await api.complete(Response.json({ detail: "Old archive failure" }, { status: 409 }));
+  expect(screen.queryByText(/Old archive failure/)).toBeNull();
+  expect(screen.getByRole("textbox")).toHaveValue("Current draft");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+});
 
 it("archive success keeps its list fact after A→B→A without reviving navigation", async () => {
   const api = server();

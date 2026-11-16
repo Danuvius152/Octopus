@@ -3,6 +3,7 @@ import type { Agent, Application, AttachmentMetadata, Delegation, QuestionItem, 
 import { readDispatchState, type DispatchState } from "./sessionDispatch";
 import { readRuntimeMetadata } from "./toolIdentity";
 import { readContextState, type ContextState } from "./sessionContext";
+import { isDelegationState } from "./delegationState";
 
 type Guard<T> = (value: unknown) => value is T;
 type Value<G> = G extends Guard<infer T> ? T : never;
@@ -70,7 +71,7 @@ const session: Guard<SessionInfo> = fields({
 const terminalDisposition = oneOf("accepted", "duplicate", "steered", "closed", "unbound", "unavailable", "not_replayed", "stopped", "unknown");
 const delegation: Guard<Delegation & { work_id: string }> = fields({
   delegation_id: id, sub_session_id: id, parent_session_id: id, target_agent_id: id, target_agent_name: text,
-  request: text, work_id: id, state: oneOf("running", "completed", "failed", "cancelled", "interrupted"),
+  request: text, work_id: id, state: isDelegationState,
   created_at: text, finished_at: nullable(text), error: nullable(text),
   terminal_disposition: optional(nullable(terminalDisposition)), terminal_delivery_error: maybeText,
 });

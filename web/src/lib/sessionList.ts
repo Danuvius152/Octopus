@@ -350,6 +350,25 @@ export class SessionList {
       successor.finish();
     }
   }
+  async confirmArchive(id: string, observation: SessionObservation): Promise<{
+    archived: boolean; successor: SessionInfo | null;
+  } | null> {
+    if (!this.current(observation)) { this.canConfirm(observation, true); return null; }
+    // A GET already in flight before the unknown write cannot confirm it.
+    this.retire({ state: "pending" }); this.dirty = true;
+    while (this.current(observation)) {
+      const result = await this.refresh(true);
+      if (!this.current(observation)) return null;
+      const state = useSessionStore.getState();
+      if (result.state === "pending" || result.state === "applied" && state.sessionRead.stale) continue;
+      if (result.state !== "applied") return null;
+      const archived = state.archivedSessions.some((row) => row.id === id);
+      const target = state.sessionSuccessors[id];
+      return { archived, successor: archived && target
+        ? [...state.sessions, ...state.archivedSessions].find((row) => row.id === target) ?? null : null };
+    }
+    return null;
+  }
   remove(id: string, observation?: SessionObservation): boolean {
     if (!this.canConfirm(observation)) return false;
     this.invalidateTarget(id);

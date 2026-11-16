@@ -9,7 +9,9 @@ break the thing it measures.
 
 from __future__ import annotations
 
+import asyncio
 import time
+from types import SimpleNamespace
 
 import aiosqlite
 import pytest
@@ -161,6 +163,27 @@ class TestReports:
         assert rows[0]["p50_ms"] == 30.0
         assert rows[0]["p99_ms"] == 1000.0, "the tail must not be averaged away"
 
+    @pytest.mark.parametrize("durations,expected", [
+        ([], None),
+        ([None], (None, None, None)),
+        ([42], (42, 42, 42)),
+        ([10, 20], (10, 20, 20)),
+        (list(range(1, 21)), (10, 19, 20)),
+        (list(range(1, 101)), (50, 95, 99)),
+    ])
+    async def test_public_turn_percentiles_use_nearest_rank(self, store, conn, durations, expected):
+        for ms in reversed(durations):
+            store.record(Event(kind="turn", backend="codex", duration_ms=ms, ok=True))
+        store.record(Event(kind="turn", backend="codex", duration_ms=9999, ts=time.time() - 7200))
+        await store.drain()
+        rows = await query.turns(conn, "1h")
+        if expected is None:
+            assert rows == []
+        else:
+            row, = rows
+            assert row["n"] == len(durations)
+            assert (row["p50_ms"], row["p95_ms"], row["p99_ms"]) == expected
+
     async def test_schedules_report_separates_fired_from_skipped(self, store, conn):
         store.record(Event(kind="schedule_fire", ok=True, detail={"schedule_id": "a"}))
         store.record(Event(kind="schedule_fire", ok=False,
@@ -184,6 +207,40 @@ class TestReports:
         data = await query.overview(conn, "24h")
         assert data["counts"] == [] and data["turns"] == []
 
+    @pytest.mark.parametrize("readings,expected", [
+        ([(0, 0, {"available": False})], (0, 1, None, None, None)),
+        ([(-60, 0, {"available": False}), (0, 3, None)], (1, 1, 3, 3, 3)),
+        ([(-60, 3, None), (0, 0, {"available": False})], (1, 1, 3, 3, None)),
+        ([(-7200, 100, None), (-60, 0, {"available": False}), (0, 0, None)], (1, 1, 0, 0, 0)),
+    ])
+    async def test_resources_distinguish_unavailable_observations_from_valid_zero(self, store, conn,
+                                                                               readings, expected):
+        now = time.time()
+        for offset, value, labels in readings:
+            store.sample(Sample("engine_pss_mb", value, ts=now + offset, labels=labels))
+        await store.drain()
+        row, = await query.resources(conn, "1h")
+        assert (row["n"], row["missing"], row["avg"], row["peak"], row["latest"]) == expected
+
+    async def test_overview_omits_on_demand_queries_but_reports_keep_them(self, store, conn):
+        store.record(Event(kind="codex_run", detail={"request_id": "request", "attempt_id": "attempt",
+            "retirement_phases": [{"phase": "graceful_exit", "elapsed_ms": 15, "grace_ms": 2000}]}))
+        store.record(Event(kind="codex_native_usage", detail={"native_thread_id": "thread",
+            "native_turn_id": "turn", "total_tokens": 990}))
+        store.record(Event(kind="codex_steer", detail={"input_id": "input", "state": "accepted"}))
+        await store.drain()
+        statements = []
+        await conn.set_trace_callback(statements.append)
+        data = await query.overview(conn, "1h")
+        diagnostics = ("codex_runs", "codex_retirement", "codex_native_usage", "codex_steers")
+        assert not set(diagnostics).intersection(data)
+        # Trace real SQLite reads; event counts may still include these kinds.
+        assert not any(f"kind='{kind}'" in sql.replace(" ", "")
+                       for sql in statements for kind in ("codex_run", "codex_native_usage", "codex_steer"))
+        for report in diagnostics:
+            assert len(await query.REPORTS[report](conn, "1h")) == 1
+        assert await query.codex_runs(conn, "0m") == []
+
     @pytest.mark.parametrize("window,expected_hours", [("30m", 0.5), ("24h", 24), ("7d", 168)])
     def test_window_parsing(self, window, expected_hours):
         delta = time.time() - query._since(window)
@@ -194,6 +251,113 @@ class TestReports:
 
 
 class TestSampler:
+    @pytest.mark.parametrize("argv,owned,expected", [
+        (["/usr/bin/node", "{claude}", "--print", "--output-format=json"], True, 1),
+        (["/usr/bin/python3", "{configured}", "app-server"], True, 1),
+        (["/bin/sh", "{configured}", "app-server"], True, 1),
+        (["/usr/bin/node", "{codex}", "exec", "--json"], True, 1),
+        (["/usr/bin/python3", "{configured}", "app-server"], False, 0),
+        (["/usr/bin/node", "/other/cli.js", "--print", "{claude}"], True, 0),
+        (["/usr/bin/python3", "-c", "{configured}", "app-server"], True, 0),
+        (["/usr/bin/python3", "/other/native-model", "app-server", "{configured}"], True, 0),
+    ])
+    async def test_script_engine_resources_use_resolved_entry_not_argument_text(self, store, conn,
+                                                                              tmp_path, monkeypatch,
+                                                                              argv, owned, expected):
+        import os
+
+        from server.config import settings
+        from server.monitor import sampler
+
+        cli = tmp_path / "bin"
+        cli.mkdir()
+        paths = {"claude": tmp_path / "claude-code" / "cli.js",
+                 "codex": tmp_path / "codex-package" / "bin.js",
+                 "configured": tmp_path / "engines" / "native-model"}
+        for name, entry in paths.items():
+            entry.parent.mkdir(parents=True, exist_ok=True)
+            entry.write_text("#!/usr/bin/env node\n")
+            entry.chmod(0o755)
+            if name != "configured":
+                (cli / name).symlink_to(entry)
+        monkeypatch.setenv("PATH", str(cli))
+        monkeypatch.setattr(settings, "codex_app_server_binary", str(paths["configured"]))
+        proc = tmp_path / "proc"
+        child = proc / "123"
+        child.mkdir(parents=True)
+        actual = [arg.format(**paths) for arg in argv]
+        (child / "cmdline").write_bytes(b"\0".join(arg.encode() for arg in actual))
+        (child / "stat").write_text(f"123 (engine) S {os.getpid() if owned else 1} 0 0")
+        (child / "smaps_rollup").write_text("Pss: 2048 kB\n")
+        monkeypatch.setattr(sampler, "_PROC", proc)
+        for reading in collect():
+            store.sample(reading)
+        await store.drain()
+        rows = {row["metric"]: row for row in await query.resources(conn, "1h")}
+        assert rows["engine_process_count"]["latest"] == expected
+        assert rows["engine_pss_mb"]["latest"] == (2.0 if expected else 0.0)
+
+    @pytest.mark.parametrize("argv,owned,expected", [
+        (["/bin/codex", "app-server", "-c", "features.x=true"], True, 1),
+        (["/bin/codex", "exec", "--json"], True, 1),
+        (["/bin/claude", "--print", "--output-format=json"], True, 1),
+        (["/engines/native-model", "app-server"], True, 1),
+        (["/engines/native-model", "app-server"], False, 0),
+        (["/bin/codex", "app-server"], False, 0),
+        (["/other/native-model", "app-server"], True, 0),
+        (["/bin/python", "app-server", "/engines/native-model"], True, 0),
+        (["/bin/codex", "-c", "exec"], True, 0),
+        (["/bin/claude", "--model", "--print"], True, 0),
+    ])
+    async def test_resource_report_counts_owned_engine_commands(self, store, conn, tmp_path, monkeypatch,
+                                                                argv, owned, expected):
+        import os
+
+        from server.config import settings
+        from server.monitor import sampler
+
+        monkeypatch.setattr(settings, "codex_app_server_binary", "/engines/native-model")
+        proc = tmp_path / "proc"
+        child = proc / "123"
+        child.mkdir(parents=True)
+        (child / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv))
+        (child / "stat").write_text(f"123 (engine) S {os.getpid() if owned else 1} 0 0")
+        (child / "smaps_rollup").write_text("Pss: 2048 kB\n")
+        monkeypatch.setattr(sampler, "_PROC", proc)
+        for reading in collect():
+            store.sample(reading)
+        await store.drain()
+        rows = {row["metric"]: row for row in await query.resources(conn, "1h")}
+        assert rows["engine_process_count"]["latest"] == expected
+        assert rows["engine_pss_mb"]["latest"] == (2.0 if expected else 0.0)
+
+    async def test_resource_report_does_not_turn_unreadable_engine_memory_into_zero(self, store, conn,
+                                                                                 tmp_path, monkeypatch):
+        import os
+
+        from server.monitor import sampler
+
+        proc = tmp_path / "proc"
+        child = proc / "123"
+        child.mkdir(parents=True)
+        (child / "cmdline").write_bytes(b"/bin/codex\0exec\0")
+        (child / "stat").write_text(f"123 (engine) S {os.getpid()} 0 0")
+        known = proc / "124"
+        known.mkdir()
+        (known / "cmdline").write_bytes(b"/bin/claude\0--print\0")
+        (known / "stat").write_text(f"124 (engine) S {os.getpid()} 0 0")
+        (known / "smaps_rollup").write_text("Pss: 1024 kB\n")
+        monkeypatch.setattr(sampler, "_PROC", proc)
+        store.sample(Sample("engine_pss_mb", 0.0, ts=time.time() - 60))
+        for reading in collect():
+            store.sample(reading)
+        await store.drain()
+        rows = {row["metric"]: row for row in await query.resources(conn, "1h")}
+        assert rows["engine_process_count"]["latest"] == 2
+        assert rows["engine_pss_mb"]["latest"] is None
+        assert rows["engine_pss_mb"]["n"] == 1
+        assert rows["engine_pss_mb"]["missing"] == 1
+
     def test_collect_reports_the_gauges_b1_is_judged_on(self):
         metrics = {s.metric for s in collect()}
         assert "mcp_sidecar_count" in metrics, "the number B1 drove to zero"
@@ -297,3 +461,26 @@ async def test_codex_http_report_weights_response_time_and_exposes_missing_sampl
         assert turn["responses"] == 3 and turn["output_tokens"] == 350
         overview = (await client.get("/api/monitor/overview?window=1h")).json()
         assert overview["codex"] == response.json()["rows"]
+
+
+async def test_cli_keeps_native_diagnostics_on_demand(store, monkeypatch, capsys):
+    from server.cli import do_monitor
+    from server.config import settings
+
+    store.record(Event(kind="codex_run", detail={"request_id": "diagnostic-request", "attempt_id": "attempt",
+        "retirement_phases": [{"phase": "graceful_exit", "elapsed_ms": 15, "grace_ms": 2000}]}))
+    store.record(Event(kind="codex_native_usage", detail={"native_thread_id": "diagnostic-thread",
+        "native_turn_id": "turn", "total_tokens": 990}))
+    store.record(Event(kind="codex_steer", detail={"input_id": "diagnostic-input", "state": "accepted"}))
+    await store.drain()
+    monkeypatch.setattr(settings, "metrics_db_path", store._db_path)
+    for report, value in (("codex_runs", "diagnostic-request"), ("codex_retirement", "graceful_exit"),
+                          ("codex_native_usage", "diagnostic-thread"), ("codex_steers", "diagnostic-input"),
+                          ("overview", "event samples")):
+        with pytest.raises(SystemExit) as result:
+            await asyncio.to_thread(do_monitor, SimpleNamespace(report=report, since="1h"))
+        assert result.value.code == 0
+        output = capsys.readouterr().out
+        assert value in output
+        if report == "overview":
+            assert "diagnostic-request" not in output and "diagnostic-input" not in output

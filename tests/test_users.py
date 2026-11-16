@@ -10,10 +10,13 @@ alive.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sqlite3
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 
+import anyio.to_thread
 import pytest
 
 from server.database import Database
@@ -36,6 +39,215 @@ async def users():
         yield UserManager(db), db
     finally:
         await db.close()
+
+
+@pytest.mark.parametrize("operation", [
+    "setup", "create", "register", "login", "wrong", "unknown", "admin_password", "own_password",
+])
+async def test_account_password_work_runs_outside_the_event_loop(users, monkeypatch, operation):
+    mgr, _db = users
+    account = proof = invite = None
+    if operation not in {"setup", "create"}:
+        account = await mgr.create_user(username="archer", password="password1")
+    if operation == "register":
+        invite = await mgr.create_invite(created_by=account["id"])
+    if operation == "own_password":
+        proof = await mgr.authenticate("archer", "password1")
+    loop_thread = threading.get_ident()
+    computing_threads = []
+    scrypt = hashlib.scrypt
+
+    def observed_scrypt(*args, **kwargs):
+        computing_threads.append(threading.get_ident())
+        return scrypt(*args, **kwargs)
+
+    monkeypatch.setattr(hashlib, "scrypt", observed_scrypt)
+    if operation == "setup":
+        account = await mgr.setup(username="archer", password="password1")
+    elif operation == "create":
+        account = await mgr.create_user(username="archer", password="password1")
+    elif operation == "register":
+        account = await mgr.register(invite_code=invite["code"], username="another", password="password1")
+    elif operation == "login":
+        logged_in, token = await mgr.login("archer", "password1")
+        assert logged_in["id"] == account["id"]
+        assert (await mgr.resolve_token(token))["id"] == account["id"]
+    elif operation in {"wrong", "unknown"}:
+        with pytest.raises(UserError) as error:
+            await mgr.login("nobody" if operation == "unknown" else "archer", "wrong-password")
+        assert error.value.status_code == 401
+    elif operation == "admin_password":
+        await mgr.set_password(account["id"], "changed-password")
+    else:
+        await mgr.change_own_password(proof, "changed-password")
+    assert computing_threads and loop_thread not in computing_threads
+
+
+@pytest.fixture
+def block_password_work(monkeypatch):
+    """Hold the real scrypt boundary; never substitute a credential result."""
+    probes = []
+
+    def install(*, password=None):
+        loop = asyncio.get_running_loop()
+        release = threading.Event()
+        started = asyncio.Queue()
+        lock = threading.Lock()
+        counts = {"active": 0, "peak": 0, "calls": 0}
+        scrypt = hashlib.scrypt
+
+        def held_scrypt(raw, **kwargs):
+            if password is not None and raw != password.encode():
+                return scrypt(raw, **kwargs)
+            with lock:
+                counts["calls"] += 1
+                counts["active"] += 1
+                counts["peak"] = max(counts["peak"], counts["active"])
+            loop.call_soon_threadsafe(started.put_nowait, threading.get_ident())
+            try:
+                assert release.wait(5), "test did not release password computation"
+                return scrypt(raw, **kwargs)
+            finally:
+                with lock:
+                    counts["active"] -= 1
+
+        monkeypatch.setattr(hashlib, "scrypt", held_scrypt)
+        probes.append(release)
+        return release, started, counts
+
+    yield install
+    for release in probes:
+        release.set()
+
+
+async def test_cancelled_password_work_keeps_capacity_until_computation_finishes(users, block_password_work):
+    mgr, db = users
+    account = await mgr.create_user(username="archer", password="password1")
+    release, started, counts = block_password_work()
+    loop = asyncio.get_running_loop()
+    default_started = asyncio.Event()
+    default_release = threading.Event()
+    default_limiter = anyio.to_thread.current_default_thread_limiter()
+    old_capacity = default_limiter.total_tokens
+    default_limiter.total_tokens = 1
+
+    def occupy_default_pool():
+        loop.call_soon_threadsafe(default_started.set)
+        assert default_release.wait(5)
+
+    ordinary_work = asyncio.create_task(anyio.to_thread.run_sync(occupy_default_pool))
+    tasks = []
+    try:
+        await asyncio.wait_for(default_started.wait(), 1)
+        tasks = [asyncio.create_task(mgr.login("archer", "password1")) for _ in range(4)]
+        threads = [await asyncio.wait_for(started.get(), 1) for _ in range(4)]
+        assert threading.get_ident() not in threads
+        # Account reads still work while KDF and default worker budgets are full.
+        assert await mgr.resolve_token("unrelated-invalid-bearer") is None
+        waiting = asyncio.create_task(mgr.login("unknown", "password1"))
+        tasks.append(waiting)
+        await asyncio.sleep(.02)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiting, 1)
+        tasks[0].cancel()
+        following = asyncio.create_task(mgr.login("archer", "password1"))
+        tasks.append(following)
+        await asyncio.sleep(.02)
+        assert not tasks[0].done(), "running computation lost its owner on cancellation"
+        assert counts == {"active": 4, "peak": 4, "calls": 4}
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 3)
+        assert isinstance(results[0], asyncio.CancelledError)
+        for result in [*results[1:4], results[5]]:
+            logged_in, token = result
+            assert logged_in["id"] == account["id"]
+            assert (await mgr.resolve_token(token))["id"] == account["id"]
+        assert counts == {"active": 0, "peak": 4, "calls": 5}
+        assert len(await db.list_tokens(account["id"])) == 4
+    finally:
+        release.set()
+        default_release.set()
+        await asyncio.gather(*tasks, ordinary_work, return_exceptions=True)
+        default_limiter.total_tokens = old_capacity
+
+
+@pytest.mark.parametrize("operation", ["create", "login", "password"])
+async def test_anyio_cancelled_password_work_cannot_commit(users, block_password_work, operation):
+    mgr, db = users
+    account = await mgr.create_user(username="archer", password="password1")
+    token = await mgr.issue_token(account["id"])
+    proof = await mgr.authenticate("archer", "password1")
+    before_tokens = await db.list_tokens(account["id"])
+    release, started, _counts = block_password_work()
+    scopes = []
+    completed = []
+    statements = []
+
+    async def request():
+        with anyio.CancelScope() as scope:
+            scopes.append(scope)
+            if operation == "create":
+                await mgr.create_user(username="another", password="password1")
+            elif operation == "login":
+                await mgr.login("archer", "password1")
+            else:
+                await mgr.change_own_password(proof, "changed-password", keep_token_hash=token_digest(token))
+            completed.append(True)
+
+    pending = asyncio.create_task(request())
+    try:
+        await asyncio.wait_for(started.get(), 1)
+        await db.conn.set_trace_callback(statements.append)
+        scopes[0].cancel()
+        await asyncio.sleep(.02)
+        assert not pending.done()
+        release.set()
+        await asyncio.wait_for(pending, 2)
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+        await db.conn.set_trace_callback(None)
+    assert not completed
+    assert not statements, "cancelled computation reached a database operation"
+    assert await db.list_tokens(account["id"]) == before_tokens
+    assert (await mgr.resolve_token(token))["id"] == account["id"]
+    assert (await mgr.authenticate("archer", "password1"))["id"] == account["id"]
+    with pytest.raises(UserError):
+        await mgr.authenticate("another", "password1")
+
+
+@pytest.mark.parametrize("operation", ["login", "password"])
+@pytest.mark.parametrize("change", ["password", "disable"])
+async def test_password_computation_cannot_spend_a_retired_proof(users, block_password_work, operation, change):
+    mgr, db = users
+    account = await mgr.create_user(username="archer", password="password1")
+    proof = await mgr.authenticate("archer", "password1")
+    release, started, _counts = block_password_work(
+        password="password1" if operation == "login" else "changed-password",
+    )
+    pending = asyncio.create_task(
+        mgr.login("archer", "password1") if operation == "login"
+        else mgr.change_own_password(proof, "changed-password")
+    )
+    try:
+        await asyncio.wait_for(started.get(), 1)
+        if change == "password":
+            await mgr.set_password(account["id"], "replacement-password")
+        else:
+            await mgr.set_disabled(account["id"], True)
+        release.set()
+        with pytest.raises(UserError) as error:
+            await asyncio.wait_for(pending, 2)
+        assert error.value.status_code == (401 if operation == "login" else 409)
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+    assert await db.list_tokens(account["id"]) == []
+    if change == "disable":
+        await mgr.set_disabled(account["id"], False)
+    expected = "password1" if change == "disable" else "replacement-password"
+    assert (await mgr.authenticate("archer", expected))["id"] == account["id"]
 
 
 # ---------------------------------------------------------------------------

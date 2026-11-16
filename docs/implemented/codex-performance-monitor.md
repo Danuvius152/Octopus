@@ -52,15 +52,35 @@ Sanitized `model_measurement` observations are internal; they bypass the necessa
 
 `GET /api/monitor/codex_turns` exposes the latest 20 logical requests within the selected window, grouped by session/request/model, with matching weighted TPS, usage and recorded effort/tier. Retries sharing a request are combined without summing concurrent rates. `/overview` includes both reports. CLI supports `octopus monitor codex --since 24h` and `codex_turns`. All routes retain operator-only access and 30-day retention.
 
-`codex_runs`, `codex_native_usage`, `codex_steers`, `codex_retirement` and `codex_anomalies` expose separate diagnostics through the same public query/overview path. Product attempts, accepted root/child turns, model responses and provider cumulative counters are distinct counts. Run facts retain preparation start/resume, spawn, start ACK, first output, root activity and retirement durations. Steer ACK proves acceptance, not processing. HarnessRun records only entered retirement phases with their original grace and actual elapsed time; cleanup is never labelled generation or parent continuation. Owner supplies its existing overall/idle elapsed values, limits and suspension state read-only. Monitor creates no clock, extends no budget and grants no idle exemption for polling, ACKs, detail reads, duplicate events or native wait.
+`codex_runs`, `codex_native_usage`, `codex_steers` and `codex_retirement` remain available through their dedicated API/CLI reports. Default `/overview` neither computes nor returns those four reports; `codex_anomalies` remains in overview. Product attempts, accepted root/child turns, model responses and provider cumulative counters are distinct counts. Run facts retain preparation start/resume, spawn, start ACK, first output, root activity and retirement durations. Steer ACK proves acceptance, not processing. HarnessRun records only entered retirement phases with their original grace and actual elapsed time; cleanup is never labelled generation or parent continuation. Owner supplies its existing overall/idle elapsed values, limits and suspension state read-only. Monitor creates no clock, extends no budget and grants no idle exemption for polling, ACKs, detail reads, duplicate events or native wait.
+
+Resource sampling recognizes this service's descendant Codex app-server/exec
+and Claude print processes, including configured binaries and supported
+interpreter/script entry points. It checks command positions and resolved entry
+paths; a matching name or path in an unrelated argument is insufficient.
+Sampling does not acquire process-lifecycle responsibility.
+
+An engine PSS observation is unavailable if any included process is unreadable.
+`available=false` in sample labels encodes that observation with a placeholder
+value required by storage; the placeholder is not a measured zero. Resource
+queries project it to NULL before AVG/MAX and valid `n`; `missing` counts only
+explicit unavailable observations, not dropped or uncollected samples. Latest
+means the latest observation inside the requested window, including unavailable.
+All-unavailable metrics still return `n=0`, positive missing and null readings;
+legacy samples without labels remain valid. A confirmed absence of engines is
+valid zero. Latency percentiles use nearest rank, `ceil(n*p)-1` bounded to the
+sample range, with null for no valid samples.
 
 ## 6. UI
 
 Monitor displays a Codex effective output TPS table. Weighted value is primary, latest measured response is secondary. State distinguishes measured, partial timing and missing timing; missing is `—`, never 0 TPS. Values are completed observations held during tools/waits, with their measurement timestamp. Expandable logical-request detail carries settings and usage context without complicating main model grouping.
 
-Execution phases, source coverage, cumulative snapshots, steer acceptance, Owner clocks, entered retirement grace phases and unaccepted execution diagnostics remain separately labelled. Older records lacking these optional facts display missing values without invented defaults.
+The page retains logical-request detail, anomalies, Connector calls, events,
+latencies, errors and resources. Native execution phases and Native counters
+and input timing are omitted; their dedicated diagnostics remain available.
+Unknown resource readings display `—`.
 
-Refresh every 5s only while the page is visible; resume immediately when visible. Requests do not overlap; stale responses cannot overwrite a changed window/token. A refresh error is visible alongside retained data. This is passive performance observation across differing prompts, context sizes, caches, effort and tier, not a controlled model/provider ranking.
+Refresh every 5s only while the page is visible; resume immediately when visible. Requests do not overlap, including manual Refresh; stale responses or errors cannot overwrite a changed window/token. A current refresh error is visible alongside retained data. This is passive performance observation across differing prompts, context sizes, caches, effort and tier, not a controlled model/provider ranking.
 
 ## 7. Interpretation limits
 

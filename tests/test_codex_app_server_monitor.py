@@ -257,17 +257,23 @@ async def test_native_monitor_separates_provider_counters_from_attempt_phases(na
         report = await client.get("/api/monitor/overview")
         assert report.status_code == 200
         overview = report.json()
-    run, = overview["codex_runs"]
+        diagnostics = {}
+        for name in ("codex_runs", "codex_retirement", "codex_native_usage", "codex_steers"):
+            assert name not in overview
+            report = await client.get(f"/api/monitor/{name}")
+            assert report.status_code == 200
+            diagnostics[name] = report.json()["rows"]
+    run, = diagnostics["codex_runs"]
     assert run["request_id"] == receipt["request_id"]
     assert run["root_turns"] == 1 and run["child_turns"] == 1 and run["resource_state"] == "proven"
     assert run["preparation_ms"] >= 0 and run["root_active_ms"] >= 0 and run["retirement_ms"] >= 0
-    phases = {row["phase"]: row for row in overview["codex_retirement"]}
+    phases = {row["phase"]: row for row in diagnostics["codex_retirement"]}
     assert phases["protocol_interrupt"]["grace_ms"] == 500
     assert phases["graceful_exit"]["grace_ms"] == 2000
     assert phases["pipe_drain"]["grace_ms"] == 2000
     assert all(row["request_id"] == receipt["request_id"] and row["elapsed_ms"] >= 0
                for row in phases.values())
-    counter, = overview["codex_native_usage"]
+    counter, = diagnostics["codex_native_usage"]
     assert counter["total_tokens"] == 990 and counter["output_tokens"] == 90
     assert sum(row["output_tokens"] for row in overview["codex"]) == 7
 

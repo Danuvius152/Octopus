@@ -258,12 +258,19 @@ class AppAgentManager:
         rows = await db.load_messages(conversation_id)
         native_requests = {(row.get("runtime_metadata") or {})["request_id"]
                            for row in rows if (row.get("runtime_metadata") or {}).get("native")}
+        associated: dict[str, list[dict[str, Any]]] = {request_id: [] for request_id in native_requests}
+        for row in rows:
+            runtime_request = (row.get("runtime_metadata") or {}).get("request_id")
+            attempt_context = (row.get("tool_input") or {}).get("attempt_context")
+            attempt_request = attempt_context.get("request_id") if isinstance(attempt_context, dict) else None
+            # Preserve the original OR association and row order. The two IDs
+            # may differ, but an equal pair contributes this row only once.
+            for request_id in dict.fromkeys(value for value in (runtime_request, attempt_request) if isinstance(value, str)):
+                if request_id in associated:
+                    associated[request_id].append(row)
         selected: set[int] = set()
         for request_id in native_requests:
-            associated = [row for row in rows
-                if (row.get("runtime_metadata") or {}).get("request_id") == request_id
-                or (row.get("tool_input") or {}).get("attempt_context", {}).get("request_id") == request_id]
-            saved = committed_result(request_id, request_id, associated)
+            saved = committed_result(request_id, request_id, associated[request_id])
             if saved.missing not in {None, "terminal_missing"}:
                 raise AppAgentError(f"The recorded reply is unavailable: {saved.missing}", status_code=409)
             selected.update(saved.message_seqs)

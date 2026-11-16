@@ -31,9 +31,14 @@ import hmac
 import re
 import secrets
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
+import anyio.to_thread
+
+from .aio import complete_cleanup
 from .crypto import new_dek, unwrap_dek, wrap_dek
 from .db.users import owner_is_available as _owner_is_available
 
@@ -47,6 +52,24 @@ _SCRYPT_N = 2**14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
 _DKLEN = 32
+
+# Four scrypt operations use about 68 MB. Admission stays cancellable; after
+# admission the slot belongs to the computation until its worker finishes.
+_PASSWORD_CAPACITY = anyio.CapacityLimiter(4)
+# Only this helper borrows these worker tokens, so the default AnyIO pool
+# cannot add a second, cancellation-shielded queue after admission.
+_PASSWORD_WORKERS = anyio.CapacityLimiter(4)
+
+
+async def _password_work[T](function: Callable[..., T], *args: Any) -> T:
+    async with _PASSWORD_CAPACITY:
+        result = await complete_cleanup(anyio.to_thread.run_sync(
+            function, *args, limiter=_PASSWORD_WORKERS,
+        ))
+        # AnyIO cancellation may have stayed pending inside the shield. Do not
+        # spend a cancelled computation's result in an account transaction.
+        await anyio.lowlevel.checkpoint_if_cancelled()
+        return result
 
 # A signed-in browser holds this in localStorage and is not asked to log in
 # again until it lapses. Thirty days is the "remember me" window: long enough
@@ -240,7 +263,9 @@ class UserManager:
         # write transaction that decides which competing first account wins.
         async with self.db.transaction(write=False) as tx:
             await require_empty(tx)
-        prepared = self.prepare_user(username=username, password=password, is_admin=True)
+        prepared = await _password_work(partial(
+            self.prepare_user, username=username, password=password, is_admin=True,
+        ))
         async with self.db.transaction(write=True) as tx:
             await require_empty(tx)
             user = await self.db._create_account(tx, **prepared)
@@ -265,7 +290,9 @@ class UserManager:
     async def create_user(
         self, *, username: str, password: str, is_admin: bool = False
     ) -> dict[str, Any]:
-        prepared = self.prepare_user(username=username, password=password, is_admin=is_admin)
+        prepared = await _password_work(partial(
+            self.prepare_user, username=username, password=password, is_admin=is_admin,
+        ))
         if await self.db.get_user_by_username(prepared["username"]) is not None:
             raise UserError("That username is taken", status_code=409)
         return await self._insert(prepared)
@@ -303,9 +330,9 @@ class UserManager:
         """
         user = await self.db.get_user_by_username(normalize_username(username))
         if user is None:
-            verify_password(password, _DUMMY_HASH)
+            await _password_work(verify_password, password, _DUMMY_HASH)
             raise UserError("Wrong username or password", status_code=401)
-        if not verify_password(password, user["password_hash"]):
+        if not await _password_work(verify_password, password, user["password_hash"]):
             raise UserError("Wrong username or password", status_code=401)
         if user["disabled_at"]:
             raise UserError("This account is disabled", status_code=403)
@@ -343,8 +370,9 @@ class UserManager:
         if user is None:
             raise UserError("No such user", status_code=404)
         validate_password(password, username=user["username"])
+        password_hash = await _password_work(hash_password, password)
         revoked = await self.db.change_password(
-            user_id, hash_password(password), at=_now(), keep=keep_token_hash
+            user_id, password_hash, at=_now(), keep=keep_token_hash
         )
         if revoked is None:
             raise UserError("No such user", status_code=404)
@@ -359,8 +387,9 @@ class UserManager:
         exclusion below only spares a bearer; it never clears a revocation.
         """
         validate_password(password, username=verified_user["username"])
+        password_hash = await _password_work(hash_password, password)
         revoked = await self.db.change_password(
-            verified_user["id"], hash_password(password), at=_now(), keep=keep_token_hash,
+            verified_user["id"], password_hash, at=_now(), keep=keep_token_hash,
             expected_password_hash=verified_user["password_hash"],
         )
         if revoked is None:
@@ -476,7 +505,9 @@ class UserManager:
         if invite["used_count"] >= invite["max_uses"]:
             raise UserError("That invite code has been used", status_code=403)
 
-        prepared = self.prepare_user(username=username, password=password, is_admin=False)
+        prepared = await _password_work(partial(
+            self.prepare_user, username=username, password=password, is_admin=False,
+        ))
         if await self.db.get_user_by_username(prepared["username"]) is not None:
             raise UserError("That username is taken", status_code=409)
 

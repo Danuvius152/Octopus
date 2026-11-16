@@ -34,7 +34,7 @@
 | 应用、构建或后端进程 | [应用](implemented/applications.md)、[应用后端](implemented/application-backends.md#6-lifecycle) | 改 App 对话读[Agent 访问](implemented/app-agent-access.md) |
 | 普通 Wiki 查询 | 当前 query 指南与工具（按任务 load_guide） | 开发引擎才读[Wiki 工程导航](implemented/wiki-development-summary.md)；可信工作要求见[知识请求](implemented/knowledge-requests.md) |
 | 前端列表、会话或卡片 | [前端任务导航](implemented/frontend-list-reconciliation.md) | 改可见性读[置顶](implemented/sidebar-pins.md)，移动布局读[手机端](implemented/mobile.md) |
-| 日常验证或文档修改 | [快速检查](testing.md#fast-checks-during-development)、[主题入口](testing.md#topic-regression-entry-points)、[隔离](testing.md#markers-providers-and-isolation) | 提交/发布才读[相应矩阵](testing.md#release-and-documentation-checks)；文档改动核对实际改变的源码事实 |
+| 日常验证或文档修改 | [快速检查](testing.md#fast-checks-during-development)、[主题入口](testing.md#topic-regression-entry-points) | 浏览器夹具读[资源与执行](testing.md#browser-ownership-and-execution)；提交读[门禁与 hook 复用](testing.md#full-checks-before-code-commits)，发布读[矩阵](testing.md#release-and-documentation-checks) |
 | 发布已验证版本 | [自动发布完整操作](local-wsl.md#自动发布) | 环境失效才读[重建](local-wsl.md#环境重建)，手机故障读[公网入口](local-wsl.md#手机公网入口) |
 
 ## 使用与配置指南

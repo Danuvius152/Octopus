@@ -116,18 +116,27 @@ class WikiCuration:
                         links.append(ref)
                         introduced[selection] -= 1
             parent = Path(path).parent.as_posix()
+            targets = resolver.TargetDocuments(db)
+            target_bodies = {}
             for reference in links:
-                resolved = resolver.resolve(db, reference, parent, source_doc=overlay["id"], overlay=overlay, check_anchor=False)
+                resolved = resolver.resolve(db, reference, parent, source_doc=overlay["id"], overlay=overlay, check_anchor=False, documents=targets)
                 if resolved.status == "resolved":
                     target_text = text
+                    target_parse = parsed
                     if resolved.target != overlay["id"]:
-                        target = db.execute("SELECT path FROM documents WHERE id=?", (resolved.target,)).fetchone()
+                        target = targets.document(resolved.target)
                         file = self.store.path(target["path"])
                         if not file.is_file():
                             raise WikiError(f"New local link target disappeared: {reference.raw_resource}", 409)
                         if reference.fragment:
-                            target_text = read_document_bytes(file, label=target["path"]).decode("utf-8-sig")
-                    if reference.fragment and not anchor_exists(target_text, reference.fragment, parsed=parsed if resolved.target == overlay["id"] else None):
+                            # Validation proves the current original, rather than
+                            # substituting the catalog's extracted body. Both
+                            # body and parse belong only to this validation.
+                            if resolved.target not in target_bodies:
+                                body = read_document_bytes(file, label=target["path"]).decode("utf-8-sig")
+                                target_bodies[resolved.target] = body, format.parse(body)
+                            target_text, target_parse = target_bodies[resolved.target]
+                    if reference.fragment and not anchor_exists(target_text, reference.fragment, parsed=target_parse):
                         raise WikiError(f"New local anchor does not exist: {reference.raw_resource}", 422)
                     continue
                 relative = os.path.normpath(os.path.join(parent, reference.value)).replace(os.sep, "/")

@@ -77,7 +77,7 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
                          "reason_code='steer_delivery_unknown',delivery_state='unknown'")
     await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (10,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (11,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []
         original_rows = reader.execute("SELECT * FROM sessions").fetchall()
         original_messages = reader.execute("SELECT * FROM messages").fetchall()
@@ -107,10 +107,52 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
             ("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "PRAGMA USER_VERSION="),
         )]
         with closing(sqlite3.connect(path)) as reader:
-            assert reader.execute("PRAGMA user_version").fetchone() == (10,)
+            assert reader.execute("PRAGMA user_version").fetchone() == (11,)
             assert reader.execute("SELECT * FROM sessions").fetchall() == original_rows
             assert reader.execute("SELECT * FROM messages").fetchall() == original_messages
             assert reader.execute("SELECT * FROM agents").fetchall() == original_agents
+
+
+async def test_message_history_keeps_unique_sequences_and_both_range_directions(tmp_path):
+    database = Database(":memory:")
+    await database.initialize()
+    try:
+        owner, _ = await create_account(database, extra_roots=[tmp_path])
+        foreign, _ = await create_account(database, username="foreign-account", extra_roots=[tmp_path])
+        for identity, account in (("original", owner), ("foreign", foreign)):
+            await database.save_session(identity, identity, str(tmp_path), "time", user_id=account["id"])
+        for seq in [-9, -2, 0, 4, 17, 100]:
+            await database.append_message("original", seq, "user", "text", f"Original {seq}")
+        await database.append_message("foreign", 4, "user", "text", "Foreign body")
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.append_message("original", 4, "user", "text", "Duplicate must not replace original")
+
+        statements = []
+        await database.conn.set_trace_callback(statements.append)
+        pages = [
+            await database.load_messages("original", limit=2, max_seq=4, newest_first=True),
+            await database.load_messages("original", limit=2, max_seq=-1, newest_first=True),
+            await database.load_messages("original", limit=2, offset=1, max_seq=4),
+            await database.load_messages("original"),
+        ]
+        await database.conn.set_trace_callback(None)
+        assert [[row["seq"] for row in page] for page in pages] == [
+            [0, 4], [-9, -2], [-2, 0], [-9, -2, 0, 4, 17, 100],
+        ]
+        assert pages[0][-1]["content"] == "Original 4"
+        reads = [sql for sql in statements if sql.startswith("SELECT ") and "FROM messages WHERE session_id" in sql]
+        assert len(reads) == 4
+        async with database.transaction(write=False) as tx:
+            assert await tx.fetch_one("PRAGMA user_version") == (11,)
+            indexes = {row[1] for row in await tx.fetch_all("PRAGMA index_list(messages)")}
+            assert "idx_messages_session" not in indexes
+            assert "messages_unique_sequence" in indexes
+            for sql in reads:
+                plan = " ".join(row[3] for row in await tx.fetch_all("EXPLAIN QUERY PLAN " + sql))
+                assert "messages_unique_sequence" in plan
+                assert "SCAN messages" not in plan and "TEMP B-TREE" not in plan
+    finally:
+        await database.close()
 
 
 @pytest.mark.parametrize("entry", ["database", "service"])
@@ -150,13 +192,13 @@ os._exit(0)
         assert path.read_bytes() == main_bytes
     elif damage != "unmarked":
         with closing(sqlite3.connect(path)) as writer:
-            writer.execute(f"PRAGMA user_version={999 if damage == 'future_version' else 3}")
+            writer.execute(f"PRAGMA user_version={999 if damage == 'future_version' else 10}")
             writer.commit()
     original = path.read_bytes()
     wal = Path(str(path) + "-wal")
     original_wal = wal.read_bytes() if wal.exists() else None
     if damage == "future_version_wal":
-        assert int.from_bytes(original[60:64], "big") == 10
+        assert int.from_bytes(original[60:64], "big") == 11
         assert original_wal is not None and len(original_wal) > 32
     directories = {child.relative_to(tmp_path) for child in tmp_path.rglob("*") if child.is_dir()}
     refuse_start(configuration, entry, tmp_path, cause="UnsupportedMainStorage")
@@ -231,12 +273,12 @@ asyncio.run(main())
     assert proof.read_text() == failure
     with closing(sqlite3.connect(path)) as reader:
         committed = failure == "commit_ack"
-        assert reader.execute("PRAGMA user_version").fetchone() == (10 if committed else 0,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (11 if committed else 0,)
         tables = {row[0] for row in reader.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         assert bool(tables) == committed
     reopened = Database(str(path))
     await reopened.initialize()
     await reopened.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (10,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (11,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []

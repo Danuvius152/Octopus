@@ -91,6 +91,16 @@ HTTP 409 on historical lookup, without borrowing other text. A valid empty
 selection returns an empty reply. Live ask/SSE retains attempt resets and requires
 delivered notifications. Legacy records cannot prove every lost body row.
 
+Conversation refresh groups saved rows by their runtime request ID and a
+dictionary-valued attempt context's request ID in one pass. Different IDs may
+associate the same row with both requests; equal IDs contribute it once, in
+original order. Null, string or array attempt context remains opaque tool input
+and cannot break a valid runtime association. The common committed-result
+selector still owns native final references; grouping avoids rescanning the
+whole conversation for every request and adds no persistent answer cache.
+`tests/test_app_agent.py` checks the public history path, constant full-history
+passes, dual-ID association and opaque input compatibility.
+
 Without a saved outcome, `running` and `queued` require the original live,
 nonfailed Owner and its current execution or queue entry. A retained App turn or
 run request can still hold capacity during cleanup but cannot establish running.

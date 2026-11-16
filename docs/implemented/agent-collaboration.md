@@ -130,14 +130,9 @@ The split is reflected in `SessionManager`:
 `_AUTO_ARCHIVE_ELIGIBLE` includes `"delegation"` for explicit
 post-terminal archival (declared in [session base](../../server/sessions/base.py)).
 
-There is a current setup exception to the cleanup contract: initial prompt
-composition happens after the round/responsibility commit but before child input
-admission. Reference-path resolution catches `OSError`, not the `RuntimeError`
-raised by a symlink loop on Python 3.12. That failure can leave a `running` empty
-round and drain responsibility although the child never started
-(see [round commit before prompt composition](../../server/delegations.py#L751-L775)
-and [reference-path resolution](../../server/delegations.py#L1275-L1302)).
 A persisted running round alone must not be read as proof of child execution.
+It can precede input admission, whose confirmed refusal and unknown outcome
+follow the [invocation rules](#1-invocation-and-identity).
 
 ### 5.3 Reply delivery: the original request completion
 

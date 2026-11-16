@@ -42,7 +42,7 @@ function mockFetch(payload: unknown, ok = true, status = 200) {
   } as Response);
 }
 
-it("keeps native execution phases and provider snapshots distinct from response speed", async () => {
+it("shows daily metrics without native phase and counter diagnostics", async () => {
   vi.stubGlobal("fetch", mockFetch(overview({
     codex_runs: [{ request_id: "native-request", input_state: "accepted", resource_state: "proven",
       preparation_ms: 120, root_active_ms: 2000, retirement_ms: 5000, metrics_unavailable: 1 }],
@@ -51,15 +51,16 @@ it("keeps native execution phases and provider snapshots distinct from response 
     codex_retirement: [{ request_id: "native-request", phase: "graceful_exit", grace_ms: 2000, elapsed_ms: 15 }],
   })));
   render(<MonitorPage />);
-  await waitFor(() => expect(screen.getAllByText("native-request").length).toBeGreaterThan(0));
-  expect(screen.getByText("Native execution phases")).toBeTruthy();
-  expect(screen.getByText("Provider cumulative snapshots")).toBeTruthy();
-  expect(screen.getByText("retirement")).toBeTruthy();
-  expect(screen.getByText("5.0s")).toBeTruthy();
-  expect(screen.getByText(/Snapshots are not added/)).toBeTruthy();
-  expect(screen.getByText(/Retirement measures resource cleanup/)).toBeTruthy();
-  expect(screen.getByText("Retirement grace phases")).toBeTruthy();
-  expect(screen.getByText("graceful_exit")).toBeTruthy();
+  await waitFor(() => expect(screen.getByText(/12 turns/)).toBeTruthy());
+  for (const title of ["Native execution phases", "Native counters and input timing",
+    "Provider cumulative snapshots", "Steer acceptance timing", "Owner budget clocks",
+    "Retirement grace phases"]) {
+    expect(screen.queryByText(title)).toBeNull();
+  }
+  expect(screen.queryByText("native-request")).toBeNull();
+  expect(screen.getByText("Recent Codex turns")).toBeTruthy();
+  expect(screen.getByText("Connector logical resource requests")).toBeTruthy();
+  expect(screen.getByText("resources")).toBeTruthy();
 });
 
 beforeEach(() => {
@@ -132,9 +133,13 @@ describe("MonitorPage", () => {
       mockFetch(overview({ counts: [], turns: [], errors: [], resources: [] }))
     );
     render(<MonitorPage />);
-    await waitFor(() =>
-      expect(screen.getAllByText(/Nothing recorded in this window/).length).toBe(12)
-    );
+    await waitFor(() => expect(screen.getByText("resources")).toBeTruthy());
+    for (const title of ["Codex effective output TPS",
+      "Recent logical requests (up to 20, within window)", "Connector logical resource requests",
+      "event samples", "turns", "top error event samples", "resources"]) {
+      const section = screen.getByText(title).closest("section")!;
+      expect(within(section).getByText(/Nothing recorded in this window/)).toBeTruthy();
+    }
   });
 
   it("explains a 503 instead of showing an error", async () => {
@@ -204,4 +209,47 @@ it("polls every five seconds only while visible and resumes on focus", async () 
   visibility = "visible";
   await act(async () => { fireEvent(document, new Event("visibilitychange")); });
   expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it("keeps refreshes serial while a visible request is pending", async () => {
+  vi.useFakeTimers();
+  let finish!: (response: Response) => void;
+  const fetcher = vi.fn().mockImplementation(() => new Promise<Response>((resolve) => { finish = resolve; }));
+  vi.stubGlobal("fetch", fetcher);
+  render(<MonitorPage />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await act(async () => { finish({ ok: true, json: async () => overview() } as Response); });
+  expect(screen.getByText(/12 turns/)).toBeTruthy();
+});
+
+it("reports refresh failure while keeping the last measured data", async () => {
+  const fetcher = mockFetch(overview());
+  vi.stubGlobal("fetch", fetcher);
+  render(<MonitorPage />);
+  await waitFor(() => expect(screen.getByText(/12 turns/)).toBeTruthy());
+  fetcher.mockRejectedValueOnce(new Error("Monitor unavailable"));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await waitFor(() => expect(screen.getByText("Monitor unavailable")).toBeTruthy());
+  expect(screen.getByText(/12 turns/)).toBeTruthy();
+});
+
+it("isolates data and errors across window and token changes", async () => {
+  const pending: Array<(response: Response) => void> = [];
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(() => new Promise<Response>((resolve) => pending.push(resolve))));
+  render(<MonitorPage />);
+  fireEvent.click(screen.getByRole("button", { name: "7d" }));
+  await act(async () => {
+    pending[1]({ ok: false, status: 500, json: async () => ({ detail: "7d failed" }) } as Response);
+  });
+  expect(screen.getByText("7d failed")).toBeTruthy();
+  act(() => { useSessionStore.setState({ token: "new-token" }); });
+  expect(screen.queryByText("7d failed")).toBeNull();
+  await act(async () => {
+    pending[2]({ ok: true, json: async () => overview({ counts: [{ kind: "turn", n: 99 }] }) } as Response);
+    pending[0]({ ok: true, json: async () => overview() } as Response);
+  });
+  expect(screen.getByText(/99 turns/)).toBeTruthy();
+  expect(screen.queryByText(/12 turns/)).toBeNull();
 });

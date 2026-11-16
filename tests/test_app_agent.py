@@ -313,6 +313,99 @@ async def test_transcript_comes_back_for_a_reload(aam, am, db, turns, mgr):
     assert [m["text"] for m in detail["messages"]] == [turns.reply]
 
 
+async def test_history_request_association_scans_stay_constant_and_preserve_committed_selection(aam, am, db, mgr, turns, tmp_path, monkeypatch):
+    app_row = await _make_app(am, db)
+    scan_counts = []
+    group_seqs = {}
+    original_load = db.load_messages
+    original_result = app_agent_mod.committed_result
+
+    class CountedRows(list):
+        scans = 0
+
+        def __iter__(self):
+            self.scans += 1
+            return super().__iter__()
+
+    async def counted_load(session_id):
+        rows = CountedRows(await original_load(session_id))
+        scan_counts.append(rows)
+        return rows
+
+    def counted_result(input_request_id, request_id, rows):
+        group_seqs[request_id] = [row["seq"] for row in rows]
+        return original_result(input_request_id, request_id, rows)
+
+    monkeypatch.setattr(db, "load_messages", counted_load)
+    monkeypatch.setattr(app_agent_mod, "committed_result", counted_result)
+    for count in (1, 16):
+        group_seqs.clear()
+        session = await mgr.create_session(app_row["agent_id"], "History", str(tmp_path), origin=ORIGIN_APP, app_id=app_row["id"])
+        expected = []
+        for index in range(count):
+            request = f"request-{index}"
+            associated_request = request if index % 3 == 0 else f"request-{index - 1}" if index % 3 == 1 else "legacy-only"
+            for offset, attempt in enumerate(("old", "final")):
+                await db.append_message(session_id=session.id, seq=index * 3 + offset, role="assistant", type="text",
+                    content=f"{attempt} answer {index}", runtime_metadata={"request_id": request, "attempt_id": attempt, "native": {
+                        "thread_id": "root", "root_thread_id": "root", "turn_id": request, "root_turn_id": request,
+                        "item_id": f"item-{offset}", "phase": "final_answer"}},
+                    tool_input={"attempt_context": {"request_id": associated_request, "attempt_id": attempt}})
+            empty = index % 3 == 0
+            await db.record_terminal(session_id=session.id, seq=index * 3 + 2, role="system", type="result", request_id=request,
+                content={"kind": "outcome", "request_id": request, "status": "success", "final_answer": {
+                    "thread_id": "root", "turn_id": request, "message_seqs": [] if empty else [index * 3 + 1]}},
+                tool_input={"attempt_context": {"request_id": request, "attempt_id": "final"}}, created_at="time")
+            if not empty:
+                expected.append({"role": "assistant", "text": f"final answer {index}", "seq": index * 3 + 1})
+        # This association is not native; broadening the validation set would
+        # reject it. It also exercises different association IDs on one row.
+        await db.append_message(session_id=session.id, seq=count * 3, role="system", type="result", content="not a native outcome",
+                                tool_input={"attempt_context": {"request_id": "legacy-only"}})
+        detail = await aam.get_conversation(app_row["id"], session.id)
+        assert detail["messages"] == expected
+        assert set(group_seqs) == {f"request-{index}" for index in range(count)}
+        assert all(len(seqs) == len(set(seqs)) and seqs == sorted(seqs) for seqs in group_seqs.values())
+        if count == 16:
+            assert group_seqs["request-0"] == [0, 1, 2, 3, 4]
+            assert group_seqs["request-1"] == [3, 4, 5]
+    assert scan_counts[0].scans == scan_counts[1].scans
+
+
+@pytest.mark.parametrize("attempt_context", [None, "tool-supplied value", ["tool-supplied value"]])
+async def test_conversation_history_accepts_opaque_tool_attempt_context(aam, am, db, mgr, turns, tmp_path, attempt_context):
+    app_row = await _make_app(am, db)
+    session = await mgr.create_session(app_row["agent_id"], "Tool history", str(tmp_path), origin=ORIGIN_APP, app_id=app_row["id"])
+    await db.append_message(session_id=session.id, seq=0, role="assistant", type="text", content="Recorded answer",
+        runtime_metadata={"request_id": "native", "attempt_id": "final", "native": {
+            "thread_id": "root", "root_thread_id": "root", "turn_id": "turn", "root_turn_id": "turn", "item_id": "answer", "phase": "final_answer"}})
+    await db.append_message(session_id=session.id, seq=1, role="assistant", type="tool_use", content="Tool call",
+        runtime_metadata={"request_id": "native", "attempt_id": "final"}, tool_input={"attempt_context": attempt_context})
+    await db.record_terminal(session_id=session.id, seq=2, role="system", type="result", request_id="native", created_at="time",
+        content={"kind": "outcome", "request_id": "native", "status": "success", "final_answer": {
+            "thread_id": "root", "turn_id": "turn", "message_seqs": [0]}},
+        tool_input={"attempt_context": {"request_id": "native", "attempt_id": "final"}})
+    detail = await aam.get_conversation(app_row["id"], session.id)
+    assert detail["messages"] == [{"role": "assistant", "text": "Recorded answer", "seq": 0}]
+
+
+@pytest.mark.parametrize("invalid", ["missing", "duplicate", "other_attempt"])
+async def test_conversation_history_rejects_invalid_committed_native_answers(aam, am, db, mgr, turns, tmp_path, invalid):
+    app_row = await _make_app(am, db)
+    session = await mgr.create_session(app_row["agent_id"], "Invalid history", str(tmp_path), origin=ORIGIN_APP, app_id=app_row["id"])
+    await db.append_message(session_id=session.id, seq=0, role="assistant", type="text", content="Must not substitute this text",
+        runtime_metadata={"request_id": "native", "attempt_id": "other" if invalid == "other_attempt" else "final", "native": {
+            "thread_id": "root", "root_thread_id": "root", "turn_id": "turn", "root_turn_id": "turn", "item_id": "answer", "phase": "final_answer"}},
+        tool_input={"attempt_context": {"request_id": "native", "attempt_id": "final"}})
+    await db.record_terminal(session_id=session.id, seq=1, role="system", type="result", request_id="native", created_at="time",
+        content={"kind": "outcome", "request_id": "native", "status": "success", "final_answer": {
+            "thread_id": "root", "turn_id": "turn", "message_seqs": {"missing": [999], "duplicate": [0, 0], "other_attempt": [0]}[invalid]}},
+        tool_input={"attempt_context": {"request_id": "native", "attempt_id": "final"}})
+    with pytest.raises(AppAgentError, match="answer_reference_invalid") as error:
+        await aam.get_conversation(app_row["id"], session.id)
+    assert error.value.status_code == 409
+
+
 @pytest.mark.asyncio
 async def test_deleting_a_conversation_and_deleting_the_app(aam, am, db, turns):
     row = await _make_app(am, db)

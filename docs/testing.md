@@ -86,14 +86,17 @@ for each case. Content reads that supply authorization evidence remain real
 reads. Use the named `short_process_shutdown` fixture only where the default
 process-exit grace period is outside the tested contract; signals and joins stay real.
 
-Before starting a check, inspect existing results and running checks. Give each
-check one executor across agents; reuse successful evidence while its code,
-configuration, dependencies and environment remain unchanged. Rerun only the
-invalidated checks or a concrete new failure hypothesis, and state that reason.
-Reuse installed dependencies, browser binaries and download caches; provision
-them once per required version, while keeping mutable test state isolated.
-Confirm that commands actually produced their expected test summary or build
-artifacts; exit zero or a help screen alone is not passing evidence.
+Before starting a check, inspect existing results and running checks. Use one
+executor per check. Keep command, scope, source version, result and log location
+in the task's existing acceptance record; reviewers and delivery reuse it.
+Successful evidence remains valid while its code, configuration, dependencies
+and environment are unchanged. State which change or concrete failure hypothesis
+requires a rerun. Read the actual test summary or build artifacts.
+
+Reuse installed tools, browser binaries and caches. Provision a missing required
+version once; isolate mutable state rather than reinstalling dependencies.
+During final validation keep the source fixed, especially while Vite watches it:
+an edit can reload the browser and discard its in-memory selection.
 
 When a full run fails only in obsolete test-specific fixtures and product code
 and shared fixtures are unchanged, update those fixtures and run the complete
@@ -112,104 +115,68 @@ When responsibilities move, move their rejection and recovery coverage with them
 Temporary acceptance tests explicitly designated for removal leave their
 decision and validation evidence, not a permanent default-suite cost.
 
-Offline browser specs import `test` from `web/e2e/test.ts`. Their HTTP requests
-stay on loopback servers or explicit local mocks; remote fonts, images, scripts
-and other incidental assets are blocked. Bundle application assets locally.
-Provider/network integration uses the explicit live tier and its focused cases.
-Tag the model-dependent case, rather than a mixed UI/model suite, with `@llm`.
-[`web/tests/e2eSelection.test.ts`](../web/tests/e2eSelection.test.ts) collects the
-actual Playwright specs in both modes without starting servers: UI-only cases
-remain offline, while Chat, schedule and native-provider cases keep their live
-selection. All E2E files are checked by `tsconfig.e2e.json` through the ordinary
-`bun run typecheck` and build commands.
+### Browser ownership and execution
 
-The shared fixture provisions a real account for each ordinary test attempt,
-including repeats and rebuilt workers. `current-account.ts` exposes that
-attempt's bearer at call time; do not capture it at module import. The account
-creation receipt grants cleanup authority over its namespace, including
-server-created successors whose creation response was lost. Locate individual
-resources by their returned IDs; display names do not establish ownership.
-Fixture teardown checks inventories and mutations, attaches cleanup failures
-and fails the test without discarding its original error. Archived sessions
-are already retired and have no public DELETE operation; they remain in the
-isolated runtime until that run ends. This does not require deleting test
-accounts or guaranteeing an empty cache after interruption.
+Import offline specs from [`web/e2e/test.ts`](../web/e2e/test.ts). Requests stay
+on loopback or explicit local mocks; bundle assets locally. Mark individual
+model-dependent cases `@llm`. The [selection check](../web/tests/e2eSelection.test.ts)
+collects real specs without servers; ordinary typecheck covers `tsconfig.e2e.json`.
 
-The runner first collects the actual Playwright selection, preserving native
-project names, multiple selections, wildcard matching and unmatched-selection
-errors. It intersects that selection with the isolation phases; each child
-receives one exact project. Ordinary `chromium` cases retain worker parallelism.
-The `installation` phase runs alone with one worker for installation-wide
-OAuth/custom-connector configuration, the agent-memory mutation guard and the
-offline Wiki fixture's shared worker. Account-local pin order still belongs to
-each attempt's account. Connector teardown restores the phase's initially empty
-configuration and checks the real API responses. Repeated cases reuse this
-phase's backend and Vite server rather than restarting services for each repeat.
-See [the project scopes](../web/playwright.config.ts) and
-[selection regressions](../web/tests/e2eOwnership.test.ts).
+Each ordinary attempt, repeat or rebuilt worker receives a real isolated
+account. Read its bearer at call time through `current-account.ts`. Creation
+receipts and returned IDs grant cleanup authority, including account-local
+successors with lost responses; names do not. Teardown checks inventories and
+mutations, retaining both body and cleanup errors. Archived sessions stay in
+the isolated runtime: their public DELETE is unavailable. Test accounts need
+no product deletion feature, and cache residue is acceptable.
 
-`bun run test:e2e:ui` retains Playwright's native interactive entry, including
-`--ui-host` and `--ui-port`. Internal collection does not launch UI. The runner
-opens each selected phase in order; its UI exposes only that phase's project
-and scope, and closes its resources before the next phase. Choose cases and
-reruns inside that UI; an empty first-account story needs native Cleanup/Setup
-before rerunning. UI mode opens each selected phase once rather than applying
-batch repeat counts to UI windows. Each Setup cycle must have a complete
-offline guard/readiness audit, and a swallowed refusal still fails. Closing UI
-before Setup explicitly reports that no test execution was audited; it is not
-a passing batch-suite result. [UI protocol tests](../web/tests/e2eUI.test.ts)
-exercise the installed CLI and the actual package entry without launching a GUI.
+The [runner](../web/e2e/run.ts) uses native Playwright collection to preserve
+project/grep selection and unmatched-selection errors, then executes only the
+selected [scopes](../web/playwright.config.ts), one exact project per child:
 
-Only actually selected first-account stories prepare an empty accounts backend
-and its Vite proxy, with a fresh pair per story repetition. Those runs do not
-start the ordinary backend; other phases do not start the accounts pair. Mutable
-state and provider output stay under `~/.cache/octopus-tests`; installed tools,
-browser binaries, dependency optimizer and download caches are reused. Normal
-teardown closes owned resources and removes its own runtime after Playwright
-stops the servers. Cache residue is not a test failure. Keep the watched source
-tree fixed during browser execution: a source edit can reload an open Vite page
-and retire its in-memory selection.
+| Phase | Preparation and ownership |
+| --- | --- |
+| Ordinary `chromium` | Parallel workers; one backend/Vite pair for all repeats. |
+| Main `installation` | One worker and one reused service pair for global connector configuration, memory guards and the Wiki worker. Connector teardown checks restoration of the initially empty configuration; pin order remains account-local. |
+| Empty accounts installation | Only selected first-account stories; a fresh accounts pair per batch repetition, without ordinary services. |
 
-Ownership regressions use same-name resources in distinct real accounts,
-simultaneous account-local pin-order writes, and an injected cleanup HTTP error.
-The archive-management case retains direct archived-history navigation and
-forces first-generation/list-confirmation overlap; it exercises the existing
-[original-operation confirmation](implemented/frontend-list-reconciliation.md#归档恢复的原操作确认)
-without replaying its POST. The frontend ESLint configuration restricts
-production `randomUUID` property access to `newSubmissionId` in
-`src/lib/submission.ts`, with explicit test/support exceptions. Its
-[real-configuration probes](../web/tests/secureIdLint.test.ts) reject direct,
-aliased, computed-property and destructured access while allowing helper calls;
-the secure randomness and local capability-error behavior remain covered by
-the helper and HTTP submission regressions.
+`test:e2e:ui` retains native UI/host/port options, opening each selected phase
+once and exposing only its project/scope. Internal collection stays headless;
+closing one phase releases its services before the next. Native UI handles
+reruns; use Cleanup/Setup to reset an empty accounts story. Every Setup cycle
+needs a complete offline guard/readiness audit, including swallowed refusals.
+Closing before Setup reports no audited execution. The
+[UI protocol checks](../web/tests/e2eUI.test.ts) stop at the GUI execution boundary.
+
+Mutable state and provider output use `~/.cache/octopus-tests`; normal teardown
+stops services and removes its own runtime. Account cleanup errors still fail;
+residual cache directories do not. Local environment setup belongs to
+[the WSL guide](local-wsl.md#离线目录与浏览器).
 
 ## Full checks before code commits
 
-At the code commit boundary, complete the check set in `./scripts/check.sh`:
-the Python dependency-pins and installed-hook checks, test-support import check,
-full hermetic backend suite, backend/frontend lint and types, frontend unit
-tests, generated contracts and the docs index check. Use the script for a
-combined run, or use the pre-commit hook for its gates and run the remaining
-checks separately. See [Test Coverage](#test-coverage) for individual commands.
+Complete the check set defined in [`scripts/check.sh`](../scripts/check.sh)
+before committing code. Choose one executor: a combined script run, or the
+hook plus checks it does not cover. Reuse successful results under the policy
+above; a commit does not itself invalidate them.
+
+When applicable hook commands already have valid passing evidence, exclude
+only those commands for that commit with
+`LEFTHOOK_EXCLUDE=<comma-separated-command-names> git commit ...`.
+Take names from [`lefthook.yml`](../lefthook.yml) and record their evidence in
+the existing acceptance record. Leave uncovered commands enabled and complete
+all required gates; excluding duplicate execution does not waive a gate.
 
 Install Git hooks with `./scripts/setup-hooks.sh`; `--check` verifies installation
 without changing it. Hooks source `scripts/toolchain-env.sh` so noninteractive Git
 can resolve the local JS toolchain. Missing or stale hooks fail the full gate.
 Python edits under `scripts/` also trigger backend lint, tests and import checks.
 
-The pins gate checks the declared runtime + `test` + `dev` dependency closure
-against `constraints-python.txt`, including the recorded Python/platform.
-Install verification tools with `.[test,dev]`; a runtime-only installation uses
-`.` and need not contain Ruff, mypy, pytest or the verifier's `packaging` parser.
-Run the verifier from the verification environment and pass the actual service
-interpreter with `--python`. Rebuild and constraint-update commands belong to
-[the local environment guide](local-wsl.md#环境重建).
-
-Mypy checks `arg-type`, `union-attr` and `misc` without global suppression;
-local exceptions explain the HTMLParser Final override and ZipExtFile IO stub.
-Preserve lifecycle-specific handling of optional database bindings. Configured
-untyped-body and missing-import exclusions mean passing is not whole-repository
-strict typing.
+The pins gate checks runtime + `test` + `dev` against `constraints-python.txt`,
+including Python/platform. Runtime-only installations need not contain test
+tools: run the verifier from the verification environment with `--python`
+pointing to the actual service interpreter. Rebuilding dependencies belongs to
+[environment recovery](local-wsl.md#环境重建), not routine validation.
 
 The full backend gate uses four pytest-xdist workers grouped by file, with worker
 restart disabled. Focused development checks and live-provider checks stay serial;
@@ -230,9 +197,9 @@ when headings move), then run `.venv/bin/python scripts/gen-docs-index.py --chec
 for both generated indexes and `git diff --check`. Do not run product suites,
 builds, model calls or deployment for documentation-only changes.
 
-Complete the release checks during validation and reuse valid results. When the
-user says to release, proceed directly with [自动发布](local-wsl.md#自动发布);
-routine release preparation does not open another review or approval round.
+Finish the release matrix during validation. The delivery owner then commits,
+pushes and follows the linked publication procedure using the same evidence;
+routine preparation opens no additional review or approval round.
 
 ## Conditional automation work
 
@@ -266,6 +233,8 @@ boundaries to verification without maintaining a second per-file inventory.
 
 | Changed boundary | Contract | Representative checks |
 | --- | --- | --- |
+| E2E ownership and runner selection | [Browser ownership](#browser-ownership-and-execution) | `resource-isolation.spec.ts`, `e2eOwnership.test.ts`, `e2eExecution.test.ts`, `e2eUI.test.ts`: real account isolation, concurrent pin writes, visible cleanup errors and native selection. |
+| Secure browser IDs and archive recovery | [Original-operation confirmation](implemented/frontend-list-reconciliation.md#归档恢复的原操作确认), `web/eslint.config.js` | `secureIdLint.test.ts` checks the production `randomUUID` restriction and helper/test exceptions; helper tests retain secure randomness and local failure. Archive management retains direct archived navigation, first-generation overlap, original-ID confirmation and a single POST. |
 | Native start, delivery and recovery | [Codex](implemented/codex-backend.md), [input evidence](implemented/input-reliability.md#codex-native-input-evidence) | `test_codex_app_server_submission.py`, `test_codex_native_recovery.py` |
 | Context sample, native compact and busy selection | [Samples](implemented/model-reasoning.md#上下文样本与配置绑定), [compact Owner](implemented/input-reliability.md#native-compaction-requests), [Claude](implemented/harness-layer.md#claude-native-compaction) | `test_session_context.py`, `test_claude_context.py`, `test_codex_compact.py`, `test_claude_compact.py`, `test_queued_compact.py`, `context-meter.spec.ts`, `queued-compaction.spec.ts` |
 | Original request settlement and failure takeover | [Completion](implemented/input-reliability.md#原请求完成与失败交接) | `test_terminal_recording.py`, `test_session_owner_failure.py` |

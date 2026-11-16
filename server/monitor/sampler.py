@@ -16,8 +16,11 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 from pathlib import Path
 
+from ..config import settings
+from ..harness.run import _which_with_fallback
 from . import Sample, sample
 
 logger = logging.getLogger(__name__)
@@ -84,19 +87,31 @@ def _is_descendant(pid: str, ancestor: str, *, max_depth: int = 12) -> bool:
     return False
 
 
+def _memory_sample(metric: str, pss_kb: int | None) -> Sample:
+    # The metrics table requires a value. The label makes this placeholder
+    # explicitly unavailable, so queries cannot reuse an earlier reading.
+    return (Sample(metric, 0.0, labels={"available": False}) if pss_kb is None
+            else Sample(metric, round(pss_kb / 1024, 1)))
+
+
 def collect() -> list[Sample]:
     """One reading of every gauge. Pure apart from reading /proc and stat()."""
     out: list[Sample] = []
     own = str(os.getpid())
-    own_pss = _pss_kb(own)
-    if own_pss is not None:
-        out.append(Sample("server_pss_mb", round(own_pss / 1024, 1)))
+    out.append(_memory_sample("server_pss_mb", _pss_kb(own)))
 
     # Engine CLI subprocesses, and any MCP sidecars still around. After B1 the
     # sidecar count should be zero; sampling it is how that stays true rather
     # than being true once.
     engines = sidecars = 0
-    engine_pss = sidecar_pss = 0
+    engine_pss: int | None = 0
+    sidecar_pss: int | None = 0
+    configured = settings.codex_app_server_binary
+    configured_path = os.path.realpath(_which_with_fallback(configured) or configured)
+    codex_path = _which_with_fallback("codex")
+    codex_paths = {configured_path, *([os.path.realpath(codex_path)] if codex_path else [])}
+    claude_path = _which_with_fallback("claude")
+    claude_path = os.path.realpath(claude_path) if claude_path else None
     for entry in _PROC.iterdir():
         if not entry.name.isdigit():
             continue
@@ -109,18 +124,30 @@ def collect() -> list[Sample]:
         if len(argv) >= 3 and argv[1] == "-m" and argv[2].startswith("server.mcp_servers"):
             if _is_descendant(entry.name, own):
                 sidecars += 1
-                sidecar_pss += _pss_kb(entry.name) or 0
+                pss = _pss_kb(entry.name)
+                sidecar_pss = sidecar_pss + pss if sidecar_pss is not None and pss is not None else None
             continue
         base = argv[0].rsplit("/", 1)[-1]
-        if base in ("claude", "codex") and ("--print" in argv or "exec" in argv[1:3]):
+        # A shebang launch exposes the interpreter followed by the resolved
+        # script entry. Only that position can name a CLI; config/prompt text
+        # elsewhere is never executable identity.
+        script = len(argv) >= 3 and (base in {"node", "nodejs", "sh", "bash", "dash"}
+                                    or re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", base) is not None)
+        cli_entry = os.path.realpath(argv[1] if script else argv[0])
+        command_index = 2 if script else 1
+        command = argv[command_index] if len(argv) > command_index else None
+        codex = cli_entry in codex_paths or not script and base == "codex"
+        claude = cli_entry == claude_path or not script and base == "claude"
+        if (codex and command in ("app-server", "exec")) or (claude and command == "--print"):
             if _is_descendant(entry.name, own):
                 engines += 1
-                engine_pss += _pss_kb(entry.name) or 0
+                pss = _pss_kb(entry.name)
+                engine_pss = engine_pss + pss if engine_pss is not None and pss is not None else None
 
     out.append(Sample("engine_process_count", float(engines)))
-    out.append(Sample("engine_pss_mb", round(engine_pss / 1024, 1)))
+    out.append(_memory_sample("engine_pss_mb", engine_pss))
     out.append(Sample("mcp_sidecar_count", float(sidecars)))
-    out.append(Sample("mcp_sidecar_pss_mb", round(sidecar_pss / 1024, 1)))
+    out.append(_memory_sample("mcp_sidecar_pss_mb", sidecar_pss))
     return out
 
 

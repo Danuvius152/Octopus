@@ -407,7 +407,8 @@ def build_parser() -> argparse.ArgumentParser:
         "report",
         nargs="?",
         default="overview",
-        help="overview (default), turns, codex, codex_turns, errors, connectors, schedules, resources, http",
+        help=("overview (default), turns, codex, codex_turns, codex_runs, codex_retirement, "
+              "codex_native_usage, codex_steers, codex_anomalies, errors, connectors, schedules, resources, http"),
     )
     monitor_parser.add_argument(
         "--since",

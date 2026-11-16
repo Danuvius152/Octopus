@@ -79,6 +79,18 @@ Login throttling bounds guessing. Opaque tokens were chosen because
 revocation can be checked against the already-open SQLite authority without
 adding a JWT refresh/revocation subsystem.
 
+UserManager runs password derivation and known/dummy verification through one
+bounded worker entry, including setup, registration, user creation and both
+password-change entries. Four admission slots bound concurrent scrypt work;
+waiting for a slot is cancellable. An admitted computation retains its slot
+until the actual worker finishes, even if its waiter is cancelled. A separate
+worker limiter of equal capacity prevents an occupied default AnyIO pool from
+adding another protected queue. Cancellation is checked again before using a
+computed result in SQL. Costs, dummy verification and login throttling remain
+unchanged; no credential or authorization proof is cached by this helper.
+`tests/test_users.py` covers default-pool saturation, waiting/running cancellation,
+capacity release and password/enabled-state races with real derivation.
+
 `UserManager.login` verifies the password outside the write transaction, then
 the database inserts the session token only if the account still exists, is
 enabled and has the exact password hash observed by that verification. A password

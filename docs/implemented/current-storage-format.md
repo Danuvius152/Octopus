@@ -2,7 +2,7 @@
 
 > **Status:** implemented — 现行完整格式、发布期存量核验与有限转换；验证和生产部署分别取证。
 
-The main database uses format **10**, and Wiki uses format **17**. Each database
+The main database uses format **11**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -208,6 +208,58 @@ metadata owner and separate secret source. Reordering a declaration does not
 require editing a second positional map. These internal records do not widen
 public response schemas. Partial/aggregate queries retain their own projections;
 there is no global row factory or storage format change.
+
+Archived-session reads share one explicit column declaration and decoder. The
+collection filters account and archived status before joining messages, then
+aggregates physical message count and the next sequence floor in one query,
+retaining empty archives and original order without a silent row cap. Physical
+count is not DISTINCT seq: duplicate history remains detectable rather than
+being hidden by aggregation. Detail, info and restore select only the account's
+target instead of loading its archive collection; absent and foreign targets
+remain indistinguishable. Restore retains the original lifecycle locks,
+eligibility, reservation and publication boundaries. `tests/test_archive_reads.py`
+checks real public consumers, query growth, empty/gapped/duplicate histories and
+account isolation.
+
+## Message range index and finite 10→11 handoff
+
+Format 11 removes only the redundant nonunique `idx_messages_session` index.
+`messages_unique_sequence(session_id,seq)` retains uniqueness and serves both
+forward and reverse range reads, offsets and previous-page existence queries;
+terminal indexes remain. Existing rows, sequence allocation and saved evidence
+do not change. New databases create this complete declaration directly; startup
+and account import still refuse format 10.
+
+The finite publication helper admits the frozen complete format-10 catalog and
+one whole known canonical or observed physical column-order profile. Per-table
+mixtures, unknown objects/orders, invalid retained facts, broken foreign keys
+or integrity failures refuse admission. Read-only preflight takes a committed
+snapshot including WAL and verifies the conversion in memory without changing
+the source. After original-writer retirement, every offline reentry reloads the
+start mask before acquiring installation ownership. One `BEGIN IMMEDIATE`
+repeats admission, drops the redundant index and advances the marker, verifies
+the complete target, and compares streaming typed values, rowids, row counts
+and sequence state for every retained table before COMMIT.
+
+Confirmed rollback retains 10. Unknown COMMIT/ROLLBACK keeps business closed;
+fresh reentry under the same candidate and frozen inputs admits the actual
+committed 10 or verifies 11 without replaying conversion or resetting later
+writes. Other retained ledgers must also pass before start. Credential creation,
+rotation and cleanup require admitted storage, the bound actual process and
+readiness before opening a credential connection. A receipt-bearing offline
+resume does not create a token before admission; uncertain conversion preserves
+original credentials and recovery material. There is no independent ungated
+cleanup command in this publication path.
+
+Both known source profiles complete independent account export/import after
+conversion, preserving login, DEK, grants, Agent settings and Wiki originals,
+identity/history while retaining chat/token/foreign-account exclusions. Current
+database tests verify duplicate-seq refusal and plans of actual public range
+queries. Private finite fixtures cover process loss, committed WAL, rollback and
+lost acknowledgments; they and their frozen helper inputs retire after actual
+publication, acceptance and forward-recovery responsibilities close. This does
+not add a permanent old-format route or establish production acceptance from
+isolated tests. Operator steps remain in [local publication](../local-wsl.md#自动发布).
 
 ## Publication boundary
 

@@ -376,8 +376,7 @@ async def get_session_info(
     live = session_manager.get_session(session_id, user_id)
     if live is not None:
         return session_info(live)
-    archived = await session_manager.list_archived_sessions(user_id)
-    match = next((row for row in archived if row["id"] == session_id), None)
+    match = await session_manager.load_archived_session_info(session_id, user_id)
     if match is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     return match

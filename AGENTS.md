@@ -97,32 +97,28 @@ collection, exclusions, restoration and verification in the same change.
 
 ## Verification
 
-During implementation, start with the target regression and affected checks.
-Before a code commit, complete the gates in `scripts/check.sh`; before release,
-also complete this installation's offline E2E, live Codex pytest and Codex browser
-checks. Documentation-only changes need affected links, index and diff checks.
+Start with the target regression and affected checks. Before committing code,
+complete the gates in `scripts/check.sh`; before release, apply the
+[release matrix](docs/testing.md#release-and-documentation-checks).
+Documentation-only changes need links, index and diff checks.
 
-Give each check one executor. Reuse successful evidence while its code,
-configuration, dependencies and environment remain unchanged; investigate
-failures and rerun only invalidated checks or a concrete new failure hypothesis.
-Inspect the actual test summary or build output before claiming success.
+Give each check one executor and reuse valid results. The
+[verification policy](docs/testing.md#fast-checks-during-development) owns evidence
+reuse, failure follow-up and installation reuse; the
+[commit procedure](docs/testing.md#full-checks-before-code-commits) explains how
+existing evidence avoids duplicate hook execution. Inspect actual summaries.
 
 ### Test Coverage
 
-The authoritative suite commands, fixture rules, evidence-reuse conditions and
-release matrix are in [testing.md](docs/testing.md). Read the relevant sections
-before running checks; do not maintain a second test-count inventory.
+Read [testing.md](docs/testing.md) for suite commands and changed-boundary
+regressions; read [browser ownership](docs/testing.md#browser-ownership-and-execution)
+when changing E2E fixtures or selection. Keep counts in execution reports.
 
 ### Backend validation scope
 
-Offline correctness covers both Claude Code and Codex, including backend-specific
-protocol and simulated-process tests. Shared harness or session changes require
-the affected coverage for both backends; Claude's live-test exclusion does not
-exclude its offline tests. This installation's live validation scope remains
-Codex only; do not probe, install or authenticate Claude for routine checks.
-Keep persistent test state isolated and use the selected credentials without
-copying secrets or changing agent defaults. `knowledge_eval` and `wiki_perf`
-remain independently opt-in and outside default commit/release gates.
+Offline correctness covers Claude Code and Codex; this installation's live
+scope is Codex only. Follow [provider and isolation rules](docs/testing.md#markers-providers-and-isolation)
+and [local credential setup](docs/local-wsl.md#live-凭据与网络) for live checks.
 
 ## Common commands
 

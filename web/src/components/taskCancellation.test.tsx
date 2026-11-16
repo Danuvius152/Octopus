@@ -74,8 +74,8 @@ it.each(kinds)("%s suppresses duplicate clicks and keeps a newer terminal after 
 });
 
 for (const kind of kinds) {
-  it.each([[200, "unmount"], [503, "unmount"], [200, "identity"], [503, "identity"]] as const)(
-    `${kind} cancels an in-flight status read after %s / %s and rejects its late publication`, async (status, change) => {
+  it.each([[200, "unmount"], [503, "unmount"], [200, "selection"], [503, "selection"]] as const)(
+    `${kind} retires its control observation after %s / %s while retaining independent readers`, async (status, change) => {
       let refreshing = false;
       let reply!: (response: Response) => void;
       let signal: AbortSignal | undefined;
@@ -95,13 +95,17 @@ for (const kind of kinds) {
         if (change === "unmount") view.unmount();
         else useSessionStore.setState({ activeSessionId: "s2" });
       });
-      expect(signal?.aborted).toBe(true);
+      // Selection retires the control's view, but this test leaves the card
+      // mounted. Its independent exact-work demand still needs the shared GET.
+      // Unmount removes both demands and must abort the transport.
+      const shared = kind === "delegation" && change === "selection";
+      expect(signal?.aborted).toBe(!shared);
       const data = kind === "research" ? [{ ...research, status: "completed" }]
         : kind === "background" ? { ...background, status: "completed" } : [{ ...delegation, state: "completed" }];
       await act(async () => reply(status === 200 ? Response.json(data) : new Response("Old read failed", { status })));
-      expect(state(kind)).toBe("running");
+      expect(state(kind)).toBe(shared && status === 200 ? "completed" : "running");
       expect(screen.queryByRole("alert")).toBeNull();
-      expect(signal?.aborted).toBe(true);
+      if (!shared) expect(signal?.aborted).toBe(true);
     },
   );
 

@@ -7,6 +7,22 @@ import { useSessionStore } from "../stores/sessionStore";
 
 beforeEach(() => useSessionStore.setState(useSessionStore.getInitialState(), true));
 
+const delegationEvent = { type: "delegation_delivery", session_id: "parent", delegation: {
+  delegation_id: "child", work_id: "work", sub_session_id: "child", parent_session_id: "parent",
+  target_agent_id: "agent", target_agent_name: "Helper", request: "Work", state: "running",
+  created_at: "now", finished_at: null, error: null,
+} };
+
+it.each(["running", "completed", "failed", "cancelled", "interrupted"])("decodes the %s delegation state", (state) => {
+  const event = { ...delegationEvent, delegation: { ...delegationEvent.delegation, state } };
+  expect(decodeWsEvent(event).kind).toBe("event");
+});
+
+it.each(["invented", "toString", null, 3])("rejects an invalid WS delegation state %s", (state) => {
+  const event = { ...delegationEvent, delegation: { ...delegationEvent.delegation, state } };
+  expect(decodeWsEvent(event).kind).toBe("invalid");
+});
+
 it.each(["stash@{0}", "a".repeat(40)])("preserves recovery reference %s without resolving a moving selector", (stash_ref) => {
   const event = { ...producers.session_unarchived, session: { ...producers.session_unarchived.session,
     fork_revert_record: { ran: true, files: ["a.py"], stash_ref, status: "completed", refused_reason: null, error: null } } };

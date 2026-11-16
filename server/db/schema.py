@@ -9,7 +9,7 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 10
+CURRENT_VERSION = 11
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -477,8 +477,6 @@ CREATE INDEX idx_connector_installations_kind
 
 CREATE INDEX idx_credentials_backend
   ON backend_credentials(backend);
-
-CREATE INDEX idx_messages_session ON messages(session_id, seq);
 
 CREATE INDEX idx_research_jobs_session
   ON research_jobs(session_id, created_at);

@@ -307,6 +307,8 @@ class TurnsMixin(SessionManagerBase):
     def close_admission(self) -> None:
         """Seal request admission synchronously before other owners stop."""
         self._admission_closed = True
+        for notification in tuple(self._notification_tasks):
+            notification.cancel()
 
     async def drain_turns(self, timeout: float = 5.0) -> int:
         self.close_admission()

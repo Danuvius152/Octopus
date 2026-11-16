@@ -102,6 +102,11 @@ def revision(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def stat_revision(stat: os.stat_result) -> str:
+    """Excluded PDF projection identity; independent of original byte integrity."""
+    return revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode())
+
+
 def asset_reason(relative: str) -> str | None:
     """Classify known asset directories by purpose, independently of suffix."""
     path = PurePosixPath(relative)
@@ -751,7 +756,7 @@ class WikiStore:
                 raw = read_document_bytes(path, label=relative) if raw is None else require_document_bytes(raw, relative)
             except DocumentTooLarge as error:
                 return self.record_resource_error(db, relative, error, stat=stat, finalize=finalize)
-        digest = revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode()) if path.suffix.lower() == ".pdf" else revision(raw)
+        digest = stat_revision(stat) if path.suffix.lower() == ".pdf" else revision(raw)
         doc_id = self.identity(db, relative, stat)
         from . import origins
 
@@ -1021,7 +1026,7 @@ class WikiStore:
                             f"{stat.st_mtime_ns}:{stat.st_size}:v3"
                             != source["signature"]
                         ):
-                            current = revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode()) if file.suffix.lower() == ".pdf" else revision(read_document_bytes(file, label=source["path"]))
+                            current = stat_revision(stat) if file.suffix.lower() == ".pdf" else revision(read_document_bytes(file, label=source["path"]))
                     except DocumentTooLarge:
                         current = None
                         ref["resource_error"] = "document_too_large"

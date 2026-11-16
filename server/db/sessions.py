@@ -44,6 +44,21 @@ _MESSAGE_COLUMNS = (
     "git_status_clean, created_at, runtime_metadata, git_ignored_baseline"
 )
 
+_SESSION_COLUMNS = (
+    "id name working_dir created_at claude_session_id credential_id archived agent_id origin backend "
+    "parent_session_id delegation_request forked_from_session_id fork_after_seq fork_needs_replay fork_metadata "
+    "fork_revert_record fork_status app_id model user_id reasoning_effort service_tier context_state"
+).split()
+
+
+def _decode_session(row: Any) -> dict[str, Any]:
+    result = dict(zip(_SESSION_COLUMNS, row, strict=True))
+    result["archived"] = bool(result["archived"])
+    result["fork_needs_replay"] = bool(result["fork_needs_replay"])
+    result["origin"] = result["origin"] or "user"
+    result["backend"] = result["backend"] or "claude-code"
+    return result
+
 
 def _decode_message(row: Any) -> dict[str, Any]:
     return {
@@ -448,23 +463,11 @@ class SessionsMixin(DatabaseBase):
         """Every session row, or only one account's (multi-tenancy.md §5).
 
         `user_id=None` is "no scoping asked for" — the boot-time load, which
-        builds the whole in-memory map, and the recovery sweeps. An *archived*
-        row is only ever read from here, so this is where its owner is checked
-        too; the live ones are filtered in memory by `list_sessions`.
+        builds the whole in-memory map, and the recovery sweeps. Archived UI
+        reads use load_archived_sessions; live ownership is filtered in memory.
         """
         async with self.transaction(write=False) as tx:
-            # Rows come back as plain tuples and are mapped by POSITION below, so a
-            # new column goes on the END of this list. Inserting one in the middle
-            # silently shifts every field after it — `fork_metadata` starts reading
-            # as an integer and sessions come back with the wrong parent.
-            query = (
-                "SELECT id, name, working_dir, created_at, claude_session_id, "
-                "credential_id, archived, agent_id, origin, backend, "
-                "parent_session_id, delegation_request, forked_from_session_id, "
-                "fork_after_seq, fork_needs_replay, fork_metadata, "
-                "fork_revert_record, fork_status, app_id, model, user_id, reasoning_effort, service_tier, context_state "
-                "FROM sessions"
-            )
+            query = f"SELECT {','.join(_SESSION_COLUMNS)} FROM sessions"
             clauses = [] if include_archived else ["archived = 0"]
             params: list[Any] = []
             if user_id is not None:
@@ -474,35 +477,34 @@ class SessionsMixin(DatabaseBase):
                 query += " WHERE " + " AND ".join(clauses)
             cursor = await tx.execute(query, params)
             rows = await cursor.fetchall()
-            return [
-                {
-                    "id": row[0],
-                    "name": row[1],
-                    "working_dir": row[2],
-                    "created_at": row[3],
-                    "claude_session_id": row[4],
-                    "credential_id": row[5],
-                    "archived": bool(row[6]),
-                    "agent_id": row[7],
-                    "origin": row[8] or "user",
-                    "backend": row[9] or "claude-code",
-                    "parent_session_id": row[10],
-                    "delegation_request": row[11],
-                    "forked_from_session_id": row[12],
-                    "fork_after_seq": row[13],
-                    "fork_needs_replay": bool(row[14]),
-                    "fork_metadata": row[15],
-                    "fork_revert_record": row[16],
-                    "fork_status": row[17],
-                    "app_id": row[18],
-                    "model": row[19],
-                    "user_id": row[20],
-                    "reasoning_effort": row[21],
-                    "service_tier": row[22],
-                    "context_state": row[23],
-                }
-                for row in rows
-            ]
+            return [_decode_session(row) for row in rows]
+
+    async def load_archived_sessions(
+        self, *, user_id: str | None = None, session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Owned archives and complete sequence state in one read snapshot.
+
+        Optional ID restricts both session selection and message aggregation.
+        None ownership retains the internal unscoped load_sessions convention.
+        Rowid order preserves the list's original insertion order.
+        """
+        clauses, params = ["s.archived = 1"], []
+        if user_id is not None:
+            clauses.append("s.user_id = ?")
+            params.append(user_id)
+        if session_id is not None:
+            clauses.append("s.id = ?")
+            params.append(session_id)
+        columns = ",".join(f"s.{column}" for column in _SESSION_COLUMNS)
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(
+                f"SELECT {columns}, COUNT(m.id), COALESCE(MAX(m.seq) + 1, 0), "
+                "COUNT(m.id) - COUNT(DISTINCT m.seq) FROM sessions s "
+                "LEFT JOIN messages m ON m.session_id = s.id WHERE " + " AND ".join(clauses) +
+                " GROUP BY s.rowid ORDER BY s.rowid", params,
+            )
+        return [{**_decode_session(row[:-3]), "message_count": row[-3],
+                 "next_message_seq": row[-2], "duplicate_seqs": row[-1]} for row in rows]
 
     async def count_messages(self, session_id: str) -> int:
         async with self.transaction(write=False) as tx:
@@ -836,7 +838,7 @@ class SessionsMixin(DatabaseBase):
         `max_seq` bounds the range in SQL. Callers that wanted a prefix used to
         load the whole transcript and drop the tail in a list comprehension —
         on the largest session here that is 4,600 rows read to keep a handful
-        (polish-2026-09.md §4 B3). `idx_messages_session(session_id, seq)`
+        (polish-2026-09.md §4 B3). `messages_unique_sequence(session_id, seq)`
         makes the bounded form a range scan.
 
         `newest_first` exists for windowing: taking the most recent N means

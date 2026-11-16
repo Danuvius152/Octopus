@@ -3,6 +3,7 @@
 import json
 from dataclasses import dataclass
 
+from . import format
 from .format import DocumentFormat
 from .links import anchor_status, note_name
 from .references import candidate_keys
@@ -13,6 +14,29 @@ class Resolution:
     target: str | None
     status: str
     keys: tuple[tuple[str, str], ...]
+
+
+class TargetDocuments:
+    """Bodies and parses owned by one catalog batch, on its existing connection."""
+
+    def __init__(self, db):
+        self.db = db
+        self.rows = {}
+        self.parses = {}
+
+    def document(self, target):
+        if target not in self.rows:
+            self.rows[target] = self.db.execute("SELECT id,path,revision,text FROM documents WHERE id=?", (target,)).fetchone()
+        return self.rows[target]
+
+    def parsed(self, row):
+        # Text distinguishes a candidate overlay from the indexed version even
+        # when it retains the same document identity. Nothing survives the call.
+        key = row["id"], row["revision"] if "revision" in row.keys() else None, row["text"]
+        if key not in self.parses:
+            self.parses[key] = format.parse(row["text"])
+        self.rows[row["id"]] = row
+        return self.parses[key]
 
 
 def initialize(db):
@@ -41,7 +65,7 @@ def index(db, row, metadata):
     return previous | current
 
 
-def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_anchor=True, source_parse: DocumentFormat | None = None):
+def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_anchor=True, source_parse: DocumentFormat | None = None, documents=None):
     """Resolve indexed identities; source_parse belongs to the current source text."""
     keys = candidate_keys(reference, parent, source_doc)
     if reference.namespace == "external":
@@ -81,11 +105,13 @@ def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_ancho
     target = selected[0] if selected else None
     if target is None:
         return Resolution(None, "unresolved", keys)
-    current = overlay if target == overlay_id else db.execute("SELECT text FROM documents WHERE id=?", (target,)).fetchone()
+    documents = documents if documents is not None else TargetDocuments(db)
+    current = overlay if target == overlay_id else documents.document(target)
     if current is None:
         return Resolution(target, "missing", keys)
     if check_anchor and reference.fragment and reference.relation in {"wikilink", "markdown_link"}:
-        status = anchor_status(current["text"], reference.fragment, parsed=source_parse if target == source_doc else None)
+        parsed = source_parse if target == source_doc and source_parse is not None else documents.parsed(current)
+        status = anchor_status(current["text"], reference.fragment, parsed=parsed)
         if status != "resolved":
             return Resolution(target, status, keys)
     return Resolution(target, "resolved", keys)

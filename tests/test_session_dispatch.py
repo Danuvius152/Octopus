@@ -385,6 +385,189 @@ async def test_paused_schedule_neither_notifies_completion_nor_archives_until_re
     assert len(notifications) == 1
 
 
+async def test_slow_idle_notification_does_not_block_the_next_accepted_harness_execution(dispatch):
+    manager, session, started, _ = dispatch
+    entered, second_entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    notifications = []
+
+    class Notifier:
+        async def fire(self, event, user_id):
+            notifications.append((event, user_id))
+            entered.set()
+            if len(notifications) == 2:
+                second_entered.set()
+            await release.wait()
+
+    manager.set_notifier_manager(Notifier())
+    try:
+        first = await manager.start_message(session.id, "one")
+        assert await asyncio.wait_for(started.get(), 2) == "one"
+        first_result = await asyncio.wait_for(first.wait(), 2)
+        await asyncio.wait_for(entered.wait(), 2)
+        second = await manager.start_message(session.id, "two")
+        assert second.accepted
+        assert await asyncio.wait_for(started.get(), 1) == "two"
+        second_result = await asyncio.wait_for(second.wait(), 2)
+        await asyncio.wait_for(second_entered.wait(), 2)
+        assert first_result.outcome.status == second_result.outcome.status == "success"
+    finally:
+        release.set()
+        await manager.drain_turns()
+    assert len(notifications) == 2
+
+
+async def test_overlapping_idle_notifications_keep_each_turn_configuration_when_finishing_in_reverse(dispatch):
+    manager, session, started, _ = dispatch
+    entered, finished = asyncio.Queue(), asyncio.Queue()
+    releases = [asyncio.Event(), asyncio.Event()]
+
+    class Notifier:
+        async def fire(self, event, user_id):
+            release = releases[0 if event.session_name == "First" else 1]
+            entered.put_nowait((event, user_id))
+            await release.wait()
+            finished.put_nowait(event.session_name)
+
+    manager.set_notifier_manager(Notifier())
+    try:
+        await manager.update_session_configuration(session.id, {"name": "First"}, session.user_id)
+        first = await manager.start_message(session.id, "one")
+        assert await asyncio.wait_for(started.get(), 2) == "one"
+        await asyncio.wait_for(first.wait(), 2)
+        first_notice = await asyncio.wait_for(entered.get(), 2)
+        await manager.update_session_configuration(session.id, {"name": "Second"}, session.user_id)
+        second = await manager.start_message(session.id, "two")
+        assert await asyncio.wait_for(started.get(), 2) == "two"
+        await asyncio.wait_for(second.wait(), 2)
+        second_notice = await asyncio.wait_for(entered.get(), 2)
+        await manager.update_session_configuration(session.id, {"name": "Current"}, session.user_id)
+        releases[1].set()
+        assert await asyncio.wait_for(finished.get(), 2) == "Second"
+        releases[0].set()
+        assert await asyncio.wait_for(finished.get(), 2) == "First"
+        assert [first_notice[0].session_name, second_notice[0].session_name] == ["First", "Second"]
+        assert first_notice[1] == second_notice[1] == session.user_id
+    finally:
+        for release in releases:
+            release.set()
+        await manager.drain_turns()
+
+
+@pytest.mark.parametrize("failure", ["shutdown", "exception"])
+async def test_idle_notification_failure_or_shutdown_preserves_committed_outcome(dispatch, failure, caplog):
+    manager, session, started, _ = dispatch
+    entered, release, ended = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class Notifier:
+        async def fire(self, event, user_id):
+            entered.set()
+            try:
+                await release.wait()
+                raise RuntimeError("External notifier failed")
+            finally:
+                ended.set()
+
+    manager.set_notifier_manager(Notifier())
+    receipt = await manager.start_message(session.id, "completed")
+    assert await asyncio.wait_for(started.get(), 2) == "completed"
+    result = await asyncio.wait_for(receipt.wait(), 2)
+    await asyncio.wait_for(entered.wait(), 2)
+    if failure == "exception":
+        release.set()
+        await asyncio.wait_for(ended.wait(), 2)
+    # Shutdown cancels and joins the external waiter, even if it never returns.
+    await manager.drain_turns(timeout=1)
+    assert ended.is_set()
+    saved = await manager.db.read_session_result(session.id, receipt.request_id)
+    assert result.recording_state == "committed" and result.outcome.status == "success"
+    assert saved.outcome.status == "success"
+    if failure == "exception":
+        assert "External notifier failed" in caplog.text
+
+
+@pytest.mark.parametrize("dispatch", [True], indirect=True)
+async def test_shutdown_joins_held_cap_handoff_without_registering_a_late_notification(dispatch, monkeypatch):
+    manager, session, started, holds = dispatch
+    monkeypatch.setattr("server.sessions.processes._MAX_HELD_PROCESSES", 1)
+    entered = asyncio.Event()
+    notifications = []
+
+    class Notifier:
+        async def fire(self, event, user_id):
+            notifications.append(event.session_id)
+            entered.set()
+
+    manager.set_notifier_manager(Notifier())
+    first = await manager.start_message(session.id, "held original")
+    assert await asyncio.wait_for(started.get(), 2) == "held original"
+    await asyncio.wait_for(first.wait(), 2)
+    await asyncio.wait_for(entered.wait(), 2)
+    holds["stop"].clear()
+    second_session = await manager.create_session(session.agent_id, "Second held host")
+    second = await manager.start_message(second_session.id, "held replacement")
+    assert await asyncio.wait_for(started.get(), 2) == "held replacement"
+    await asyncio.wait_for(second.wait(), 2)
+    await asyncio.wait_for(holds["stop entered"].wait(), 2)
+    closing = asyncio.create_task(manager.drain_turns(timeout=2))
+    try:
+        done, _ = await asyncio.wait({closing}, timeout=.05)
+        assert not done, "Real held-process retirement must finish before shutdown"
+        holds["stop"].set()
+        await asyncio.wait_for(closing, 2)
+        assert notifications == [session.id]
+    finally:
+        holds["stop"].set()
+        await asyncio.gather(closing, return_exceptions=True)
+
+
+@pytest.mark.parametrize("change", ["new_input", "restore_same_id"])
+async def test_old_notification_cannot_archive_a_new_execution_or_restored_session(dispatch, monkeypatch, change):
+    manager, _, started, holds = dispatch
+    entered, release, archive_checked = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class Notifier:
+        async def fire(self, event, user_id):
+            entered.set()
+            await release.wait()
+
+    manager.set_notifier_manager(Notifier())
+    agent = await manager.db.get_system_agent()
+    scheduled = await manager.create_session(agent["id"], "Original schedule", origin="schedule")
+    receipt = await manager.start_message(scheduled.id, "completed schedule")
+    assert await asyncio.wait_for(started.get(), 2) == "completed schedule"
+    await asyncio.wait_for(receipt.wait(), 2)
+    await asyncio.wait_for(entered.wait(), 2)
+    if change == "restore_same_id":
+        await manager.archive_session(scheduled.id, replace=False)
+        current = await manager.unarchive_session(scheduled.id, scheduled.user_id)
+        assert current is not scheduled
+    else:
+        current = scheduled
+        await manager.start_message(scheduled.id, "first")
+        assert await asyncio.wait_for(started.get(), 2) == "first"
+    archive = manager.auto_archive_scheduled_session
+    decisions = []
+
+    async def observe_archive(*args, **kwargs):
+        result = await archive(*args, **kwargs)
+        decisions.append(result)
+        archive_checked.set()
+        return result
+
+    monkeypatch.setattr(manager, "auto_archive_scheduled_session", observe_archive)
+    try:
+        release.set()
+        await asyncio.wait_for(archive_checked.wait(), 2)
+        assert decisions == [False]
+        assert manager.get_session(scheduled.id) is current
+        if change == "new_input":
+            assert manager.dispatch_snapshot(scheduled.id)["active_request_id"] is not None
+    finally:
+        holds["first"].set()
+        release.set()
+        await manager.drain_turns()
+
+
 async def test_submission_receipt_duplicate_and_closed_are_explicit(dispatch):
     from server.mcp_identity import close_work
 

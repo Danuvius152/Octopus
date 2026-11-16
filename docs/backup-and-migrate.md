@@ -63,13 +63,32 @@ installation records preserves the saved relationships and grant; it does not
 replay a callback or establish current provider access. See the
 [Connector lifecycle](implemented/connectors.md#oauth-and-lifecycle).
 
-Current archives contain complete main format 10 and Wiki format 17. GitHub
+Current archives contain complete main format 11 and Wiki format 17. GitHub
 installations preserve their canonical numeric identity, display label, original
 installation ID, encrypted grant and Agent links through export/import. The
 importer rejects an older main marker before creating the target; it does not
 convert `login:id` keys or restore pending OAuth work. A historical installation
 must first complete its authorized source-side publication handoff under the
 [storage contract](implemented/current-storage-format.md#github-identity-and-finite-publication-handoff).
+
+Wiki source stability, archive byte integrity and restored local projections
+are checked separately. A PDF with `revision_kind=stat` is an excluded body
+whose source revision represents mtime and size; it is compared with those
+source attributes, not a byte hash. It cannot detect an edit preserving both
+attributes. Text revisions retain byte comparison, including the existing
+exception for a reconciled oversized original with no accepted current revision.
+Arbitrary stat metadata cannot exempt a text original from byte checks.
+
+The manifest independently hashes every original, including large PDFs and
+oversized text, using bounded streaming reads. Import verifies those bytes
+before creating target data. It then preserves vault/document identities,
+history and operation receipts, rebinds local file keys, and invalidates document
+signatures and index checked time. First Store preparation rebuilds projections
+against restored attributes before ordinary reads; new mtimes do not rewrite
+historical revisions or receipts. Both `.pdf` and `.PDF` remain excluded from
+body processing; Markdown remains searchable. The real account round-trips in
+`tests/test_wiki_account_portability.py` cover those boundaries, original damage,
+bounded read/readinto, oversized-text retention and receipt associations.
 
 Research reports, versioned `{job_id}/evidence.json` summaries and
 `synthesis-failure.json` materials follow the existing recursive account-tree

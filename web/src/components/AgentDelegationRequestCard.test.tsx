@@ -5,7 +5,8 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
 import { MessageBubble } from "./MessageBubble";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { observeDelegations } from "../lib/delegationReads";
+import { refreshDelegations } from "../lib/delegationReads";
+import { observeSession } from "../lib/hydrateSession";
 import { useSessionStore, type Delegation, type Message, type SessionInfo } from "../stores/sessionStore";
 
 const metadata = (call = "call-current", work = "round-current", receipt = true) => ({
@@ -33,6 +34,160 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([delegation()]))));
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it.each([false, true])("shares transport across two cards without borrowing failed hydration (held detail=%s)", async (held) => {
+  vi.useFakeTimers();
+  const replies: ((response: Response) => void)[] = [];
+  const rows = [delegation(), delegation({ work_id: "other-work", target_agent_name: "Weber" })];
+  let finishDetail!: (response: Response) => void;
+  const detailResponse = new Promise<Response>((resolve) => { finishDetail = resolve; });
+  vi.stubGlobal("fetch", vi.fn((url: string) => {
+    if (url.endsWith("/delegations")) return new Promise<Response>((resolve) => replies.push(resolve));
+    if (url.includes("?view=browser")) return detailResponse;
+    return Promise.resolve(Response.json([]));
+  }));
+  useSessionStore.getState().setMessages("parent", [toolUse(), result(), toolUse("other-call"), result("other-call", "other-work")]);
+  useSessionStore.getState().setDelegations("parent", rows);
+  render(<>{card()}{card(toolUse("other-call"), "Weber")}</>);
+  const hydration = observeSession("parent");
+  const failed = expect(hydration.done).rejects.toThrow("HTTP 503");
+  try {
+    if (!held) { finishDetail(Response.json({}, { status: 503 })); await failed; }
+    expect(replies).toHaveLength(1);
+    await act(async () => replies[0](Response.json(rows)));
+    expect(screen.getAllByText("running")).toHaveLength(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(replies).toHaveLength(2);
+    if (held) { finishDetail(Response.json({}, { status: 503 })); await failed; }
+    await act(async () => replies[1](Response.json(rows.map((row) => ({ ...row, state: "completed" })))));
+    expect(screen.getAllByText("completed")).toHaveLength(2);
+  } finally { hydration.cancel(); }
+});
+
+it("issues confirmation after an unknown cancel while the older ordinary GET is still in flight", async () => {
+  const replies: ((response: Response) => void)[] = [];
+  const events: string[] = [];
+  vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => {
+    events.push(init?.method || "GET");
+    if (init?.method === "POST") return Promise.reject(new Error("ACK lost"));
+    return new Promise<Response>((resolve) => replies.push(resolve));
+  }));
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  render(card());
+  await act(async () => fireEvent.click(screen.getByTitle("Cancel delegation")));
+  expect(screen.getByRole("alert")).toHaveTextContent("unconfirmed");
+  await act(async () => fireEvent.click(screen.getByText("Refresh status")));
+  expect(events).toEqual(["GET", "POST", "GET"]);
+  await act(async () => replies[1](Response.json([delegation({ state: "cancelled" })])));
+  await act(async () => replies[0](Response.json([delegation()])));
+  expect(screen.getByText("cancelled")).toBeTruthy();
+  expect(events.filter((method) => method === "POST")).toHaveLength(1);
+});
+
+it.each([false, true])("does not confirm a later receipt's absence with an older GET (live row=%s)", async (liveRow) => {
+  vi.useFakeTimers();
+  const replies: ((response: Response) => void)[] = [];
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => replies.push(resolve))));
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  const view = render(card());
+  await act(async () => {
+    useSessionStore.getState().setMessages("parent", [toolUse(), result(), toolUse("new-call"), result("new-call", "new-work")]);
+    if (liveRow) handleWsMessage({ type: "delegation_delivery", session_id: "parent", delegation: delegation({ work_id: "new-work" }) });
+  });
+  view.rerender(<>{card()}{card(toolUse("new-call"))}</>);
+  expect(replies).toHaveLength(1);
+  await act(async () => replies[0](Response.json([])));
+  // The original missing work is finished. Only the newly joined receipt can
+  // keep this coordinator observing until a request started after it joined.
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(replies).toHaveLength(2);
+  await act(async () => replies[1](Response.json([delegation({ work_id: "new-work", state: "completed" })])));
+  expect(screen.getByText("completed")).toBeTruthy();
+  expect(screen.getByText("status unavailable")).toBeTruthy();
+});
+
+it("ends only the missing exact-work demand while the other work continues refreshing", async () => {
+  vi.useFakeTimers();
+  const replies: ((response: Response) => void)[] = [];
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => replies.push(resolve))));
+  useSessionStore.getState().setMessages("parent", [toolUse(), result(), toolUse("other-call"), result("other-call", "other-work")]);
+  const other = delegation({ work_id: "other-work", target_agent_name: "Weber" });
+  const view = render(<>{card()}{card(toolUse("other-call"), "Weber")}</>);
+  await act(async () => replies[0](Response.json([other])));
+  expect(screen.getByText("status unavailable")).toBeTruthy();
+  expect(screen.getByText("running")).toBeTruthy();
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(replies).toHaveLength(2);
+  await act(async () => replies[1](Response.json([other, delegation({ work_id: "new-round" })])));
+  expect(screen.getByText("status unavailable")).toBeTruthy();
+  view.rerender(card());
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+  expect(replies).toHaveLength(2);
+});
+
+it("keeps one failure budget across cards, pauses after three failures and offers a fresh explicit read", async () => {
+  vi.useFakeTimers();
+  let calls = 0;
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    calls++;
+    if (calls < 3) return Response.json({ detail: "Offline" }, { status: 503 });
+    if (calls === 3) return Response.json({ invalid: "collection" });
+    return Response.json([delegation({ state: "completed" }), delegation({ work_id: "other-work", state: "completed" })]);
+  }));
+  useSessionStore.getState().setMessages("parent", [toolUse(), result(), toolUse("other-call"), result("other-call", "other-work")]);
+  useSessionStore.getState().setDelegations("parent", [delegation(), delegation({ work_id: "other-work" })]);
+  const view = render(card());
+  await act(async () => {});
+  expect(calls).toBe(1);
+  view.rerender(<>{card()}{card(toolUse("other-call"), "Weber")}</>);
+  expect(calls).toBe(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+  expect(calls).toBe(3);
+  expect(screen.getAllByRole("alert")).toHaveLength(2);
+  view.rerender(<>{card()}{card(toolUse("other-call"), "Weber")}{card()}</>);
+  expect(calls).toBe(3);
+  expect(screen.getAllByRole("alert")).toHaveLength(3);
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+  expect(calls).toBe(3);
+  await act(async () => fireEvent.click(screen.getAllByText("Refresh status")[0]));
+  expect(calls).toBe(4);
+  expect(screen.getAllByText("completed")).toHaveLength(3);
+});
+
+it("shows a later exhausted observation even after a successful explicit refresh of running work", async () => {
+  vi.useFakeTimers();
+  let gets = 0;
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return Response.json({});
+    return ++gets <= 2 ? Response.json([delegation()]) : Response.json({}, { status: 503 });
+  }));
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  render(card());
+  await act(async () => {});
+  await act(async () => fireEvent.click(screen.getByTitle("Cancel delegation")));
+  await act(async () => fireEvent.click(screen.getByText("Refresh status")));
+  expect(screen.getByText("Current status refreshed.")).toBeTruthy();
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  expect(gets).toBe(5);
+  expect(screen.getByRole("alert")).toHaveTextContent("could not be confirmed");
+  expect(screen.getAllByText("Refresh status")).toHaveLength(1);
+});
+
+it.each(["completed", "cancelled"] as const)("clears an exhausted observation warning when WS confirms %s", async (state) => {
+  vi.useFakeTimers();
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({}, { status: 503 })));
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  render(card());
+  await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+  expect(screen.getByRole("alert")).toHaveTextContent("could not be confirmed");
+  await act(async () => handleWsMessage({ type: "delegation_delivery", session_id: "parent", delegation: delegation({ state }) }));
+  expect(screen.getByText(state)).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByText("Refresh status")).toBeNull();
+});
 
 it("shows a failed exact-round cancel while retaining the original running work", async () => {
   useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
@@ -207,7 +362,7 @@ it("accepts a completed round after its polling success while another list read 
   useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
   useSessionStore.getState().setDelegations("parent", [delegation()]);
   render(card());
-  const reconnected = observeDelegations("parent");
+  const reconnected = refreshDelegations("parent");
   await act(async () => replies[0](Response.json([delegation()])));
   await act(async () => {
     replies[1](Response.json([delegation({ state: "completed" })]));

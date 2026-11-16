@@ -173,9 +173,21 @@ Owner 串行修改活动状态；慢准备、spawn、stdin、reader 和退休由
 
 单轮结算由原 Owner 的 `OwnerRuntime.settle(execution)` 使用原 Execution、
 settlement 和发布上下文完成。Manager 不再回取 `runtime.current/frames` 解释
-旧结果，只保留入口、注册、跨会话配额和故障接管。重复结算返回原选定事件；
+旧结果，负责入口、注册、跨会话配额、闲置外部通知协调和故障接管。重复结算返回原选定事件；
 不把旧终态重新选择给后来的请求。Database 仍拥有输入和 terminal 的短事务，
 原 publisher 仍拥有有序交付；慢通知和资源退出不阻塞命令处理。
+
+原轮次定稿后，Owner 的下一次 dispatch 仍等待原资源确认及 held-cap 处理，
+不等待闲置 Webhook 等外部通知。Manager 在同步交接阶段登记协调任务，随后等待
+原 cap 工作，再用该轮捕获的会话信息发送通知；后续轮次不改写旧通知的材料。
+通知失败或关停取消不改变 committed outcome。关闭准入时取消并 join 外部通知
+子任务，原 cap、已启动的归档和生命周期效果继续由受管任务收束；不能统一取消
+全部 Manager 任务，也不能在 drain 已结束后才登记通知责任。
+
+通知后的自动归档携带原 Session 对象身份，继续经过原 identity、reservation、
+revision、活动及 pending 输入门槛。通知期间有新输入、归档／恢复或同 ID 后继时，
+旧通知不能归档当前活动对象或丢弃待处理输入。`tests/test_session_dispatch.py`
+覆盖阻塞通知时下一轮实际进入 Harness、逆序通知及关闭／恢复交错。
 
 订阅注册明确区分必需业务消费者与尽力观察者。App 正文及委派问题转发为必需；
 WS、应用构建进展及 Research 交付投影为观察者。受众过滤保持原账户归属。

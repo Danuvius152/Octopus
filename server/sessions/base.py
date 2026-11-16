@@ -689,7 +689,7 @@ class SessionManagerBase:
     ) -> dict[str, Any]:
         raise NotImplementedError  # provided by a mixin
 
-    async def auto_archive_scheduled_session(self, session_id: str) -> bool:
+    async def auto_archive_scheduled_session(self, session_id: str, *, expected_session: Session | None = None) -> bool:
         raise NotImplementedError  # provided by a mixin
 
     async def _restore_task_return(
@@ -768,6 +768,9 @@ class SessionManagerBase:
         self._admission_closed = False
         self._input_state: Literal["uninitialized", "initializing", "ready", "failed"] = "uninitialized"
         self._owned_tasks: set[asyncio.Task[Any]] = set()
+        # Only external notification waits may be cancelled at shutdown.
+        # Coordinators and any started lifecycle effects stay in _owned_tasks.
+        self._notification_tasks: set[asyncio.Task[None]] = set()
         # Resolution owns refresh through provider completion and conditional writeback.
         self._credential_refreshes: dict[tuple[str | None, str], asyncio.Task[HarnessCredential | None]] = {}
         self._credential_refresh_closed = False
@@ -1010,6 +1013,31 @@ class SessionManagerBase:
         if user_id is not None and session.user_id != user_id:
             return None
         return session
+
+    def _start_idle_delivery(self, original: Session, captured: Session, resources: asyncio.Task[Any], *, notify: bool) -> None:
+        if captured.origin not in self._AUTO_ARCHIVE_ORIGINS and (not notify or self._notifier_manager is None):
+            return
+        async def deliver() -> None:
+            # Ownership is registered before this first await, including when
+            # shutdown begins while held-cap retirement is still pending.
+            await asyncio.shield(resources)
+            if self._admission_closed:
+                return
+            if notify and self._notifier_manager is not None:
+                notification = asyncio.create_task(self._fire_session_idle_notification(captured),
+                                                   name=f"session-notify-{original.id}")
+                self._notification_tasks.add(notification)
+                notification.add_done_callback(self._notification_tasks.discard)
+                self._own_task(notification)
+                try:
+                    await asyncio.shield(notification)
+                except asyncio.CancelledError:
+                    if not notification.cancelled():
+                        raise
+            if not self._admission_closed and captured.origin in self._AUTO_ARCHIVE_ORIGINS:
+                await self.auto_archive_scheduled_session(original.id, expected_session=original)
+
+        self._own_task(asyncio.create_task(deliver(), name=f"session-idle-{original.id}"))
 
     async def _fire_session_idle_notification(self, session: Session) -> None:
         """Notify async targets that this session just went fully idle.

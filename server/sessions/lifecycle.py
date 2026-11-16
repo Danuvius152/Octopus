@@ -24,6 +24,7 @@ from ..knowledge import KnowledgeContext, OwnedTaskContext, receive_return
 from ..models import (
     MessageContent,
     SessionDetail,
+    SessionInfo,
     SessionRestoreRequest,
     SessionRestoreStatus,
 )
@@ -659,7 +660,7 @@ class LifecycleMixin(SessionManagerBase):
         )
         return new
 
-    async def auto_archive_scheduled_session(self, session_id: str) -> bool:
+    async def auto_archive_scheduled_session(self, session_id: str, *, expected_session: Session | None = None) -> bool:
         """Apply the schedule or abandoned-delegation-setup archive policy.
 
         Unlike `archive_session`, no replacement thread is created — the
@@ -672,6 +673,7 @@ class LifecycleMixin(SessionManagerBase):
         session = self.sessions.get(session_id)
         if (
             session is None
+            or expected_session is not None and session is not expected_session
             or session.origin not in self._AUTO_ARCHIVE_ELIGIBLE
         ):
             return False
@@ -729,15 +731,22 @@ class LifecycleMixin(SessionManagerBase):
         models for the response.
         """
         database = self.input_database()
-        rows = await database.load_sessions(include_archived=True, user_id=user_id)
+        rows = await database.load_archived_sessions(user_id=user_id)
         out: list[dict[str, Any]] = []
         for row in rows:
-            if not row["archived"]:
-                continue
-            count, _next_seq, duplicates = await database.message_sequence_state(row["id"])
-            out.append(session_info(row, count, archived=True,
-                                    transcript_integrity="duplicate_seq" if duplicates else "ok").model_dump())
+            out.append(session_info(row, row["message_count"], archived=True,
+                                    transcript_integrity="duplicate_seq" if row["duplicate_seqs"] else "ok").model_dump())
         return out
+
+    async def load_archived_session_info(
+        self, session_id: str, user_id: str | None = None,
+    ) -> SessionInfo | None:
+        rows = await self.input_database().load_archived_sessions(user_id=user_id, session_id=session_id)
+        if not rows:
+            return None
+        row = rows[0]
+        return session_info(row, row["message_count"], archived=True,
+                            transcript_integrity="duplicate_seq" if row["duplicate_seqs"] else "ok")
 
     async def load_archived_session_detail(
         self, session_id: str, user_id: str | None = None
@@ -747,10 +756,8 @@ class LifecycleMixin(SessionManagerBase):
         one of `user_id`'s, which a caller must not be able to tell apart.
         """
         database = self.input_database()
-        rows = await database.load_sessions(include_archived=True, user_id=user_id)
-        match = next(
-            (r for r in rows if r["id"] == session_id and r["archived"]), None
-        )
+        rows = await database.load_archived_sessions(user_id=user_id, session_id=session_id)
+        match = rows[0] if rows else None
         if match is None:
             return None
         # Windowed like a live open, and counted separately: `len(messages)`
@@ -760,7 +767,7 @@ class LifecycleMixin(SessionManagerBase):
             session_id, limit=_ARCHIVED_MESSAGE_WINDOW, newest_first=True
         )
         messages = [MessageContent(**m) for m in messages_raw]
-        total, _next_seq, duplicates = await database.message_sequence_state(session_id)
+        total, duplicates = match["message_count"], match["duplicate_seqs"]
         if duplicates:
             messages = []
         oldest = messages[0].seq if messages else None
@@ -919,13 +926,11 @@ class LifecycleMixin(SessionManagerBase):
         if self.db is None:
             raise ValueError("DB not initialized")
         await self.db.require_application_session_writable(session_id)
-        rows = await self.db.load_sessions(include_archived=True, user_id=user_id)
-        match = next(
-            (r for r in rows if r["id"] == session_id and r["archived"]), None
-        )
+        rows = await self.db.load_archived_sessions(user_id=user_id, session_id=session_id)
+        match = rows[0] if rows else None
         if match is None:
             raise SessionAdmissionClosed(f"Archived session {session_id} not found")
-        message_state = await self.db.message_sequence_state(session_id)
+        message_state = match["message_count"], match["next_message_seq"], match["duplicate_seqs"]
         if returning is not None:
             await self.require_active_agent(match["agent_id"])
             # Recheck after waiting for lifecycle admission and storage reads,
