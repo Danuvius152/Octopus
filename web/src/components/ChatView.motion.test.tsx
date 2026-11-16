@@ -1,9 +1,9 @@
-import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
-import { mockChatViewport } from "./chatViewport.test-support";
+import { mockChatViewport, mockChatItemLayout } from "./chatViewport.test-support";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
+import { applyTranscript } from "../lib/transcript";
 
 const session = { id: "motion", name: "Motion", agent_id: "agent", status: "idle", backend: "codex",
   created_at: "2026-11-13", working_dir: "/tmp", archived: false } as SessionInfo;
@@ -20,18 +20,35 @@ beforeEach(() => {
     messageWindows: { [session.id]: Symbol("original window") },
     streamingText: {}, streamingItems: {}, pendingQuestions: {}, subagents: {}, dispatchStates: {}, dispatchUnavailable: {},
   });
+  applyTranscript(session.id, { messages: useSessionStore.getState().messages[session.id],
+    next_message_seq: 16, oldest_loaded_seq: 1, has_more_messages: false });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 // Only browser dimensions, delivery and time are controlled. The real ChatView,
-// store and public Virtuoso mock context still own rendering and following.
-function motionViewport(bottomRemainder = 0) {
+// store and real Virtuoso measurement path still own rendering and following.
+function motionViewport(bottomRemainder = 0, revealGrowth = 0, stopAtReveal = false) {
+  mockChatItemLayout();
   let time = 1000;
   let height = 1200;
   let viewportHeight = 600;
   let hidden = false;
   let serial = 0;
   let afterScroll: (() => void) | undefined;
+  if (revealGrowth) {
+    const layout = vi.mocked(HTMLElement.prototype.getBoundingClientRect).getMockImplementation()!;
+    let footerHeight = 0;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const viewport = this.closest<HTMLElement>(".chat-messages");
+      if (viewport && this.firstElementChild?.hasAttribute("data-chat-footer")) {
+        // One real layout change at the reveal boundary, with no subsequent
+        // token or ResizeObserver delivery to rescue a missing write check.
+        if (!footerHeight && viewport.style.visibility !== "hidden") { footerHeight = revealGrowth; height += revealGrowth; }
+        return new DOMRect(0, height - viewport.scrollTop - footerHeight, 800, footerHeight);
+      }
+      return layout.call(this);
+    });
+  }
   const queued = new Map<number, FrameRequestCallback>();
   const observers = new Map<ResizeObserver, { callback: ResizeObserverCallback; elements: Set<Element> }>();
   vi.spyOn(performance, "now").mockImplementation(() => time);
@@ -52,10 +69,8 @@ function motionViewport(bottomRemainder = 0) {
   vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
     return this.classList.contains("chat-messages") ? height : 0;
   });
-  const view = render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
-    <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()}
-      connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
-  </VirtuosoMockContext.Provider>);
+  const view = render(<ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()}
+    connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
   const viewport = view.container.querySelector<HTMLElement>(".chat-messages")!;
   const writes: { at: number; top: number }[] = [];
   viewport.scrollTo = (optionsOrX?: ScrollToOptions | number, y?: number) => {
@@ -70,8 +85,18 @@ function motionViewport(bottomRemainder = 0) {
     const batch = [...queued.values()]; queued.clear();
     // A frame timeline can precede the request/execution clock. Preserve the
     // observed ordering rather than making the platform imply a positive dt.
-    act(() => { for (const callback of batch) callback(time - 40); });
+    act(() => {
+      for (const callback of batch) callback(time - 40);
+      for (const [observer, { callback, elements }] of observers) for (const element of elements) {
+        if (element === viewport) continue;
+        const signature = Array.from(element.children).map((child) => (child as HTMLElement).dataset.index ?? "").join(",");
+        if (measured.get(element) === signature) continue;
+        measured.set(element, signature);
+        callback([{ target: element } as ResizeObserverEntry], observer);
+      }
+    });
   };
+  const measured = new WeakMap<Element, string>();
   const notify = () => {
     const entry: ResizeObserverEntry = { target: viewport, contentRect: new DOMRect(0, 0, 800, viewportHeight),
       borderBoxSize: [{ inlineSize: 800, blockSize: viewportHeight }], contentBoxSize: [{ inlineSize: 800, blockSize: viewportHeight }],
@@ -82,15 +107,19 @@ function motionViewport(bottomRemainder = 0) {
       }
     });
   };
-  for (let index = 0; index < 8; index++) tick(16);
-  expect(viewport.scrollTop, "initial positioning uses the physical bottom").toBe(600 - bottomRemainder);
-  expect(view.getByText("Saved text 15"), "the initial target participates in the rendered list").toBeVisible();
+  for (let index = 0; index < (revealGrowth ? 12 : 8); index++) {
+    tick(16);
+    if (stopAtReveal && viewport.style.visibility !== "hidden") break;
+  }
+  expect(viewport.scrollTop, "initial positioning uses the physical bottom").toBe(600 + revealGrowth - bottomRemainder);
+  if (!revealGrowth) expect(view.getByText("Saved text 15"), "the initial target participates in the rendered list").toBeVisible();
+  expect(viewport).toBeVisible();
   writes.length = 0;
   return { viewport, writes, tick,
-    grow: (amount: number) => {
+    grow: (amount: number, deliverResize = true) => {
       height += amount;
       viewport.scrollTop = Math.min(viewport.scrollTop, Math.max(0, height - viewportHeight - bottomRemainder));
-      notify();
+      if (deliverResize) notify();
     },
     resize: (next: number) => { viewportHeight = next; notify(); },
     afterScroll: (callback?: () => void) => { afterScroll = callback; },
@@ -131,6 +160,31 @@ it.each([
   expect(motion.pending(), "settled following leaves no queued frames").toBe(0);
 });
 
+it("self-verifies Footer growth during reveal layout without another output or resize", () => {
+  const motion = motionViewport(0, 900);
+  expect(motion.viewport.scrollTop).toBe(1500);
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.writes).toHaveLength(0);
+  expect(motion.pending()).toBe(0);
+});
+
+it("hands output after a qualified reveal to normal following", () => {
+  const motion = motionViewport(0, 0, true);
+  // The reveal layout has committed. Subsequent output belongs to follow,
+  // even when it arrives before the next browser frame or resize delivery.
+  motion.grow(23, false);
+  act(() => useSessionStore.setState({ sessions: [{ ...session, status: "running" }],
+    streamingText: { [session.id]: "Output before the first revealed frame\n" } }));
+  expect(screen.getByText("Output before the first revealed frame")).toBeVisible();
+  expect(motion.viewport.scrollTop, "initial no longer writes after the qualified reveal").toBe(600);
+  motion.tick(16);
+  expect(motion.viewport.scrollTop).toBeGreaterThan(600);
+  expect(motion.viewport.scrollTop).toBeLessThan(623);
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(623);
+  expect(motion.pending()).toBe(0);
+});
+
 it("stops immediately while the page is hidden and resumes with a fresh time origin", () => {
   const motion = motionViewport();
   motion.grow(300); motion.tick(16);
@@ -139,8 +193,12 @@ it("stops immediately while the page is hidden and resumes with a fresh time ori
   expect(readingTop).toBeLessThan(900);
   expect(motion.pending()).toBeGreaterThan(0);
   motion.visibility(true);
-  expect(motion.pending(), "hiding cancels without waiting for a background frame").toBe(0);
   const stopped = motion.writes.length;
+  // Virtuoso may still owe one browser measurement from the preceding scroll.
+  // It cannot turn into a write or a continuing automatic task while hidden.
+  motion.tick(0);
+  expect(motion.writes).toHaveLength(stopped);
+  expect(motion.pending()).toBe(0);
   motion.tick(60_000); motion.grow(100); motion.tick(16);
   expect(motion.viewport.scrollTop).toBe(readingTop);
   expect(motion.writes).toHaveLength(stopped);
@@ -159,6 +217,7 @@ it("honors reduced motion with one immediate update and no idle follow frames", 
   const motion = motionViewport();
   motion.grow(300); motion.tick(16);
   expect(motion.viewport.scrollTop).toBe(900);
+  motion.tick(0);
   expect(motion.writes).toHaveLength(1);
   expect(motion.pending()).toBe(0);
   motion.grow(100); motion.tick(16);
@@ -182,13 +241,220 @@ it("settles at a fractional physical bottom without repeating clamped scroll wri
   expect(motion.writes).toHaveLength(settled);
 });
 
+it.each([0, 0.5])("keeps following after a downward wheel at a %spx bottom remainder", (remainder) => {
+  const motion = motionViewport(remainder);
+  fireEvent.wheel(motion.viewport, { deltaY: 100 });
+  motion.grow(100);
+  for (let index = 0; index < 30; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(700 - remainder);
+  expect(motion.pending()).toBe(0);
+});
+
+it.each(["wheel", "End"])("resumes reading clamped to bottom on explicit %s without extra displacement", (input) => {
+  const motion = motionViewport(0.5);
+  fireEvent.keyDown(motion.viewport, { key: "PageUp" });
+  motion.viewport.scrollTop = 400;
+  fireEvent.scroll(motion.viewport);
+  motion.grow(-200);
+  expect(motion.viewport.scrollTop).toBe(399.5);
+  motion.tick(16);
+  expect(motion.writes).toHaveLength(0);
+  if (input === "wheel") fireEvent.wheel(motion.viewport, { deltaY: 100 });
+  else fireEvent.keyDown(motion.viewport, { key: "End" });
+  motion.grow(100);
+  for (let index = 0; index < 30; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(499.5);
+  expect(motion.pending()).toBe(0);
+});
+
+it("preserves reading without a visible anchor when detail replaces the same opening's window", () => {
+  const motion = motionViewport();
+  fireEvent.keyDown(motion.viewport, { key: "PageUp" });
+  motion.viewport.scrollTop = 400;
+  fireEvent.scroll(motion.viewport);
+  // No visible DOM anchor is available in this controlled geometry, as when
+  // reading inside a tall Footer. Window replacement must retain the intent.
+  act(() => applyTranscript(session.id, { messages: [
+    { role: "assistant", type: "text", seq: 200, content: "Detail arrived while reading" },
+  ], oldest_loaded_seq: 200, next_message_seq: 201, has_more_messages: false }));
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(400);
+  expect(motion.writes).toHaveLength(0);
+  motion.grow(100);
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(400);
+  expect(motion.pending()).toBe(0);
+  expect(screen.getByText(/The previous reading position is unavailable/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(700);
+  expect(screen.queryByText(/The previous reading position is unavailable/)).toBeNull();
+});
+
+it.each([false, true])("shows a readable boundary and returns to latest after a lost identity (equivalent refresh=%s)", (refresh) => {
+  const motion = motionViewport();
+  const first = motion.viewport.querySelector<HTMLElement>("[data-message-key]")!;
+  vi.spyOn(motion.viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 600));
+  vi.spyOn(first, "getBoundingClientRect").mockReturnValue(new DOMRect(0, -20, 800, 80));
+  fireEvent.keyDown(motion.viewport, { key: "PageUp" });
+  motion.viewport.scrollTop = 400;
+  fireEvent.scroll(motion.viewport);
+  act(() => applyTranscript(session.id, { messages: [
+    { role: "assistant", type: "text", seq: 200, content: "Replacement readable boundary" },
+  ], oldest_loaded_seq: 200, next_message_seq: 201, has_more_messages: false }));
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(400);
+  expect(screen.getByText(/The previous reading position is unavailable/)).toBeVisible();
+  motion.grow(100); motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(400);
+  if (refresh) {
+    act(() => applyTranscript(session.id, { messages: [
+      { role: "assistant", type: "text", seq: 200, content: "Replacement readable boundary" },
+    ], oldest_loaded_seq: 200, next_message_seq: 201, has_more_messages: false }));
+    for (let index = 0; index < 12; index++) motion.tick(16);
+  }
+  fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(700);
+  expect(screen.queryByText(/The previous reading position is unavailable/)).toBeNull();
+});
+
+it("pauses output for the whole touch contact and resumes only after its qualified downward release", () => {
+  const motion = motionViewport();
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(motion.viewport, { touches: [touch(400)] });
+  motion.grow(100);
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(600);
+  expect(motion.writes).toHaveLength(0);
+  fireEvent.touchMove(motion.viewport, { touches: [touch(300)] });
+  motion.viewport.scrollTop = 700; fireEvent.scroll(motion.viewport);
+  motion.grow(100);
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(700);
+  motion.viewport.scrollTop = 800; fireEvent.scroll(motion.viewport);
+  fireEvent.touchEnd(motion.viewport, { touches: [], changedTouches: [touch(300)] });
+  motion.grow(100);
+  for (let index = 0; index < 30; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(900);
+  expect(motion.pending()).toBe(0);
+});
+
+it("ignores an unrelated changed touch before the qualified owner releases", () => {
+  const motion = motionViewport();
+  fireEvent.keyDown(motion.viewport, { key: "PageUp" });
+  const touch = { identifier: 7, clientY: 400 };
+  fireEvent.touchStart(motion.viewport, { touches: [touch] });
+  const moved = { ...touch, clientY: 300 };
+  fireEvent.touchMove(motion.viewport, { touches: [moved] });
+  fireEvent.touchEnd(motion.viewport, { touches: [moved], changedTouches: [{ identifier: 8, clientY: 300 }] });
+  fireEvent.touchEnd(motion.viewport, { touches: [], changedTouches: [moved] });
+  motion.grow(100);
+  for (let index = 0; index < 30; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(700);
+  expect(motion.pending()).toBe(0);
+});
+
+function thumbEvent(viewport: HTMLElement, type: "pointerdown" | "pointerup", clientY: number) {
+  // JSDOM omits PointerEvent. Supply the browser event fields used by the
+  // real capture handler; a native scrollbar may deliver no pointermove.
+  const event = new MouseEvent(type, { bubbles: true, button: 0, clientX: 801, clientY });
+  Object.defineProperties(event, { pointerId: { value: 1 }, pointerType: { value: "mouse" }, isPrimary: { value: true } });
+  fireEvent(viewport, event);
+}
+
+it("keeps an upward thumb drag in reading when native movement emits no pointermove", () => {
+  const motion = motionViewport();
+  thumbEvent(motion.viewport, "pointerdown", 500);
+  motion.viewport.scrollTop = 400;
+  fireEvent.scroll(motion.viewport);
+  thumbEvent(motion.viewport, "pointerup", 380);
+  motion.grow(100);
+  for (let index = 0; index < 30; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(400);
+  expect(motion.pending()).toBe(0);
+});
+
+it("retains the original following intent through a window replacement during an unmoved thumb contact", () => {
+  const motion = motionViewport();
+  thumbEvent(motion.viewport, "pointerdown", 500);
+  act(() => applyTranscript(session.id, { messages: [
+    { role: "assistant", type: "text", seq: 200, content: "Replacement while holding thumb" },
+  ], oldest_loaded_seq: 200, next_message_seq: 201, has_more_messages: false }));
+  thumbEvent(motion.viewport, "pointerup", 500);
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  motion.grow(100);
+  for (let index = 0; index < 30; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(700);
+  expect(motion.pending()).toBe(0);
+});
+
+it("keeps a contact suspended through a same-opening window replacement until its matching release", () => {
+  const motion = motionViewport();
+  const touch = { identifier: 7, clientY: 400 };
+  fireEvent.touchStart(motion.viewport, { touches: [touch] });
+  act(() => applyTranscript(session.id, { messages: [
+    { role: "assistant", type: "text", seq: 200, content: "Detail while still touching" },
+  ], oldest_loaded_seq: 200, next_message_seq: 201, has_more_messages: false }));
+  motion.grow(100);
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(600);
+  expect(motion.writes).toHaveLength(0);
+  // The original target may have gone away; the opening still owns the contact.
+  fireEvent.touchEnd(document.body, { touches: [], changedTouches: [touch] });
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(700);
+  motion.grow(100);
+  for (let index = 0; index < 30; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(800);
+  expect(motion.pending()).toBe(0);
+});
+
+it.each(["tap", "cancel", "multiple contacts"])("does not turn paused reading into following after a touch %s", (ending) => {
+  const motion = motionViewport();
+  fireEvent.keyDown(motion.viewport, { key: "PageUp" });
+  const touch = { identifier: 7, clientY: 400 };
+  fireEvent.touchStart(motion.viewport, { touches: [touch] });
+  if (ending === "multiple contacts") {
+    fireEvent.touchStart(motion.viewport, { touches: [touch, { identifier: 8, clientY: 300 }] });
+    fireEvent.touchEnd(motion.viewport, { touches: [], changedTouches: [touch] });
+  } else if (ending === "cancel") {
+    fireEvent.touchMove(motion.viewport, { touches: [{ ...touch, clientY: 300 }] });
+    fireEvent.touchCancel(motion.viewport, { touches: [], changedTouches: [touch] });
+  } else fireEvent.touchEnd(motion.viewport, { touches: [], changedTouches: [touch] });
+  motion.grow(100);
+  for (let index = 0; index < 30; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(600);
+  expect(motion.pending()).toBe(0);
+});
+
+it("keeps following suspended until the last finger leaves a multiple-contact gesture", () => {
+  const motion = motionViewport();
+  const first = { identifier: 7, clientY: 400 };
+  const second = { identifier: 8, clientY: 300 };
+  fireEvent.touchStart(motion.viewport, { touches: [first] });
+  fireEvent.touchStart(motion.viewport, { touches: [first, second] });
+  motion.grow(100);
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(600);
+  fireEvent.touchEnd(motion.viewport, { touches: [second], changedTouches: [first] });
+  motion.grow(100);
+  for (let index = 0; index < 12; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(600);
+  fireEvent.touchEnd(motion.viewport, { touches: [], changedTouches: [second] });
+  for (let index = 0; index < 30; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(800);
+});
+
 it("retires a zero-height viewport's motion at measurement and resumes from its new geometry", () => {
   const motion = motionViewport();
   motion.grow(300); motion.tick(16);
   const top = motion.viewport.scrollTop;
   motion.resize(0);
-  expect(motion.pending(), "a zero-height measurement stops without a future frame").toBe(0);
   const stopped = motion.writes.length;
+  motion.tick(0);
+  expect(motion.writes).toHaveLength(stopped);
+  expect(motion.pending()).toBe(0);
   motion.tick(60_000);
   expect(motion.writes).toHaveLength(stopped);
   motion.resize(600); motion.tick(16);
@@ -228,8 +494,10 @@ it("keeps a successor created during a cancelled scroll write usable", () => {
   });
   motion.tick(16);
   expect(motion.viewport.scrollTop).toBe(900);
-  expect(motion.pending()).toBe(1);
+  expect(motion.pending()).toBeGreaterThan(0);
+  const writes = motion.writes.length;
   motion.tick(16);
+  expect(motion.writes.length - writes, "one follow step per delivered frame").toBe(1);
   expect(motion.viewport.scrollTop).toBeGreaterThan(900);
   expect(motion.viewport.scrollTop).toBeLessThan(1000);
   for (let index = 0; index < 30; index++) motion.tick(16);
@@ -302,6 +570,7 @@ it("applies a changed reduced-motion preference during the active movement", () 
   expect(motion.viewport.scrollTop).toBeLessThan(900);
   reduced = true; motion.tick(16);
   expect(motion.viewport.scrollTop).toBe(900);
+  motion.tick(0);
   expect(motion.pending()).toBe(0);
   reduced = false; motion.grow(100); motion.tick(16);
   expect(motion.viewport.scrollTop).toBeGreaterThan(900);

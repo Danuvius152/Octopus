@@ -792,6 +792,7 @@ describe("session-owned attachment drafts", () => {
 
   it("restores a queued-input failure using its original File objects", async () => {
     const { input, send, sendMessage } = setup(async () => ({ accepted: true, requestId: "accepted-files" }));
+    fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
     fireEvent.change(input, { target: { value: "Queued complete input" } });
     pick();
     await complete(0, "lost-file");
@@ -820,6 +821,7 @@ describe("session-owned attachment drafts", () => {
     }
     const { input, send, sendMessage } = setup();
     recordQueuedFailure(representation === "expanded");
+    fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
     if (representation === "expanded") fireEvent.click(await screen.findByRole("button", { name: "View full message" }));
     fireEvent.click(await screen.findByRole("button", { name: "Restore draft and re-upload files" }));
     expect(input).toHaveValue("Queued complete input");

@@ -76,6 +76,7 @@ export function observeSession(sessionId: string, purpose: "complete" | "detail"
   const lifetime = sessions.observe(sessionId);
   const { observation } = lifetime;
   const read = detailReads.begin(sessionId);
+  if (purpose !== "metadata") useSessionStore.getState().setTranscriptReadError(sessionId, null, start);
   let active = true;
   let confirmation: SessionRead | undefined;
   const current = () => active;
@@ -103,7 +104,11 @@ export function observeSession(sessionId: string, purpose: "complete" | "detail"
       }
       return detail;
     } catch (error) {
-      if (purpose !== "metadata" && current() && sessions.current(observation)) useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
+      if (purpose !== "metadata" && current() && sessions.current(observation)) {
+        useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
+        if (read.claim()) useSessionStore.getState().setTranscriptReadError(sessionId,
+          error instanceof Error ? error.message : String(error), start);
+      }
       throw error;
     } finally {
       read.finish();

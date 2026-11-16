@@ -37,13 +37,29 @@ function scrollbarThumb(element: Element) {
     y: box.top + viewport.clientHeight * viewport.scrollTop / viewport.scrollHeight + height / 2, gutter };
 }
 
+async function expectFooterMarkerInViewport(scroller: Locator) {
+  // Streaming text is deliberately plain. Measure its final text range rather
+  // than looking for a Markdown heading or accepting a tall ancestor's overlap.
+  await expect.poll(() => scroller.evaluate((viewport) => {
+    const text = viewport.querySelector(".msg-streaming-text")?.firstChild;
+    const marker = "Static Footer final marker";
+    const index = text?.textContent?.lastIndexOf(marker) ?? -1;
+    if (!text || index < 0) return false;
+    const range = document.createRange();
+    range.setStart(text, index); range.setEnd(text, index + marker.length);
+    const bounds = range.getBoundingClientRect();
+    const visible = viewport.getBoundingClientRect();
+    return bounds.height > 0 && bounds.top >= visible.top && bounds.bottom <= visible.bottom + 1;
+  })).toBe(true);
+}
+
 async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [], beforeSelect?: () => Promise<void>) {
   const session = { id: "follow-output", agent_id: "follow-agent", name: "Following output", backend: "codex",
     status: "running", archived: false, working_dir: "/tmp", created_at: "2026-11-12T00:00:00Z" };
   const messages: Message[] = Array.from({ length: count }, (_, index) => ({
     role: "assistant", type: "text", seq: index + 1, content: `Saved row ${index + 1}`,
   }));
-  let snapshot = { messages, next_message_seq: count + 1, oldest_loaded_seq: 1, has_more_messages: false };
+  let snapshot = { messages, next_message_seq: count ? count + 1 : 0, oldest_loaded_seq: count ? 1 : null, has_more_messages: false };
   const pages: Route[] = [];
   let socket!: WebSocketRoute;
   await page.route("**/api/**", async (route) => {
@@ -56,6 +72,7 @@ async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [],
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
     else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
     else if (path === "/api/sessions") data = [session];
+    else if (path.endsWith("/submissions")) data = { items: [], next_cursor: null };
     else if (path === `/api/sessions/${session.id}/messages`) { pages.push(route); return; }
     else if (path.startsWith(`/api/sessions/${session.id}/native-details/`)) data = {
       anchor_seq: 41, child: helper, availability: "not_collected", messages: [], next_after_seq: null, has_more: false,
@@ -92,6 +109,65 @@ async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [],
   return { scroller, gap, send, settle, output, session, pages, replaceOnReconnect };
 }
 
+for (const count of [0, 40]) {
+test(`a static tall Footer completes first presentation with ${count ? "saved history" : "no displayed rows"}`, async ({ page }) => {
+  let gate!: Awaited<ReturnType<typeof page.evaluateHandle<{
+    flush: () => void; release: () => void;
+  }>>>;
+  const { scroller, gap, send } = await openChat(page, count, [], async () => {
+    gate = await page.evaluateHandle(() => {
+      const request = window.requestAnimationFrame, cancel = window.cancelAnimationFrame;
+      let serial = 0;
+      const pending = new Map<number, FrameRequestCallback>();
+      window.requestAnimationFrame = (callback) => { const id = --serial; pending.set(id, callback); return id; };
+      window.cancelAnimationFrame = (id) => { if (id < 0) pending.delete(id); else cancel(id); };
+      return { flush: () => {
+        const batch = [...pending.values()]; pending.clear();
+        for (const callback of batch) callback(performance.now());
+      }, release: () => {
+        window.requestAnimationFrame = request; window.cancelAnimationFrame = cancel;
+        for (const callback of pending.values()) request(callback);
+        pending.clear();
+      } };
+    });
+  });
+  try {
+    expect(await scroller.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
+    send({ type: "assistant_delta", content: "Static output\n\n".repeat(80) + "### Static Footer final marker" });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+    let revealed = false;
+    for (let frame = 0; frame < 24; frame++) {
+      await gate.evaluate((queued) => queued.flush());
+      revealed = await scroller.evaluate((element) => getComputedStyle(element).visibility === "visible");
+      if (revealed) break;
+    }
+    expect(revealed, "the last output does not require another token or an idle interval").toBe(true);
+    expect(await gap()).toBeLessThanOrEqual(1);
+    await expectFooterMarkerInViewport(scroller);
+  } finally { await gate.evaluate((queued) => queued.release()); await gate.dispose(); }
+});
+}
+
+test("return to latest consumes an unchanged tail measurement after detail refresh under a static tall Footer", async ({ page }) => {
+  const { scroller, gap, send, settle, session, replaceOnReconnect } = await openChat(page);
+  await scroller.press("Home");
+  await expect(scroller.getByText("Saved row 1", { exact: true })).toBeInViewport();
+  const snapshot = { messages: [{ role: "assistant" as const, type: "text", seq: 200, content: "Unchanged saved tail" }],
+    oldest_loaded_seq: 200, next_message_seq: 201, has_more_messages: false };
+  replaceOnReconnect(snapshot);
+  await expect(page.getByText(/The previous reading position is unavailable/)).toBeVisible();
+  send({ type: "assistant_delta", content: "Static output\n\n".repeat(80) + "### Static Footer final marker" });
+  await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+  await settle();
+  const refreshed = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/sessions/${session.id}`);
+  replaceOnReconnect(snapshot);
+  await refreshed;
+  await settle();
+  await page.getByRole("button", { name: "Jump to latest" }).click();
+  await expect.poll(gap).toBeLessThanOrEqual(1);
+  await expectFooterMarkerInViewport(scroller);
+});
+
 test("a nonempty replacement window uses the current list and keeps history usable", async ({ page }) => {
   const { scroller, gap, send, settle, pages, replaceOnReconnect } = await openChat(page);
   const original = await scroller.elementHandle();
@@ -100,10 +176,14 @@ test("a nonempty replacement window uses the current list and keeps history usab
   const row = (seq: number): Message => ({ role: "assistant", type: "text", seq, content: `Replacement row ${seq}` });
   replaceOnReconnect({ messages: Array.from({ length: 60 }, (_, index) => row(index + 200)),
     next_message_seq: 260, oldest_loaded_seq: 200, has_more_messages: true });
-  await expect(scroller.getByText("Replacement row 259", { exact: true })).toBeVisible();
-  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await expect(page.getByText(/The previous reading position is unavailable/)).toBeVisible();
+  await expect(scroller.getByText("Replacement row 200", { exact: true })).toBeInViewport();
   expect(await scroller.evaluate((element, old) => element === old, original)).toBe(true);
+  const readingTop = await scroller.evaluate((element) => element.scrollTop);
   send({ type: "assistant_text", seq: 260, content: "After the replacement" });
+  await settle();
+  expect(await scroller.evaluate((element) => element.scrollTop)).toBe(readingTop);
+  await page.getByRole("button", { name: "Jump to latest" }).click();
   await expect(scroller.getByText("After the replacement", { exact: true })).toBeVisible();
   await expect.poll(gap).toBeLessThanOrEqual(2);
   await scroller.press("Home");
@@ -228,8 +308,8 @@ test("navigation before the initial target retires it through late viewport meas
       return scroller.evaluate((element) => element.scrollHeight - element.clientHeight);
     }).toBeGreaterThan(300);
     expect(await gate.evaluate((queued) => queued.writes())).toBe(0);
+    await page.getByLabel("Conversation preparation").press("PageDown");
     const reading = await scroller.evaluate((element) => {
-      element.dispatchEvent(new KeyboardEvent("keydown", { key: "PageDown", bubbles: true }));
       element.scrollTop = 200;
       element.style.flex = "none";
       element.style.height = `${element.clientHeight - 80}px`;

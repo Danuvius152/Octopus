@@ -56,6 +56,7 @@ it("keeps archived history in a receiving tab and offers its explicit successor"
   server();
   useSessionStore.setState({ messages: { a: [{ role: "assistant", type: "text", seq: 1, content: "Original history" }] } });
   mount();
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   await waitFor(() => expect(screen.getByText("Original history")).toBeVisible());
@@ -357,6 +358,7 @@ it("confirms a sparse archive broadcast while the original detail is pending wit
   const api = server();
   useSessionStore.setState({ sessions: [b], messages: { a: [{ role: "assistant", type: "text", seq: 1, content: "Original history" }] } });
   mount();
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
   api.holdDetail(a.id);
   const detail = observeSession(a.id, "detail");
   await waitFor(() => expect(api.detailPending()).toBe(true));
@@ -434,6 +436,7 @@ it("opens the direct successor's archived history without following its own succ
   expect(useSessionStore.getState().archivedSessions.map((row) => row.id)).toContain(child.id);
   fireEvent.click(screen.getByRole("button", { name: "Open successor" }));
   await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
   await waitFor(() => expect(screen.getByText("Result original message")).toBeVisible());
   expect(screen.queryByRole("textbox")).toBeNull();
   expect(api.fetcher.mock.calls.some(([url]) => new URL(url).pathname === "/api/sessions/grandchild")).toBe(false);

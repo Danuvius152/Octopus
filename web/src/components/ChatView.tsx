@@ -16,10 +16,13 @@ import {
 } from "@tabler/icons-react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
+  hasTranscriptBaseline,
   useSessionStore,
   type Message,
   type PendingQuestion,
   type SessionInfo,
+  type StreamingItem,
+  type SubagentRun,
 } from "../stores/sessionStore";
 import { ForkDialog } from "./ForkDialog";
 import { ResearchCard } from "./ResearchCard";
@@ -56,11 +59,14 @@ import { Button } from "./ui/button";
 import { useSessionFork } from "../hooks/useSessionFork";
 import { observeOlderMessages } from "../lib/transcript";
 import { selectSession } from "../lib/selectSession";
+import { observeSession } from "../lib/hydrateSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { newSubmissionId, readSubmission, type QuestionCommandTarget, type SubmissionReply } from "../lib/submission";
 import { MAX_ATTACHMENTS_PER_MESSAGE, useDraftAttachments, type PendingAttachment } from "../hooks/useDraftAttachments";
 
 const EMPTY_MESSAGES: Message[] = [];
+const EMPTY_STREAMING_ITEMS: Record<string, StreamingItem> = {};
+const EMPTY_SUBAGENTS: Record<string, SubagentRun> = {};
 
 /** True on a device whose primary input can't hover — a phone or tablet.
  *
@@ -75,10 +81,14 @@ function isTouchDevice(): boolean {
   );
 }
 
-/** A nested output pane can consume navigation or block scroll chaining. */
+/** A nested output pane can consume navigation or block scroll chaining.
+ * Downward input at the physical boundary still belongs to the main list. */
 function canScrollChat(viewport: HTMLElement | null, target: EventTarget | null, up: boolean, from = viewport?.scrollTop ?? 0): boolean {
-  if (!viewport?.clientHeight || (up ? from <= 0 : viewport.scrollHeight - viewport.clientHeight - from <= 0)) return false;
+  if (!viewport?.clientHeight || up && from <= 0) return false;
   let element = target instanceof Element ? target : null;
+  // The preparation surface overlays this same list while its layout stays
+  // measurable. Navigation there has the same owner as navigation on the list.
+  if (element?.closest("[data-chat-preparation]")?.parentElement?.querySelector(".chat-messages") === viewport) element = viewport;
   while (element && element !== viewport) {
     const style = getComputedStyle(element);
     if (/^(auto|scroll)$/.test(style.overflowY) && element.scrollHeight > element.clientHeight
@@ -176,8 +186,11 @@ const EMPTY_QUESTIONS: PendingQuestion[] = [];
 
 // Keep the component type stable as its live contents change. Replacing the
 // Footer component on every delta unmounts it and disrupts size observation.
-function ChatFooter({ context }: { context?: { footer: ReactNode } }) {
-  return context?.footer;
+function ChatFooter({ context }: { context?: { footer: ReactNode; onLayout: () => void } }) {
+  const footer = context?.footer;
+  const onLayout = context?.onLayout;
+  useLayoutEffect(() => { onLayout?.(); }, [footer, onLayout]);
+  return <div data-chat-footer>{footer}</div>;
 }
 // Local notices have no persisted seq. Their occurrence identity follows the
 // immutable store message through prepends, without retaining another transcript.
@@ -208,13 +221,40 @@ interface ViewportScope {
 }
 type ViewportPosition = ViewportScope & {
   frame: number | null;
-} & ({ kind: "initial" } | { kind: "history"; key: string; offset: number });
+} & ({ kind: "initial"; tail: TailMeasurement | null; checking: boolean } |
+  { kind: "history"; key: string; offset: number; physicalTop: number });
+interface TailMeasurement {
+  message: Message;
+  height: number;
+  width: number;
+  installed: boolean;
+}
+interface InitialPresentation {
+  phase: "preparing" | "revealing" | "ready" | "reading" | "incomplete";
+  remaining: number;
+  since: number | null;
+  deadline: number | null;
+  error?: string;
+}
+function newPresentation(): InitialPresentation {
+  return { phase: "preparing", remaining: 2000, since: null, deadline: null };
+}
+function pausePreparation(owner: InitialPresentation) {
+  if (owner.deadline !== null) window.clearTimeout(owner.deadline);
+  owner.deadline = null;
+  if (owner.since !== null) owner.remaining = Math.max(0, owner.remaining - Math.max(0, performance.now() - owner.since));
+  owner.since = null;
+}
 interface NavigationContact {
-  source: "pointer" | "touch";
+  sessionId: string | null;
+  account: number;
+  source: "pointer" | "touch" | "thumb";
   id: number;
   y: number;
   top: number;
   resume: boolean;
+  invalid: boolean;
+  pointers: Set<number>;
 }
 
 export function ChatView({
@@ -278,6 +318,8 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const transcriptBaseline = useSessionStore((s) => activeSessionId ? hasTranscriptBaseline(s, activeSessionId) : false);
+  const transcriptReadError = useSessionStore((s) => activeSessionId ? s.transcriptReadErrors[activeSessionId] : undefined);
   const viewing = useRef<{ account: number; sessionId: string } | null>(null);
   useEffect(() => {
     const unsubscribe = useSessionStore.subscribe((state, before) => {
@@ -322,13 +364,12 @@ export function ChatView({
     return () => { deleted(); account(); };
   }, [activeSessionId, clearAttachments, resetHistory]);
   const messagesMap = useSessionStore((s) => s.messages);
-  const streamingMap = useSessionStore((s) => s.streamingText);
-  const streamingItems = useSessionStore((s) => s.streamingItems);
   const messages = activeSessionId ? (messagesMap[activeSessionId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES;
-  const streamingText = activeSessionId ? (streamingMap[activeSessionId] ?? "") : "";
-  const subagentSnapshots = useSessionStore((s) => s.subagents);
-  const nativeStreaming = useMemo(() => Object.entries(activeSessionId ? streamingItems[activeSessionId] || {} : {})
-    .filter(([, item]) => !isNativeChild(item.runtime_metadata)), [activeSessionId, streamingItems]);
+  const streamingText = useSessionStore((s) => activeSessionId ? s.streamingText[activeSessionId] ?? "" : "");
+  const streamingItems = useSessionStore((s) => activeSessionId ? s.streamingItems[activeSessionId] ?? EMPTY_STREAMING_ITEMS : EMPTY_STREAMING_ITEMS);
+  const subagentSnapshots = useSessionStore((s) => activeSessionId ? s.subagents[activeSessionId] ?? EMPTY_SUBAGENTS : EMPTY_SUBAGENTS);
+  const nativeStreaming = useMemo(() => Object.entries(streamingItems)
+    .filter(([, item]) => !isNativeChild(item.runtime_metadata)), [streamingItems]);
   const sessions = useSessionStore((s) => s.sessions);
   const archivedSessions = useSessionStore((s) => s.archivedSessions);
   const agents = useSessionStore((s) => s.agents);
@@ -356,12 +397,12 @@ export function ChatView({
     setRestoredInput({ sessionId: activeSessionId, clientId: saved.client_request_id });
     textareaRef.current?.focus();
   }, [activeSessionId, input, pendingAttachments, isArchived, transcriptDamaged, addFiles, setInput, resetHistory]);
-  const dispatchStates = useSessionStore((s) => s.dispatchStates);
+  const dispatchState = useSessionStore((s) => activeSessionId ? s.dispatchStates[activeSessionId] : undefined);
+  const activeRequestId = dispatchState?.active_request_id;
   const chatMessages = useMemo(() => nativeChatMessages(messages,
-    Object.values(activeSessionId ? subagentSnapshots[activeSessionId] || {} : {}),
-    activeSessionId ? dispatchStates[activeSessionId]?.active_request_id : undefined),
-  [messages, activeSessionId, subagentSnapshots, dispatchStates]);
-  const dispatchPaused = activeSessionId ? dispatchStates[activeSessionId]?.paused ?? false : false;
+    Object.values(subagentSnapshots), activeRequestId),
+  [messages, subagentSnapshots, activeRequestId]);
+  const dispatchPaused = dispatchState?.paused ?? false;
   const pendingQuestionsMap = useSessionStore((s) => s.pendingQuestions);
   const pendingQuestions = activeSessionId
     ? (pendingQuestionsMap[activeSessionId] ?? EMPTY_QUESTIONS)
@@ -380,15 +421,25 @@ export function ChatView({
       window: state.activeSessionId ? state.messageWindows[state.activeSessionId] : undefined };
   });
   const currentView = useRef<ChatViewportView | null>(null);
-  // Reading input/scroll retains one anchor for a possible node handoff: the
-  // library may detach its public ref after the old DOM has lost its geometry.
-  // It holds no DOM, transcript copy, observer or ongoing task.
+  // The opening owns reading intent; a window/node replacement only hands off
+  // its optional position. Release the old node as soon as the handoff commits.
   const readingHandoff = useRef<{
-    view: ChatViewportView; key: string; offset: number;
+    view: ChatViewportView; anchor: ReturnType<typeof captureReadingAnchor>;
+    physical?: { viewport: HTMLElement; top: number };
   } | null>(null);
+  const [readingBoundary, setReadingBoundary] = useState(false);
+  const initialPresentation = useRef<InitialPresentation>(newPresentation());
+  const [presentation, setPresentation] = useState(() => ({ owner: initialPresentation.current, phase: initialPresentation.current.phase }));
+  const publishPresentation = useCallback((owner: InitialPresentation, phase: InitialPresentation["phase"]) => {
+    if (owner !== initialPresentation.current) return;
+    owner.phase = phase;
+    setPresentation({ owner, phase });
+  }, []);
   const position = useRef<ViewportPosition | null>(null);
+  // Keep just the current node/window's last real tail measurement. A reader
+  // can request latest without causing another resize of an unchanged row.
+  const measuredTail = useRef<(ViewportScope & TailMeasurement) | null>(null);
   const projectedMessages = useRef(chatMessages);
-  const renderedRows = useRef<string[]>([]);
   // Input retires follow intent before queued layout work can overwrite it.
   // Position alone cannot distinguish native navigation from virtual layout.
   const following = useRef(true);
@@ -422,6 +473,31 @@ export function ChatView({
     return position.current === operation && scroller.current === operation.viewport &&
       currentViewportView(operation.view);
   }, [currentViewportView]);
+  const failPreparation = useCallback((owner: InitialPresentation, error: string) => {
+    if (owner !== initialPresentation.current || owner.phase !== "preparing" && owner.phase !== "revealing") return;
+    pausePreparation(owner);
+    retirePosition(); cancelFollow();
+    following.current = false;
+    owner.error = error;
+    publishPresentation(owner, "incomplete");
+  }, [cancelFollow, retirePosition, publishPresentation]);
+  const preparationBudget = useCallback(function updateBudget() {
+    const owner = initialPresentation.current;
+    const view = currentView.current;
+    const viewport = scroller.current;
+    const active = (owner.phase === "preparing" || owner.phase === "revealing") && view?.sessionId &&
+      currentViewportView(view) && hasTranscriptBaseline(useSessionStore.getState(), view.sessionId) &&
+      viewport?.clientHeight && !document.hidden && !navigationContact.current;
+    if (!active) { pausePreparation(owner); return; }
+    if (owner.since !== null) return;
+    if (owner.remaining <= 0) { failPreparation(owner, "Positioning did not finish within the available layout time."); return; }
+    owner.since = performance.now();
+    owner.deadline = window.setTimeout(() => {
+      if (owner !== initialPresentation.current) return;
+      pausePreparation(owner);
+      updateBudget();
+    }, owner.remaining);
+  }, [currentViewportView, failPreparation]);
   const pauseFollowing = useCallback(() => {
     following.current = false;
     cancelFollow();
@@ -430,18 +506,11 @@ export function ChatView({
     const viewport = scroller.current;
     const view = currentView.current;
     const anchor = viewport?.clientHeight && view && currentViewportView(view) ? captureReadingAnchor(viewport) : null;
-    readingHandoff.current = anchor && view ? { view, ...anchor } : null;
-  }, [cancelFollow, retirePosition, currentViewportView]);
-  const navigate = useCallback((up: boolean, from: number) => {
-    const viewport = scroller.current;
-    const view = currentView.current;
-    if (!viewport || !view || !currentViewportView(view)) return;
-    if (viewport.scrollTop > 0) setPagingReady(true);
-    pauseFollowing();
-    if (!up) {
-      downwardNavigation.current = { view, viewport, top: from, until: performance.now() + 500 };
-    }
-  }, [pauseFollowing, currentViewportView]);
+    readingHandoff.current = view ? { view, anchor } : null;
+    const owner = initialPresentation.current;
+    pausePreparation(owner);
+    publishPresentation(owner, "reading");
+  }, [cancelFollow, retirePosition, currentViewportView, publishPresentation]);
   const pauseForReading = useCallback((event: MouseEvent<HTMLElement>) => {
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest("button[aria-expanded], summary")) pauseFollowing();
@@ -449,14 +518,14 @@ export function ChatView({
   const followMeasuredOutput = useCallback(() => {
     const viewport = scroller.current;
     const view = currentView.current;
-    if (!view || !currentViewportView(view) || !following.current || position.current || !viewport?.clientHeight || document.hidden || followFrame.current) return;
+    if (!view || !currentViewportView(view) || !following.current || navigationContact.current || position.current || !viewport?.clientHeight || document.hidden || followFrame.current) return;
     if (!reducedMotion.current && typeof window.matchMedia === "function") {
       reducedMotion.current = window.matchMedia("(prefers-reduced-motion: reduce)");
     }
     const work = { view, viewport, frame: 0, time: performance.now() };
     followFrame.current = work;
     const current = () => followFrame.current === work && scroller.current === viewport &&
-      following.current && !position.current && !document.hidden && viewport.clientHeight > 0 && currentViewportView(view);
+      following.current && !navigationContact.current && !position.current && !document.hidden && viewport.clientHeight > 0 && currentViewportView(view);
     const stop = () => { if (followFrame.current === work) followFrame.current = null; };
     const advance = () => {
       if (!current()) { stop(); return; }
@@ -489,37 +558,46 @@ export function ChatView({
     };
     work.frame = requestAnimationFrame(advance);
   }, [currentViewportView]);
-  const releaseNavigationContact = useCallback((contact: NavigationContact, y: number) => {
-    if (navigationContact.current !== contact) return;
-    navigationContact.current = null;
+  const navigate = useCallback((up: boolean, from: number) => {
     const viewport = scroller.current;
     const view = currentView.current;
-    if (!viewport?.clientHeight || !view || !currentViewportView(view) || position.current) return;
-    const navigation = downwardNavigation.current;
-    const directed = navigation?.viewport === viewport && navigation.view === view;
-    // Native thumb drags may omit pointermove. Touch release instead requires
-    // direction established by this contact, so inner scrolling or a tap cannot
-    // turn an unrelated main-list displacement into a return to following.
-    const returned = (contact.source === "pointer" || directed) && viewport.scrollTop > contact.top &&
-      viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4;
-    if (contact.resume && y === contact.y || returned) {
-      following.current = true;
-      downwardNavigation.current = null;
-      readingHandoff.current = null;
-      followMeasuredOutput();
-    } else if (contact.source === "touch" && directed) {
-      navigation.until = performance.now() + 500;
+    if (!viewport?.clientHeight || document.hidden || !view || !currentViewportView(view)) return;
+    if (viewport.scrollTop > 0) setPagingReady(true);
+    pauseFollowing();
+    if (!up) {
+      if (!navigationContact.current && viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4) {
+        following.current = true;
+        readingHandoff.current = null;
+        setReadingBoundary(false);
+        followMeasuredOutput();
+      } else downwardNavigation.current = { view, viewport, top: from, until: performance.now() + 500 };
     }
-  }, [currentViewportView, followMeasuredOutput]);
+  }, [pauseFollowing, currentViewportView, followMeasuredOutput]);
+  const startNavigationContact = useCallback((source: NavigationContact["source"], id: number, y: number) => {
+    const viewport = scroller.current;
+    const view = currentView.current;
+    if (!viewport?.clientHeight || document.hidden || !view || !currentViewportView(view)) return;
+    cancelFollow();
+    const operation = position.current;
+    if (operation?.frame !== null && operation?.frame !== undefined) cancelAnimationFrame(operation.frame);
+    if (operation) operation.frame = null;
+    downwardNavigation.current = null;
+    // Contact suspends writes without changing the opening's reading intent.
+    // Only navigation during that contact can withdraw the original permission.
+    navigationContact.current = { source, id, y, top: viewport.scrollTop,
+      resume: following.current, invalid: false, pointers: new Set([id]), sessionId: view.sessionId, account: view.account };
+    preparationBudget();
+  }, [cancelFollow, currentViewportView, preparationBudget]);
   // Automatic paging needs a genuine departure from the physical top.
   // Settling or cancelling an initial target at mount-time 0 does not grant it.
   const [pagingReady, setPagingReady] = useState(false);
-  const positionMeasuredOutput = useCallback(() => {
+  const positionMeasuredOutput = useCallback(function schedulePosition() {
+    preparationBudget();
     const operation = position.current;
-    if (!operation || !currentPosition(operation) || !operation.viewport.clientHeight || operation.frame !== null) return;
+    if (!operation || !currentPosition(operation) || !operation.viewport.clientHeight || document.hidden || navigationContact.current || operation.frame !== null) return;
     operation.frame = requestAnimationFrame(() => {
       operation.frame = null;
-      if (!currentPosition(operation) || !operation.viewport.clientHeight) return;
+      if (!currentPosition(operation) || !operation.viewport.clientHeight || document.hidden || navigationContact.current) return;
       const viewport = operation.viewport;
       const rows = projectedMessages.current;
       const finish = () => {
@@ -528,7 +606,7 @@ export function ChatView({
         // scroll event. Publish the reading handoff with the position itself.
         if (!following.current) {
           const anchor = captureReadingAnchor(viewport);
-          readingHandoff.current = anchor ? { view: operation.view, ...anchor } : null;
+          readingHandoff.current = { view: operation.view, anchor };
         }
         position.current = null;
         if (operation.kind === "initial") {
@@ -538,22 +616,82 @@ export function ChatView({
         followMeasuredOutput();
       };
       if (operation.kind === "initial") {
-        const gap = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
-        if (gap > 1 && currentPosition(operation)) {
-          virtuoso.current?.scrollTo({ top: viewport.scrollHeight, behavior: "auto" });
-        }
+        if (!operation.view.sessionId || !hasTranscriptBaseline(useSessionStore.getState(), operation.view.sessionId)) return;
+        const write = (top: number) => {
+          if (!currentPosition(operation) || Math.abs(top - viewport.scrollTop) <= 1) return;
+          virtuoso.current?.scrollTo({ top, behavior: "auto" });
+          // Every actual application write owns its next verification. The
+          // final token, resize or browser scroll notification may never arrive.
+          schedulePosition();
+        };
         const tail = rows.at(-1);
-        if ((!tail || renderedRows.current.includes(chatMessageKey(tail))) &&
-          viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 1) finish();
+        if (tail && operation.tail && operation.tail.message !== tail && operation.tail.width === viewport.clientWidth &&
+          chatMessageKey(operation.tail.message) === chatMessageKey(tail)) {
+          // An equivalent detail can replace the message object without a
+          // resize. Revalidate the real outer item against its prior measured
+          // height, then check the public size tree again. Estimates alone
+          // cannot create this proof; an unmounted/changed row is probed below.
+          const item = Array.from(viewport.querySelectorAll<HTMLElement>("[data-message-key]"))
+            .find((row) => row.dataset.messageKey === chatMessageKey(tail))?.parentElement;
+          const rectangle = item?.getBoundingClientRect();
+          if (rectangle?.width && rectangle.height === operation.tail.height) {
+            operation.tail = { message: tail, height: rectangle.height, width: viewport.clientWidth, installed: false };
+            measuredTail.current = { view: operation.view, viewport, ...operation.tail };
+          }
+        }
+        if (operation.tail && (operation.tail.message !== tail || operation.tail.width !== viewport.clientWidth)) operation.tail = null;
+        if (tail && !operation.tail) {
+          // A tall Footer can put the historical tail outside overscan. Probe
+          // the row first; it need not remain mounted at the physical bottom.
+          virtuoso.current?.scrollIntoView({ index: rows.length - 1, calculateViewLocation: ({ itemTop, viewportTop }) => {
+            const top = Math.max(0, Math.min(viewport.scrollHeight - viewport.clientHeight,
+              viewport.scrollTop + itemTop - viewportTop));
+            write(top);
+            return null;
+          } });
+          return;
+        }
+        if (operation.tail && !operation.tail.installed) {
+          if (!operation.checking) {
+            operation.checking = true;
+            const measured = operation.tail;
+            virtuoso.current?.getState((state) => {
+              operation.checking = false;
+              if (!currentPosition(operation) || operation.tail !== measured) return;
+              if (state.ranges.some((range) => range.startIndex <= rows.length - 1 && range.endIndex >= rows.length - 1 &&
+                range.size === measured.height)) {
+                measured.installed = true;
+                schedulePosition();
+              }
+            });
+          }
+          if (!operation.tail.installed) return;
+        }
+        const gap = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
+        if (gap > 1) { write(Math.max(0, viewport.scrollHeight - viewport.clientHeight)); return; }
+        const owner = initialPresentation.current;
+        if (owner.phase === "preparing") publishPresentation(owner, "revealing");
+        else if (owner.phase !== "revealing") finish();
         return;
       }
       const index = rows.findIndex((message) => chatMessageKey(message) === operation.key);
-      if (index < 0) { finish(); return; }
+      if (index < 0) {
+        viewport.scrollTop = Math.max(0, Math.min(operation.physicalTop, viewport.scrollHeight - viewport.clientHeight));
+        setReadingBoundary(true);
+        finish(); return;
+      }
       const element = Array.from(viewport.querySelectorAll<HTMLElement>("[data-message-key]"))
         .find((row) => row.dataset.messageKey === operation.key);
       if (element) {
         const delta = element.getBoundingClientRect().top - viewport.getBoundingClientRect().top - operation.offset;
-        if (Math.abs(delta) > 1 && currentPosition(operation)) viewport.scrollTop += delta;
+        if (Math.abs(delta) > 1 && currentPosition(operation)) {
+          const before = viewport.scrollTop;
+          viewport.scrollTop += delta;
+          // This write can change the virtual range and its measured extent.
+          // Verify the same anchor after that layout instead of retiring on
+          // the pre-write geometry. A physical clamp still ends the operation.
+          if (viewport.scrollTop !== before) { schedulePosition(); return; }
+        }
         finish();
       } else {
         // Probe the row itself before applying an offset inside a tall row:
@@ -566,24 +704,130 @@ export function ChatView({
             const top = viewport.scrollTop + itemTop - viewportTop;
             if (top >= 0 && top < viewport.scrollHeight && Math.abs(top - viewport.scrollTop) > 1 && currentPosition(operation)) {
               virtuoso.current?.scrollTo({ top, behavior: "auto" });
+              schedulePosition();
             }
           }
           return null;
         } });
       }
     });
-  }, [currentPosition, followMeasuredOutput]);
+  }, [currentPosition, followMeasuredOutput, preparationBudget, publishPresentation]);
+  const measureItem = useCallback((element: HTMLElement, field: "offsetHeight" | "offsetWidth") => {
+    const rectangle = element.getBoundingClientRect();
+    const size = field === "offsetHeight" ? rectangle.height : rectangle.width;
+    const operation = position.current;
+    const tail = projectedMessages.current.at(-1);
+    const view = currentView.current;
+    const viewport = scroller.current;
+    if (field === "offsetHeight" && size > 0 && rectangle.width > 0 && view && currentViewportView(view) &&
+      viewport && tail && element.closest(".chat-messages") === viewport &&
+      element.querySelector<HTMLElement>("[data-message-key]")?.dataset.messageKey === chatMessageKey(tail)) {
+      const previous = measuredTail.current;
+      const measurement = previous?.view === view && previous.viewport === viewport && previous.message === tail &&
+        previous.height === size && previous.width === viewport.clientWidth ? previous :
+        { view, viewport, message: tail, height: size, width: viewport.clientWidth, installed: false };
+      measuredTail.current = measurement;
+      if (operation?.kind !== "initial" || !currentPosition(operation) || operation.tail === measurement) return size;
+      operation.tail = measurement;
+      // Virtuoso publishes this value after itemSize returns. A subsequent
+      // frame checks its public size tree, including equal-to-estimate heights.
+      positionMeasuredOutput();
+    }
+    return size;
+  }, [currentPosition, currentViewportView, positionMeasuredOutput]);
   const measuredOutput = useCallback(() => {
-    if (!scroller.current?.clientHeight) { cancelFollow(); return; }
+    preparationBudget();
+    if (!scroller.current?.clientHeight || document.hidden) {
+      cancelFollow();
+      const operation = position.current;
+      if (operation?.frame !== null && operation?.frame !== undefined) cancelAnimationFrame(operation.frame);
+      if (operation) operation.frame = null;
+      return;
+    }
     positionMeasuredOutput();
     followMeasuredOutput();
-  }, [cancelFollow, positionMeasuredOutput, followMeasuredOutput]);
+  }, [cancelFollow, positionMeasuredOutput, followMeasuredOutput, preparationBudget]);
+  const releaseNavigationContact = useCallback((contact: NavigationContact, y: number) => {
+    if (navigationContact.current !== contact) return;
+    navigationContact.current = null;
+    const viewport = scroller.current;
+    const view = currentView.current;
+    if (!viewport?.clientHeight || !view || contact.sessionId !== view.sessionId || contact.account !== view.account || !currentViewportView(view)) return;
+    // Native scrollbar drags can omit pointermove. A moved release withdraws
+    // the original permission before deciding whether it really returned down.
+    if (contact.source === "thumb" && (y !== contact.y || !contact.resume)) pauseFollowing();
+    const navigation = downwardNavigation.current;
+    const directed = !contact.invalid && navigation?.viewport === viewport && navigation.view === view;
+    // Native thumb drags may omit pointermove. Touch release instead requires
+    // direction established by this contact, so inner scrolling or a tap cannot
+    // turn an unrelated main-list displacement into a return to following.
+    const returned = !contact.invalid && (contact.source === "thumb" ? y > contact.y && viewport.scrollTop > contact.top : directed && viewport.scrollTop >= navigation.top) &&
+      viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4;
+    if (!contact.invalid && contact.source === "thumb" && contact.resume && y === contact.y || returned) {
+      following.current = true;
+      downwardNavigation.current = null;
+      readingHandoff.current = null;
+      setReadingBoundary(false);
+    } else if (contact.source !== "thumb" && directed) {
+      navigation.until = performance.now() + 500;
+    }
+    if (contact.invalid) downwardNavigation.current = null;
+    measuredOutput();
+  }, [currentViewportView, measuredOutput, pauseFollowing]);
+  useEffect(() => {
+    // The opening owns a held contact, even if its original viewport is
+    // replaced or the release lands outside the list. Geometry stays scoped.
+    const pointerDown = (event: PointerEvent) => {
+      const contact = navigationContact.current;
+      if (!contact || contact.source === "touch" || contact.pointers.has(event.pointerId)) return;
+      contact.pointers.add(event.pointerId);
+      contact.invalid = true;
+      downwardNavigation.current = null;
+    };
+    const pointerEnd = (event: PointerEvent) => {
+      const contact = navigationContact.current;
+      if (!contact || contact.source === "touch" || !contact.pointers.delete(event.pointerId)) return;
+      if (event.type === "pointercancel") { contact.invalid = true; downwardNavigation.current = null; }
+      if (!contact.pointers.size) releaseNavigationContact(contact, event.type === "pointercancel" ? contact.y : event.clientY);
+    };
+    const touchStart = (event: TouchEvent) => {
+      const contact = navigationContact.current;
+      if (contact?.source === "touch" && event.touches.length > 1) {
+        contact.invalid = true;
+        downwardNavigation.current = null;
+      }
+    };
+    const touchEnd = (event: TouchEvent) => {
+      const contact = navigationContact.current;
+      if (!contact || contact.source !== "touch") return;
+      const touch = Array.from(event.changedTouches).find((item) => item.identifier === contact.id);
+      if (!touch && !contact.invalid) return;
+      if (event.type === "touchcancel" || event.touches.length) {
+        contact.invalid = true;
+        downwardNavigation.current = null;
+      }
+      if (!event.touches.length) releaseNavigationContact(contact, touch?.clientY ?? contact.y);
+    };
+    window.addEventListener("pointerdown", pointerDown, true);
+    window.addEventListener("pointerup", pointerEnd, true);
+    window.addEventListener("pointercancel", pointerEnd, true);
+    window.addEventListener("touchstart", touchStart, true);
+    window.addEventListener("touchend", touchEnd, true);
+    window.addEventListener("touchcancel", touchEnd, true);
+    return () => {
+      window.removeEventListener("pointerdown", pointerDown, true);
+      window.removeEventListener("pointerup", pointerEnd, true);
+      window.removeEventListener("pointercancel", pointerEnd, true);
+      window.removeEventListener("touchstart", touchStart, true);
+      window.removeEventListener("touchend", touchEnd, true);
+      window.removeEventListener("touchcancel", touchEnd, true);
+    };
+  }, [releaseNavigationContact]);
   useEffect(() => {
     const visibilityChanged = () => {
       // A hidden page may stop delivering frames altogether. Retire now;
       // returning starts from the current extent and a fresh execution clock.
-      if (document.hidden) cancelFollow();
-      else measuredOutput();
+      measuredOutput();
     };
     document.addEventListener("visibilitychange", visibilityChanged);
     return () => document.removeEventListener("visibilitychange", visibilityChanged);
@@ -592,23 +836,54 @@ export function ChatView({
     retirePosition();
     downwardNavigation.current = null;
     readingHandoff.current = null;
-    renderedRows.current = [];
     const view = currentView.current;
     if (!view?.sessionId || !currentViewportView(view)) return;
-    position.current = { kind: "initial", view, viewport, frame: null };
+    const measured = measuredTail.current;
+    position.current = { kind: "initial", view, viewport, frame: null,
+      tail: measured?.view === view && measured.viewport === viewport ? measured : null, checking: false };
     positionMeasuredOutput();
   }, [retirePosition, positionMeasuredOutput, currentViewportView]);
+  const retryInitialPosition = useCallback(() => {
+    const view = currentView.current;
+    if (!view?.sessionId || !currentViewportView(view)) return;
+    pausePreparation(initialPresentation.current);
+    initialPresentation.current = newPresentation();
+    publishPresentation(initialPresentation.current, "preparing");
+    following.current = true;
+    setReadingBoundary(false);
+    if (scroller.current) startInitialPosition(scroller.current);
+    if (!hasTranscriptBaseline(useSessionStore.getState(), view.sessionId)) {
+      void observeSession(view.sessionId, "detail").done.catch(() => {});
+    }
+  }, [currentViewportView, publishPresentation, startInitialPosition]);
+  const restoreReading = useCallback((view: ChatViewportView, viewport: HTMLElement) => {
+    const handoff = readingHandoff.current;
+    readingHandoff.current = null;
+    if (handoff?.anchor) {
+      position.current = { kind: "history", view, viewport, ...handoff.anchor, frame: null,
+        physicalTop: handoff.physical?.viewport === viewport ? handoff.physical.top : 0 };
+      positionMeasuredOutput();
+    } else if (handoff?.physical?.viewport === viewport) {
+      viewport.scrollTop = Math.max(0, Math.min(handoff.physical.top, viewport.scrollHeight - viewport.clientHeight));
+      if (handoff.view.window !== view.window) setReadingBoundary(true);
+    } else {
+      viewport.scrollTop = 0;
+      setReadingBoundary(true);
+    }
+  }, [positionMeasuredOutput]);
   const setScroller = useCallback((element: HTMLElement | Window | null) => {
     const next = element instanceof HTMLElement ? element : null;
     const previous = scroller.current;
     if (previous === next) return;
+    measuredTail.current = null;
     const view = currentView.current;
     if (previous && view && currentViewportView(view)) {
       const operation = position.current;
       const anchor = operation?.kind === "history" && currentPosition(operation)
         ? { key: operation.key, offset: operation.offset }
         : !following.current && previous.clientHeight ? captureReadingAnchor(previous) : null;
-      if (anchor) readingHandoff.current = { view, ...anchor };
+      if (!following.current) readingHandoff.current = { view, anchor,
+        physical: { viewport: previous, top: operation?.kind === "history" ? operation.physicalTop : previous.scrollTop } };
       else if (following.current) readingHandoff.current = null;
     }
     cancelFollow();
@@ -616,24 +891,21 @@ export function ChatView({
     downwardNavigation.current = null;
     viewportObserver.current?.disconnect();
     viewportObserver.current = null;
-    navigationContact.current = null;
+    if (navigationContact.current) navigationContact.current.invalid = true;
     scroller.current = next;
     const viewport = scroller.current;
     lastScrollTop.current = viewport?.scrollTop ?? 0;
     if (scroller.current) {
       // Virtuoso publishes this ref after layout effects. Attach to the
       // actual current node, including replacements and hidden-view returns.
-      const handoff = readingHandoff.current;
-      readingHandoff.current = null;
-      if (view && currentViewportView(view) && handoff?.view === view) {
-        position.current = { kind: "history", view, viewport: scroller.current,
-          key: handoff.key, offset: handoff.offset, frame: null };
-        positionMeasuredOutput();
-      } else if (following.current) startInitialPosition(scroller.current);
+      if (view && currentViewportView(view) && initialPresentation.current.phase !== "incomplete") {
+        if (following.current) startInitialPosition(scroller.current);
+        else restoreReading(view, scroller.current);
+      }
       viewportObserver.current = new ResizeObserver(measuredOutput);
       viewportObserver.current.observe(scroller.current);
     }
-  }, [cancelFollow, retirePosition, startInitialPosition, measuredOutput, currentViewportView, currentPosition, positionMeasuredOutput]);
+  }, [cancelFollow, retirePosition, startInitialPosition, measuredOutput, currentViewportView, currentPosition, restoreReading]);
   const [loadingOlder, setLoadingOlder] = useState(false);
   // Whether the list is scrolled to its top, and whether the last automatic
   // load there came back empty (a failed fetch). The second stops a failure
@@ -651,36 +923,58 @@ export function ChatView({
       (sid ? state.messageWindows[sid] : undefined) === (sid ? before.messageWindows[sid] : undefined)) return;
     // Retire synchronously at the store boundary, before React can batch a
     // departure and return into identical selected values.
+    const sameOpening = state.accountGeneration === before.accountGeneration && sid === before.activeSessionId;
+    pausePreparation(initialPresentation.current);
+    const view = currentView.current;
+    const viewport = scroller.current;
+    if (sameOpening && !following.current && view && viewport) {
+      const operation = position.current;
+      const anchor = operation?.kind === "history" ? { key: operation.key, offset: operation.offset }
+        : viewport.clientHeight ? captureReadingAnchor(viewport) : readingHandoff.current?.anchor ?? null;
+      readingHandoff.current = { view, anchor,
+        physical: { viewport, top: operation?.kind === "history" ? operation.physicalTop : viewport.scrollTop } };
+    } else if (!sameOpening) {
+      readingHandoff.current = null;
+      following.current = true;
+      setReadingBoundary(false);
+      initialPresentation.current = newPresentation();
+      publishPresentation(initialPresentation.current, "preparing");
+      navigationContact.current = null;
+    }
     currentView.current = null;
-    readingHandoff.current = null;
+    measuredTail.current = null;
     cancelFollow(); retirePosition();
-    downwardNavigation.current = null; navigationContact.current = null;
+    downwardNavigation.current = null;
+    if (navigationContact.current) navigationContact.current.invalid = true;
     olderRead.current?.cancel(); olderRead.current = null;
     setViewportView({ sessionId: sid, account: state.accountGeneration,
       window: sid ? state.messageWindows[sid] : undefined });
-  }), [cancelFollow, retirePosition]);
+  }), [cancelFollow, retirePosition, publishPresentation]);
   useLayoutEffect(() => {
     currentView.current = viewportView;
     cancelFollow();
-    following.current = true;
-    navigationContact.current = null;
     retirePosition();
     setLoadingOlder(false);
     setPagingReady(false);
     setAtTop(false);
     setOlderStalled(false);
-    if (scroller.current) startInitialPosition(scroller.current);
+    if (scroller.current && initialPresentation.current.phase !== "incomplete") {
+      if (following.current) startInitialPosition(scroller.current);
+      else restoreReading(viewportView, scroller.current);
+    }
     return () => {
       cancelFollow(viewportView);
       if (position.current?.view === viewportView) retirePosition(position.current);
       if (currentView.current === viewportView) {
+        measuredTail.current = null;
+        pausePreparation(initialPresentation.current);
         currentView.current = null;
         readingHandoff.current = null;
         downwardNavigation.current = null; navigationContact.current = null;
         olderRead.current?.cancel(); olderRead.current = null;
       }
     };
-  }, [viewportView, cancelFollow, retirePosition, startInitialPosition]);
+  }, [viewportView, cancelFollow, retirePosition, startInitialPosition, restoreReading]);
   const loadOlder = useCallback(() => {
     const sid = activeSessionId;
     const view = currentView.current;
@@ -695,7 +989,7 @@ export function ChatView({
       const anchor = captureReadingAnchor(element);
       retirePosition();
       downwardNavigation.current = null;
-      mergedPosition = anchor ? { kind: "history", view, viewport: element, ...anchor, frame: null } : null;
+      mergedPosition = anchor ? { kind: "history", view, viewport: element, ...anchor, frame: null, physicalTop: element.scrollTop } : null;
       position.current = mergedPosition;
     });
     olderRead.current = read;
@@ -721,7 +1015,38 @@ export function ChatView({
   useLayoutEffect(() => {
     projectedMessages.current = chatMessages;
     positionMeasuredOutput();
-  }, [chatMessages, loadingOlder, positionMeasuredOutput]);
+  }, [chatMessages, loadingOlder, transcriptBaseline, positionMeasuredOutput]);
+
+  useLayoutEffect(() => {
+    if (transcriptDamaged || !transcriptBaseline && transcriptReadError) {
+      failPreparation(initialPresentation.current, transcriptDamaged ? "Conversation history is damaged." : transcriptReadError!);
+    }
+  }, [transcriptBaseline, transcriptReadError, transcriptDamaged, presentation.owner, failPreparation]);
+
+  useLayoutEffect(() => {
+    const owner = presentation.owner;
+    if (owner !== initialPresentation.current || presentation.phase !== "revealing" || owner.phase !== "revealing") return;
+    const operation = position.current;
+    if (operation?.kind !== "initial" || !currentPosition(operation)) return;
+    const viewport = operation.viewport;
+    const tail = projectedMessages.current.at(-1);
+    const footer = viewport.querySelector<HTMLElement>("[data-chat-footer]")?.parentElement;
+    const positioned = !document.hidden && viewport.clientHeight > 0 &&
+      (!tail || operation.tail?.installed && operation.tail.message === tail && operation.tail.width === viewport.clientWidth) &&
+      viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 1 &&
+      (!footer || footer.getBoundingClientRect().bottom - viewport.getBoundingClientRect().bottom <= 1);
+    if (!positioned) {
+      publishPresentation(owner, "preparing");
+      positionMeasuredOutput();
+      return;
+    }
+    pausePreparation(owner);
+    retirePosition(operation);
+    publishPresentation(owner, "ready");
+    setAtTop(atLoadedStart(viewport, projectedMessages.current[0]));
+    setPagingReady(viewport.scrollTop > 4);
+    followMeasuredOutput();
+  }, [presentation, chatMessages, currentPosition, publishPresentation, positionMeasuredOutput, retirePosition, followMeasuredOutput]);
 
   // Physical scroll events supply current top geometry. An estimated initial
   // range or a delayed library top report cannot arm history by itself.
@@ -749,8 +1074,8 @@ export function ChatView({
   // other. Attachments always queue, so the label follows that too.
   const canSteer =
     !!activeSession?.can_steer && pendingAttachments.length === 0 &&
-    (!activeSessionId || (dispatchStates[activeSessionId]?.active_operation !== "compact" &&
-      !dispatchStates[activeSessionId]?.items.some((item) => item.operation === "compact")));
+    (dispatchState?.active_operation !== "compact" &&
+      !dispatchState?.items.some((item) => item.operation === "compact"));
 
   useEffect(() => {
     for (const [requestId, draft] of submittedDrafts.current) {
@@ -1857,6 +2182,14 @@ export function ChatView({
       {header}
       {forkBanner}
       {delegationBanner}
+      {readingBoundary && <div role="status" className="shrink-0 px-4 py-2 text-sm text-muted-foreground">
+        The previous reading position is unavailable. Showing loaded content.{" "}
+        <Button size="sm" variant="ghost" onClick={() => {
+          following.current = true;
+          setReadingBoundary(false);
+          if (scroller.current) startInitialPosition(scroller.current);
+        }}>Jump to latest</Button>
+      </div>}
       {transcriptDamaged && activeSessionId && <TranscriptIntegrityNotice key={activeSessionId} sessionId={activeSessionId} />}
 
       {activeSession && (
@@ -1904,18 +2237,7 @@ export function ChatView({
         </div>
       )}
 
-      <Virtuoso
-        ref={virtuoso}
-        scrollerRef={setScroller}
-        key={`transcript:${activeSessionId}`}
-        className="chat-messages flex-1 min-h-0"
-        data={chatMessages}
-        itemContent={renderMessage}
-        computeItemKey={(_index, message) => chatMessageKey(message)}
-        itemsRendered={(items) => {
-          renderedRows.current = items.flatMap((item) => item.data ? [chatMessageKey(item.data)] : []);
-          positionMeasuredOutput();
-        }}
+      <div className="relative flex flex-1 min-h-0"
         onClickCapture={pauseForReading}
         onWheelCapture={(event) => {
           const viewport = scroller.current;
@@ -1925,7 +2247,6 @@ export function ChatView({
           const up = event.deltaY < 0;
           const from = up ? Math.max(viewport.scrollTop, lastScrollTop.current) : Math.min(viewport.scrollTop, lastScrollTop.current);
           if (!canScrollChat(viewport, event.target, up, from)) return;
-          navigationContact.current = null;
           navigate(up, from);
         }}
         onKeyDown={(event) => {
@@ -1936,30 +2257,36 @@ export function ChatView({
           const target = event.target instanceof HTMLElement ? event.target : null;
           if (target?.isContentEditable || target?.closest("input, textarea, select, [role=textbox]")) return;
           if (event.key === " " && target?.closest("button, a[href], summary, [role=button]")) return;
-          navigationContact.current = null;
           navigate(up, scroller.current!.scrollTop);
         }}
         onPointerDownCapture={(event) => {
+          const contact = navigationContact.current;
+          if (contact?.source === "touch") return;
+          if (contact) {
+            contact.pointers.add(event.pointerId);
+            contact.invalid = true;
+            downwardNavigation.current = null;
+            return;
+          }
           navigationContact.current = null;
           downwardNavigation.current = null;
           const viewport = scroller.current;
           if (!viewport || !event.isPrimary) return;
           if (event.pointerType === "touch" || event.pointerType === "pen") {
-            navigationContact.current = { source: "pointer", id: event.pointerId, y: event.clientY, top: viewport.scrollTop, resume: following.current };
+            startNavigationContact("pointer", event.pointerId, event.clientY);
           } else if (event.button === 0 && event.target === viewport &&
             (canScrollChat(viewport, viewport, true) || canScrollChat(viewport, viewport, false))) {
             const left = viewport.getBoundingClientRect().left + viewport.clientLeft;
             if (event.clientX < left || event.clientX >= left + viewport.clientWidth) {
-              navigationContact.current = { source: "pointer", id: event.pointerId, y: event.clientY, top: viewport.scrollTop, resume: following.current };
-              pauseFollowing();
+              startNavigationContact("thumb", event.pointerId, event.clientY);
             }
           }
         }}
         onPointerMoveCapture={(event) => {
           const pointer = navigationContact.current;
-          if (!pointer || pointer.source !== "pointer" || pointer.id !== event.pointerId) return;
-          if (event.pointerType === "mouse") {
-            if (event.clientY !== pointer.y) pointer.resume = false;
+          if (!pointer || pointer.source === "touch" || pointer.id !== event.pointerId) return;
+          if (pointer.source === "thumb") {
+            if (event.clientY !== pointer.y) { pointer.resume = false; pauseFollowing(); }
             return;
           }
           if (event.clientY === pointer.y) return;
@@ -1970,37 +2297,21 @@ export function ChatView({
             navigate(up, pointer.top);
           }
         }}
-        onPointerUpCapture={(event) => {
-          const pointer = navigationContact.current;
-          if (pointer?.source === "pointer" && pointer.id === event.pointerId) releaseNavigationContact(pointer, event.clientY);
-        }}
-        onPointerCancelCapture={(event) => {
-          const pointer = navigationContact.current;
-          // A TouchEvent stream owns its own end/cancel after takeover. Pointer
-          // cancellation must not end it, and its identifier is independent.
-          if (pointer?.source === "touch") return;
-          navigationContact.current = null;
-          // Without TouchEvent takeover, retain the existing pointer fallback's
-          // bounded proof. Cancellation never grants direction or following.
-          if (!pointer || pointer.id !== event.pointerId ||
-            event.pointerType !== "touch" && event.pointerType !== "pen") downwardNavigation.current = null;
-        }}
         onTouchStartCapture={(event) => {
-          navigationContact.current = null;
           downwardNavigation.current = null;
           const viewport = scroller.current;
-          if (!viewport || event.touches.length !== 1) return;
+          if (!viewport || !event.touches.length) return;
           const touch = event.touches[0];
           // Take over the one contact record, rather than handling the same
           // motion through both PointerEvent and TouchEvent callbacks.
-          navigationContact.current = { source: "touch", id: touch.identifier, y: touch.clientY,
-            top: viewport.scrollTop, resume: following.current };
+          if (navigationContact.current?.source !== "touch") startNavigationContact("touch", touch.identifier, touch.clientY);
+          if (event.touches.length > 1 && navigationContact.current) navigationContact.current.invalid = true;
         }}
         onTouchMoveCapture={(event) => {
           const contact = navigationContact.current;
           if (!contact || contact.source !== "touch") return;
           if (event.touches.length !== 1) {
-            navigationContact.current = null;
+            contact.invalid = true;
             downwardNavigation.current = null;
             return;
           }
@@ -2016,25 +2327,20 @@ export function ChatView({
             navigate(up, contact.top);
           }
         }}
-        onTouchEndCapture={(event) => {
-          const contact = navigationContact.current;
-          if (!contact || contact.source !== "touch") return;
-          const touch = Array.from(event.changedTouches).find((item) => item.identifier === contact.id);
-          if (!touch) return;
-          if (event.touches.length) {
-            navigationContact.current = null;
-            downwardNavigation.current = null;
-            return;
-          }
-          releaseNavigationContact(contact, touch.clientY);
-        }}
-        onTouchCancelCapture={(event) => {
-          const contact = navigationContact.current;
-          if (!contact || contact.source !== "touch" ||
-            !Array.from(event.changedTouches).some((touch) => touch.identifier === contact.id)) return;
-          navigationContact.current = null;
-          downwardNavigation.current = null;
-        }}
+      >
+      <Virtuoso
+        style={{ visibility: presentation.phase === "preparing" || presentation.phase === "incomplete" ? "hidden" : undefined }}
+        inert={presentation.phase === "preparing" || presentation.phase === "incomplete" ? true : undefined}
+        aria-hidden={presentation.phase === "preparing" || presentation.phase === "incomplete" ? true : undefined}
+        itemSize={measureItem}
+        ref={virtuoso}
+        scrollerRef={setScroller}
+        key={`transcript:${activeSessionId}`}
+        className="chat-messages flex-1 min-h-0"
+        data={chatMessages}
+        itemContent={renderMessage}
+        computeItemKey={(_index, message) => chatMessageKey(message)}
+        itemsRendered={positionMeasuredOutput}
         onScrollEnd={() => { if (!navigationContact.current) downwardNavigation.current = null; }}
         onScroll={(event) => {
           const viewport = event.currentTarget;
@@ -2045,7 +2351,7 @@ export function ChatView({
           const atStart = atLoadedStart(viewport, projectedMessages.current[0]);
           setAtTop(atStart);
           if (!atStart) setOlderStalled(false);
-          if (navigationContact.current) navigationContact.current.top = Math.min(navigationContact.current.top, top);
+          if (navigationContact.current && navigationContact.current.source !== "thumb") navigationContact.current.top = Math.min(navigationContact.current.top, top);
           if (!position.current && !navigationContact.current) {
             const navigation = downwardNavigation.current;
             if (navigation && (navigation.viewport !== viewport || performance.now() > navigation.until ||
@@ -2057,13 +2363,14 @@ export function ChatView({
                 following.current = true;
                 downwardNavigation.current = null;
                 readingHandoff.current = null;
+                setReadingBoundary(false);
                 followMeasuredOutput();
               }
             }
           }
           if (!following.current && !position.current) {
             const anchor = captureReadingAnchor(viewport);
-            readingHandoff.current = anchor ? { view, ...anchor } : null;
+            readingHandoff.current = { view, anchor };
           }
           if (!position.current && top > 4) setPagingReady(true);
           lastScrollTop.current = top;
@@ -2072,8 +2379,18 @@ export function ChatView({
         followOutput={false}
         increaseViewportBy={{ top: 400, bottom: 400 }}
         components={{ Header: olderHeader, Footer: ChatFooter }}
-        context={{ footer }}
+        context={{ footer, onLayout: measuredOutput }}
       />
+
+      {(presentation.phase === "preparing" || presentation.phase === "incomplete") && <div data-chat-preparation
+        tabIndex={0} aria-label="Conversation preparation"
+        className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-4 text-sm text-muted-foreground">
+        <p role="status">{presentation.phase === "incomplete" ? "Positioning incomplete" : transcriptBaseline ? "Positioning latest output…" : "Loading conversation…"}</p>
+        {presentation.owner.error && <p>{presentation.owner.error}</p>}
+        <Button size="sm" variant="outline" onClick={pauseFollowing}>Browse loaded content</Button>
+        {presentation.phase === "incomplete" && <Button size="sm" variant="outline" onClick={retryInitialPosition}>Retry positioning</Button>}
+      </div>}
+      </div>
 
       <div aria-label="Questions outside the history window" className="max-h-[40vh] shrink-0 overflow-y-auto empty:hidden"
         onClickCapture={pauseForReading}>

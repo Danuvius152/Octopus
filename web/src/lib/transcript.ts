@@ -9,9 +9,8 @@ const API = window.location.origin;
  *
  * Three places load a snapshot — selecting a session, the WebSocket reconnect
  * refetch, and the archived-session viewer — and each owes the store the same
- * three things: the messages, the WS dedup baseline, and where the window
- * starts so scroll-back knows what to ask for (polish-2026-09.md §4 B2). It
- * lives here so a fourth caller cannot get two of the three right.
+ * messages, WS dedup baseline and cursor as one installation. The store owns
+ * rejection, merging and publication so no caller can expose a partial baseline.
  */
 export function applyTranscript(
   sessionId: string,
@@ -22,44 +21,15 @@ export function applyTranscript(
   const store = useSessionStore.getState();
   if (data.transcript_integrity === "duplicate_seq") {
     store.setMessages(sessionId, []);
-    store.setMessageWindow(sessionId, null, false);
     sessions.patch(sessionId, { transcript_integrity: "duplicate_seq" });
     return false;
   }
   const messages = (data.messages as MessageInput[]) || [];
   const snapshotHigh = typeof data.next_message_seq === "number"
     ? data.next_message_seq - 1 : Math.max(-1, ...messages.map((m) => m.seq ?? -1));
-  const currentHigh = store.lastAppliedSeq[sessionId] ?? -1;
-  if (snapshotHigh < currentHigh) return false;
   const oldest = typeof data.oldest_loaded_seq === "number" ? data.oldest_loaded_seq : null;
-  const currentOldest = store.oldestSeq[sessionId];
-  const current = store.messages[sessionId] ?? [];
-  // A prefix can only be kept when every row up to the snapshot is present.
-  // Otherwise its old cursor hides a disconnected middle after a long outage.
-  const prefixSeqs = current.filter((m) => typeof m.seq === "number" &&
-    typeof oldest === "number" && m.seq < oldest).map((m) => m.seq!).sort((a, b) => a - b);
-  const preservePrefix = typeof oldest === "number" && typeof currentOldest === "number" &&
-    currentOldest < oldest && prefixSeqs[0] === currentOldest &&
-    prefixSeqs.length === oldest - currentOldest &&
-    prefixSeqs.every((seq, index) => seq === currentOldest + index);
-  const retained = current.filter((m) => typeof m.seq === "number" &&
-    (m.seq > snapshotHigh || (preservePrefix && m.seq < oldest!)));
-  const merged = [...retained, ...messages];
-  const sequenced = new Map(merged.filter((m) => typeof m.seq === "number").map((m) => [m.seq!, m]));
-  const rows = [...sequenced.values()].sort((a, b) => a.seq! - b.seq!);
-  rows.push(...messages.filter((m) => typeof m.seq !== "number"));
-  const liveHigh = Math.max(-1, ...current.map((message) => message.seq ?? -1));
-  store.setMessages(sessionId, rows, preserveStreaming || liveHigh >= snapshotHigh && Boolean(
-    store.streamingText[sessionId] || Object.keys(store.streamingItems[sessionId] || {}).length), nativeBaseline);
-  store.setMessageWindow(
-    sessionId,
-    preservePrefix ? currentOldest : oldest,
-    preservePrefix ? Boolean(store.hasMoreMessages[sessionId]) : Boolean(data.has_more_messages)
-  );
-  // Any WS event at or below the snapshot's high-water mark is already in the
-  // messages above, so the handler must drop it rather than render it twice.
-  store.setLastAppliedSeq(sessionId, snapshotHigh);
-  return true;
+  return store.installTranscript(sessionId, { messages, high: snapshotHigh, oldestSeq: oldest,
+    hasMore: Boolean(data.has_more_messages) }, nativeBaseline, preserveStreaming);
 }
 
 export type OlderMessagesResult = MessagePageResult | { state: "unneeded" | "in_flight" };

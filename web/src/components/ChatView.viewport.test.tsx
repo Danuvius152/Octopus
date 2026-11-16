@@ -4,6 +4,7 @@ import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
 import { mockChatViewport } from "./chatViewport.test-support";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
+import { applyTranscript } from "../lib/transcript";
 
 const session = { id: "viewport-a", name: "A", agent_id: "agent", status: "idle", backend: "codex",
   created_at: "2026-11-13", working_dir: "/tmp", archived: false } as SessionInfo;
@@ -18,6 +19,7 @@ beforeEach(() => {
     agents: [], credentials: [], backendModels: {},
     messages: { [session.id]: [{ role: "assistant", type: "text", seq: 1, content: "Saved text" }] },
     messageWindows: { [session.id]: Symbol("original window") },
+    oldestSeq: {}, hasMoreMessages: {}, lastAppliedSeq: {},
     streamingText: {}, streamingItems: {}, pendingQuestions: {}, subagents: {}, dispatchStates: {}, dispatchUnavailable: {},
   });
   queued.clear(); serial = 0;
@@ -37,6 +39,10 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it.each(["before commit", "after successor commit"])("retires a pending position on A→B→A %s", (delivery) => {
+  // A confirmed empty history with a tall Footer exercises position ownership
+  // without substituting fixed item sizes for the real tail-measurement proof.
+  useSessionStore.setState({ messages: {} });
+  applyTranscript(session.id, { messages: [], oldest_loaded_seq: null, next_message_seq: 0 });
   const view = render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
     <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()}
       connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
@@ -83,7 +89,7 @@ it("cancels initial positioning at the fake top without hiding manual history", 
   expect(viewport.scrollTop).toBe(0);
   // Controlled native-input signal with no displacement: jsdom has no native
   // scrolling. Browser geometry and actual paging are covered by E2E.
-  fireEvent.keyDown(viewport, { key: "PageDown" });
+  fireEvent.keyDown(view.getByLabelText("Conversation preparation"), { key: "PageDown" });
   act(() => { for (const callback of delivered) callback(performance.now()); });
   expect(write).not.toHaveBeenCalled();
   expect(viewport.scrollTop).toBe(0);
@@ -96,9 +102,11 @@ it("cancels initial positioning at the fake top without hiding manual history", 
 
 it("does not start automatic history from a top report whose viewport becomes zero-height before the effect", async () => {
   useSessionStore.setState({ token: "viewport-test", connected: true,
-    messages: { [session.id]: [{ role: "assistant", type: "text", seq: 200, content: "Saved text" }] },
+    messages: { [session.id]: [{ role: "assistant", type: "thinking", seq: 200, content: "Saved reasoning" }] },
     oldestSeq: { [session.id]: 200 }, hasMoreMessages: { [session.id]: true },
   });
+  applyTranscript(session.id, { messages: useSessionStore.getState().messages[session.id],
+    oldest_loaded_seq: 200, next_message_seq: 201, has_more_messages: true });
   const requests: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string) => {
     if (input.includes("before_seq=")) requests.push(input);
@@ -111,15 +119,13 @@ it("does not start automatic history from a top report whose viewport becomes ze
   const viewport = view.container.querySelector<HTMLElement>(".chat-messages")!;
   let height = 600;
   Object.defineProperty(viewport, "clientHeight", { configurable: true, get: () => height });
-  const first = viewport.querySelector<HTMLElement>("[data-message-key]")!;
-  vi.spyOn(first, "getBoundingClientRect").mockImplementation(() =>
-    new DOMRect(0, -viewport.scrollTop, 800, 80));
   viewport.scrollTo = (optionsOrX?: ScrollToOptions | number, y?: number) => {
     const top = typeof optionsOrX === "number" ? y ?? 0 : optionsOrX?.top ?? 0;
     viewport.scrollTop = Math.max(0, Math.min(600, top));
   };
-  // Complete initial positioning at the real bottom so paging is available.
-  for (let frame = 0; frame < 5; frame++) act(() => {
+  // Confirmed thinking-only history has no displayed tail to measure. Keep
+  // this regression focused on the paging effect's current viewport lifetime.
+  for (let frame = 0; frame < 8; frame++) act(() => {
     const callbacks = [...queued.values()]; queued.clear();
     for (const callback of callbacks) callback(performance.now());
   });
@@ -128,9 +134,9 @@ it("does not start automatic history from a top report whose viewport becomes ze
   await act(async () => {
     viewport.scrollTop = 0;
     fireEvent.scroll(viewport);
-    // Layout disappears after the scroll handler but before passive effects.
     height = 0;
   });
+  expect(height).toBe(0);
   expect(requests).toEqual([]);
   // A fresh visible top report still permits an ordinary history request.
   await act(async () => {

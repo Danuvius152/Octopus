@@ -39,9 +39,10 @@ async function startReset() {
   render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
     <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
   </VirtuosoMockContext.Provider>);
-  // Virtuoso schedules initial viewport work; its cold render can exceed the
-  // default one-second query wait while other test files share the workers.
-  await screen.findByRole("button", { name: "Submit" }, { timeout: 3000 });
+  // This fixture supplies WS interactions without installed history. Choose
+  // reading explicitly before exercising the reset contract.
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
+  await screen.findByRole("button", { name: "Submit" });
   fireEvent.change(screen.getByPlaceholderText(/Send to queue/), { target: { value: "/reset" } });
   fireEvent.click(document.querySelector<HTMLButtonElement>(".btn-send")!);
   await waitFor(() => expect(resolve).toBeTypeOf("function"));

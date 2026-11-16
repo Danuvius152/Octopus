@@ -88,6 +88,7 @@ it("keeps unchanged completed Markdown isolated from current output, background 
     <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()}
       connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
   </VirtuosoMockContext.Provider>);
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
   await waitFor(() => expect(screen.getByRole("heading", { name: "Reasoning" })).toBeVisible());
   const original = screen.getByRole("heading", { name: "Reasoning" });
   const count = () => observed.sources.filter((source) => source === saved).length;

@@ -4,6 +4,7 @@ import { act, renderHook } from "@testing-library/react";
 
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
 import { useSessionStore, type Agent, type Application, type SessionInfo } from "../stores/sessionStore";
+import { applyTranscript } from "../lib/transcript";
 
 it("merges an unseen delayed steer before a higher sequence without repeating either row", () => {
   useSessionStore.setState({ messages: {}, lastAppliedSeq: {}, streamingText: {}, streamingItems: {} });
@@ -310,10 +311,9 @@ it("preserves recovery progress through reconnect and paged history without endi
   const live = useSessionStore.getState().messages["recovery-test"][0];
   expect(useSessionStore.getState().streamingText["recovery-test"]).toBe("unfinished");
   expect(live.recovery?.phase).toBe("retrying");
-  useSessionStore.getState().setMessages("recovery-test", [
+  applyTranscript("recovery-test", { messages: [
     { role: "assistant", type: "text", seq: 5, content: "continued" },
-  ]);
-  useSessionStore.getState().setMessageWindow("recovery-test", 5, true);
+  ], next_message_seq: 6, oldest_loaded_seq: 5, has_more_messages: true });
   useSessionStore.getState().prependMessages("recovery-test", [
     { role: "system", type: "recovery", seq: 4, content: recovery },
   ], 4, false, { beforeSeq: 5, window: useSessionStore.getState().messageWindows["recovery-test"] });

@@ -288,10 +288,15 @@ afterEach(() => {
 });
 
 function renderChat(props: Partial<Parameters<typeof ChatView>[0]> = {}) {
-  return render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
+  const view = render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
     <ChatView sendMessage={vi.fn()} interrupt={vi.fn()}
       answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} {...props} />
   </VirtuosoMockContext.Provider>);
+  // These lifecycle cases start from readable content, independently of the
+  // initial-positioning tests and jsdom's zero-height layout.
+  const browse = screen.queryByRole("button", { name: "Browse loaded content" });
+  if (browse) fireEvent.click(browse);
+  return view;
 }
 
 it("keeps persisted approval history readable after reload without live actions or status", async () => {
@@ -445,6 +450,7 @@ it("keeps a newer WebSocket question answerable when the earlier HTTP refetch co
   const socket = Socket.instances[0];
   act(() => { socket.readyState = Socket.OPEN; socket.onopen?.(); });
   act(() => socket.onmessage?.({ data: JSON.stringify(requested) }));
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
   expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
   await act(async () => {
     resolveDetail(new Response(JSON.stringify({

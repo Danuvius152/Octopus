@@ -70,6 +70,7 @@ it("keeps a pending question visible when its transcript row is outside the load
   useSessionStore.setState({ messages: { parent: [{ role: "assistant", type: "text", seq: 200, content: "Latest window" }] },
     pendingQuestions: { parent: [question] } });
   mount();
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
   await waitFor(() => expect(screen.getByText("Still waiting for your decision?")).toBeVisible());
   expect(screen.getAllByRole("button", { name: "Submit" })).toHaveLength(1);
   act(() => useSessionStore.getState().addMessage(parent.id, { role: "assistant", type: "question_request", seq: 201,
@@ -95,6 +96,7 @@ it.each(["connection", "service"])("releases paging UI after an obsolete %s obse
     oldest_loaded_seq: 200, has_more_messages: true, next_message_seq: 201 };
   applyTranscript(parent.id, snapshot);
   mount();
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
   // A mount-time top is not user navigation. Start this lifecycle check
   // through the same manual history entry a reader can always use.
   fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
@@ -121,8 +123,8 @@ it("gives identical unsequenced notices distinct stable display identities", asy
   mockSessionFetch(async () => Response.json([]));
   const notice = { role: "system" as const, type: "notice", content: "Model for this session: unchanged" };
   const store = useSessionStore.getState();
-  store.setMessages(parent.id, [{ role: "assistant", type: "text", seq: 200, content: "Reading" }]);
-  store.setMessageWindow(parent.id, 200, false);
+  applyTranscript(parent.id, { messages: [{ role: "assistant", type: "text", seq: 200, content: "Reading" }],
+    next_message_seq: 201, oldest_loaded_seq: 200, has_more_messages: false });
   store.addMessage(parent.id, notice);
   store.addMessage(parent.id, notice);
   mount();
@@ -158,6 +160,7 @@ it.each(["rewind", "duplicate"])("%s loads a paged snapshot without overwriting 
     }] });
   });
   await act(async () => finish(new Response(JSON.stringify(detail()))));
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
   const state = useSessionStore.getState();
   expect(state.oldestSeq[child.id]).toBe(200);
   expect(state.hasMoreMessages[child.id]).toBe(true);
@@ -197,18 +200,22 @@ it.each(["switch", "return", "remount"])("a late old page cannot settle the curr
     oldestSeq: { parent: 200, "fork-child": 200 }, hasMoreMessages: { parent: true, "fork-child": true },
   });
   const view = mount();
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
   fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
   await waitFor(() => expect(replies.parent).toHaveLength(1));
   if (transition === "remount") {
     view.unmount(); mount();
+    fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
     fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
   }
   else {
     act(() => useSessionStore.getState().setActiveSessionId(child.id));
+    fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
     fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
     await waitFor(() => expect(replies[child.id]).toHaveLength(1));
     if (transition === "return") {
       act(() => useSessionStore.getState().setActiveSessionId(parent.id));
+      fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
       fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
     }
   }

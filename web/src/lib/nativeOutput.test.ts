@@ -18,8 +18,7 @@ test("hidden root reasoning has no chat rows while transcript sequences and chil
     { role: "assistant" as const, type: "thinking", seq: 10, content: "", runtime_metadata: identity("child") },
     { role: "assistant" as const, type: "text", seq: 11, content: "After" },
   ];
-  useSessionStore.getState().setMessages("s", messages);
-  useSessionStore.getState().setLastAppliedSeq("s", 11);
+  applyTranscript("s", { messages, next_message_seq: 12, oldest_loaded_seq: 1, has_more_messages: false });
   const stored = useSessionStore.getState().messages.s;
   expect(nativeChatMessages(stored).map((row) => [row.type, row.seq])).toEqual([
     ["text", 1], ["native_subagent", 10], ["text", 11],
@@ -88,13 +87,11 @@ test("interleaved native items clear only their own streaming text without advan
 
 test("history pagination rebuilds native cards without child text leaking into main chat or lowering the high water", () => {
   const store = useSessionStore.getState();
-  store.setLastAppliedSeq("s", 20);
-  store.setMessages("s", [
+  applyTranscript("s", { messages: [
     { role: "system", type: "native_subagent", seq: 7, runtime_metadata: identity("child"), tool_input: { task_id: "child", card_id: "c", status: "completed", native_thread_id: "child", native_turn_id: "t" } },
     { role: "assistant", type: "text", seq: 8, content: "Other attempt must stay out", runtime_metadata: { ...identity("child"), attempt_id: "other" } },
     { role: "assistant", type: "text", seq: 9, content: "Root", runtime_metadata: identity("root") },
-  ]);
-  store.setMessageWindow("s", 7, true);
+  ], next_message_seq: 21, oldest_loaded_seq: 7, has_more_messages: true });
   store.prependMessages("s", [
     { role: "system", type: "native_subagent", seq: 1, tool_input: { task_id: "child", card_id: "c", name: "/root/reviewer", status: "running", native_thread_id: "child", native_turn_id: "t" } },
     { role: "assistant", type: "text", seq: 2, content: "Saved child", runtime_metadata: identity("child") },

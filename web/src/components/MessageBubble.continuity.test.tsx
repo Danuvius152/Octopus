@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { MessageBubble } from "./MessageBubble";
 import { nativeChatMessages } from "../lib/nativeOutput";
+import { applyTranscript } from "../lib/transcript";
 import { useSessionStore, type Message, type SubagentRun } from "../stores/sessionStore";
 
 const runtime = { request_id: "work-request", attempt_id: "work-attempt", native: {
@@ -131,8 +132,7 @@ it.each(["request", "attempt", "thread", "turn", "account", "session"])("does no
 it("preserves the same mounted work while its detail resources retire independently through a history prepend", async () => {
   useSessionStore.setState({ token: "detail-reader" });
   const preview: Message = { ...saved, body_state: "preview", detail_ref: "/api/sessions/s/messages/11" };
-  useSessionStore.getState().setMessages("s", [child, preview]);
-  useSessionStore.getState().setMessageWindow("s", 10, true);
+  applyTranscript("s", { messages: [child, preview], next_message_seq: 12, oldest_loaded_seq: 10, has_more_messages: true });
   const original = useSessionStore.getState().messageWindows.s;
   const bodies = new Map<number, (response: Response) => void>();
   const fullReads: number[] = [];

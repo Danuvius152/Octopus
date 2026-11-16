@@ -20,6 +20,54 @@ const loadOlderMessages = (sessionId: string) => observeOlderMessages(sessionId)
  * are pinned here, because in the browser they look like ordinary scrolling.
  */
 describe("applyTranscript", () => {
+  it("publishes messages, cursor, window and coverage in one installation", () => {
+    const publications: unknown[] = [];
+    const stop = useSessionStore.subscribe((state) => publications.push({
+      rows: state.messages.s1?.map((row) => row.seq), oldest: state.oldestSeq.s1,
+      more: state.hasMoreMessages.s1, high: state.lastAppliedSeq.s1,
+      window: typeof state.messageWindows.s1,
+    }));
+    try {
+      applyTranscript("s1", { messages: [msg(10), msg(11)], oldest_loaded_seq: 10,
+        has_more_messages: true, next_message_seq: 12 });
+      expect(publications).toEqual([{ rows: [10, 11], oldest: 10, more: true, high: 11, window: "symbol" }]);
+    } finally { stop(); }
+  });
+
+  it("keeps only an equivalent confirmed empty window continuous", () => {
+    const store = useSessionStore.getState();
+    store.setMessages("s1", []);
+    const unknown = useSessionStore.getState().messageWindows.s1;
+    const empty = { messages: [], next_message_seq: 0, oldest_loaded_seq: null, has_more_messages: false };
+    applyTranscript("s1", empty);
+    const confirmed = useSessionStore.getState().messageWindows.s1;
+    expect(confirmed).not.toBe(unknown);
+    expect(useSessionStore.getState().lastAppliedSeq.s1).toBe(-1);
+    for (let index = 0; index < 3; index++) applyTranscript("s1", empty);
+    expect(useSessionStore.getState().messageWindows.s1).toBe(confirmed);
+    applyTranscript("s1", { ...empty, has_more_messages: true });
+    expect(useSessionStore.getState().messageWindows.s1).not.toBe(confirmed);
+    const changed = useSessionStore.getState().messageWindows.s1;
+    store.setMessages("s1", []);
+    expect(useSessionStore.getState().messageWindows.s1).not.toBe(changed);
+    expect(useSessionStore.getState().oldestSeq.s1).toBeUndefined();
+  });
+
+  it.each(["clear", "damaged"])("keeps old WS rejected after %s and allows a later valid detail", (failure) => {
+    applyTranscript("s1", { messages: [msg(10), msg(11)], oldest_loaded_seq: 10, next_message_seq: 12 });
+    if (failure === "clear") useSessionStore.getState().setMessages("s1", []);
+    else applyTranscript("s1", { messages: [msg(10), msg(10)], transcript_integrity: "duplicate_seq" });
+    expect(useSessionStore.getState().oldestSeq.s1).toBeUndefined();
+    handleWsMessage({ type: "assistant_delta", session_id: "s1", content: "New unfinished answer" });
+    handleWsMessage({ type: "result", session_id: "s1", seq: 11, content: "Old legacy terminal" });
+    expect(useSessionStore.getState().streamingText.s1).toBe("New unfinished answer");
+    expect(useSessionStore.getState().messages.s1).toEqual([]);
+    expect(useSessionStore.getState().lastAppliedSeq.s1).toBe(11);
+    expect(applyTranscript("s1", { messages: [msg(12)], oldest_loaded_seq: 12, next_message_seq: 13 })).toBe(true);
+    expect(useSessionStore.getState().messages.s1.map((row) => row.seq)).toEqual([12]);
+    expect(useSessionStore.getState().oldestSeq.s1).toBe(12);
+  });
+
   it("keeps an installed window when an older snapshot arrives after out-of-order live rows", () => {
     applyTranscript("s1", { messages: [msg(10), msg(11)], oldest_loaded_seq: 10,
       next_message_seq: 12, has_more_messages: true });

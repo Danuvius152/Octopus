@@ -321,6 +321,9 @@ interface SessionStore {
   messages: Record<string, Message[]>;
   addMessage: (sessionId: string, msg: MessageInput) => void;
   setMessages: (sessionId: string, msgs: MessageInput[], preserveStreaming?: boolean, nativeBaseline?: Record<string, StreamingItem>) => void;
+  installTranscript: (sessionId: string, snapshot: {
+    messages: MessageInput[]; high: number; oldestSeq: number | null; hasMore: boolean;
+  }, nativeBaseline?: Record<string, StreamingItem>, preserveStreaming?: boolean) => boolean;
   // The transcript arrives windowed to the most recent messages
   // (polish-2026-09.md §4 B2): `oldestSeq` is the lowest seq held for a
   // session and the cursor the next page asks from, `hasMoreMessages` whether
@@ -329,11 +332,9 @@ interface SessionStore {
   oldestSeq: Record<string, number | null>;
   hasMoreMessages: Record<string, boolean>;
   messageWindows: Record<string, symbol | undefined>;
-  setMessageWindow: (
-    sessionId: string,
-    oldestSeq: number | null,
-    hasMore: boolean
-  ) => void;
+  // Necessary history read failure, independent of execution/auxiliary reads.
+  transcriptReadErrors: Record<string, string>;
+  setTranscriptReadError: (sessionId: string, error: string | null, start: { accountGeneration: number }) => void;
   // Accept a page only into the window it extends, in one store update.
   prependMessages: (
     sessionId: string,
@@ -347,7 +348,6 @@ interface SessionStore {
   // A live maximum cannot prove that an unseen lower seq was published.
   // The WS reducer also checks identities in the current message window.
   lastAppliedSeq: Record<string, number>;
-  setLastAppliedSeq: (sessionId: string, seq: number) => void;
 
   schedules: Schedule[];
   scheduleRead: ListReadState;
@@ -589,6 +589,37 @@ function settledQuestions(state: SessionStore, sessionId: string, messages: Mess
 function hasTerminalFor(messages: MessageInput[], identity: AttemptIdentity | undefined): boolean {
   return Boolean(identity && messages.some((message) =>
     message.type === "result" && sameAttempt(readAttemptIdentity(message), identity)));
+}
+
+/** Snapshot coverage also rejects old WS. Installation validity additionally
+ * needs cursor metadata, which a raw clear/quarantine withdraws independently. */
+export function hasTranscriptBaseline(state: Pick<SessionStore, "lastAppliedSeq" | "oldestSeq" | "hasMoreMessages">, sessionId: string): boolean {
+  return state.lastAppliedSeq[sessionId] !== undefined && state.oldestSeq[sessionId] !== undefined &&
+    state.hasMoreMessages[sessionId] !== undefined;
+}
+
+function continuousTranscript(previous: Message[], messages: MessageInput[]): boolean {
+  const first = messages.find((message) => typeof message.seq === "number")?.seq;
+  const seqs = new Set(messages.map((message) => message.seq));
+  return first !== undefined && first === previous.find((message) => typeof message.seq === "number")?.seq &&
+    previous.every((message) => message.seq !== undefined && seqs.has(message.seq));
+}
+
+function replaceTranscript(state: SessionStore, sessionId: string, messages: MessageInput[], window: symbol | undefined,
+  preserveStreaming: boolean, nativeBaseline?: Record<string, StreamingItem>): Partial<SessionStore> {
+  const keepRoot = preserveStreaming && !hasTerminalFor(messages, state.streamingTextAttempt[sessionId]);
+  return {
+    ...settledQuestions(state, sessionId, messages),
+    messageWindows: { ...state.messageWindows, [sessionId]: window },
+    messages: { ...state.messages, [sessionId]: messages.map(normalizeMessage) },
+    streamingText: keepRoot ? state.streamingText : dropKey(state.streamingText, sessionId),
+    streamingTextAttempt: keepRoot ? state.streamingTextAttempt : dropKey(state.streamingTextAttempt, sessionId),
+    streamingItems: preserveStreaming || nativeBaseline ? { ...state.streamingItems, [sessionId]: Object.fromEntries(
+      Object.entries(state.streamingItems[sessionId] || {}).filter(([key, item]) =>
+        (preserveStreaming || item !== nativeBaseline?.[key]) && !hasTerminalFor(messages, item.runtime_metadata) &&
+        !messages.some((message) => message.type === "text" && nativeItemKey(message.runtime_metadata) === key)))
+    } : dropKey(state.streamingItems, sessionId),
+  };
 }
 
 function insertMessage(rows: Message[], message: Message): void {
@@ -836,18 +867,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     dispatchUnavailable: dropKey(s.dispatchUnavailable, id), sessionMembership: dropKey(s.sessionMembership, id),
     oldestSeq: dropKey(s.oldestSeq, id), hasMoreMessages: dropKey(s.hasMoreMessages, id),
     messageWindows: dropKey(s.messageWindows, id), lastAppliedSeq: dropKey(s.lastAppliedSeq, id),
+    transcriptReadErrors: dropKey(s.transcriptReadErrors, id),
     bgTasks: dropKey(s.bgTasks, id), research: dropKey(s.research, id), delegations: dropKey(s.delegations, id),
     wikiJobs: dropKey(s.wikiJobs, id), wikiJobDirty: dropKey(s.wikiJobDirty, id),
     wikiJobReadErrors: dropKey(s.wikiJobReadErrors, id), sessionAuxiliaryErrors: dropKey(s.sessionAuxiliaryErrors, id),
   })),
 
   lastAppliedSeq: {},
-  setLastAppliedSeq: (sessionId, seq) =>
-    set((s) => {
-      const current = s.lastAppliedSeq[sessionId] ?? -1;
-      if (seq <= current) return s;
-      return { lastAppliedSeq: { ...s.lastAppliedSeq, [sessionId]: seq } };
-    }),
 
   messages: {},
   addMessage: (sessionId, msg) =>
@@ -885,36 +911,62 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setMessages: (sessionId, msgs, preserveStreaming = false, nativeBaseline) =>
     set((s) => {
       const previous = s.messages[sessionId] || [];
-      const first = msgs.find((message) => typeof message.seq === "number")?.seq;
-      const seqs = new Set(msgs.map((message) => message.seq));
-      const continuous = first !== undefined && first === previous.find((message) => typeof message.seq === "number")?.seq &&
-        previous.every((message) => message.seq !== undefined && seqs.has(message.seq));
+      const continuous = continuousTranscript(previous, msgs);
       return {
-      ...settledQuestions(s, sessionId, msgs),
-      messageWindows: { ...s.messageWindows, [sessionId]: continuous ? s.messageWindows[sessionId] : Symbol() },
-      messages: { ...s.messages, [sessionId]: msgs.map(normalizeMessage) },
-      // A snapshot reload is authoritative; any half-streamed text it doesn't
-      // contain is stale by definition.
-      streamingText: preserveStreaming && !hasTerminalFor(msgs, s.streamingTextAttempt[sessionId])
-        ? s.streamingText : dropKey(s.streamingText, sessionId),
-      streamingTextAttempt: preserveStreaming && !hasTerminalFor(msgs, s.streamingTextAttempt[sessionId])
-        ? s.streamingTextAttempt : dropKey(s.streamingTextAttempt, sessionId),
-      streamingItems: preserveStreaming || nativeBaseline ? { ...s.streamingItems, [sessionId]: Object.fromEntries(
-        Object.entries(s.streamingItems[sessionId] || {}).filter(([key, item]) =>
-          (preserveStreaming || item !== nativeBaseline?.[key]) &&
-          !hasTerminalFor(msgs, item.runtime_metadata) &&
-          !msgs.some((message) => message.type === "text" && nativeItemKey(message.runtime_metadata) === key)))
-      } : dropKey(s.streamingItems, sessionId),
-    }; }),
+        ...replaceTranscript(s, sessionId, msgs,
+          continuous ? s.messageWindows[sessionId] ?? Symbol() : Symbol(), preserveStreaming, nativeBaseline),
+        // Preserve the rejection watermark while withdrawing installation proof.
+        ...(!continuous ? { oldestSeq: dropKey(s.oldestSeq, sessionId),
+          hasMoreMessages: { ...s.hasMoreMessages, [sessionId]: false } } : {}),
+      };
+    }),
+  installTranscript: (sessionId, snapshot, nativeBaseline, preserveStreaming = false) => {
+    let applied = false;
+    set((s) => {
+      if (snapshot.high < (s.lastAppliedSeq[sessionId] ?? -1)) return s;
+      const previous = s.messages[sessionId] ?? [];
+      const oldest = snapshot.oldestSeq;
+      const currentOldest = s.oldestSeq[sessionId];
+      // Retain a loaded prefix only when it reaches the snapshot without holes.
+      const prefix = previous.filter((message) => typeof message.seq === "number" &&
+        oldest !== null && message.seq < oldest).map((message) => message.seq!).sort((a, b) => a - b);
+      const preservePrefix = oldest !== null && typeof currentOldest === "number" && currentOldest < oldest &&
+        prefix[0] === currentOldest && prefix.length === oldest - currentOldest &&
+        prefix.every((seq, index) => seq === currentOldest + index);
+      const retained = previous.filter((message) => typeof message.seq === "number" &&
+        (message.seq > snapshot.high || preservePrefix && message.seq < oldest!));
+      const merged = [...retained, ...snapshot.messages];
+      const sequenced = new Map(merged.filter((message) => typeof message.seq === "number").map((message) => [message.seq!, message]));
+      const rows = [...sequenced.values()].sort((a, b) => a.seq! - b.seq!);
+      rows.push(...snapshot.messages.filter((message) => typeof message.seq !== "number").map(normalizeMessage));
+      const nextOldest = preservePrefix ? currentOldest : oldest;
+      const hasMore = preservePrefix ? Boolean(s.hasMoreMessages[sessionId]) : snapshot.hasMore;
+      const equivalentEmpty = !previous.length && !rows.length && hasTranscriptBaseline(s, sessionId) &&
+        s.lastAppliedSeq[sessionId] === snapshot.high && currentOldest === nextOldest && s.hasMoreMessages[sessionId] === hasMore;
+      const continuous = equivalentEmpty || continuousTranscript(previous, rows);
+      const liveHigh = Math.max(-1, ...previous.map((message) => message.seq ?? -1));
+      const keepStreaming = preserveStreaming || liveHigh >= snapshot.high && Boolean(
+        s.streamingText[sessionId] || Object.keys(s.streamingItems[sessionId] || {}).length);
+      applied = true;
+      return {
+        ...replaceTranscript(s, sessionId, rows, continuous ? s.messageWindows[sessionId] ?? Symbol() : Symbol(), keepStreaming, nativeBaseline),
+        oldestSeq: { ...s.oldestSeq, [sessionId]: nextOldest },
+        hasMoreMessages: { ...s.hasMoreMessages, [sessionId]: hasMore },
+        lastAppliedSeq: { ...s.lastAppliedSeq, [sessionId]: snapshot.high },
+        transcriptReadErrors: dropKey(s.transcriptReadErrors, sessionId),
+      };
+    });
+    return applied;
+  },
 
   oldestSeq: {},
   hasMoreMessages: {},
   messageWindows: {},
-  setMessageWindow: (sessionId, oldestSeq, hasMore) =>
-    set((s) => ({
-      oldestSeq: { ...s.oldestSeq, [sessionId]: oldestSeq },
-      hasMoreMessages: { ...s.hasMoreMessages, [sessionId]: hasMore },
-    })),
+  transcriptReadErrors: {},
+  setTranscriptReadError: (sessionId, error, start) => set((s) => {
+    if (start.accountGeneration !== s.accountGeneration || s.transcriptReadErrors[sessionId] === (error ?? undefined)) return s;
+    return { transcriptReadErrors: error ? { ...s.transcriptReadErrors, [sessionId]: error } : dropKey(s.transcriptReadErrors, sessionId) };
+  }),
   prependMessages: (sessionId, msgs, oldestSeq, hasMore, basis) => {
     let result: MessagePageResult = { state: "obsolete" };
     set((cur) => {
