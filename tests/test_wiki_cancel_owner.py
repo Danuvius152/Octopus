@@ -21,6 +21,8 @@ async def test_confirmed_cancellations_release_finished_task_references(jobs):
         await jobs.cancel(job["id"], None)
         await jobs.settle_cancelled(job["id"], None)
         assert jobs.get(job["id"])["settlement_phase"] == "confirmed"
+    retiring = [task for key, task in WikiWorker.cancellations.items() if key[0] == root]
+    await asyncio.wait_for(asyncio.gather(*(asyncio.shield(task) for task in retiring)), 3)
     await asyncio.sleep(0)
     assert not [key for key in WikiWorker.cancellations if key[0] == root]
 

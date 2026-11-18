@@ -1450,6 +1450,240 @@ async def test_archive_unknown_session_raises(manager):
         await manager.archive_session("does-not-exist")
 
 
+@pytest.mark.parametrize("replace", [False, True], ids=["without-successor", "with-successor"])
+async def test_competing_archive_cannot_report_a_commit_owned_by_the_other_post(manager, monkeypatch, replace):
+    old = await _new(manager, name="Concurrent archive")
+    first_ready, second_ready, release_second = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    archive_live = manager._archive_live_session
+    events = []
+
+    async def delay_competing_archive(session, **kwargs):
+        assert session is old
+        if not first_ready.is_set():
+            first_ready.set()
+            await second_ready.wait()
+        else:
+            second_ready.set()
+            await release_second.wait()
+        return await archive_live(session, **kwargs)
+
+    monkeypatch.setattr(manager, "_archive_live_session", delay_competing_archive)
+    manager.on_broadcast("observe-concurrent-archive",
+                         lambda event: asyncio.sleep(0, result=events.append(event.get("type"))))
+    async with await _session_client(manager, old) as client:
+        url = f"/api/sessions/{old.id}/archive"
+        first = asyncio.create_task(client.post(url, params={"replace": str(replace).lower()}))
+        second = None
+        try:
+            await asyncio.wait_for(first_ready.wait(), 2)
+            second = asyncio.create_task(client.post(url, params={"replace": str(replace).lower()}))
+            winner = await asyncio.wait_for(asyncio.shield(first), 2)
+            assert winner.status_code == (201 if replace else 204)
+            release_second.set()
+            loser = await asyncio.wait_for(asyncio.shield(second), 2)
+            assert loser.status_code == 404
+            assert (await client.get(f"/api/sessions/{old.id}")).json()["archived"] is True
+            assert len((await client.get("/api/sessions")).json()) == int(replace)
+            assert events.count("session_archived") == 1
+        finally:
+            second_ready.set()
+            release_second.set()
+            await asyncio.gather(first, *([second] if second is not None else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_archive_configuration_failure_reports_committed_effect_and_successor(manager, monkeypatch):
+    old = await _new(manager, name="Archive partial result")
+    old.model = "original-model"
+    await manager.db.update_session_field(old.id, model=old.model)
+    update = manager.db.update_session_field
+
+    async def refuse_successor_configuration(session_id, **fields):
+        if session_id != old.id and "model" in fields:
+            raise ValueError("Successor configuration storage refused")
+        await update(session_id, **fields)
+
+    monkeypatch.setattr(manager.db, "update_session_field", refuse_successor_configuration)
+    events = []
+    manager.on_broadcast("partial-archive-test", lambda event: asyncio.sleep(0, result=events.append(copy.deepcopy(event))))
+    async with await _session_client(manager, old) as client:
+        response = await client.post(f"/api/sessions/{old.id}/archive")
+        assert response.status_code == 500
+        result = response.json()
+        assert result == {
+            "old_session_id": old.id, "archived": True,
+            "new_session_id": manager.list_sessions()[0].id,
+            "failure_stage": "successor_configuration",
+            "message": "Successor configuration storage refused",
+        }
+        archived = await client.get(f"/api/sessions/{old.id}")
+        assert archived.json()["archived"] is True
+        successor = await client.get(f"/api/sessions/{result['new_session_id']}")
+        assert successor.json()["model"] is None
+    frames = [event for event in events if event.get("type") == "session_archived"]
+    assert len(frames) == 1
+    assert frames[0]["archive_result"] == result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+async def test_archive_successor_is_private_until_configuration_settles(manager, monkeypatch, fail):
+    old = await _new(manager, name="Archive initialization")
+    old.model = "original-model"
+    await manager.db.update_session_field(old.id, model=old.model)
+    entered, release = asyncio.Event(), asyncio.Event()
+    update = manager.db.update_session_field
+    successor_id = None
+
+    async def block_configuration(session_id, **fields):
+        nonlocal successor_id
+        if session_id != old.id and "model" in fields:
+            successor_id = session_id
+            entered.set()
+            await release.wait()
+            if fail:
+                raise ValueError("Configuration unavailable")
+        await update(session_id, **fields)
+
+    monkeypatch.setattr(manager.db, "update_session_field", block_configuration)
+    async with await _session_client(manager, old) as client:
+        archive = asyncio.create_task(client.post(f"/api/sessions/{old.id}/archive"))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            assert successor_id is not None
+            assert (await client.get("/api/sessions")).json() == []
+            assert manager.get_session(successor_id) is None
+            refusal = await client.post(f"/api/sessions/{successor_id}/submissions", json={
+                "client_request_id": "during-archive-initialization", "content": "Use inherited configuration",
+            })
+            assert refusal.status_code == 404
+            assert await manager.db.get_client_submission(successor_id, "during-archive-initialization") is None
+        finally:
+            release.set()
+            response = await asyncio.wait_for(archive, 2)
+        assert response.status_code == (500 if fail else 201)
+        successor = manager.get_session(successor_id)
+        assert successor is not None
+        assert successor.model == (None if fail else old.model)
+        saved = next(row for row in await manager.db.load_sessions() if row["id"] == successor_id)
+        assert saved["model"] == successor.model
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["successor_creation", "schedule_rebinding"])
+async def test_archive_later_failure_publishes_only_known_effects(manager, monkeypatch, stage):
+    old = await _new(manager, name="Archive later failure")
+    events = []
+    manager.on_broadcast("later-archive-failure", lambda event: asyncio.sleep(0, result=events.append(copy.deepcopy(event))))
+
+    async def refuse(*args, **kwargs):
+        raise OSError("Storage unavailable")
+
+    monkeypatch.setattr(manager.db, "save_session" if stage == "successor_creation" else "repoint_schedules_origin", refuse)
+    async with await _session_client(manager, old) as client:
+        response = await client.post(f"/api/sessions/{old.id}/archive")
+        assert response.status_code == 500
+        result = response.json()
+        assert result == {
+            "old_session_id": old.id, "archived": True,
+            "new_session_id": manager.list_sessions()[0].id if stage == "schedule_rebinding" else None,
+            "failure_stage": stage, "message": "Storage unavailable",
+        }
+        assert (await client.get(f"/api/sessions/{old.id}")).json()["archived"] is True
+    frames = [event for event in events if event.get("type") == "session_archived"]
+    assert len(frames) == 1
+    assert frames[0]["archive_result"] == result
+    assert frames[0]["old_session_id"] == result["old_session_id"]
+    assert frames[0]["new_session_id"] == result["new_session_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+async def test_archive_private_successor_preserves_credential_deletion_consistency(manager, monkeypatch, fail):
+    owner = (await manager.db.get_system_agent())["user_id"]
+    await manager.db.save_credential(
+        credential_id="archive-binding", backend="claude-code", label="Synthetic archive binding",
+        auth_type="api_key", secret_encrypted="not-used-by-this-test",
+        created_at="2026-11-17T00:00:00+00:00", user_id=owner,
+    )
+    old = await _new(manager, credential_id="archive-binding")
+    entered, release = asyncio.Event(), asyncio.Event()
+    update = manager.db.update_session_field
+
+    async def block_configuration(session_id, **fields):
+        if session_id != old.id and "model" in fields:
+            entered.set()
+            await release.wait()
+            if fail:
+                raise ValueError("Configuration unavailable")
+        await update(session_id, **fields)
+
+    monkeypatch.setattr(manager.db, "update_session_field", block_configuration)
+    async with await _session_client(manager, old) as client:
+        archive = asyncio.create_task(client.post(f"/api/sessions/{old.id}/archive"))
+        deleting = None
+        deleted = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            deleting = asyncio.create_task(manager.delete_credential_binding("archive-binding", owner))
+            # The real deletion must wait for the private candidate to join the
+            # same live-binding propagation boundary, in both result branches.
+            done, _ = await asyncio.wait({deleting}, timeout=0.05)
+            assert not done, "credential deletion escaped the candidate's configuration boundary"
+        finally:
+            release.set()
+            response = await asyncio.wait_for(archive, 2)
+            if deleting is not None:
+                deleted = await asyncio.wait_for(deleting, 2)
+        assert response.status_code == (500 if fail else 201)
+        assert deleted is not None
+    successor = manager.list_sessions()[0]
+    saved = next(row for row in await manager.db.load_sessions() if row["id"] == successor.id)
+    assert await manager.db.get_credential("archive-binding", owner) is None
+    assert successor.credential_id == saved["credential_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_archive_pre_effect_refusal_does_not_publish_an_archive(manager, monkeypatch):
+    old = await _new(manager)
+    events = []
+    manager.on_broadcast("archive-refusal", lambda event: asyncio.sleep(0, result=events.append(copy.deepcopy(event))))
+    update = manager.db.update_session_field
+
+    async def refuse(session_id, **fields):
+        if fields.get("archived"):
+            raise ValueError("Archive write refused")
+        await update(session_id, **fields)
+
+    monkeypatch.setattr(manager.db, "update_session_field", refuse)
+    async with await _session_client(manager, old) as client:
+        response = await client.post(f"/api/sessions/{old.id}/archive")
+        assert response.status_code == 404
+        assert "archived" not in response.json()
+    assert manager.get_session(old.id) is old
+    assert not (await manager.db.get_session_binding(old.id))["archived"]
+    assert not [event for event in events if event.get("type") == "session_archived"]
+
+
+@pytest.mark.asyncio
+async def test_archive_broadcast_failure_is_not_a_business_stage_failure(manager):
+    old = await _new(manager)
+
+    async def refuse_publication(event):
+        if event.get("type") == "session_archived":
+            raise RuntimeError("Required archive consumer unavailable")
+
+    manager.on_broadcast("required-archive-consumer", refuse_publication, required=True)
+    try:
+        with pytest.raises(RuntimeError, match="Required archive consumer unavailable") as raised:
+            await manager.archive_session(old.id)
+        assert type(raised.value) is RuntimeError
+        assert manager.get_session(old.id) is None
+        assert len(manager.list_sessions()) == 1
+    finally:
+        manager.remove_broadcast("required-archive-consumer")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("overrides", [
     ("gpt-5.4", "high", "fast"),

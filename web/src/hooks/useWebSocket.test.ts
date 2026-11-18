@@ -45,7 +45,7 @@ it.each(["claude-code", "codex"])("keeps the current %s stream when old text and
   handleWsMessage({ type: "assistant_text", session_id: "streams", seq: 3, content: "Old complete", ...source("old") });
   const partial = () => backend === "codex"
     ? Object.values(useSessionStore.getState().streamingItems.streams || {}).map((item) => item.content)
-    : [useSessionStore.getState().streamingText.streams];
+    : [useSessionStore.getState().streamingText.streams?.content];
   expect(partial()).toEqual(["Current partial"]);
   const terminal = { type: "result", session_id: "streams", seq: 4, request_id: "old", attempt_id: "attempt",
     content: { kind: "outcome", operation: "message", request_id: "old", status: "success" } };
@@ -309,7 +309,7 @@ it("preserves recovery progress through reconnect and paged history without endi
   handleWsMessage({ type: "assistant_delta", session_id: "recovery-test", content: "unfinished" });
   handleWsMessage({ type: "recovery", session_id: "recovery-test", seq: 4, content: recovery });
   const live = useSessionStore.getState().messages["recovery-test"][0];
-  expect(useSessionStore.getState().streamingText["recovery-test"]).toBe("unfinished");
+  expect(useSessionStore.getState().streamingText["recovery-test"]?.content).toBe("unfinished");
   expect(live.recovery?.phase).toBe("retrying");
   applyTranscript("recovery-test", { messages: [
     { role: "assistant", type: "text", seq: 5, content: "continued" },

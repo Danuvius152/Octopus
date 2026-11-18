@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useSessionStore, type Message } from "../stores/sessionStore";
+import { captureStreamingRead, useSessionStore, type Message } from "../stores/sessionStore";
 import { applyTranscript, observeOlderMessages } from "./transcript";
 import { handleWsMessage } from "../hooks/useWebSocket";
 
@@ -20,6 +20,34 @@ const loadOlderMessages = (sessionId: string) => observeOlderMessages(sessionId)
  * are pinned here, because in the browser they look like ordinary scrolling.
  */
 describe("applyTranscript", () => {
+  it("keeps persistent coverage continuous when local notices are added or removed", () => {
+    const snapshot = { messages: [msg(10), msg(11)], oldest_loaded_seq: 10, next_message_seq: 12 };
+    applyTranscript("s1", snapshot);
+    const window = useSessionStore.getState().messageWindows.s1;
+    useSessionStore.getState().addMessage("s1", { role: "system", type: "notice", content: "Local status" });
+    applyTranscript("s1", snapshot);
+    expect(useSessionStore.getState().messageWindows.s1).toBe(window);
+  });
+
+  it("keeps confirmed empty coverage continuous through local notice changes", () => {
+    const snapshot = { messages: [], oldest_loaded_seq: null, next_message_seq: 0, has_more_messages: false };
+    applyTranscript("s1", snapshot);
+    const window = useSessionStore.getState().messageWindows.s1;
+    useSessionStore.getState().addMessage("s1", { role: "system", type: "notice", content: "Local status" });
+    applyTranscript("s1", snapshot);
+    expect(useSessionStore.getState().messageWindows.s1).toBe(window);
+    applyTranscript("s1", { messages: [msg(0)], oldest_loaded_seq: 0, next_message_seq: 1 });
+    expect(useSessionStore.getState().messageWindows.s1).not.toBe(window);
+  });
+
+  it("does not use uninstalled persistent rows as proof of a continuous baseline", () => {
+    useSessionStore.getState().setMessages("s1", [msg(10), msg(11)]);
+    const uninstalled = useSessionStore.getState().messageWindows.s1;
+    applyTranscript("s1", { messages: [msg(10), msg(11)], oldest_loaded_seq: 10, next_message_seq: 12 });
+    expect(useSessionStore.getState().messageWindows.s1).not.toBe(uninstalled);
+    expect(useSessionStore.getState().oldestSeq.s1).toBe(10);
+  });
+
   it("publishes messages, cursor, window and coverage in one installation", () => {
     const publications: unknown[] = [];
     const stop = useSessionStore.subscribe((state) => publications.push({
@@ -60,7 +88,7 @@ describe("applyTranscript", () => {
     expect(useSessionStore.getState().oldestSeq.s1).toBeUndefined();
     handleWsMessage({ type: "assistant_delta", session_id: "s1", content: "New unfinished answer" });
     handleWsMessage({ type: "result", session_id: "s1", seq: 11, content: "Old legacy terminal" });
-    expect(useSessionStore.getState().streamingText.s1).toBe("New unfinished answer");
+    expect(useSessionStore.getState().streamingText.s1?.content).toBe("New unfinished answer");
     expect(useSessionStore.getState().messages.s1).toEqual([]);
     expect(useSessionStore.getState().lastAppliedSeq.s1).toBe(11);
     expect(applyTranscript("s1", { messages: [msg(12)], oldest_loaded_seq: 12, next_message_seq: 13 })).toBe(true);
@@ -131,7 +159,6 @@ describe("applyTranscript", () => {
       hasMoreMessages: {},
       lastAppliedSeq: {},
       streamingText: {},
-      streamingTextAttempt: {},
       streamingItems: {},
       activeAttempts: {},
     });
@@ -172,7 +199,7 @@ describe("applyTranscript", () => {
     expect(state.messages.s1.map((m) => m.seq)).toEqual([10, 11, 12]);
     expect(state.messages.s1[2].tool_input).toEqual({ request_context: { request_id: "human-12", source: "human" } });
     expect(state.lastAppliedSeq.s1).toBe(11);
-    expect(state.streamingText.s1).toBe("new answer in progress");
+    expect(state.streamingText.s1?.content).toBe("new answer in progress");
     expect(state.oldestSeq.s1).toBe(10);
   });
 
@@ -180,12 +207,12 @@ describe("applyTranscript", () => {
     handleWsMessage({ type: "user_message", session_id: "s1", seq: 0, content: "question" });
     handleWsMessage({ type: "assistant_delta", session_id: "s1", content: "answer still streaming" });
     applyTranscript("s1", { messages: [msg(0)], next_message_seq: 1 });
-    expect(useSessionStore.getState().streamingText.s1).toBe("answer still streaming");
+    expect(useSessionStore.getState().streamingText.s1?.content).toBe("answer still streaming");
   });
 
   it("retains root and child native-only deltas that arrive during an older snapshot read", () => {
     handleWsMessage({ type: "attempt_started", session_id: "s1", request_id: "r", attempt_id: "a" });
-    const baseline = useSessionStore.getState().streamingItems.s1 || {};
+    const baseline = captureStreamingRead("s1");
     const identity = (thread: string) => ({ request_id: "r", attempt_id: "a", native: {
       thread_id: thread, turn_id: "t", item_id: "same", root_thread_id: "root", root_turn_id: "t" } });
     handleWsMessage({ type: "assistant_delta", session_id: "s1", content: "Root live", runtime_metadata: identity("root") });
@@ -239,10 +266,12 @@ describe("loadOlderMessages", () => {
       const reading = loadOlderMessages("s1");
       handleWsMessage({ type: "user_message", session_id: "s1", seq: 9, content: "msg-9" });
       handleWsMessage({ type: "user_message", session_id: "s1", seq: 8, content: "msg-8" });
+      const before = useSessionStore.getState().messages.s1;
       respond(Response.json({ messages: [msg(8), msg(9)], oldest_loaded_seq: 8, has_more_messages: true }));
       expect(await reading).toEqual({ state: "merged", added: 0 });
       const state = useSessionStore.getState();
       expect(state.messages.s1.map((row) => row.seq)).toEqual([8, 9, 10, 11]);
+      expect(state.messages.s1).toBe(before);
       expect(state.oldestSeq.s1).toBe(8);
       expect(state.hasMoreMessages.s1).toBe(true);
     } finally {

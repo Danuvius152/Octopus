@@ -174,7 +174,7 @@ it("hands output after a qualified reveal to normal following", () => {
   // even when it arrives before the next browser frame or resize delivery.
   motion.grow(23, false);
   act(() => useSessionStore.setState({ sessions: [{ ...session, status: "running" }],
-    streamingText: { [session.id]: "Output before the first revealed frame\n" } }));
+    streamingText: { [session.id]: { content: "Output before the first revealed frame\n" } } }));
   expect(screen.getByText("Output before the first revealed frame")).toBeVisible();
   expect(motion.viewport.scrollTop, "initial no longer writes after the qualified reveal").toBe(600);
   motion.tick(16);
@@ -286,7 +286,10 @@ it("preserves reading without a visible anchor when detail replaces the same ope
   expect(motion.pending()).toBe(0);
   expect(screen.getByText(/The previous reading position is unavailable/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
-  for (let index = 0; index < 12; index++) motion.tick(16);
+  motion.tick(16);
+  expect(motion.viewport.scrollTop).toBeGreaterThan(400);
+  expect(motion.viewport.scrollTop).toBeLessThan(700);
+  for (let index = 0; index < 21; index++) motion.tick(16);
   expect(motion.viewport.scrollTop).toBe(700);
   expect(screen.queryByText(/The previous reading position is unavailable/)).toBeNull();
 });
@@ -314,7 +317,10 @@ it.each([false, true])("shows a readable boundary and returns to latest after a 
     for (let index = 0; index < 12; index++) motion.tick(16);
   }
   fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
-  for (let index = 0; index < 12; index++) motion.tick(16);
+  motion.tick(16);
+  expect(motion.viewport.scrollTop).toBeGreaterThan(400);
+  expect(motion.viewport.scrollTop).toBeLessThan(700);
+  for (let index = 0; index < 21; index++) motion.tick(16);
   expect(motion.viewport.scrollTop).toBe(700);
   expect(screen.queryByText(/The previous reading position is unavailable/)).toBeNull();
 });

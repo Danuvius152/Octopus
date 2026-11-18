@@ -1,6 +1,5 @@
 import { accountFetch as fetch } from "./accountFetch";
-import type { SessionInfo } from "../stores/sessionStore";
-import { useSessionStore } from "../stores/sessionStore";
+import { captureStreamingRead, useSessionStore, type SessionInfo, type StreamingReadBasis } from "../stores/sessionStore";
 import { applyTranscript } from "./transcript";
 import { readDispatchState } from "./sessionDispatch";
 import { sessions, type SessionObservation } from "./sessionList";
@@ -56,12 +55,13 @@ export async function hydrateSession(sessionId: string): Promise<void> {
 type SnapshotStart = ReturnType<typeof useSessionStore.getState>;
 const detailReads = new SnapshotReads();
 
-async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, observation: SessionObservation, current: () => boolean, read: ReturnType<SnapshotReads["begin"]>) {
+async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, observation: SessionObservation,
+  current: () => boolean, read: ReturnType<SnapshotReads["begin"]>, streamingBasis: StreamingReadBasis | undefined) {
   if (!res.ok) throw new Error(`Could not load session state (HTTP ${res.status}).`);
   const data: Record<string, unknown> = await res.json();
   const dispatch = readDispatchState(data.dispatch_state);
   if (!current() || !sessions.current(observation, dispatch?.generation)) return null;
-  const applied = applySessionSnapshot(sessionId, data, start, !read.claim());
+  const applied = applySessionSnapshot(sessionId, data, start, !read.claim(), streamingBasis);
   if (!applied) return null;
   sessions.detail(sessionInfoFromDetail(data), observation, dispatch);
   return { data, ...applied };
@@ -82,6 +82,7 @@ export function observeSession(sessionId: string, purpose: "complete" | "detail"
   const current = () => active;
   const done = (async () => {
     try {
+      const streamingBasis = purpose === "metadata" ? undefined : captureStreamingRead(sessionId);
       const res = await fetch(`${API}/api/sessions/${sessionId}${purpose === "metadata" ? "/info" : "?view=browser"}`, {
         headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
       });
@@ -91,7 +92,7 @@ export function observeSession(sessionId: string, purpose: "complete" | "detail"
         if (!current() || !sessions.current(observation)) return null;
         return sessions.detail(info, observation, null) ? info as unknown as Record<string, unknown> : null;
       }
-      const result = await applyDetailResponse(sessionId, res, start, observation, current, read);
+      const result = await applyDetailResponse(sessionId, res, start, observation, current, read, streamingBasis);
       const detail = result?.data ?? null;
       if (detail && start.activeSessionId === sessionId && useSessionStore.getState().activeSessionId === sessionId && typeof detail.agent_id === "string") {
         useSessionStore.getState().setActiveAgentId(detail.agent_id);
@@ -281,16 +282,13 @@ function applyDispatchSnapshot(
 /** Reject a retired service before any part of its detail can be rehydrated. */
 export function applySessionSnapshot(
   sessionId: string, detail: Record<string, unknown>, start = useSessionStore.getState(),
-  advanceOnly = false,
+  advanceOnly = false, streamingBasis?: StreamingReadBasis,
 ): { needsExecutionConfirmation: boolean } | null {
   if (typeof detail.id === "string" && detail.id !== sessionId) return null;
-  const live = useSessionStore.getState();
   const applied = applyDispatchSnapshot(sessionId, detail, start, advanceOnly);
   if (!applied) return null;
   advanceOnly ||= applied.needsExecutionConfirmation;
-  const transcriptApplied = applyTranscript(sessionId, detail, start.streamingItems[sessionId] || {},
-    live.streamingText[sessionId] !== start.streamingText[sessionId] ||
-    live.streamingTextAttempt[sessionId] !== start.streamingTextAttempt[sessionId]);
+  const transcriptApplied = applyTranscript(sessionId, detail, streamingBasis);
   advanceOnly ||= !transcriptApplied;
   const store = useSessionStore.getState();
   const snapshotMessages = (detail.messages as { seq?: number }[]) || [];

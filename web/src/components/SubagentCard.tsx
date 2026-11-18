@@ -17,8 +17,11 @@ export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; c
   const messages = useSessionStore((s) => s.messages[sessionId]);
   const streaming = useSessionStore((s) => s.streamingItems[sessionId]);
   const snapshots = useSessionStore((s) => s.subagents[sessionId]);
+  // Saved facts own the collected body and its detail anchor. Live deltas
+  // only compose the current preview; they do not invalidate that scan.
+  const saved = useMemo(() => nativeCard(messages || [], cardId, Object.values(snapshots || {})), [messages, cardId, snapshots]);
+  const anchorSeq = useMemo(() => saved ? nativeDetailAnchor(messages || [], saved) : undefined, [messages, saved]);
   const run = useMemo(() => {
-    const saved = nativeCard(messages || [], cardId, Object.values(snapshots || {}));
     if (!saved) return undefined;
     const partials = Object.values(streaming || {}).filter((item) =>
       saved.runtime_metadata && item.runtime_metadata.request_id === saved.runtime_metadata.request_id &&
@@ -26,8 +29,7 @@ export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; c
       item.runtime_metadata.native?.thread_id === saved.native_thread_id &&
       item.runtime_metadata.native?.turn_id === saved.native_turn_id);
     return { ...saved, summary: [saved.summary, ...partials.map((item) => item.content)].filter(Boolean).join("\n\n") };
-  }, [messages, streaming, cardId, snapshots]);
-  const anchorSeq = run ? nativeDetailAnchor(messages || [], run) : undefined;
+  }, [saved, streaming]);
   const work = run && nativeWorkKey(run.runtime_metadata, run.native_thread_id, run.native_turn_id);
   return <SubagentCard key={JSON.stringify([sessionId, work ?? cardId])}
     sessionId={sessionId} observedRun={run} detailAnchor={anchorSeq} />;

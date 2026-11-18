@@ -17,8 +17,12 @@ const { child } = vi.hoisted(() => ({ child: {
 // Duplicate is driven through the actual slash-command watcher and POST below.
 vi.mock("./ForkDialog", () => ({ ForkDialog: ({ onForked }: { onForked: (value: unknown, observation: SessionObservation) => void }) =>
   <button onClick={async () => {
-    const observation = sessionList.capture();
-    if (await sessionList.created(child as SessionInfo, observation, child.forked_from_session_id)) onForked(child, observation);
+    const tracked = sessionList.observe(child.forked_from_session_id, useSessionStore.getState(), "archive");
+    try {
+      if (await sessionList.created(child as SessionInfo, tracked.observation, child.forked_from_session_id)) onForked(child, tracked.observation);
+    } finally {
+      tracked.finish();
+    }
   }}>Confirm test rewind</button> }));
 
 const parent = { ...child, id: "parent", name: "Parent", forked_from_session_id: null } as SessionInfo;

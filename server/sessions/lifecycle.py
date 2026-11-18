@@ -23,6 +23,8 @@ from ..harness import get_harness
 from ..knowledge import KnowledgeContext, OwnedTaskContext, receive_return
 from ..models import (
     MessageContent,
+    SessionArchiveFailureStage,
+    SessionArchiveResult,
     SessionDetail,
     SessionInfo,
     SessionRestoreRequest,
@@ -55,6 +57,14 @@ from .submission import ReturnRefused
 # the slice free of a router import; the read-only manage view pages back
 # through the same `…/messages` cursor.
 _ARCHIVED_MESSAGE_WINDOW = 200
+
+
+class SessionArchiveFailed(RuntimeError):
+    """Archival committed; a later business step failed with these known facts."""
+
+    def __init__(self, result: SessionArchiveResult):
+        super().__init__(result.message)
+        self.result = result
 
 
 class LifecycleMixin(SessionManagerBase):
@@ -322,7 +332,7 @@ class LifecycleMixin(SessionManagerBase):
         parent_session_id: str | None = None,
         delegation_request: str | None = None,
         app_id: str | None = None,
-        *, persist: bool = True,
+        *, persist: bool = True, register: bool = True,
     ) -> Session:
         """Create a conversation thread owned by `agent_id`.
 
@@ -397,7 +407,7 @@ class LifecycleMixin(SessionManagerBase):
                 app_id=session.app_id,
                 user_id=session.user_id,
             )
-        if persist:
+        if persist and register:
             self.sessions[sid] = session
         return session
 
@@ -522,7 +532,9 @@ class LifecycleMixin(SessionManagerBase):
             else self._retirement_operation(old.agent_id, only_request_id=only_request_id)
         )
         async with operation:
-            _, successor = await self._archive_original(old, replace=replace, only_request_id=only_request_id)
+            archived, successor = await self._archive_original(old, replace=replace, only_request_id=only_request_id)
+            if not archived and only_request_id is None:
+                raise ValueError(f"Session {old.id} not found")
             return successor
 
     async def _archive_original(
@@ -626,38 +638,59 @@ class LifecycleMixin(SessionManagerBase):
         # New session inherits agent / name / working_dir / credential_id /
         # origin but starts with no claude_session_id (fresh conversation).
         new = successor
-        if new is None:
-            # Replacement belongs to this already registered lifecycle command.
-            new = await self._create_session(
-                agent_id=old.agent_id, name=old.name, working_dir=old.working_dir,
-                credential_id=old.credential_id, origin=old.origin, backend=old.backend, app_id=old.app_id,
-            )
-            new.model, new.reasoning_effort, new.service_tier = old.model, old.reasoning_effort, old.service_tier
-            if self.db:
-                await self.db.update_session_field(new.id, model=new.model,
-                    reasoning_effort=new.reasoning_effort, service_tier=new.service_tier)
+        failure: SessionArchiveFailed | None = None
+        stage: SessionArchiveFailureStage = "successor_creation"
+        try:
+            if new is None:
+                # Credential deletion propagates through the live registry.
+                # Keep private creation, initialization and registration inside
+                # its existing configuration boundary so it cannot miss us.
+                async with self.input_database().configuration_lock:
+                    new = await self._create_session(
+                        agent_id=old.agent_id, name=old.name, working_dir=old.working_dir,
+                        credential_id=old.credential_id, origin=old.origin, backend=old.backend, app_id=old.app_id,
+                        register=False,
+                    )
+                    stage = "successor_configuration"
+                    try:
+                        if self.db:
+                            await self.db.update_session_field(new.id, model=old.model,
+                                reasoning_effort=old.reasoning_effort, service_tier=old.service_tier)
+                        new.model, new.reasoning_effort, new.service_tier = old.model, old.reasoning_effort, old.service_tier
+                    finally:
+                        # Creation already committed. A failed configuration write
+                        # retains that real successor with its actual saved defaults.
+                        self.sessions[new.id] = new
 
-        # Schedules are agent-owned, so ownership needs no repoint.
-        # But a schedule created from this session (origin_session_id == old.id)
-        # should follow the live successor thread, otherwise its runs fall back
-        # to throwaway sessions. Fires read the current DB origin; registration
-        # holds only the schedule ID, so changing origin must not reset cadence
-        # or hand this original archive's work to a closing Runner.
-        if self.db:
-            await self.db.repoint_schedules_origin(old.id, new.id)
+            # Rebinding changes only the origin; keep the schedule's cadence
+            # and the registered Runner's ownership unchanged.
+            stage = "schedule_rebinding"
+            if self.db:
+                await self.db.repoint_schedules_origin(old.id, new.id)
+        except Exception as error:
+            failure = SessionArchiveFailed(SessionArchiveResult(
+                old_session_id=old.id, new_session_id=new.id if new is not None else None,
+                failure_stage=stage, message=str(error),
+            ))
+            failure.__cause__ = error
+
+        result = failure.result if failure is not None else None
 
         await self._broadcast(
             {
                 "type": "session_archived",
-                "old_session_id": old.id,
-                "new_session_id": new.id,
-                "name": new.name,
-                "model": new.model,
-                "reasoning_effort": new.reasoning_effort,
-                "service_tier": new.service_tier,
+                "old_session_id": result.old_session_id if result else old.id,
+                "new_session_id": result.new_session_id if result else new.id if new else None,
+                "name": new.name if new else old.name,
+                "model": new.model if new else None,
+                "reasoning_effort": new.reasoning_effort if new else None,
+                "service_tier": new.service_tier if new else None,
                 "dispatch_state": dispatch_state,
+                **({"archive_result": result.model_dump()} if result else {}),
             }, user_id=old.user_id,
         )
+        if failure is not None:
+            raise failure
         return new
 
     async def auto_archive_scheduled_session(self, session_id: str, *, expected_session: Session | None = None) -> bool:

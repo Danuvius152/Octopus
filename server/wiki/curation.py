@@ -10,7 +10,7 @@ from typing import Any
 from . import portable_metadata, resolver
 from .formats import require_markdown_maintenance
 from .history import WikiHistory
-from .links import anchor_exists, source_span
+from .links import AnchorProjection, source_span
 from .references import local_references, path_uri, source_reference
 from .sections import original_text, region, top_offset
 from .store import WikiError, read_document_bytes, require_document_bytes, revision
@@ -117,12 +117,12 @@ class WikiCuration:
                         introduced[selection] -= 1
             parent = Path(path).parent.as_posix()
             targets = resolver.TargetDocuments(db)
-            target_bodies = {}
+            target_anchors = {}
+            candidate_anchors = AnchorProjection.from_parsed(parsed)
             for reference in links:
                 resolved = resolver.resolve(db, reference, parent, source_doc=overlay["id"], overlay=overlay, check_anchor=False, documents=targets)
                 if resolved.status == "resolved":
-                    target_text = text
-                    target_parse = parsed
+                    anchors = candidate_anchors
                     if resolved.target != overlay["id"]:
                         target = targets.document(resolved.target)
                         file = self.store.path(target["path"])
@@ -130,13 +130,13 @@ class WikiCuration:
                             raise WikiError(f"New local link target disappeared: {reference.raw_resource}", 409)
                         if reference.fragment:
                             # Validation proves the current original, rather than
-                            # substituting the catalog's extracted body. Both
-                            # body and parse belong only to this validation.
-                            if resolved.target not in target_bodies:
+                            # substituting the catalog's extracted body. Retain
+                            # only its anchor facts for this validation.
+                            if resolved.target not in target_anchors:
                                 body = read_document_bytes(file, label=target["path"]).decode("utf-8-sig")
-                                target_bodies[resolved.target] = body, format.parse(body)
-                            target_text, target_parse = target_bodies[resolved.target]
-                    if reference.fragment and not anchor_exists(target_text, reference.fragment, parsed=target_parse):
+                                target_anchors[resolved.target] = AnchorProjection.from_parsed(format.parse(body))
+                            anchors = target_anchors[resolved.target]
+                    if reference.fragment and anchors.status(reference.fragment) != "resolved":
                         raise WikiError(f"New local anchor does not exist: {reference.raw_resource}", 422)
                     continue
                 relative = os.path.normpath(os.path.join(parent, reference.value)).replace(os.sep, "/")

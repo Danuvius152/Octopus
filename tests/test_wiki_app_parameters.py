@@ -547,15 +547,14 @@ async def test_admitted_wiki_worker_continues_after_app_deletion(bound, monkeypa
             while not runs:
                 await asyncio.sleep(0)
         original = runs[0]
+        original_worker = worker.tasks[jobs.user_id]
         deleted = await asyncio.wait_for(client.delete("/api/applications/parameters", headers=client.headers,
                                                        params={"keep_files": "true"}), 3)
         assert deleted.status_code == 204, deleted.text
         assert api.session_manager.get_session(original.session_id) is not None
         assert not original.release.is_set(), "App deletion retired the independent Wiki execution"
         original.release.set()
-        async with asyncio.timeout(3):
-            while jobs.get(job_id)["status"] in {"running", "queued"}:
-                await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.shield(original_worker), 3)
         current = jobs.get(job_id)
         assert current["status"] == "completed_with_attention"  # The controlled model publishes no receipt.
         assert current["grant"]["registration_generation"] == jobs.registration["registration_generation"]

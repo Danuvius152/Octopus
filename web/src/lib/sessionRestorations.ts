@@ -133,26 +133,43 @@ export class SessionRestorations {
         : proof.state === "generation_unknown" ? "The previous service's retirement is unconfirmed." : uncertain };
     }
     // A list that started before the closing proof cannot settle this POST.
-    let reading = this.list.refreshAfterRestoration();
-    while (this.current(record, observer)) {
-      const result = await reading;
-      if (!this.current(record, observer)) return { session: null };
-      if (result.state === "pending" || result.state === "applied" && useSessionStore.getState().sessionRead.stale) {
-        reading = this.list.refresh(true); continue;
+    const { observation, finish } = this.list.observe();
+    try {
+      let reading = this.list.refreshAfterRestoration();
+      let adoptedInitialGeneration = false;
+      while (this.current(record, observer)) {
+        const result = await reading;
+        if (!this.current(record, observer)) return { session: null };
+        const firstGenerationCurrent = this.list.initialGenerationCurrent(observation);
+        if (result.state === "obsolete" && !adoptedInitialGeneration && firstGenerationCurrent) {
+          adoptedInitialGeneration = true;
+          reading = this.list.refresh(true);
+          continue;
+        }
+        // A shared read may have settled as pending before the scope retired.
+        // Recheck the adopted scope before either retrying or using its result.
+        const scopeCurrent = adoptedInitialGeneration ? firstGenerationCurrent : this.list.current(observation);
+        if (!scopeCurrent || result.state === "obsolete" || result.state === "failed") {
+          throw new Error("Could not synchronize restored sessions. Retry confirmation.");
+        }
+        const state = useSessionStore.getState();
+        if (result.state === "pending" || state.sessionRead.stale) {
+          reading = this.list.refresh(true); continue;
+        }
+        const session = state.sessions.find(row => row.id === record.sessionId) ?? null;
+        // Inclusive absence is processed through SessionList's deletion owner.
+        if (!session && !state.archivedSessions.some(row => row.id === record.sessionId)) return { session: null };
+        sessionStorage.removeItem(key(record.owner, record.sessionId));
+        record.identity = null; record.active = null;
+        this.records.delete(key(record.owner, record.sessionId));
+        this.phase(record.sessionId, "ready");
+        return { session, message: !session ? proof.status_code ? `Restoration ended (HTTP ${proof.status_code}). ${proof.message ?? ""}`
+          : "The session is still archived. You can restore it again." : undefined };
       }
-      if (result.state !== "applied") throw new Error("Could not synchronize restored sessions. Retry confirmation.");
-      const state = useSessionStore.getState();
-      const session = state.sessions.find(row => row.id === record.sessionId) ?? null;
-      // Inclusive absence is processed through SessionList's deletion owner.
-      if (!session && !state.archivedSessions.some(row => row.id === record.sessionId)) return { session: null };
-      sessionStorage.removeItem(key(record.owner, record.sessionId));
-      record.identity = null; record.active = null;
-      this.records.delete(key(record.owner, record.sessionId));
-      this.phase(record.sessionId, "ready");
-      return { session, message: !session ? proof.status_code ? `Restoration ended (HTTP ${proof.status_code}). ${proof.message ?? ""}`
-        : "The session is still archived. You can restore it again." : undefined };
+      return { session: null };
+    } finally {
+      finish();
     }
-    return { session: null };
   }
   restore(id: string): Promise<Result> | null { return this.act(id, false); }
   confirm(id: string): Promise<Result> | null { return this.act(id, true); }

@@ -164,10 +164,11 @@ async def test_followup_retires_old_question_writer_only_after_confirmed_takeove
                     await prepare_release.wait()
                 return await get_agent(agent_id)
 
-            async def pause_archive(session_id):
+            async def pause_archive(session_id, *, expected_session):
+                assert expected_session is manager.get_session(session_id)
                 archive_entered.set()
                 await archive_release.wait()
-                return await auto_archive(session_id)
+                return await auto_archive(session_id, expected_session=expected_session)
 
             async def pause_second_admission(session_id, prompt, **kwargs):
                 if session_id == first.delegation_id:

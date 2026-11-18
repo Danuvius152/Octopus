@@ -16,6 +16,17 @@ class SessionStatus(str, Enum):
     running = "running"
 
 
+SessionArchiveFailureStage = Literal["successor_creation", "successor_configuration", "schedule_rebinding"]
+
+
+class SessionArchiveResult(BaseModel):
+    old_session_id: str
+    archived: Literal[True] = True
+    new_session_id: str | None
+    failure_stage: SessionArchiveFailureStage
+    message: str
+
+
 class SessionRestoreRequest(BaseModel):
     operation_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     service_generation: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")

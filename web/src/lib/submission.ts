@@ -1,7 +1,12 @@
 import { accountFetch } from "./accountFetch";
+import type { ClientSubmissionStatus } from "../api";
+import type { components } from "../api/contracts";
+
+type HttpSubmissionReceipt = ClientSubmissionStatus | components["schemas"]["ClientSubmissionRefusal"];
 
 /** One HTTP receipt observation, including its body; timeout never resends work. */
-export async function readSubmission<T>(url: string, init: RequestInit): Promise<T> {
+export async function readSubmission(url: string, init: RequestInit,
+  original: { sessionId: string; clientId: string; operation: "message" | "compact" }): Promise<SubmissionReply> {
   const controller = new AbortController();
   const cancelled = new Promise<never>((_resolve, reject) => {
     controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
@@ -15,7 +20,13 @@ export async function readSubmission<T>(url: string, init: RequestInit): Promise
       controller.signal.throwIfAborted();
       const response = await accountFetch(url, { ...init, signal: controller.signal });
       if (!response.ok) throw new Error(`Submission confirmation failed (${response.status}).`);
-      return await response.json() as T;
+      const receipt = await response.json() as HttpSubmissionReceipt | null;
+      if (!receipt || receipt.session_id !== original.sessionId || receipt.client_request_id !== original.clientId ||
+          typeof receipt.accepted !== "boolean" ||
+          ("operation" in receipt ? receipt.operation !== original.operation : receipt.accepted || init.method === "GET")) {
+        throw new Error("The receipt does not identify the original submission.");
+      }
+      return submissionReply(receipt);
     })()]);
   } finally {
     clearTimeout(deadline);
@@ -32,6 +43,26 @@ export interface SubmissionReply {
   state?: "unknown";
   clientRequestId?: string;
   execution?: import("../api").ClientSubmissionStatus["execution"];
+}
+
+export function submissionReply(status: HttpSubmissionReceipt): SubmissionReply {
+  return { accepted: status.accepted, execution: "execution" in status ? status.execution : undefined, state: status.state ?? undefined,
+    message: status.message ?? undefined, code: status.code ?? undefined,
+    clientRequestId: status.client_request_id, requestId: "request_id" in status ? status.request_id : undefined };
+}
+
+/** Admission and execution are separate facts for both direct and GET receipts. */
+export function classifySubmission(
+  reply: { accepted: boolean; state?: "unknown" | null; execution?: SubmissionReply["execution"] } | void,
+  operation: "message" | "compact" | "continuation",
+): "unknown" | "recoverable" | "readonly" | "rejected" | "settled" {
+  if (!reply || reply.state === "unknown" || reply.execution?.state === "unknown") return "unknown";
+  if (reply.execution?.state === "withdrawn") {
+    return operation !== "compact" && reply.execution.recoverable_input ? "recoverable" : "readonly";
+  }
+  if (reply.execution?.state === "pending" || reply.execution?.state === "running" || reply.execution?.state === "done" ||
+      !reply.execution && reply.accepted) return "settled";
+  return reply.execution ? "unknown" : "rejected";
 }
 
 /** Captured before sending; a later view cannot retarget the answer. */

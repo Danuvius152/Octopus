@@ -37,8 +37,10 @@ no-op, EOF and failure are in [native compact](../implemented/harness-layer.md#c
 
 [`claude-context-compact-2.1.319.json`](claude-context-compact-2.1.319.json)
 retains contiguous frames from an unmodified 2.1.319 CLI with a synthetic
-loopback Anthropic provider. Its binary digest, source revision, inputs and
-scenario outcome are part of the fixture. The main normal/compact/empty run is
+loopback Anthropic provider. Home paths and derived project directory names
+use an example account of the same length. Artifact and request hashes refer
+to the captures before anonymization. The fixture includes the CLI binary
+digest, source revision, inputs and scenario outcomes. The main normal/compact/empty run is
 recorded as failed; short and child cases retain their own outcomes. It is not
 a real-provider/model or current-deployment check. In particular, its empty
 history failure does not prove a successful compact no-op.

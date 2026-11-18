@@ -108,7 +108,7 @@ it("recalls only a selected preview's full text and sends its tail without expan
   expect(send()).toBeEnabled();
   expect(useSessionStore.getState().messages[session.id][1]).toEqual(row);
   fireEvent.click(send());
-  expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "A shared preview and the essential tail", undefined, undefined);
+  expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "A shared preview and the essential tail", undefined, undefined, expect.any(String));
 });
 
 it("keeps equal previews as separate messages and recalls their distinct tails in order", async () => {
@@ -246,7 +246,7 @@ it.each(["/compact ", "/reset ", "/model another-model "])("blocks %s before ren
   expect(transport.mock.calls.filter(([, init]) => init?.method && init.method !== "GET")).toHaveLength(0);
   edit("Ready to send");
   fireEvent.click(send());
-  await waitFor(() => expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Ready to send", undefined, undefined));
+  await waitFor(() => expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Ready to send", undefined, undefined, expect.any(String)));
   await act(async () => reads[0].reply.resolve(Response.json(prompt(1, "Retired full message"))));
   expect(box()).toHaveValue("");
 });

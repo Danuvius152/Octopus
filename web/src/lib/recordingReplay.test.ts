@@ -18,7 +18,7 @@ it("keeps the real Claude backpressure history through replay, reconnect and a n
   applyTranscript(session, initial);
   handleWsMessage({ type: "attempt_started", session_id: session, request_id: "stdin-original", attempt_id: "original-attempt" });
   handleWsMessage(steering.delta);
-  expect(useSessionStore.getState().streamingText[session]).toBe("Output partial");
+  expect(useSessionStore.getState().streamingText[session]?.content).toBe("Output partial");
   handleWsMessage(steering.output);
   expect(useSessionStore.getState().streamingText[session]).toBeUndefined();
   // A read begun before the saved steer returns while stdout has moved on.
@@ -43,7 +43,7 @@ it("keeps the real Claude backpressure history through replay, reconnect and a n
   applyTranscript(session, initial);
   const state = useSessionStore.getState();
   expect(state.messages[session].map((row) => row.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
-  expect(state.streamingText[session]).toBe("New request in progress");
+  expect(state.streamingText[session]?.content).toBe("New request in progress");
   expect(state.activeAttempts[session]).toEqual({ request_id: "new-request", attempt_id: "new-attempt" });
   expect(state.pendingQuestions[session] || []).toEqual([]);
   expect(state.lastAppliedSeq[session]).toBe(3);

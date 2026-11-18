@@ -59,6 +59,23 @@ available.
 | `withdrawn` | Withdrawn before execution; eligible inputs can be restored for review. |
 | `unknown` | Execution or delivery cannot be confirmed; no automatic replay. |
 
+Ordinary messages, compact and continuation share the browser receipt classifier.
+Ordinary and continuation sends receive their direct receipts over WebSocket.
+The shared HTTP reader handles compact POST and confirmation GET by original
+session and client ID. Accepted POST receipts and all GET receipts require the
+original wire operation. An explicit pre-admission POST refusal may omit it.
+Continuation confirms by message operation with a ten-second GET deadline.
+A mismatched or unreadable response leaves the original submission unknown.
+
+After explicit refusal, ordinary messages and continuation keep the original
+submission for user-directed recovery. Compact restores editing only while the
+original draft version matches. A withdrawal is eligible for recovery when
+`recoverable_input` is present. Recovery uses the original submitted text and
+attachments. Withdrawn compact or an input without that evidence remains
+read-only. Pending, running and done retain the original execution and outcome
+fields. Unknown results retain their draft, attachments and original ID for GET
+confirmation.
+
 Delivery evidence has its own `delivery_state`. An uncertain steer remains
 unknown even when the carrying request has a successful result. For ordinary
 single-input execution, the exact terminal and input settlement commit in one

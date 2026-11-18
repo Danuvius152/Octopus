@@ -2,7 +2,7 @@
 
 from pathlib import PurePosixPath
 
-from . import resolver, source_bindings, source_confirmations, uids
+from . import format, resolver, source_bindings, source_confirmations, uids
 from .links import note_name
 from .references import ParsedReference, local_references
 
@@ -91,10 +91,11 @@ def resolve_edges(db, row, metadata, *, targets=None):
     db.execute("DELETE FROM wiki_edge_lookups WHERE source_doc=?", (row["id"],))
     parent = PurePosixPath(row["path"]).parent.as_posix()
     targets = targets if targets is not None else resolver.TargetDocuments(db)
-    parsed = targets.parsed(row)
+    parsed = format.parse(row["text"])
+    targets.anchors(row, parsed=parsed)
     refs = [(ParsedReference.restore(entry["reference"]), entry.get("recorded_revision"), entry.get("label"), resolved)
             for entry, resolved in source_bindings.index(db, row, metadata)]
-    refs.extend((reference, None, None, resolver.resolve(db, reference, parent, source_doc=row["id"], source_parse=parsed, documents=targets))
+    refs.extend((reference, None, None, resolver.resolve(db, reference, parent, source_doc=row["id"], documents=targets))
                 for reference in local_references(row["text"], parsed=parsed))
     for ordinal, (reference, recorded, label, resolved) in enumerate(refs):
         resource, relation, location = reference.raw_resource, reference.relation, reference.fragment

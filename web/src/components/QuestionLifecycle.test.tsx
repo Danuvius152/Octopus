@@ -142,7 +142,7 @@ it("keeps the original continuation identity when its receipt is unknown across 
   renderChat({ sendMessage });
   expect(await screen.findByRole("button", { name: "Continue as new message" })).toBeDisabled();
   const fetch = vi.fn(async () => Response.json({ session_id: sid, client_request_id: id,
-    accepted: true, execution: { state: "running" } }));
+    operation: "message", accepted: true, execution: { state: "running" } }));
   vi.stubGlobal("fetch", fetch);
   fireEvent.click(screen.getByRole("button", { name: "Check original receipt" }));
   await waitFor(() => expect(screen.queryByRole("button", { name: "Continue as new message" })).not.toBeInTheDocument());

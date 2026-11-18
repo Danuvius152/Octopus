@@ -45,6 +45,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable, Coroutine
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
@@ -53,7 +54,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 if TYPE_CHECKING:
     from .database import Database
+    from .db.sessions import SessionRelation
     from .session_manager import SessionManager
+    from .sessions.base import Session
 
 from .aio import complete_cleanup
 from .bg_tasks import bg_task_manager
@@ -400,21 +403,22 @@ class DelegationManager:
     ) -> DelegationError | None:
         """Interpret an acknowledged CAS miss against the current relation."""
         assert self.db is not None
-        rows = {row["id"]: row for row in await self.db.load_sessions(include_archived=True)}
+        async with self.db.session_relation_snapshot() as read:
+            rows = await read((rec.parent_session_id, rec.delegation_id))
         parent, child = rows.get(rec.parent_session_id), rows.get(rec.delegation_id)
         if parent is None or child is None:
             rec._relationship_deleted = True
         if child is None:
             rec._question_notices_closed = True
-        if parent is None or parent["user_id"] != user_id:
+        if parent is None or parent.user_id != user_id:
             rec._round_recording_closed = True
             return DelegationError("Parent session is gone", status_code=404)
         if child is None:
             rec._round_recording_closed = True
             return DelegationError("Child session is gone; start a fresh delegation", status_code=409)
-        if (child["parent_session_id"] != rec.parent_session_id
-                or child["user_id"] != user_id or child["origin"] != "delegation"
-                or child["agent_id"] != rec.target_agent_id):
+        if (child.parent_session_id != rec.parent_session_id
+                or child.user_id != user_id or child.origin != "delegation"
+                or child.agent_id != rec.target_agent_id):
             rec._round_recording_closed = True
             return DelegationError("Child delegation relationship changed; start a fresh delegation", status_code=409)
         target = await self.db.get_agent(rec.target_agent_id)
@@ -729,7 +733,7 @@ class DelegationManager:
         try:
             self._require_caller(scope, parent_session_id, parent_work_id)
         except DelegationError:
-            await self.session_mgr.auto_archive_scheduled_session(child.id)
+            await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child)
             raise
 
         rec = DelegationRunState(
@@ -741,17 +745,63 @@ class DelegationManager:
             parent_work_id=parent_work_id,
             owned_context=owned_context,
         )
-        async def abandon_setup() -> None:
+        async def abandon_setup(
+            error: str = "Delegation setup ended before child request admission",
+            *, return_terminal: bool = False,
+        ) -> None:
+            """Finish any original return before withdrawing the exact parent obligation."""
             assert self.session_mgr is not None
-            if rec.state != "running" or self.session_mgr.has_pending_or_active_work(child.id, rec.work_id):
+            if rec.state != "running" or self.session_mgr.work_has_resources(rec.work_id):
                 return
+            finished_at = datetime.now(UTC).isoformat()
+            try:
+                saved = await self._save_round(
+                    rec, running_only=True, state="cancelled",
+                    error=error, finished_at=finished_at,
+                )
+            except DelegationError:
+                # Only the acknowledged absence of the original relationship
+                # permits retiring this unadmitted round without another write.
+                if not rec._relationship_deleted:
+                    raise
+                async with rec._save_lock:
+                    if (self._records.get(child.id) is not rec or rec.state != "running"
+                            or self.session_mgr.work_has_resources(rec.work_id)):
+                        return
+                    rec.state = "cancelled"
+                    rec.error = "Delegation relationship deleted before child admission"
+                    rec.finished_at = finished_at
+                    rec._round_recording_closed = True
+                    rec._question_notices_closed = True
+                    self._records.pop(child.id, None)
+                    self._rounds.pop(rec.work_id, None)
+                    saved = False
+            else:
+                if not saved:
+                    return
             close_work(rec.work_id)
-            await self._save_round(
-                rec, state="cancelled", error="Delegation setup ended before child request admission",
-                finished_at=datetime.now(UTC).isoformat(),
-            )
+            observe_return = saved and return_terminal
+            if not observe_return:
+                # Proven refusal has no return to admit. Release the exact
+                # parent responsibility before archival can fail independently.
+                await self._withdraw_child_responsibility(rec)
+            await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child)
+            if not observe_return:
+                return
+            await self._inject_terminal(rec)
+            if rec._terminal_injecting:
+                # A concurrent cancellation may own this observation;
+                # setup still owns the subsequent responsibility exit.
+                observer = rec._terminal_command
+                assert observer is not None and observer is not asyncio.current_task()
+                await asyncio.wait({observer})
+                observer.result()
+            if rec._terminal_disposition == "unknown":
+                # Finishing this observation does not confirm return
+                # admission. The original receipt/consumption still owns
+                # the parent's exact responsibility.
+                return
             await self._withdraw_child_responsibility(rec)
-            await self.session_mgr.auto_archive_scheduled_session(child.id)
 
         # Commit before publishing, then register before child admission:
         # a fast child can synchronously broadcast its complete result there.
@@ -763,7 +813,7 @@ class DelegationManager:
         except DelegationError:
             # A confirmed refusal owns no admitted work. Retire the empty
             # conversation allocated before waiting for the parent's seal.
-            await self.session_mgr.auto_archive_scheduled_session(child.id)
+            await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child)
             raise
         try:
             if self.session_mgr.get_session(parent.id) is not parent:
@@ -782,12 +832,7 @@ class DelegationManager:
             await abandon_setup()
             raise DelegationError(str(exc), status_code=409) from exc
         if not receipt.accepted:
-            await self._save_round(
-                rec, state="cancelled", error="Child request suppressed: admission is closed",
-                finished_at=datetime.now(UTC).isoformat(),
-            )
-            await self.session_mgr.auto_archive_scheduled_session(child.id)
-            await self._inject_terminal(rec)
+            await abandon_setup("Child request suppressed: admission is closed", return_terminal=True)
         else:
             self._watch_completion(child.id, rec.work_id, receipt)
 
@@ -971,8 +1016,8 @@ class DelegationManager:
                 rec._round_recording_closed = True
                 rec._question_notices_closed = True
             await self._withdraw_child_responsibility(rec)
-            if reopening:
-                await self.session_mgr.auto_archive_scheduled_session(delegation_id)
+            if reopening and child is not None:
+                await self.session_mgr.auto_archive_scheduled_session(delegation_id, expected_session=child)
 
         try:
             if reopening:
@@ -1114,7 +1159,7 @@ class DelegationManager:
             )
         return matches[0]
 
-    async def _check_chain(self, parent, *, target_agent_id: str) -> None:
+    async def _check_chain(self, parent: Session, *, target_agent_id: str) -> None:
         """Walk the parent chain upward from the given parent session.
 
         Enforces two rules (agent-collaboration.md §5.9):
@@ -1136,81 +1181,52 @@ class DelegationManager:
         what stands between "Vera asks Octo" and an infinite
         delegation tower — it must never be skipped.
 
-        Archived ancestors are allowed: when ``session_mgr.get_session``
-        returns None for a non-null ancestor id, we fall back to the
-        DB (``include_archived=True``) so that a legitimately archived
-        delegation parent still contributes its agent_id / origin to
-        the walk. Without the DB fallback, an unarchived child whose parent
-        remains archived would over-reject every subsequent
-        ``ask_agent``.
+        An archived ancestor still contributes its agent and origin. Resolve
+        each live miss by ID, using one read snapshot for persisted relations.
         """
         assert self.session_mgr is not None
+        assert self.db is not None
         chain_agent_ids: set[str] = set()
         visited_session_ids: set[str] = set()
         existing_hops = 0
-        # Lazy DB cache: load all rows (live + archived) at most once
-        # per call, keyed by id. Most chains are short; on a fan-out
-        # this saves O(n) round-trips.
-        archived_rows_by_id: dict[str, dict[str, Any]] | None = None
-
-        async def _load_archived_index() -> dict[str, dict[str, Any]]:
-            assert self.db is not None
-            rows = await self.db.load_sessions(include_archived=True)
-            return {r["id"]: r for r in rows}
-
-        _SAFETY_CAP = 64  # see for/else clause below
+        safety_cap = 64
         sid: str | None = parent.id
-        for _ in range(_SAFETY_CAP):
-            if sid is None:
-                break
-            if sid in visited_session_ids:
-                # Real session-id cycle (e.g. A.parent=B, B.parent=A)
-                # — not a transitive agent cycle, but a corrupted
-                # pointer chain. Either way this is unsafe; reject.
-                raise DelegationError(
-                    "Caller chain has a session-id cycle "
-                    "(corrupted parent_session_id pointers)",
-                    status_code=409,
-                )
-            visited_session_ids.add(sid)
-            session = self.session_mgr.get_session(sid)
-            if session is not None:
-                agent_id = session.agent_id
-                origin = session.origin
-                next_sid: str | None = session.parent_session_id
-            else:
-                # Memory miss — consult the DB (live + archived) for
-                # the row before failing closed. An archived
-                # delegation parent is legitimate state after the
-                # auto-archive fix.
-                if archived_rows_by_id is None:
-                    archived_rows_by_id = await _load_archived_index()
-                row = archived_rows_by_id.get(sid)
-                if row is None:
+        async with AsyncExitStack() as snapshot:
+            read = None
+            for _ in range(safety_cap):
+                if sid is None:
+                    break
+                if sid in visited_session_ids:
+                    raise DelegationError(
+                        "Caller chain has a session-id cycle (corrupted parent_session_id pointers)",
+                        status_code=409,
+                    )
+                visited_session_ids.add(sid)
+                relation: Session | SessionRelation | None = self.session_mgr.get_session(sid)
+                if relation is None:
+                    if read is None:
+                        read = await snapshot.enter_async_context(self.db.session_relation_snapshot())
+                    relation = (await read((sid,))).get(sid)
+                if relation is None:
                     raise DelegationError(
                         "Caller chain references a session that "
                         "exists in neither memory nor the database; "
                         "refuse rather than guess",
                         status_code=409,
                     )
-                agent_id = row.get("agent_id")
-                origin = row.get("origin") or "user"
-                next_sid = row.get("parent_session_id")
-            if agent_id:
-                chain_agent_ids.add(agent_id)
-            if origin == "delegation":
-                existing_hops += 1
-            sid = next_sid
-        else:
-            # for/else: loop exhausted the safety cap without
-            # encountering a None terminator. That's a chain longer
-            # than _SAFETY_CAP, which is unreasonable in practice —
-            # treat as corruption and fail closed.
-            raise DelegationError(
-                f"Caller chain exceeds {_SAFETY_CAP} hops; refuse "
-                f"as a fail-closed guard against pointer corruption",
-                status_code=409,
-            )
+                if relation.user_id != parent.user_id:
+                    raise DelegationError("Caller chain crosses account ownership", status_code=409)
+                if relation.agent_id:
+                    chain_agent_ids.add(relation.agent_id)
+                if relation.origin == "delegation":
+                    existing_hops += 1
+                sid = relation.parent_session_id
+            else:
+                raise DelegationError(
+                    f"Caller chain exceeds {safety_cap} hops; refuse "
+                    "as a fail-closed guard against pointer corruption",
+                    status_code=409,
+                )
 
         if target_agent_id in chain_agent_ids:
             raise DelegationError(

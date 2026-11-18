@@ -1,10 +1,33 @@
 """Resolve local note links for navigation; a link is never proof of reading."""
 
 import re
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from . import format
 from .format import heading_slug as heading_slug
+
+
+@dataclass(frozen=True)
+class AnchorProjection:
+    """Operation-local navigation facts without source text or parser tokens."""
+
+    headings: tuple[dict, ...]
+    ambiguous_heading_slugs: frozenset[str]
+    html_anchors: frozenset[str]
+    block_spans: dict[str, tuple[int, int] | None]
+
+    @classmethod
+    def from_parsed(cls, parsed: format.DocumentFormat) -> "AnchorProjection":
+        return cls(
+            tuple({"title": heading["title"], "slug": heading["slug"]} for heading in parsed.headings),
+            frozenset(parsed.ambiguous_heading_slugs),
+            frozenset(parsed.html_anchors),
+            parsed.block_spans.copy(),
+        )
+
+    def status(self, anchor: str) -> str:
+        return _anchor_status(self, anchor)
 
 
 def note_name(path):
@@ -25,7 +48,7 @@ def block_span(text: str, identifier: str, *, parsed: format.DocumentFormat | No
     return (parsed if parsed is not None else format.parse(text)).block_spans.get(identifier)
 
 
-def _heading(parsed: format.DocumentFormat, value: str, *, fragment: bool) -> tuple[str, dict | None]:
+def _heading(parsed: format.DocumentFormat | AnchorProjection, value: str, *, fragment: bool) -> tuple[str, dict | None]:
     """Explicit URI fragments and bare display titles have different priority."""
     value = value.casefold()
     if fragment:
@@ -44,9 +67,12 @@ def _heading(parsed: format.DocumentFormat, value: str, *, fragment: bool) -> tu
 
 def anchor_status(text: str, anchor: str, *, parsed: format.DocumentFormat | None = None) -> str:
     """The anchor was already URI-decoded; keep its explicit fragment kind."""
-    parsed = parsed if parsed is not None else format.parse(text)
+    return _anchor_status(parsed if parsed is not None else format.parse(text), anchor)
+
+
+def _anchor_status(parsed: format.DocumentFormat | AnchorProjection, anchor: str) -> str:
     if anchor.startswith("^"):
-        return "resolved" if block_span(text, anchor, parsed=parsed) is not None else "missing_anchor"
+        return "resolved" if parsed.block_spans.get(anchor) is not None else "missing_anchor"
     if anchor.casefold() in parsed.ambiguous_heading_slugs:
         return "ambiguous"
     if anchor in parsed.html_anchors:

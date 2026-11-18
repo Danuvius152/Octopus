@@ -164,7 +164,7 @@ it("keeps correction separate from paused results and resumes only on the explic
   expect(screen.getByText("Background task")).toBeTruthy();
   fireEvent.change(input, { target: { value: "correct the direction" } });
   fireEvent.click(send);
-  expect(sendMessage).toHaveBeenCalledWith(session.id, "correct the direction", undefined, undefined);
+  expect(sendMessage).toHaveBeenCalledWith(session.id, "correct the direction", undefined, undefined, expect.any(String));
   expect(useSessionStore.getState().dispatchStates[session.id].paused).toBe(true);
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Resume processing" })));
   expect(useSessionStore.getState().dispatchStates[session.id].paused).toBe(false);
@@ -304,7 +304,7 @@ it("retains an unconfirmed draft after a missing receipt and confirms the origin
       reads += 1;
       if (reads === 1) return Response.json({ detail: "Submission not found" }, { status: 404 });
       return Response.json({ session_id: session.id, client_request_id: "uncertain-client", request_id: "original-request",
-        accepted: true, execution: { state: "running", state_version: 1, execution_owner_request_id: "original-request",
+        accepted: true, operation: "message", execution: { state: "running", state_version: 1, execution_owner_request_id: "original-request",
           delivery_state: "none", recoverable_input: false } });
     }
     if (url.includes("/wiki-jobs")) return Response.json([]);
@@ -346,7 +346,7 @@ it("keeps an unknown execution through a failed status read and restores only a 
       if (reads === 2) throw new TypeError("Network unavailable");
       const unknown = reads === 1;
       return Response.json({ session_id: session.id, client_request_id: "uncertain-client", request_id: "original-request",
-        accepted: true, message: unknown ? "Execution outcome remains unknown" : "Withdrawn before execution; input can be restored",
+        accepted: true, operation: "message", message: unknown ? "Execution outcome remains unknown" : "Withdrawn before execution; input can be restored",
         execution: { state: unknown ? "unknown" : "withdrawn", state_version: reads,
           execution_owner_request_id: "original-request", delivery_state: "none", recoverable_input: !unknown } });
     }
@@ -377,7 +377,7 @@ it("keeps an unknown execution through a failed status read and restores only a 
     expect(sendMessage).toHaveBeenCalledTimes(1);
     fireEvent.change(input, { target: { value: "Reviewed recovery input" } });
     await act(async () => fireEvent.click(send));
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Reviewed recovery input", undefined, undefined, undefined, "uncertain-client");
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Reviewed recovery input", undefined, undefined, expect.any(String), "uncertain-client");
   } finally {
     vi.unstubAllGlobals();
   }
@@ -388,7 +388,7 @@ it("can read admission status while the WebSocket is disconnected", async () => 
   const statusUrl = `${window.location.origin}/api/sessions/${session.id}/submissions/uncertain-client`;
   const request = vi.fn(async (url: string) => {
     if (url === statusUrl) return Response.json({ session_id: session.id, client_request_id: "uncertain-client", request_id: "original-request",
-      accepted: true, execution: { state: "done", state_version: 2, execution_owner_request_id: "original-request",
+      accepted: true, operation: "message", execution: { state: "done", state_version: 2, execution_owner_request_id: "original-request",
         delivery_state: "confirmed", recoverable_input: false } });
     if (url.includes("/wiki-jobs")) return Response.json([]);
     return Response.json({ items: [], next_cursor: null });
@@ -420,7 +420,7 @@ it("keeps a withdrawn receipt read-only when the server does not allow input rec
   const statusUrl = `${window.location.origin}/api/sessions/${session.id}/submissions/uncertain-client`;
   const request = vi.fn(async (url: string) => {
     if (url === statusUrl) return Response.json({ session_id: session.id, client_request_id: "uncertain-client", request_id: "original-request",
-      accepted: true, message: "This historical receipt is read-only",
+      accepted: true, operation: "message", message: "This historical receipt is read-only",
       execution: { state: "withdrawn", state_version: 2, execution_owner_request_id: "original-request",
         delivery_state: "none", recoverable_input: false } });
     if (url.includes("/wiki-jobs")) return Response.json([]);
@@ -439,8 +439,8 @@ it("keeps a withdrawn receipt read-only when the server does not allow input rec
     expect(screen.getByRole("button", { name: "Restore draft" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
     expect(input).toHaveValue("");
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
-    expect(request.mock.calls.filter(([url]) => url === statusUrl)).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Retry admission confirmation" })).not.toBeInTheDocument();
+    expect(request.mock.calls.filter(([url]) => url === statusUrl)).toHaveLength(1);
     expect(sendMessage).toHaveBeenCalledTimes(1);
   } finally {
     vi.unstubAllGlobals();
@@ -460,7 +460,7 @@ describe("shared Wiki without a composer switch", () => {
     expect(screen.getByText(phase === "running" ? "Compacting native context…" : "Waiting to compact after current work")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Send to running turn" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Queue message" }));
-    expect(sendMessage).toHaveBeenCalledWith(session.id, "Continue later", undefined, undefined);
+    expect(sendMessage).toHaveBeenCalledWith(session.id, "Continue later", undefined, undefined, expect.any(String));
   });
 
   it.each(["unchanged", "edited", "switched", "returned", "account"])("submits exact compact and protects the %s draft", async (change) => {
@@ -488,7 +488,8 @@ describe("shared Wiki without a composer switch", () => {
         act(() => useSessionStore.setState({ sessions: [session], activeSessionId: session.id }));
         fireEvent.change(screen.getByRole("textbox"), { target: { value: "New account draft" } });
       }
-      await act(async () => finish(Response.json({ accepted: true, operation: "compact", request_id: "native-compact" })));
+      await act(async () => finish(Response.json({ accepted: true, operation: "compact", request_id: "native-compact",
+        session_id: session.id, client_request_id: JSON.parse(String(init.body)).client_request_id })));
       expect(screen.getByRole("textbox")).toHaveValue(change === "unchanged" ? "" : change === "edited" ? "My next question" :
         change === "account" ? "New account draft" : "  /compact  ");
     } finally { vi.unstubAllGlobals(); }
@@ -499,7 +500,7 @@ describe("shared Wiki without a composer switch", () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       requests.push({ url, init });
       if (init?.method === "POST") throw new Error("Receipt lost");
-      return Response.json({ accepted: true, operation: "compact", request_id: "original" });
+      return Response.json({ accepted: true, session_id: session.id, client_request_id: url.split("/").at(-1), operation: "compact", request_id: "original" });
     }));
     try {
       const { input, send, sendMessage } = setup();
@@ -509,6 +510,37 @@ describe("shared Wiki without a composer switch", () => {
       expect(sendMessage).not.toHaveBeenCalled();
       expect(requests.map(({ init }) => init?.method)).toEqual(["POST", "GET"]);
       expect(requests[1].url).toBe(requests[0].url + "/" + JSON.parse(requests[0].init?.body as string).client_request_id);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it.each(["mismatched POST", "lost POST"])("keeps a compact draft after a %s and a mismatched confirmation", async (first) => {
+    const requests: { url: string; init?: RequestInit }[] = [];
+    let confirmed = false;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push({ url, init });
+      const posting = init?.method === "POST";
+      if (posting && first === "lost POST") throw new TypeError("Receipt lost");
+      return Response.json({
+        accepted: true, operation: "compact", request_id: "persisted-request",
+        session_id: posting || confirmed ? session.id : "some-other-session",
+        client_request_id: posting ? "some-other-client" : url.split("/").at(-1),
+        execution: { state: "pending", state_version: 1, delivery_state: "none",
+          execution_owner_request_id: "persisted-request", recoverable_input: false },
+      });
+    }));
+    try {
+      const { input, send } = setup();
+      fireEvent.change(input, { target: { value: "/compact" } });
+      fireEvent.click(send);
+      const confirm = await screen.findByRole("button", { name: "Retry admission confirmation" });
+      expect(input).toHaveValue("/compact");
+      const original = JSON.parse(requests[0].init?.body as string).client_request_id;
+      expect(requests[1].url).toBe(requests[0].url + "/" + original);
+      confirmed = true;
+      fireEvent.click(confirm);
+      await waitFor(() => expect(input).toHaveValue(""));
+      expect(requests.map(({ init }) => init?.method)).toEqual(["POST", "GET", "GET"]);
+      expect(requests[2].url).toBe(requests[1].url);
     } finally { vi.unstubAllGlobals(); }
   });
 
@@ -522,7 +554,8 @@ describe("shared Wiki without a composer switch", () => {
         if (phase === "body") return new Response(new ReadableStream());
         throw new Error("Receipt lost");
       }
-      return phase === "get" ? await new Promise<Response>(() => {}) : Response.json({ accepted: true, operation: "compact" });
+      return phase === "get" ? await new Promise<Response>(() => {}) : Response.json({ accepted: true, session_id: session.id,
+        client_request_id: url.split("/").at(-1), operation: "compact" });
     }));
     try {
       const { input, send, sendMessage } = setup();
@@ -551,9 +584,10 @@ describe("shared Wiki without a composer switch", () => {
   it.each(["session", "account"])("ends a hanging compact observer when the %s changes and allows the new view's request", async (change) => {
     vi.useFakeTimers();
     const requests: RequestInit[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       requests.push(init!);
-      return requests.length === 1 ? await new Promise<Response>(() => {}) : Response.json({ accepted: true, operation: "compact" });
+      return requests.length === 1 ? await new Promise<Response>(() => {}) : Response.json({ accepted: true, operation: "compact",
+        session_id: url.split("/").at(-2), client_request_id: JSON.parse(String(init!.body)).client_request_id });
     }));
     try {
       const { input, send } = setup();
@@ -580,7 +614,8 @@ describe("shared Wiki without a composer switch", () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       requests.push({ url, init });
       if (init?.method === "POST") throw new Error("Receipt lost");
-      return confirmed ? Response.json({ accepted: true, operation: "compact", request_id: "original" }) : new Response("Missing", { status: 404 });
+      return confirmed ? Response.json({ accepted: true, session_id: session.id, client_request_id: url.split("/").at(-1),
+        operation: "compact", request_id: "original" }) : new Response("Missing", { status: 404 });
     }));
     try {
       const { input, send, sendMessage } = setup();
@@ -607,7 +642,7 @@ describe("shared Wiki without a composer switch", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: "What does /compact do?" } });
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledWith(session.id, "What does /compact do?", undefined, undefined);
+    expect(sendMessage).toHaveBeenCalledWith(session.id, "What does /compact do?", undefined, undefined, expect.any(String));
   });
 
   it.each(["请结合共享知识解释这个问题", ...commandCases.map(({ message }) => message)])(
@@ -616,7 +651,7 @@ describe("shared Wiki without a composer switch", () => {
       expect(screen.queryByRole("button", { name: "Use local Wiki for this message" })).not.toBeInTheDocument();
       fireEvent.change(input, { target: { value: message } });
       fireEvent.click(send);
-      expect(sendMessage).toHaveBeenLastCalledWith(session.id, message.trim(), undefined, undefined);
+      expect(sendMessage).toHaveBeenLastCalledWith(session.id, message.trim(), undefined, undefined, expect.any(String));
       expect(input).toHaveValue("");
     },
   );
@@ -631,7 +666,7 @@ describe("shared Wiki without a composer switch", () => {
       }));
       expect(input).toHaveValue(message);
       fireEvent.click(send);
-      expect(sendMessage).toHaveBeenLastCalledWith("other-session", message, undefined, undefined);
+      expect(sendMessage).toHaveBeenLastCalledWith("other-session", message, undefined, undefined, expect.any(String));
     },
   );
 
@@ -688,7 +723,8 @@ describe("session-owned attachment drafts", () => {
     vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       if (String(url).endsWith("/submissions")) {
         requests.push(init!);
-        return Response.json({ accepted: true, operation: "compact" });
+        return Response.json({ accepted: true, operation: "compact", session_id: session.id,
+          client_request_id: JSON.parse(String(init!.body)).client_request_id });
       }
       return upload(url, init);
     }));
@@ -702,7 +738,7 @@ describe("session-owned attachment drafts", () => {
     if (phase === "uploading") await complete(0, "keep-file");
     fireEvent.change(input, { target: { value: "Read preserved file" } });
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledWith(session.id, "Read preserved file", ["keep-file"], undefined);
+    expect(sendMessage).toHaveBeenCalledWith(session.id, "Read preserved file", ["keep-file"], undefined, expect.any(String));
   });
 
   it("reuploads a ready A file for B and never sends A's id", async () => {
@@ -718,7 +754,7 @@ describe("session-owned attachment drafts", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     await complete(1, "B-file");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(other.id, "Use the whole input", ["B-file"], undefined);
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(other.id, "Use the whole input", ["B-file"], undefined, expect.any(String));
   });
 
   it("ignores late uploads across A to B to A and removal", async () => {
@@ -733,7 +769,7 @@ describe("session-owned attachment drafts", () => {
     expect(send).toBeDisabled();
     await complete(2, "current-A");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "", ["current-A"], undefined);
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "", ["current-A"], undefined, expect.any(String));
     pick();
     await waitFor(() => expect(uploads).toHaveLength(4));
     fireEvent.click(screen.getByRole("button", { name: "Remove evidence.txt" }));
@@ -745,7 +781,7 @@ describe("session-owned attachment drafts", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
     await complete(4, "replacement-file");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "", ["replacement-file"], undefined);
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "", ["replacement-file"], undefined, expect.any(String));
   });
 
   it("blocks partial sending after upload failure and retries the same file", async () => {
@@ -761,7 +797,7 @@ describe("session-owned attachment drafts", () => {
     expect(uploads[1].file.name).toBe(uploads[0].file.name);
     await complete(1, "retried");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Required file", ["retried"], undefined);
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Required file", ["retried"], undefined, expect.any(String));
   });
 
   it("restores a refused draft by reuploading even in its original session", async () => {
@@ -804,7 +840,7 @@ describe("session-owned attachment drafts", () => {
     expect(send).toBeDisabled();
     await complete(1, "replacement-file");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Queued complete input", ["replacement-file"], undefined);
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Queued complete input", ["replacement-file"], undefined, expect.any(String));
   });
 
   it.each(["inline", "expanded"])("requires file reselection when restoring a durable %s failure after reload", async (representation) => {
@@ -832,7 +868,7 @@ describe("session-owned attachment drafts", () => {
     pick();
     await complete(0, "reselected-file");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Queued complete input", ["reselected-file"], undefined);
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Queued complete input", ["reselected-file"], undefined, expect.any(String));
   });
 });
 
@@ -852,6 +888,6 @@ it("restores a server-saved input without sending, then explicitly sends a new r
   expect(sendMessage).not.toHaveBeenCalled();
   fireEvent.change(input, { target: { value: "Reviewed and edited input" } });
   fireEvent.click(send);
-  expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Reviewed and edited input", undefined, undefined, undefined, "old-client");
+  expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Reviewed and edited input", undefined, undefined, expect.any(String), "old-client");
   vi.unstubAllGlobals();
 });

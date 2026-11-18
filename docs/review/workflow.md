@@ -6,52 +6,52 @@
 
 **最值得迁移的是“研究能续接”的方法：围绕问题取证，保留结论成立的条件，把实际采用的约定与历史资料分开，再验证下一次能否找到并正确使用它们。** 优先把这些方法用于论文比较、研究想法、实验和项目写作；数学证明管理、特定计算后端与完整的资料存储引擎按各自用途取舍。
 
-本文提供候选文本与流程，不修改已保存的 agent 配置，不安装参考包。已有工程范围由[研究工作流计划](../plans/ai-research-workflow.md)承接，Wiki 扩展由[Wiki 计划](../plans/wiki-future-plan.md)承接。这里的参考链接指向本机版本目录，换机器需重新取得该包。
+本文提供候选文本与流程，不修改已保存的 agent 配置，不安装参考包。已有工程范围由[研究工作流计划](../plans/ai-research-workflow.md)承接，Wiki 扩展由[Wiki 计划](../plans/wiki-future-plan.md)承接。文中的参考文件路径相对于 Pika Math Learning Toolkit 2.2.0 的解包目录。
 
 ## 1. 八个 skill，分别取什么
 
-2.2.0 新增 Research Asset Map，并刷新另外七个 skill 的来源快照；发布说明明确说各 skill 的版本号保持不变。因此，单看版本号不足以判断正文是否更新。本次按实际包内文件分析，不把安装认证解释成研究质量或性能认证。[发布说明][release]、[来源清单][versions]
+2.2.0 新增 Research Asset Map，并刷新另外七个 skill 的来源快照；发布说明明确说各 skill 的版本号保持不变。因此，单看版本号不足以判断正文是否更新。本次按实际包内文件分析，不把安装认证解释成研究质量或性能认证。发布说明（`RELEASE_NOTES.md`）、来源清单（`SOURCE_VERSIONS.json`）
 
 | Skill 与包内版本 | 最值得取的设计 | 对你的用途与取舍 |
 | --- | --- | --- |
-| [Research Asset Map][ram] · v1.0.4 | 来源、摘录、主张、决定与产出分开；记录准确版本、实际采纳范围和纠正影响；归档后从自然问题检索验收 | **优先借鉴。** 适合非数学研究、数字人方案、文章和演示材料；在现有 Wiki 与项目入口上实现这些语义，先不复制它的整套库。 |
-| [Math Research Solve][mrs] · v3.4.0 | 需要时复用旧资产；重读依据后判断适用性；保留有信息量的失败和重开条件；研究与正式归档分开 | **优先借鉴。** 用于持续研究与跨会话续接。保留当前研究问题及其变更理由，不照搬数学目标不可变、证明状态或交换包审查体系。 |
-| [Manage Personal Knowledge][mpk] · v1.11.6 | 一个入口负责路由，专业流程各有 owner；检索覆盖可见；写回有明确交接包 | **优先借鉴。** 主会话协调 Wiki、论文、实验和写作；索引与正文各有责任，避免每个 skill 复制全部流程。题库优先的默认检索顺序不适用于通用 AI 研究。 |
-| [Obsidian Vault Notes][ovn] · v1.14.0 | 当前文件优先；按指定范围自动优化写作与去 AI 味；保护含义、校准作者表达；内容审查、两遍改写和机械检查分开 | **优先迁移写作方法。** 局部改句走短路径，整篇重写覆盖全文；借鉴文风校准方法，不照搬原作者画像、Vault 权限包或发布控制器。 |
-| [PDF Problem Search][pdf] · v1.12.4 | 先缩小范围，保持查询硬条件，命中后核读原页，区分正文角色、提取失败与未命中 | **迁移到论文取证。** 核对本文实验、相关工作、附录和图表；数学公式指纹与定理检索算法无需迁移。 |
-| [Math & Science Computation][msc] · v1.12.3 | 按交付选择计算与核验成本；估算可行性；选中路径再实测能力；作业、尝试、产物和核验分别绑定 | **迁移到 AI 实验。** 区分快速探索、可复现交付和额外独立核验；采用任务适合的执行器，不继承其 Wolfram 优先级或 Windows 专属政策。 |
-| [Compute Fleet Manager][fleet] · v1.0.10 | 有效吞吐优先；权威队列唯一；数据就地处理；原身份恢复；程序负责持续监测 | **有真实多机需求再采用。** 先把单机实验闭环做通，已有调度器继续拥有任务事实。 |
-| [Math Coach][coach] · v1.13.1 | 沿用户提出的路线推进，代做已经确定的机械步骤，在关键判断处交还选择 | **只取协作启发。** 严格教学模式不迁移，不建立专门教学流程；正常研究、实现与交付继续完成用户要求。 |
+| Research Asset Map（`payload/research-asset-map/SKILL.md`） · v1.0.4 | 来源、摘录、主张、决定与产出分开；记录准确版本、实际采纳范围和纠正影响；归档后从自然问题检索验收 | **优先借鉴。** 适合非数学研究、数字人方案、文章和演示材料；在现有 Wiki 与项目入口上实现这些语义，先不复制它的整套库。 |
+| Math Research Solve（`payload/math-research-solve/SKILL.md`） · v3.4.0 | 需要时复用旧资产；重读依据后判断适用性；保留有信息量的失败和重开条件；研究与正式归档分开 | **优先借鉴。** 用于持续研究与跨会话续接。保留当前研究问题及其变更理由，不照搬数学目标不可变、证明状态或交换包审查体系。 |
+| Manage Personal Knowledge（`payload/manage-personal-knowledge/SKILL.md`） · v1.11.6 | 一个入口负责路由，专业流程各有 owner；检索覆盖可见；写回有明确交接包 | **优先借鉴。** 主会话协调 Wiki、论文、实验和写作；索引与正文各有责任，避免每个 skill 复制全部流程。题库优先的默认检索顺序不适用于通用 AI 研究。 |
+| Obsidian Vault Notes（`payload/obsidian-vault-notes/SKILL.md`） · v1.14.0 | 当前文件优先；按指定范围自动优化写作与去 AI 味；保护含义、校准作者表达；内容审查、两遍改写和机械检查分开 | **优先迁移写作方法。** 局部改句走短路径，整篇重写覆盖全文；借鉴文风校准方法，不照搬原作者画像、Vault 权限包或发布控制器。 |
+| PDF Problem Search（`payload/pdf-problem-search/SKILL.md`） · v1.12.4 | 先缩小范围，保持查询硬条件，命中后核读原页，区分正文角色、提取失败与未命中 | **迁移到论文取证。** 核对本文实验、相关工作、附录和图表；数学公式指纹与定理检索算法无需迁移。 |
+| Math & Science Computation（`payload/math-science-computation/SKILL.md`） · v1.12.3 | 按交付选择计算与核验成本；估算可行性；选中路径再实测能力；作业、尝试、产物和核验分别绑定 | **迁移到 AI 实验。** 区分快速探索、可复现交付和额外独立核验；采用任务适合的执行器，不继承其 Wolfram 优先级或 Windows 专属政策。 |
+| Compute Fleet Manager（`payload/compute-fleet-manager/SKILL.md`） · v1.0.10 | 有效吞吐优先；权威队列唯一；数据就地处理；原身份恢复；程序负责持续监测 | **有真实多机需求再采用。** 先把单机实验闭环做通，已有调度器继续拥有任务事实。 |
+| Math Coach（`payload/math-coach/SKILL.md`） · v1.13.1 | 沿用户提出的路线推进，代做已经确定的机械步骤，在关键判断处交还选择 | **只取协作启发。** 严格教学模式不迁移，不建立专门教学流程；正常研究、实现与交付继续完成用户要求。 |
 
 ## 2. 值得学习的底层设计
 
 ### 2.1 指令只规定可观察的工作，不规定思考套路
 
-MRS 明确把自己定位为研究资料基础设施：保存尝试、反馈、证据与后续可用条件，同时保留研究者选择方法的自由。它不要求固定思考步骤、研究轮数、角色数量或定时写日志。对 Octopus，适合要求的是“比较前核条件”“结论能回到依据”“失败说明什么仍未知”，而不是让每个任务依次扮演若干研究角色。[研究核心][mrs-core]
+MRS 明确把自己定位为研究资料基础设施：保存尝试、反馈、证据与后续可用条件，同时保留研究者选择方法的自由。它不要求固定思考步骤、研究轮数、角色数量或定时写日志。对 Octopus，适合要求的是“比较前核条件”“结论能回到依据”“失败说明什么仍未知”，而不是让每个任务依次扮演若干研究角色。研究核心（`payload/math-research-solve/references/core-workflow.md`）
 
 这也解释了为什么不宜直接复制整篇 SKILL.md。原文中大量规则服务于它自己的存储、发布和恢复工具；脱离工具后，提示词只能表达意图，无法兑现事务、资源限制或独立审查。
 
 ### 2.2 把“最新”“已采用”“有证据”拆开
 
-RAM 最有价值的区分是：HEAD 选择当前记录版本，项目采纳约定决定它能否约束当前工作。新草稿不自动取代已采纳方案，某个主题的新决定也不撤销其他主题的旧约定；来源材料、候选方案、历史证据和待复查项各有用途。[现行约定][ram-use]
+RAM 最有价值的区分是：HEAD 选择当前记录版本，项目采纳约定决定它能否约束当前工作。新草稿不自动取代已采纳方案，某个主题的新决定也不撤销其他主题的旧约定；来源材料、候选方案、历史证据和待复查项各有用途。现行约定（`payload/research-asset-map/references/project-use.md`）
 
 例如，你曾决定数字人系统优先满足指定设备上的交互延迟，后来保存了一篇高质量离线生成方案。这篇论文可以提供方法启发，却不能仅因更新就把项目目标改成离线画质。若你只修改形象风格，运行设备与延迟约束仍然有效。缺少明确采纳依据时，保留候选状态；只澄清真正影响当前工作的冲突，独立的阅读和草拟继续。
 
 ### 2.3 检索负责发现，准确读回负责使用
 
-共同模式是：先看有限元数据，选出与当前问题相关的材料，再读准确版本和必要原文。索引、地图、摘要、排名与能力快照都是导航；采用某项结果前仍要核对条件、纠正和实际可取得性。空结果只说明本次覆盖范围未命中，响应截断也不等于没有材料。[RAM 数据合同][ram-data]、[MRS 检索边界][mrs-core]
+共同模式是：先看有限元数据，选出与当前问题相关的材料，再读准确版本和必要原文。索引、地图、摘要、排名与能力快照都是导航；采用某项结果前仍要核对条件、纠正和实际可取得性。空结果只说明本次覆盖范围未命中，响应截断也不等于没有材料。RAM 数据合同（`payload/research-asset-map/references/data-contract.md`）、MRS 检索边界（`payload/math-research-solve/references/core-workflow.md`）
 
-已读且未变的材料可以复用。遇到路线选择、实质障碍、条件变化或上下文恢复时，再检查旧依据是否足够；无需每一步重新搜索。过去失败也应带条件使用：规模、实现或资源发生变化后，可以在原授权范围内重新估算，不能把一次失败写成永久禁令。[研究续接][mrs-context]、[经验复用][mrs-experience]
+已读且未变的材料可以复用。遇到路线选择、实质障碍、条件变化或上下文恢复时，再检查旧依据是否足够；无需每一步重新搜索。过去失败也应带条件使用：规模、实现或资源发生变化后，可以在原授权范围内重新估算，不能把一次失败写成永久禁令。研究续接（`payload/math-research-solve/references/research-context.md`）、经验复用（`payload/math-research-solve/references/experience-reuse.md`）
 
 ### 2.4 完成标准跟着用户要的结果走
 
 查询出处，完成于准确定位；比较方法，完成于关键问点得到回答或明确留下缺口；要求实际运行，完成于取得结果并做适当核验；要求保存，则还需要完成对应交付。生成报告、进程退出、文件落盘和能够用于决策，分别需要证据。
 
-计算 skill 的分档值得借鉴：普通回答采用足够的低成本检查；可复现交付保留代码、设置与结果；确有需要时再增加独立核验。名称不同不自动提高证据等级，也不应让一次简单计算承担完整实验项目的成本。[计算流程][msc]
+计算 skill 的分档值得借鉴：普通回答采用足够的低成本检查；可复现交付保留代码、设置与结果；确有需要时再增加独立核验。名称不同不自动提高证据等级，也不应让一次简单计算承担完整实验项目的成本。计算流程（`payload/math-science-computation/SKILL.md`）
 
 ### 2.5 保存之后，要从真实使用入口验收
 
-RAM 不把“记录写进去了”当作可用性验收。它要求从项目入口出发，以自然问题实际检索，再识别找到的是当前约定、旧版、候选还是待复查材料；预先知道的 ID 只能事后核对，不能替代发现过程。[检索验收][ram-acceptance]
+RAM 不把“记录写进去了”当作可用性验收。它要求从项目入口出发，以自然问题实际检索，再识别找到的是当前约定、旧版、候选还是待复查材料；预先知道的 ID 只能事后核对，不能替代发现过程。检索验收（`payload/research-asset-map/references/retrieval-acceptance.md`）
 
 这特别适合你的长期研究：一周后问“上次为什么放弃这条路线”“当前口型评测采用什么条件”，应能找回决定、依据和适用范围。仅知道某个文件存在，不能证明换会话后还能正确继续。
 
@@ -66,7 +66,7 @@ RAM 不把“记录写进去了”当作可用性验收。它要求从项目入�
 | 按需工作流与参考文档 | 论文比较、实验、项目续接、写作的步骤与完成条件 | 实际产物及失败场景是否满足合同 |
 | 工具与项目文件 | 版本绑定、覆盖信息、持久结果、预算、恢复、引用和实际检查 | 真实消费者读取与相应故障验证 |
 
-参考包 `agents/openai.yaml` 的 `default_prompt` 是调用入口的建议文本，不能当作整份运行时 system prompt。其好的做法是用动词说明用途，例如“从证据地图继续研究”“保留有用结果和失败”；具体操作与边界由 SKILL.md 和工具承担。计算 skill 的入口已经包含大量专属政策，不适合整体复制。[入口 prompt 示例][mrs-prompt]、[计算入口][msc-prompt]
+参考包 `agents/openai.yaml` 的 `default_prompt` 是调用入口的建议文本，不能当作整份运行时 system prompt。其好的做法是用动词说明用途，例如“从证据地图继续研究”“保留有用结果和失败”；具体操作与边界由 SKILL.md 和工具承担。计算 skill 的入口已经包含大量专属政策，不适合整体复制。入口 prompt 示例（`payload/math-research-solve/agents/openai.yaml`）、计算入口（`payload/math-science-computation/agents/openai.yaml`）
 
 ### 3.2 可迁移的通用候选文本
 
@@ -156,7 +156,7 @@ If a safe edit requires an unresolved factual or source decision, retain that
 claim and report the exact issue while completing independent style improvements.
 ```
 
-这段迁移自[去 AI 味改写][ovn-ai]与[文章修订][ovn-style]的行为要求。原包的[作者画像][ovn-voice]来自其用户的笔记分析，不能直接视作你的文风。可迁移的是先区分可靠作者原文、引用、脚本体裁和助手残留，再校准表达的方法。若以后要建立你的画像，另用你提供或授权的样本，不直接继承原包的词频、标点偏好，也不为了校准自动扫描其他笔记。
+这段迁移自去 AI 味改写（`payload/obsidian-vault-notes/references/ai-style-rewrite.md`）与文章修订（`payload/obsidian-vault-notes/references/article-revision-style.md`）的行为要求。原包的作者画像（`payload/obsidian-vault-notes/references/author-voice-profile.md`）来自其用户的笔记分析，不能直接视作你的文风。可迁移的是先区分可靠作者原文、引用、脚本体裁和助手残留，再校准表达的方法。若以后要建立你的画像，另用你提供或授权的样本，不直接继承原包的词频、标点偏好，也不为了校准自动扫描其他笔记。
 
 ## 4. 四条可直接使用的工作流
 
@@ -179,7 +179,7 @@ claim and report the exact issue while completing independent style improvements
 
 原始 PDF、转换稿和研究解释各自保留来源身份。转换完成、原页核对和语义阅读分别说明；原件更新形成新转换结果，不覆盖人工整理的正文。交付含图片或表格时，从实际入口重开正文、附件和定位；离线或跨机器可用性仅在相应要求下验收。
 
-参考包提供文本提取、定位、OCR 路由与写回约定，版面敏感阅读还依赖包外 `$pdf`。本次依据不能把它认定为已经验证的完整 PDF→Markdown 转换方案；转换器仍需在你的代表性论文上选型。[PDF 流程][pdf]、[PDF 库与 OCR][mpk-pdf]
+参考包提供文本提取、定位、OCR 路由与写回约定，版面敏感阅读还依赖包外 `$pdf`。本次依据不能把它认定为已经验证的完整 PDF→Markdown 转换方案；转换器仍需在你的代表性论文上选型。PDF 流程（`payload/pdf-problem-search/SKILL.md`）、PDF 库与 OCR（`payload/manage-personal-knowledge/references/pdf-library.md`）
 
 ### 4.2 从研究想法到实际实验
 
@@ -195,9 +195,9 @@ claim and report the exact issue while completing independent style improvements
 
 改变数据、模型、参数或评测标准，需要新的设定身份并关联原实验；不能覆盖旧结果。checkpoint 只有在恢复了匹配的代码、输入和实际状态后才支持续跑，进度百分比不足以证明可恢复，也不能把续跑算作算法加速。
 
-长任务继续交给现有 BG 或所选项目执行器。等待超时、响应超限和回执丢失时查原任务及已保存结果；执行成功、核验通过、结果送达和进程停止分别确认。必要原始证据完整保存，模型上下文只读当前判断需要的摘要与片段。[执行合同][msc-contracts]、[Octopus 完成合同](../implemented/input-reliability.md#原请求完成与失败交接)
+长任务继续交给现有 BG 或所选项目执行器。等待超时、响应超限和回执丢失时查原任务及已保存结果；执行成功、核验通过、结果送达和进程停止分别确认。必要原始证据完整保存，模型上下文只读当前判断需要的摘要与片段。执行合同（`payload/math-science-computation/references/execution-contracts.md`）、[Octopus 完成合同](../implemented/input-reliability.md#原请求完成与失败交接)
 
-多机仅在确有收益时扩展：先跑通每类节点的微型生成—核验—回传闭环，再验证分片覆盖、原子准入、旧尝试隔离和资源限制。程序监测真实吞吐与资源，AI 处理研究判断；数据就地分析，临时节点到期前保存必要材料。没有有价值的获准工作时允许空闲，CPU 满载不构成研究产出。[多机流程][fleet]
+多机仅在确有收益时扩展：先跑通每类节点的微型生成—核验—回传闭环，再验证分片覆盖、原子准入、旧尝试隔离和资源限制。程序监测真实吞吐与资源，AI 处理研究判断；数据就地分析，临时节点到期前保存必要材料。没有有价值的获准工作时允许空闲，CPU 满载不构成研究产出。多机流程（`payload/compute-fleet-manager/SKILL.md`）
 
 ### 4.3 项目续接与新证据修正
 
@@ -221,7 +221,7 @@ claim and report the exact issue while completing independent style improvements
 | 尝试、反馈、原因与重开条件 | 复用失败经验，同时保留条件变化后的探索空间。 |
 | 产出、证据位置与下一步 | 从入口能打开材料并继续工作。 |
 
-这是 RAM 的通用资料地图与 MRS 的条件化经验复用最适合结合的位置。先用已有 Wiki 页面和项目文件建立可用入口；只有实际维护与查询证明手工关系不足时，才考虑自动索引与影响追踪。[现行约定][ram-use]、[经验复用][mrs-experience]
+这是 RAM 的通用资料地图与 MRS 的条件化经验复用最适合结合的位置。先用已有 Wiki 页面和项目文件建立可用入口；只有实际维护与查询证明手工关系不足时，才考虑自动索引与影响追踪。现行约定（`payload/research-asset-map/references/project-use.md`）、经验复用（`payload/math-research-solve/references/experience-reuse.md`）
 
 ### 4.4 基于材料写作与数字人多媒体产出
 
@@ -232,10 +232,10 @@ claim and report the exact issue while completing independent style improvements
 写作与修订按以下顺序进行。新文章先确定要回答的问题和材料，既有文章先读当前正文、段落前后文及章节作用，再进入同一套内容与语言检查。
 
 1. **确定范围和保留项。** 明确全文、章节或局部请求，核对读者、体裁、信息覆盖和必须保留的结构。润色请求直接进入改写，不停在建议清单；只检查的请求保持只读。局部修改只处理所选内容与必要衔接。
-2. **先检查内容。** 逐段检查指代是什么、作了什么判断、增加了什么、依据在哪里，以及删除后读者会失去什么。定义、过渡和例子按真实功能审视，不要求每段都添加数据。缺依据的实质判断单独标出，不靠润色补成事实。[段落审查][ovn-content]
+2. **先检查内容。** 逐段检查指代是什么、作了什么判断、增加了什么、依据在哪里，以及删除后读者会失去什么。定义、过渡和例子按真实功能审视，不要求每段都添加数据。缺依据的实质判断单独标出，不靠润色补成事实。段落审查（`payload/obsidian-vault-notes/references/paragraph-content-review.md`）
 3. **按上下文改写。** 用可靠作者原文校准表达，说明谁做了什么、对象和条件是什么。处理下表中的具体问题，同时保留有效术语、细节与论证。整篇重写可调整结构，但不靠大幅删掉论据伪造干净效果。
 4. **连续冷读第二遍。** 暂时放下初始问题清单，检查新稿是否出现整齐句长、连续金句、同义词轮换、套路结尾、衔接断裂或文风被磨平。空洞结尾换个近义说法仍要处理。
-5. **核对最终稿。** 对照改前含义、信息与结构，检查图表、引用及相关格式。简要报告修改范围、主要改写和具体未决项。lint 若使用，前后结果仅用于辅助检查，不代替语义审查和冷读。[去 AI 味改写][ovn-ai]、[文章修订][ovn-style]
+5. **核对最终稿。** 对照改前含义、信息与结构，检查图表、引用及相关格式。简要报告修改范围、主要改写和具体未决项。lint 若使用，前后结果仅用于辅助检查，不代替语义审查和冷读。去 AI 味改写（`payload/obsidian-vault-notes/references/ai-style-rewrite.md`）、文章修订（`payload/obsidian-vault-notes/references/article-revision-style.md`）
 
 | 需要检查的表达 | 处理方式与保留边界 |
 | --- | --- |
@@ -247,11 +247,11 @@ claim and report the exact issue while completing independent style improvements
 
 修订尤其要保护数字、单位、否定、因果、时间顺序、引用归属和确定性。例如，不能把“作者在该数据集报告提升”润色成“方法已经普遍有效”。个人经历、真实犹豫、明确立场和有效重复也应保留，不能为了模仿人类添加口语、情绪或故事。事实判断暂时无法核实时，保留对应主张并说明缺口，其他可独立完成的改写继续。
 
-数字人项目的证据与产出也包括视频、字幕、音频、幻灯片、动画场景及可编辑工程。值得迁移 RAM 的多媒体设计：先看元数据，再选择具体片段；记录文件版本与时间段、页、场景或帧范围，附可搜索的用途说明和必要构建依赖。重新剪辑、转码或改页后，旧定位须核对映射。[多媒体资料][ram-media]
+数字人项目的证据与产出也包括视频、字幕、音频、幻灯片、动画场景及可编辑工程。值得迁移 RAM 的多媒体设计：先看元数据，再选择具体片段；记录文件版本与时间段、页、场景或帧范围，附可搜索的用途说明和必要构建依赖。重新剪辑、转码或改页后，旧定位须核对映射。多媒体资料（`payload/research-asset-map/references/media-assets.md`）
 
 自制演示可以说明效果，不能作为独立验证自身结论的证据；精选 demo 也不能代表完整评测。字幕或 OCR 不覆盖无文字视觉内容，脚本静态分析不证明实际渲染通过。文件哈希确认的是字节身份，外部位置登记也不等于原件已经保存；需要保全的媒体应另行确认完整副本、依赖和实际可读性。
 
-获授权写入 Wiki 时，交接目标、范围、来源与版本、结论状态、保护项及附件；沿现有维护入口取得最终结果。提交任务、完成维护、读者能检索并打开材料分别验收。普通阅读无需自动入库；已经要求记录的内容则在原授权内完成。[写回交接][mpk-writeback]、[Wiki 当前合同](../implemented/wiki-development-summary.md)
+获授权写入 Wiki 时，交接目标、范围、来源与版本、结论状态、保护项及附件；沿现有维护入口取得最终结果。提交任务、完成维护、读者能检索并打开材料分别验收。普通阅读无需自动入库；已经要求记录的内容则在原授权内完成。写回交接（`payload/manage-personal-knowledge/references/writeback-handoff.md`）、[Wiki 当前合同](../implemented/wiki-development-summary.md)
 
 ## 5. 提示词之外，需要什么支撑
 
@@ -289,7 +289,7 @@ claim and report the exact issue while completing independent style improvements
 
 有界返回应说明覆盖、截断、来源状态和展开方式，完整结果留在可读取的产物中。单次响应字节上限不等于整个任务的累计预算；预算须在实际执行边界计入失败和重试，未知成本不能写成零。失去回执后先查原操作，不能为多取一页结果而重跑业务。
 
-版本绑定、写前冲突检查、持久作业、取消与资源限制都需要真实 producer 和 consumer。提示词可以要求检查，无法替代实现；结构验证、哈希一致和软件返回成功，也只能证明对应边界。参考包自身反复声明这些限制，这是值得迁移的诚实边界。[RAM 数据合同][ram-data]、[计算执行合同][msc-contracts]
+版本绑定、写前冲突检查、持久作业、取消与资源限制都需要真实 producer 和 consumer。提示词可以要求检查，无法替代实现；结构验证、哈希一致和软件返回成功，也只能证明对应边界。参考包自身反复声明这些限制，这是值得迁移的诚实边界。RAM 数据合同（`payload/research-asset-map/references/data-contract.md`）、计算执行合同（`payload/math-science-computation/references/execution-contracts.md`）
 
 ## 6. 采用顺序与不迁移的部分
 
@@ -330,30 +330,3 @@ claim and report the exact issue while completing independent style improvements
 每项同时记录回答质量与成本：问点覆盖、准确定位、条件保真、错误结论、检索成功，以及墙钟时间、调用／token、重复读取、失败重试和必要人工修正。冷启动与复用分别测；并行耗时不能相加冒充墙钟时间，也不能用减少证据义务制造提速。质量要求相同后，才判断新 prompt 或工作流是否更划算。
 
 本文证据是本地文档与相关实现的阅读：覆盖八个 SKILL.md、八份入口 prompt，以及所引的资料、续接、写作和执行合同；未运行参考包业务、PDF 转换、模型实验或多机调度，也没有验证长期研究收益。Octopus 阅读基线为本地 HEAD `0a56386315548b6e9df6251166220749fc0ce4aa` 的工作树，含其他未提交改动；该 SHA 不代表所有已读文件的精确内容或线上版本。后续实施按[文档与验证政策](../testing.md#release-and-documentation-checks)选择检查，真实效果仍需上述任务验证。
-
-[release]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/RELEASE_NOTES.md
-[versions]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/SOURCE_VERSIONS.json
-[ram]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/research-asset-map/SKILL.md
-[mrs]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/math-research-solve/SKILL.md
-[mpk]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/manage-personal-knowledge/SKILL.md
-[ovn]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/obsidian-vault-notes/SKILL.md
-[pdf]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/pdf-problem-search/SKILL.md
-[msc]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/math-science-computation/SKILL.md
-[fleet]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/compute-fleet-manager/SKILL.md
-[coach]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/math-coach/SKILL.md
-[ram-use]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/research-asset-map/references/project-use.md
-[ram-data]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/research-asset-map/references/data-contract.md
-[ram-acceptance]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/research-asset-map/references/retrieval-acceptance.md
-[ram-media]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/research-asset-map/references/media-assets.md
-[mrs-core]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/math-research-solve/references/core-workflow.md
-[mrs-context]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/math-research-solve/references/research-context.md
-[mrs-experience]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/math-research-solve/references/experience-reuse.md
-[mrs-prompt]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/math-research-solve/agents/openai.yaml
-[msc-prompt]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/math-science-computation/agents/openai.yaml
-[msc-contracts]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/math-science-computation/references/execution-contracts.md
-[mpk-pdf]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/manage-personal-knowledge/references/pdf-library.md
-[mpk-writeback]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/manage-personal-knowledge/references/writeback-handoff.md
-[ovn-content]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/obsidian-vault-notes/references/paragraph-content-review.md
-[ovn-ai]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/obsidian-vault-notes/references/ai-style-rewrite.md
-[ovn-style]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/obsidian-vault-notes/references/article-revision-style.md
-[ovn-voice]: /home/jack/ref/pika_math_learning_toolkit-2.2.0/payload/obsidian-vault-notes/references/author-voice-profile.md

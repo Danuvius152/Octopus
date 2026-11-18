@@ -5988,6 +5988,26 @@ export interface components {
             /** Line End */
             line_end: number;
         };
+        /** SessionArchiveResult */
+        SessionArchiveResult: {
+            /** Old Session Id */
+            old_session_id: string;
+            /**
+             * Archived
+             * @default true
+             * @constant
+             */
+            archived: true;
+            /** New Session Id */
+            new_session_id: string | null;
+            /**
+             * Failure Stage
+             * @enum {string}
+             */
+            failure_stage: "successor_creation" | "successor_configuration" | "schedule_rebinding";
+            /** Message */
+            message: string;
+        };
         /** SessionDetail */
         SessionDetail: {
             /** Id */
@@ -8771,6 +8791,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionArchiveResult"];
                 };
             };
         };

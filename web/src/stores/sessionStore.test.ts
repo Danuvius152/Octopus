@@ -13,7 +13,7 @@ describe("sessionStore", () => {
     for (let i = 0; i < 100; i++) store.appendStreamingText("native", chunk, {
       ...metadata, native: { ...metadata.native, item_id: `item-${i}` } });
     const state = useSessionStore.getState();
-    expect(new TextEncoder().encode(JSON.stringify(state.streamingText.legacy)).length).toBeLessThanOrEqual(64 * 1024);
+    expect(new TextEncoder().encode(JSON.stringify(state.streamingText.legacy.content)).length).toBeLessThanOrEqual(64 * 1024);
     expect(new TextEncoder().encode(JSON.stringify(state.streamingItems.native)).length).toBeLessThanOrEqual(256 * 1024);
     expect(Object.keys(state.streamingItems.native).length).toBeLessThanOrEqual(32);
     store.addMessage("legacy", { role: "assistant", type: "text", seq: 1, content: "Full saved replacement" });
@@ -331,8 +331,8 @@ describe("sessionStore", () => {
       appendStreamingText("s2", "other");
       appendStreamingText("s1", "orld");
       expect(useSessionStore.getState().streamingText).toEqual({
-        s1: "Hello world",
-        s2: "other",
+        s1: { content: "Hello world" },
+        s2: { content: "other" },
       });
     });
 
@@ -358,7 +358,7 @@ describe("sessionStore", () => {
         tool_name: "Bash",
         tool_use_id: "t1",
       });
-      expect(useSessionStore.getState().streamingText.s1).toBe("working on it");
+      expect(useSessionStore.getState().streamingText.s1?.content).toBe("working on it");
     });
 
     it("only clears the session whose block completed", () => {
@@ -366,18 +366,19 @@ describe("sessionStore", () => {
       appendStreamingText("s1", "aaa");
       appendStreamingText("s2", "bbb");
       addMessage("s1", { role: "assistant", type: "text", content: "aaa done" });
-      expect(useSessionStore.getState().streamingText.s2).toBe("bbb");
+      expect(useSessionStore.getState().streamingText.s2?.content).toBe("bbb");
     });
 
     it("clears on an explicit clear, and is a no-op when already empty", () => {
       const { appendStreamingText, clearStreamingText } = useSessionStore.getState();
       appendStreamingText("s1", "half a sentence");
+      useSessionStore.setState({ streamingItems: { s1: {} } });
       clearStreamingText("s1");
       expect(useSessionStore.getState().streamingText.s1).toBeUndefined();
-      // No-op path must return the identical object so subscribers don't wake.
-      const before = useSessionStore.getState().streamingText;
+      expect(useSessionStore.getState().streamingItems.s1).toBeUndefined();
+      const before = useSessionStore.getState();
       clearStreamingText("s1");
-      expect(useSessionStore.getState().streamingText).toBe(before);
+      expect(useSessionStore.getState()).toBe(before);
     });
 
     it("drops stale partial text when a snapshot reloads the session", () => {

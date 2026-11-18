@@ -31,7 +31,7 @@ it.each([
   { type: "recovery", content: { kind: "recovery", request_id: 42, phase: "retrying", code: "retry", message: "Retry" } },
   { type: "recovery", content: { kind: "recovery", request_id: "r", phase: "invented", code: "retry", message: "Retry" } },
 ])("rejects malformed domain content before consuming the sequence: %j", (event) => {
-  useSessionStore.setState({ streamingText: { s: "Original stream" } });
+  useSessionStore.setState({ streamingText: { s: { content: "Original stream" } } });
   const before = useSessionStore.getState();
   handleWsMessage({ ...event, session_id: "s", seq: 10 });
   expect(useSessionStore.getState()).toBe(before);

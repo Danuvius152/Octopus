@@ -18,6 +18,7 @@ from server.applications import ApplicationManager
 from server.config import settings
 from server.delegations import DelegationManager
 from server.deps import get_session_manager
+from server.harness.codex_rpc import RPC_TIMEOUT as NATIVE_RPC_TIMEOUT
 from server.mcp_identity import mint, register_run, revoke_run, verify
 from server.research import manager as research_module
 from server.research.manager import ResearchManager
@@ -46,7 +47,15 @@ from tests.wiki_job_runtime import client as client
 from tests.wiki_job_runtime import jobs as jobs
 from tests.wiki_job_runtime import process
 
-native_runtime = native_tests.native_runtime
+native_peer = native_tests.native_runtime
+
+
+@pytest.fixture
+def native_runtime(native_peer, monkeypatch):
+    # These tests exercise original MCP input and effect lifetimes. The
+    # synthetic peer uses the regular RPC allowance; SDK waits stay bounded.
+    monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", NATIVE_RPC_TIMEOUT)
+    return native_peer
 
 
 async def cancel_original_input(manager, session, token, root, monkeypatch):

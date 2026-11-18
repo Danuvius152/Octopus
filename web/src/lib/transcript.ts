@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "./accountFetch";
-import { useSessionStore, type Message, type MessagePageResult, type StreamingItem } from "../stores/sessionStore";
+import { useSessionStore, type Message, type MessagePageResult, type StreamingReadBasis } from "../stores/sessionStore";
 import type { MessageInput } from "./turnOutcome";
 import { sessions } from "./sessionList";
 
@@ -15,8 +15,7 @@ const API = window.location.origin;
 export function applyTranscript(
   sessionId: string,
   data: Record<string, unknown>,
-  nativeBaseline?: Record<string, StreamingItem>,
-  preserveStreaming = false,
+  streamingBasis?: StreamingReadBasis,
 ): boolean {
   const store = useSessionStore.getState();
   if (data.transcript_integrity === "duplicate_seq") {
@@ -29,7 +28,7 @@ export function applyTranscript(
     ? data.next_message_seq - 1 : Math.max(-1, ...messages.map((m) => m.seq ?? -1));
   const oldest = typeof data.oldest_loaded_seq === "number" ? data.oldest_loaded_seq : null;
   return store.installTranscript(sessionId, { messages, high: snapshotHigh, oldestSeq: oldest,
-    hasMore: Boolean(data.has_more_messages) }, nativeBaseline, preserveStreaming);
+    hasMore: Boolean(data.has_more_messages) }, streamingBasis);
 }
 
 export type OlderMessagesResult = MessagePageResult | { state: "unneeded" | "in_flight" };

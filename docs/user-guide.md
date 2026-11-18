@@ -1,14 +1,14 @@
 # Octopus 使用说明：本机启动、智能体协作与手机访问
 
-本文针对 `/home/jack/Octopus` 这套 WSL + Codex 安装，按当前源码和本机配置整理。
+本文介绍 WSL 上使用 Codex 的 Octopus 安装。仓库内的命令以仓库根目录为起点。
 手机访问采用[项目 README 推荐的 Cloudflare Tunnel](../README.md#quick-start)。
 
 ## 1. 本机配置入口
 
 | 项目 | 配置目标或检查入口 |
 | --- | --- |
-| 项目目录 | `/home/jack/Octopus` |
-| 发布代码 | `/home/jack/.octopus/releases/current`；用 `readlink -f` 检查实际工作树 |
+| 项目目录 | 仓库根目录 |
+| 发布代码 | `~/.octopus/releases/current`，用 `readlink -f` 检查实际工作树 |
 | Python | 项目 `.venv`；重建方法见 [本机手册](local-wsl.md) |
 | 模型后端 | 本机验证政策使用 Codex；CLI 登录状态须现场检查 |
 | 后台服务 | 用户级 `octopus.service`；用 `systemctl --user status octopus` 检查 |
@@ -28,10 +28,9 @@
 wsl -d Ubuntu
 ```
 
-然后在 Ubuntu 中执行：
+在 Ubuntu 中进入仓库根目录，再执行：
 
 ```bash
-cd /home/jack/Octopus
 systemctl --user start octopus
 systemctl --user status octopus --no-pager
 curl --noproxy '*' --fail --silent --show-error \
@@ -116,15 +115,11 @@ Octopus 网页登录与 Codex 模型登录是两回事。使用 Codex 前检查 
 ### 给任务选择正确的工作目录
 
 在侧栏的智能体下新建会话时，展开 **+ working dir · engine**，填写 working dir。
-开发本项目使用：
-
-```text
-/home/jack/Octopus
-```
+开发本项目时，在仓库根目录运行 `pwd`，将输出的绝对路径填入 working dir。
 
 未填写时使用服务的默认工作目录；创建账户后，默认目录属于该账户。
 创建账户后，外部目录需要列入允许范围：到 **Account → Where you can work**
-检查是否已有 `/home/jack/Octopus`，没有就通过 **Add a directory** 添加。
+检查是否已有仓库根目录，没有就通过 **Add a directory** 添加。
 管理员同样可以添加实际 Obsidian vault 所在目录。
 
 所有路径都以运行 Octopus 的 WSL 文件系统为准。例如 Windows 的
@@ -161,7 +156,7 @@ Octopus 网页登录与 Codex 模型登录是两回事。使用 Codex 前检查 
 日常从最合适的智能体发起任务。例如给 Octo：
 
 ```text
-请在 /home/jack/Octopus 实现这个需求：……
+请在当前 Octopus 仓库实现这个需求：……
 遵守项目 AGENTS.md。完成后请 Vera review 架构、代码和测试，
 根据其具体发现修复并完成验证，再给我最终结果。
 ```
@@ -342,8 +337,8 @@ wsl -d Ubuntu --exec /usr/bin/sleep infinity
 
 README 的 `octopus serve --tunnel` 用于启用项目内置隧道。当前受管安装由
 数据库旁的中央配置和服务 profile 绑定，普通 `serve` 会转交 systemd；直接
-添加 `--tunnel` 会与已绑定的 `enable_tunnel=false` 冲突。仅修改开发目录
-`/home/jack/Octopus/.env` 再重启服务不会启用当前受管服务的隧道。
+添加 `--tunnel` 会与已绑定的 `enable_tunnel=false` 冲突。仅修改开发目录下的
+`.env` 再重启服务不会启用当前受管服务的隧道。
 
 本机保留内置隧道关闭，由独立用户服务连接现有 8000 端口。配置边界见
 [本机服务管理](local-wsl.md#服务管理)。
@@ -390,16 +385,16 @@ Applications 中调用 `/apps/{id}/agent/chat` 的应用则使用 SSE，因此�
 
 | 内容 | 本机路径或入口 |
 | --- | --- |
-| 当前服务配置、setup 证明 | `/home/jack/.octopus/octopus.db.service.env`，权限 `0600` |
-| 安装身份与路径绑定 | `/home/jack/.octopus/octopus.db.service.json` |
-| 开发配置 | `/home/jack/Octopus/.env`，不叠加到当前受管服务 |
-| 主数据库：智能体角色、prompt、会话、定时任务等 | `/home/jack/.octopus/octopus.db` |
-| 监控数据库 | `/home/jack/.octopus/octopus-metrics.db` |
-| 用户服务定义 | `/home/jack/.config/systemd/user/octopus.service` |
+| 当前服务配置、setup 证明 | `~/.octopus/octopus.db.service.env`，权限 `0600` |
+| 安装身份与路径绑定 | `~/.octopus/octopus.db.service.json` |
+| 开发配置 | 仓库根目录的 `.env`，不叠加到当前受管服务 |
+| 主数据库：智能体角色、prompt、会话、定时任务等 | `~/.octopus/octopus.db` |
+| 监控数据库 | `~/.octopus/octopus-metrics.db` |
+| 用户服务定义 | `~/.config/systemd/user/octopus.service` |
 | 服务的网络代理环境 | `octopus.service` 的原生 Environment，见 [本机服务管理](local-wsl.md#服务管理) |
 | 隧道程序、用户服务 | `~/.local/bin/cloudflared`、`~/.config/systemd/user/octopus-tunnel.service` |
 | 隧道的网络代理环境 | `~/.config/octopus-tunnel/proxy.env`，权限 `0600` |
-| 智能体记忆、应用、附件和账户数据 | `/home/jack/.octopus/` 下的相应目录 |
+| 智能体记忆、应用、附件和账户数据 | `~/.octopus/` 下的相应目录 |
 | Codex 自身登录和会话数据 | 本机 `~/.codex/` |
 | Obsidian 知识库 | 你另行指定的实际 vault 目录 |
 

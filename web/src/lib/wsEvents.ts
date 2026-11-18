@@ -4,6 +4,7 @@ import { readDispatchState, type DispatchState } from "./sessionDispatch";
 import { readRuntimeMetadata } from "./toolIdentity";
 import { readContextState, type ContextState } from "./sessionContext";
 import { isDelegationState } from "./delegationState";
+import { readArchiveResult } from "./sessionArchive";
 
 type Guard<T> = (value: unknown) => value is T;
 type Value<G> = G extends Guard<infer T> ? T : never;
@@ -36,6 +37,7 @@ function fields<const S extends Rules>(rules: S): Guard<Fields<S>> {
 const numberMap: Guard<Record<string, number>> = (v): v is Record<string, number> => record(v) && Object.values(v).every(number);
 const countMap: Guard<Record<string, number>> = (v): v is Record<string, number> => record(v) && Object.values(v).every(integer);
 const dispatch: Guard<DispatchState> = (v): v is DispatchState => readDispatchState(v) !== null;
+const archiveResult: Guard<Dto["SessionArchiveResult"]> = (v): v is Dto["SessionArchiveResult"] => readArchiveResult(v) !== null;
 const runtime: Guard<Dto["RuntimeMetadata"]> = (v): v is Dto["RuntimeMetadata"] => readRuntimeMetadata(v) !== undefined;
 const backend = oneOf("claude-code", "codex");
 const tier = optional(nullable(oneOf("default", "fast")));
@@ -185,7 +187,7 @@ const definitions = [
   event("agent_deleted", { agent_id: id }),
   event("session_unarchived", { ...inSession, session, dispatch_state: optional(dispatch) }),
   event("session_archived", { old_session_id: id, new_session_id: nullable(id), name: optional(text), ...settings,
-    dispatch_state: optional(dispatch) }),
+    dispatch_state: optional(dispatch), archive_result: optional(archiveResult) }),
   event("session_forked", { fork_session_id: id }),
   event("session_deleted", inSession),
 ];
@@ -210,7 +212,9 @@ function identitiesAgree(data: WsEvent): boolean {
     case "agent_archived":
       return data.agent === undefined || data.agent_id === data.agent.id && data.agent.archived;
     case "session_archived":
-      return data.new_session_id === null || data.name !== undefined;
+      return (data.new_session_id === null || data.name !== undefined) &&
+        (!data.archive_result || data.archive_result.old_session_id === data.old_session_id &&
+          data.archive_result.new_session_id === data.new_session_id);
     case "session_unarchived":
       return data.session.id === data.session_id && !data.session.archived;
     case "delegation_delivery":

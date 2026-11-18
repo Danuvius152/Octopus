@@ -26,8 +26,9 @@ and `list` operate through the parent-scoped delegation API.
 
 The target is a non-archived agent in the same account. Missing/ambiguous names,
 self-delegation, an ancestor-agent cycle or depth beyond three are refused.
-An unavailable ancestor cannot be assumed safe: the walk uses retained database
-identity and rejects missing/cyclic ancestry. The child inherits the parent's cwd
+The ancestor walk uses live relations first and reads missing IDs through the
+[relation snapshot](current-storage-format.md#narrow-session-bindings). Missing or cyclic
+ancestry and owner mismatches are refused. The child inherits the parent's cwd
 and receives the request plus optional resolved file paths. It does not receive
 the parent's transcript. Its persona, credential and memory belong to the target
 agent. MCP defaults apply only when creating agents; saved tool selections remain.
@@ -49,10 +50,11 @@ permissions and other resolution failures retain a could-not-resolve annotation,
 including the RuntimeError form on older supported Python versions. A preparation
 failure cannot leave a running round that never submitted input.
 
-After setup publication, only typed `SessionAdmissionClosed`,
+After setup publication, a typed `SessionAdmissionClosed`,
 `SessionAdmissionBusy`, `SessionMailboxFull` or `AdmissionIntegrityError` proves
-the initial input was refused and invokes the existing setup withdrawal/empty
-child cleanup. A plain ValueError, connection failure or lost receipt remains
+input was refused and allows setup withdrawal and empty child cleanup. A
+structured receipt of nonacceptance retains its original terminal-return rules.
+A plain ValueError, connection failure or lost receipt remains
 unknown even with an empty in-memory queue; a durable input may already exist.
 It retains the original round, command and child responsibility instead of
 claiming no execution, injecting a false failure or replaying. Follow-up keeps
@@ -109,7 +111,17 @@ A delegation child session keeps the ordinary session retention policy:
   check. New responsibility blocks sealing without deleting the successful
   candidate: concurrent setups may all be refused before admission. Withdrawing
   the last such responsibility rechecks that candidate and can seal directly.
-  A refused empty child is archived; storage uncertainty follows fail-stop.
+  Initial setup that proved nonacceptance and owns no execution resources first
+  records `cancelled` through the original round CAS. If that write misses and
+  the narrow read proves the original relation was deleted, only the captured
+  in-memory work is retired. Both paths withdraw the exact parent responsibility
+  and recheck sealing after any required terminal-return observation. An unknown
+  original terminal handoff retains that responsibility. With no return to admit,
+  the withdrawal precedes archival, so an archive fault cannot block a parent
+  whose work is settled. Setup cleanup archives only the original Session
+  instance. If follow-up setup reopened an archived conversation, rollback
+  can retire that same instance with its history intact. A file check that
+  outlives the Session finishes before admission and rejects the retired instance.
 
   Follow-up setup keeps its own admission phase. Typed SessionOwner refusals
   prove no input was accepted and permit restoring the previous round. A plain
@@ -118,8 +130,12 @@ A delegation child session keeps the ordinary session retention policy:
   submitted input (or received an explicit refusal) and owns no resources, it
   closes only its captured in-memory round/work without writing a nonexistent
   previous snapshot. It also withdraws that exact parent-work responsibility.
-  A changed relationship or recording-closed marker alone is not deletion proof;
-  accepted/unknown input keeps its original owner and drain responsibility.
+  A CAS miss checks the original parent and child in the
+  [relation snapshot](current-storage-format.md#narrow-session-bindings).
+  Only a successful read proving original deletion allows local settlement.
+  A changed owner or relationship, a recording-closed marker and a failed read
+  leave deletion unconfirmed. Accepted or unknown input keeps its original owner
+  and drain responsibility.
   `tests/test_delegation_restart_deletion.py` covers parent/child deletion around
   CAS, before input, after acceptance and with a lost receipt, nested withdrawal
   and relationship replacement. Existing refusal/question-writer tests retain
@@ -140,8 +156,8 @@ delegations to the same agent share the agent's memory dir — see
 [concurrency and rationale](#concurrency-rationale-and-verification).
 The split is reflected in `SessionManager`:
 `_AUTO_ARCHIVE_ORIGINS` is only `("schedule",)`, while
-`_AUTO_ARCHIVE_ELIGIBLE` includes `"delegation"` for explicit
-post-terminal archival (declared in [session base](../../server/sessions/base.py)).
+`_AUTO_ARCHIVE_ELIGIBLE` includes `"delegation"` for explicit cleanup before
+admission (declared in [session base](../../server/sessions/base.py)).
 
 A persisted running round alone must not be read as proof of child execution.
 It can precede input admission, whose confirmed refusal and unknown outcome

@@ -103,9 +103,26 @@ export function AgentDelegationRequestCard({
   // only demand for its exact receipt and its publication lifetime.
   useEffect(() => {
     if (!delegationId || !workId || terminal) return;
-    const observation = watchDelegation(sessionId, { delegation_id: delegationId, work_id: workId },
-      (failed) => setUnavailable(failed ? observationKey : null));
-    return observation.cancel;
+    let observation: ReturnType<typeof watchDelegation> | undefined;
+    const update = () => {
+      // Visibility owns only this continuous consumer. Hydration and command
+      // confirmations retain their independent shared-read lifetimes.
+      if (document.hidden || useSessionStore.getState().mainView !== "chat") {
+        observation?.cancel(); observation = undefined;
+      } else if (!observation) {
+        observation = watchDelegation(sessionId, { delegation_id: delegationId, work_id: workId },
+          (failed) => setUnavailable(failed ? observationKey : null));
+      }
+    };
+    const unsubscribe = useSessionStore.subscribe((state, previous) => {
+      if (state.mainView !== previous.mainView) update();
+    });
+    document.addEventListener("visibilitychange", update);
+    update();
+    return () => {
+      unsubscribe(); document.removeEventListener("visibilitychange", update);
+      observation?.cancel();
+    };
   }, [delegationId, workId, terminal, sessionId, observationKey]);
 
   const openChild = async () => {

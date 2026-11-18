@@ -127,7 +127,6 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       // Pending command ownership belongs to this hook's captured socket.
       break;
     case "attempt_started":
-      clearStreamingText(sessionId);
       getState().setActiveAttempt(sessionId, { request_id: data.request_id, attempt_id: data.attempt_id });
       break;
     case "wiki_job_changed":
@@ -524,8 +523,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
 
     case "session_unarchived": {
       const revived = data.session;
-      if (!revived || revived.id !== sessionId || revived.archived) break;
-      sessionList.row(revived);
+      if (revived?.id === sessionId) sessionList.restored(revived);
       break;
     }
 
@@ -570,7 +568,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
           fork_is_full_copy: false,
           archived: false,
         };
-      sessionList.archive(oldId, undefined, replacement);
+      sessionList.archive(oldId, undefined, replacement, newId, data.archive_result);
       break;
     }
     case "session_forked": {

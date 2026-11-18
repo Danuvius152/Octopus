@@ -7,7 +7,7 @@ for (const width of [390, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     const session = { id: "card-width", agent_id: "card-agent", name: "Card width", backend: "codex",
       status: "idle", archived: false, working_dir: "/tmp", created_at: "2026-11-12T00:00:00Z" };
-    const path = `/home/jack/${"long-directory-name/".repeat(30)}${"x".repeat(240)}.md`;
+    const path = `test-data/${"long-directory-name/".repeat(30)}${"x".repeat(240)}.md`;
     const request = `Review this file: ${path}`;
     const messages: Message[] = [];
     for (const continued of [false, true]) {

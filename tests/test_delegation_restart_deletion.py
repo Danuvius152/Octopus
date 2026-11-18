@@ -7,8 +7,10 @@ import json
 import pytest
 
 from server.agent_manager import AgentManager
+from server.db.transaction import Transaction
 from server.delegations import DelegationError
 from server.mcp_identity import verify
+from server.service_health import ServiceUnavailable
 from tests.test_delegation_restart import runtime as runtime
 from tests.test_delegation_restart import wait_finished
 from tests.test_delegation_restart_nested import gated_cli as gated_cli
@@ -76,19 +78,36 @@ async def test_changed_child_relation_is_a_confirmed_refusal_even_with_the_same_
 ):
     boot, starts = runtime
     current, original = await completed_before_restart(boot, starts)
+    other_parent = await current.manager.create_session(
+        (await current.database.get_system_agent())["id"], "Other parent", backend="codex",
+    )
     previous = await current.database.load_delegation_state(
         original.delegation_id, parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
     )
     save = current.database.compare_and_set_delegation_state
     entered, release = asyncio.Event(), asyncio.Event()
+    miss_reads: list[str] = []
+    fetched_ids: list[list[str]] = []
+    fetch_all = Transaction.fetch_all
+
+    async def observe_relation_read(tx, sql, parameters=()):
+        rows = await fetch_all(tx, sql, parameters)
+        if sql.startswith("SELECT id, agent_id, user_id, origin, parent_session_id FROM sessions"):
+            fetched_ids.append([row[0] for row in rows])
+        return rows
 
     async def pause_new_round(*args, **kwargs):
         if json.loads(args[2])["state"] == "running":
             entered.set()
             await release.wait()
+            saved = await save(*args, **kwargs)
+            assert not saved
+            await current.database.conn.set_trace_callback(miss_reads.append)
+            return saved
         return await save(*args, **kwargs)
 
     monkeypatch.setattr(current.database, "compare_and_set_delegation_state", pause_new_round)
+    monkeypatch.setattr(Transaction, "fetch_all", observe_relation_read)
     following = asyncio.create_task(current.delegations.follow_up_delegation(
         parent_session_id=current.parent_id, delegation_id=original.delegation_id,
         request="held stale relationship review",
@@ -108,20 +127,77 @@ async def test_changed_child_relation_is_a_confirmed_refusal_even_with_the_same_
         elif changed == "origin":
             await current.database.update_session_field(original.delegation_id, origin="user")
         else:
-            parent = await current.manager.create_session(
-                (await current.database.get_system_agent())["id"], "Other parent", backend="codex",
-            )
             async with current.database.transaction(write=True) as tx:
-                await tx.execute("UPDATE sessions SET parent_session_id = ? WHERE id = ?", (parent.id, original.delegation_id))
+                await tx.execute(
+                    "UPDATE sessions SET parent_session_id = ? WHERE id = ?",
+                    (other_parent.id, original.delegation_id),
+                )
     finally:
         release.set()
-    with pytest.raises(DelegationError) as refused:
-        await following
+    try:
+        with pytest.raises(DelegationError) as refused:
+            await following
+    finally:
+        await current.database.conn.set_trace_callback(None)
     assert refused.value.status_code == 409
+    assert "relationship changed" in str(refused.value)
     current_round = current.delegations.get_delegation(original.delegation_id)
     assert current_round.work_id == original.work_id and current_round.state == "completed"
     assert starts.empty()
     await current.delegations.confirm_recording()
+    session_reads = [
+        " ".join(sql.split()) for sql in miss_reads if sql.startswith("SELECT") and " FROM sessions" in sql
+    ]
+    assert len(session_reads) == 1, session_reads
+    projection = session_reads[0].split(" FROM sessions", 1)[0]
+    assert set(projection.removeprefix("SELECT ").replace(" ", "").split(",")) == {
+        "id", "agent_id", "user_id", "origin", "parent_session_id",
+    }
+    assert len(fetched_ids) == 1
+    assert len(fetched_ids[0]) == 2
+    assert set(fetched_ids[0]) == {current.parent_id, original.delegation_id}
+
+
+async def test_cas_miss_relation_read_failure_does_not_settle_the_round(runtime, monkeypatch):
+    boot, starts = runtime
+    current, original = await completed_before_restart(boot, starts)
+    database = current.database
+    save = database.compare_and_set_delegation_state
+    execute = database.conn.execute
+    read_error = ServiceUnavailable("Relationship read unavailable after CAS miss")
+
+    async def change_relation_before_save(*args, **kwargs):
+        await database.update_session_field(original.delegation_id, origin="user")
+        saved = await save(*args, **kwargs)
+        assert not saved
+        return saved
+
+    async def refuse_relationship_read(sql, parameters=()):
+        if sql.startswith("SELECT id, agent_id, user_id, origin, parent_session_id FROM sessions"):
+            raise read_error
+        return await execute(sql, parameters)
+
+    monkeypatch.setattr(database, "compare_and_set_delegation_state", change_relation_before_save)
+    monkeypatch.setattr(database.conn, "execute", refuse_relationship_read)
+    try:
+        with pytest.raises(ServiceUnavailable) as failure:
+            await current.delegations.follow_up_delegation(
+                parent_session_id=current.parent_id, delegation_id=original.delegation_id,
+                request="Review after relationship read failure",
+            )
+        assert failure.value is read_error
+        still_original = current.delegations.get_delegation(original.delegation_id)
+        assert still_original.work_id == original.work_id and still_original.state == "completed"
+        assert starts.empty()
+        with pytest.raises(RuntimeError, match="Delegation command cleanup failed") as recording:
+            await current.delegations.confirm_recording()
+        assert recording.value.__cause__ is read_error
+    finally:
+        # Release the isolated fixture after verifying the original failure
+        # stays visible to its real recording/drain consumer.
+        for command in tuple(current.delegations._commands):
+            if command.done() and not command.cancelled() and command.exception() is read_error:
+                current.delegations._forget_command(command)
 
 
 @pytest.mark.parametrize("deleted", ["parent", "child"])

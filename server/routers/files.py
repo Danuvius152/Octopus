@@ -34,7 +34,7 @@ from ..file_viewer import (
 from ..harness import HarnessOneshotError, get_harness
 from ..models import ShowMeResolveRequest, ShowMeResolveResponse
 from ..sessions import SessionManager
-from ..showme_ai import resolve_showme_reference
+from ..showme_ai import resolve_local_path, resolve_showme_reference
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +53,12 @@ async def _working_dir_for(
     live = session_manager.get_session(session_id, user_id)
     if live is not None:
         return live.working_dir
-    archived = await session_manager.load_archived_session_detail(
+    working_dir = await session_manager.input_database().get_archived_working_dir(
         session_id, user_id
     )
-    if archived is None:
+    if working_dir is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    return archived.working_dir
+    return working_dir
 
 
 def _resolve_or_raise(working_dir: str, path: str) -> ResolvedFile:
@@ -93,6 +93,10 @@ async def resolve_showme(
     if agent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
+    direct = resolve_local_path(req.text, session.working_dir)
+    if direct is not None:
+        return ShowMeResolveResponse(path=direct)
+
     harness = get_harness(session.backend)
     # Resolve through the same path the turn engine uses so the harness gets a
     # proper HarnessCredential (decrypted, OAuth-refreshed for Claude, or
@@ -121,7 +125,7 @@ async def resolve_showme(
             credential=None,
             runner=run_resolver,
             working_dir=session.working_dir,
-            messages=await session_manager.db.load_messages(session_id),
+            messages=await session_manager.db.load_messages(session_id, limit=12, newest_first=True),
             session_name=session.name,
         )
     except (ValueError, HarnessOneshotError) as error:

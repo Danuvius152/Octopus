@@ -146,8 +146,11 @@ def test_catalog_batch_parses_a_repeated_anchor_target_once_and_recomputes_next_
         (root / "target.md").write_text(changed)
         calls.clear()
         store.refresh()
-        # One indexing parse and one parse shared by the entire new catalog batch.
-        assert calls.count(changed) == 2
+        # The target's own source parse cannot be retained for later source work.
+        # If referenced first, its light projection needs one temporary parse too.
+        with store.connect() as db:
+            first_source = db.execute("SELECT path FROM documents ORDER BY id LIMIT 1").fetchone()[0]
+        assert calls.count(changed) == (2 if first_source == "target.md" else 3)
         assert calls.count(target) == 0
         assert {edge["status"] for edge in store.graph("first.md")["edges"]} == {"missing_anchor"}
     finally:

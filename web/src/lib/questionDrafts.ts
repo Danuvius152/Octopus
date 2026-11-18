@@ -1,6 +1,6 @@
 import { useSessionStore, type PendingQuestion } from "../stores/sessionStore";
 import { accountFetch } from "./accountFetch";
-import type { SubmissionReply } from "./submission";
+import { classifySubmission, readSubmission, type SubmissionReply } from "./submission";
 import type { PendingAttachment } from "../hooks/useDraftAttachments";
 
 export interface AnswerPayload {
@@ -17,12 +17,18 @@ export interface QuestionDraft {
     kind: "answer" | "continuation";
     id: string;
     answers: AnswerPayload[];
-    state: "pending" | "unknown" | "rejected";
+    state: "pending" | "unknown" | "rejected" | "readonly";
     content?: string;
     attachments?: PendingAttachment[];
     message?: string;
+    receipt?: SubmissionReply;
+    recoveryOfClientId?: string;
   };
 }
+
+export type RetainContinuationInput = (requestId: string, input: {
+  sessionId: string; text: string; attachments: PendingAttachment[];
+}) => void;
 
 export function questionDraftKey(account: number, sessionId: string, question: PendingQuestion): string {
   return JSON.stringify([account, sessionId, question.request_id ?? null, question.attempt_id ?? null, question.question_id]);
@@ -49,17 +55,27 @@ export function beginQuestionTransmission(key: string, transmission: NonNullable
   return started;
 }
 
-export function finishQuestionTransmission(key: string, id: string, reply?: SubmissionReply | void): void {
+export function finishQuestionTransmission(key: string, id: string, reply?: SubmissionReply | void, retainInput?: RetainContinuationInput): void {
   useSessionStore.setState((state) => {
     const draft = state.questionDrafts[key];
     if (!draft || draft.transmission?.id !== id) return state;
     const drafts = { ...state.questionDrafts };
-    if (reply?.accepted && reply.state !== "unknown") {
+    const outcome = draft.transmission.kind === "continuation" ? classifySubmission(reply, "continuation")
+      : reply?.accepted && reply.state !== "unknown" ? "settled" : !reply || reply.state === "unknown" ? "unknown" : "rejected";
+    if (outcome === "settled") {
+      // Hand Files to the message recovery consumer before the question's
+      // transmission snapshot retires, for direct and confirmed receipts.
+      if (draft.transmission.kind === "continuation" && reply?.requestId && draft.transmission.attachments?.length) {
+        retainInput?.(reply.requestId, { sessionId: draft.sessionId,
+          text: draft.transmission.content ?? questionDraftText(draft), attachments: draft.transmission.attachments });
+      }
       // A receipt confirms only the exact submitted snapshot, not later edits.
       if (draft.answers === draft.transmission.answers) delete drafts[key];
       else drafts[key] = { ...draft, transmission: undefined };
     } else drafts[key] = { ...draft, transmission: { ...draft.transmission,
-      state: !reply || reply.state === "unknown" ? "unknown" : "rejected", message: reply?.message } };
+      state: outcome === "unknown" ? "unknown" : outcome === "readonly" ? "readonly" : "rejected",
+      message: reply?.message || (outcome === "readonly" ? "This continuation was withdrawn and cannot be restored." : undefined),
+      receipt: reply || undefined, recoveryOfClientId: outcome === "recoverable" ? id : undefined } };
     return { questionDrafts: drafts };
   });
 }
@@ -85,20 +101,15 @@ export function observeQuestionResolution(key: string, raw: unknown): boolean {
   return true;
 }
 
-export async function confirmQuestionReceipt(key: string): Promise<void> {
+export async function confirmQuestionReceipt(key: string, retainInput?: RetainContinuationInput): Promise<void> {
   const state = useSessionStore.getState(), draft = state.questionDrafts[key];
   if (!draft) return;
   if (draft.transmission?.kind === "continuation") {
     const original = draft.transmission;
-    const response = await accountFetch(`/api/sessions/${encodeURIComponent(draft.sessionId)}/submissions/${encodeURIComponent(original.id)}`,
-      { headers: { Authorization: `Bearer ${state.token}` }, signal: AbortSignal.timeout(10_000) });
-    if (!response.ok) throw new Error(`Original message receipt is still unknown (${response.status}).`);
-    const result = await response.json();
-    if (result.session_id !== draft.sessionId || result.client_request_id !== original.id || result.accepted !== true
-      || result.state === "unknown" || result.execution?.state === "unknown") {
-      throw new Error("Original message admission is still unconfirmed. No input was resent.");
-    }
-    finishQuestionTransmission(key, original.id, { accepted: true });
+    const result = await readSubmission(`/api/sessions/${encodeURIComponent(draft.sessionId)}/submissions/${encodeURIComponent(original.id)}`,
+      { method: "GET", headers: { Authorization: `Bearer ${state.token}` }, signal: AbortSignal.timeout(10_000) },
+      { sessionId: draft.sessionId, clientId: original.id, operation: "message" });
+    finishQuestionTransmission(key, original.id, result, retainInput);
     return;
   }
   const path = `/api/sessions/${encodeURIComponent(draft.sessionId)}/questions/${encodeURIComponent(draft.question.question_id)}/result`;

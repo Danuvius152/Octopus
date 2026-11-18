@@ -28,6 +28,7 @@ from ..models import (
     MessagePage,
     NativeDetailPage,
     PendingQuestionInfo,
+    SessionArchiveResult,
     SessionDetail,
     SessionInfo,
     SessionRestoreRequest,
@@ -38,6 +39,7 @@ from ..models import (
 from ..session_manager import ForkError
 from ..sessions import SessionManager
 from ..sessions.configuration import SessionConfigurationError
+from ..sessions.lifecycle import SessionArchiveFailed
 from ..sessions.presentation import session_info
 from ..sessions.restoration import RestoreRefused
 from ..sessions.runtime_types import QuotaExceeded
@@ -690,6 +692,7 @@ async def reset_session(
     "/{session_id}/archive",
     response_model=SessionInfo,
     status_code=status.HTTP_201_CREATED,
+    responses={500: {"model": SessionArchiveResult}},
 )
 async def archive_session(
     session_manager: SessionMgr,
@@ -712,6 +715,8 @@ async def archive_session(
     _own_session(session_manager, session_id, user_id)
     try:
         new = await session_manager.archive_session(session_id, replace=replace)
+    except SessionArchiveFailed as error:
+        return JSONResponse(error.result.model_dump(), status_code=500)
     except ValueError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     if new is None:

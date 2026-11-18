@@ -422,6 +422,10 @@ class TurnsMixin(SessionManagerBase):
         if session.user_id is None:
             raise ValueError("The session has no attachment owner")
         files = await asyncio.to_thread(_files, session_id, list(attachment_ids or []), user_id=session.user_id)
+        # File preparation can outlive the captured session. No request has
+        # entered its owner yet, so retirement here is a confirmed refusal.
+        if self.sessions.get(session_id) is not session:
+            raise SessionAdmissionClosed(f"Session {session_id} is no longer live")
         queued = QueuedPrompt(
             prompt, list(attachment_ids or []), wiki_mode=wiki_mode, source=source,
             delivery_id=delivery_id, work_id=work_id, question_session_id=question_session_id,

@@ -7,23 +7,13 @@ import pytest
 from server.agent_manager import AgentManager
 from server.delegations import DelegationError
 from server.mcp_identity import revoke_run
-from tests.test_delegation_notification_failure import (
-    notification_runtime as notification_runtime,
-)
-from tests.test_delegation_notification_failure import (
+from tests.delegation_runtime import notification_runtime as notification_runtime
+from tests.delegation_runtime import (
+    observe_terminal_deliveries,
     release_model,
+    starts,
     wait_round_finished,
 )
-from tests.test_delegation_text_deletion import observe_terminal_deliveries
-
-
-async def starts(runtime, session_id, count):
-    async with asyncio.timeout(3):
-        while True:
-            observed = [scope for scope, _ in runtime.starts if scope.session_id == session_id]
-            if len(observed) >= count and (runtime.root / f"{observed[count - 1].run_lease_id}.input").exists():
-                return
-            await asyncio.sleep(.005)
 
 
 @pytest.mark.parametrize("reuse_leaf", [False, True])

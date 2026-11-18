@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useSessionStore } from "../stores/sessionStore";
-import { confirmQuestionReceipt, discardQuestionDraft, observeQuestionResolution, questionDraftText } from "../lib/questionDrafts";
+import { confirmQuestionReceipt, discardQuestionDraft, observeQuestionResolution, questionDraftText, type RetainContinuationInput } from "../lib/questionDrafts";
 import { Button } from "./ui/button";
 import type { PendingAttachment } from "../hooks/useDraftAttachments";
 
@@ -8,12 +9,14 @@ interface Props {
   sessionId: string;
   composerOccupied: boolean;
   onContinue: (key: string, content: string, attachments: PendingAttachment[]) => void;
+  onAcceptedInput: RetainContinuationInput;
 }
 
-export function QuestionDraftRecovery({ sessionId, composerOccupied, onContinue }: Props) {
+export function QuestionDraftRecovery({ sessionId, composerOccupied, onContinue, onAcceptedInput }: Props) {
   const [checking, setChecking] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const drafts = useSessionStore((state) => state.questionDrafts);
+  const drafts = useSessionStore(useShallow((state) => Object.fromEntries(
+    Object.entries(state.questionDrafts).filter(([, draft]) => draft.sessionId === sessionId))));
   const closed = useSessionStore((state) => state.closedQuestionIds[sessionId]);
   const messages = useSessionStore((state) => state.messages[sessionId]);
   const pending = useSessionStore((state) => state.pendingQuestions[sessionId]);
@@ -29,7 +32,7 @@ export function QuestionDraftRecovery({ sessionId, composerOccupied, onContinue 
   }, [drafts, sessionId, messages]);
   const confirm = async (key: string) => {
     setChecking(key); setError("");
-    try { await confirmQuestionReceipt(key); }
+    try { await confirmQuestionReceipt(key, onAcceptedInput); }
     catch (failure) { setError(failure instanceof Error ? failure.message : "Original receipt is still unknown."); }
     finally { setChecking(null); }
   };
@@ -45,7 +48,7 @@ export function QuestionDraftRecovery({ sessionId, composerOccupied, onContinue 
         {draft.transmission?.attachments?.map((attachment) => <p key={attachment.uid}>{attachment.file.name}</p>)}
       </details>
       <Button size="sm" variant="outline" disabled={composerOccupied || !closed?.[draft.question.question_id] ||
-        draft.transmission?.state === "unknown" || draft.transmission?.state === "pending"}
+        draft.transmission?.state === "unknown" || draft.transmission?.state === "pending" || draft.transmission?.state === "readonly"}
         onClick={() => onContinue(key, draft.transmission?.content ?? questionDraftText(draft), draft.transmission?.attachments ?? [])}>Continue as new message</Button>
       <Button size="sm" variant="outline" disabled={checking === key}
         onClick={() => void confirm(key)}>{checking === key ? "Checking…" : "Check original receipt"}</Button>

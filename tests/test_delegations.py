@@ -29,11 +29,13 @@ import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
+import aiosqlite
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from server.agent_manager import AgentManager
 from server.database import Database
+from server.db.transaction import Transaction
 from server.delegations import (
     DEPTH_CAP,
     DelegationError,
@@ -63,8 +65,9 @@ def models():
 
 
 @pytest.fixture
-async def db(tmp_path):
-    d = Database(":memory:")
+async def db(tmp_path, request):
+    filename = getattr(request, "param", None)
+    d = Database(str(tmp_path / filename) if filename else ":memory:")
     await d.initialize()
     await create_account(d, extra_roots=[tmp_path])
     yield d
@@ -596,7 +599,8 @@ async def test_start_delegation_rejects_self(models, dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cycle_rejected(models, dm, mgr, db, monkeypatch):
+@pytest.mark.parametrize("archived", [False, True], ids=["live", "archived"])
+async def test_cycle_rejected(models, dm, mgr, db, monkeypatch, archived):
     """Octo → Vera → Octo is rejected at the cycle check."""
     monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
@@ -613,6 +617,9 @@ async def test_cycle_rejected(models, dm, mgr, db, monkeypatch):
         parent_session_id=octo_sess.id,
         delegation_request="r",
     )
+    if archived:
+        await db.update_session_field(octo_sess.id, archived=True)
+        mgr.sessions.pop(octo_sess.id)
     # Now Vera tries to ask Octo — cycle.
     with pytest.raises(DelegationError) as excinfo:
         await dm.start_delegation(
@@ -622,6 +629,7 @@ async def test_cycle_rejected(models, dm, mgr, db, monkeypatch):
         )
     assert excinfo.value.status_code == 409
     assert "Cycle" in str(excinfo.value)
+    assert not models.requests
 
 
 @pytest.mark.asyncio
@@ -691,6 +699,99 @@ async def test_chain_walk_falls_back_to_db_for_archived_ancestor(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("archived", "db"), [
+    (False, None), (True, None), (True, "delegation-ancestors.db"),
+], indirect=["db"], ids=["live", "archived", "archived-during-delete"])
+async def test_ancestor_walk_reads_only_original_chain(
+    models, dm, mgr, db, monkeypatch, archived, tmp_path,
+):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
+    root_agent = await db.get_system_agent()
+    caller_agent = await _make_agent(db, "Caller")
+    middle_agent = await _make_agent(db, "Middle")
+    await _make_agent(db, "Reviewer")
+    root = await _make_session(mgr, root_agent["id"], name="Root")
+    middle = await _make_session(
+        mgr, middle_agent["id"], name="Middle", origin="delegation", parent_session_id=root.id,
+    )
+    caller = await _make_session(
+        mgr, caller_agent["id"], name="Caller", origin="delegation", parent_session_id=middle.id,
+    )
+    if archived:
+        for ancestor in (root, middle):
+            await db.update_session_field(ancestor.id, archived=True)
+            mgr.sessions.pop(ancestor.id)
+    writer_path = tmp_path / "delegation-ancestors.db"
+    deleted_during_walk = False
+    projection = "SELECT id, agent_id, user_id, origin, parent_session_id FROM sessions"
+    fetched_ids: list[list[str]] = []
+    fetch_all = Transaction.fetch_all
+
+    async def observe_ancestor_read(tx, sql, parameters=()):
+        nonlocal deleted_during_walk
+        rows = await fetch_all(tx, sql, parameters)
+        if sql.startswith(projection):
+            fetched_ids.append([row[0] for row in rows])
+            if parameters == (middle.id,) and writer_path.exists():
+                async with aiosqlite.connect(writer_path) as writer:
+                    await writer.execute("PRAGMA foreign_keys = ON")
+                    await writer.execute("DELETE FROM sessions WHERE id = ?", (root.id,))
+                    await writer.commit()
+                deleted_during_walk = True
+        return rows
+
+    monkeypatch.setattr(Transaction, "fetch_all", observe_ancestor_read)
+    for index in range(40):
+        await db.save_session(
+            f"unrelated-{index}", "Unrelated history", root.working_dir,
+            "2026-11-18T00:00:00+00:00", agent_id=root_agent["id"], user_id=root.user_id,
+            delegation_request="Unrelated body " * 2048,
+        )
+    statements: list[str] = []
+    await db.conn.set_trace_callback(statements.append)
+    try:
+        record = await dm.start_delegation(
+            parent_session_id=caller.id, agent_name="Reviewer", request="Review this work",
+        )
+    finally:
+        await db.conn.set_trace_callback(None)
+    assert record.state == "running"
+    assert record.parent_session_id == caller.id
+    ancestor_reads = [
+        sql for sql in statements if sql.startswith("SELECT") and " FROM sessions" in sql and "parent_session_id" in sql
+    ]
+    assert len(ancestor_reads) == (2 if archived else 0), ancestor_reads
+    if archived:
+        assert all(sql.startswith(projection + " WHERE ") for sql in ancestor_reads)
+        assert fetched_ids == [[middle.id], [root.id]]
+    else:
+        assert fetched_ids == []
+    if writer_path.exists():
+        assert deleted_during_walk
+        assert await db.get_session_binding(root.id) is None
+
+
+@pytest.mark.parametrize("archived", [False, True])
+async def test_chain_walk_rejects_foreign_ancestor(models, dm, mgr, db, monkeypatch, archived):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
+    own_agent = await db.get_system_agent()
+    await _make_agent(db, "Reviewer")
+    outsider, _ = await create_account(db, username="foreign-ancestor")
+    outside_agent = await AgentManager(db).create_agent(name="Foreign root", user_id=outsider["id"])
+    foreign = await _make_session(mgr, outside_agent["id"], name="Foreign root")
+    if archived:
+        await db.update_session_field(foreign.id, archived=True)
+        mgr.sessions.pop(foreign.id)
+    caller = await _make_session(
+        mgr, own_agent["id"], name="Caller", origin="delegation", parent_session_id=foreign.id,
+    )
+    with pytest.raises(DelegationError, match="crosses account ownership") as error:
+        await dm.start_delegation(parent_session_id=caller.id, agent_name="Reviewer", request="Review this work")
+    assert error.value.status_code == 409
+    assert not models.requests
+
+
+@pytest.mark.asyncio
 async def test_chain_walk_rejects_truly_missing_ancestor(
     models, dm, mgr, db, monkeypatch
 ):
@@ -719,7 +820,8 @@ async def test_chain_walk_rejects_truly_missing_ancestor(
 
 
 @pytest.mark.asyncio
-async def test_depth_cap_rejected(models, dm, mgr, db, monkeypatch):
+@pytest.mark.parametrize("archived", [False, True])
+async def test_depth_cap_rejected(models, dm, mgr, db, monkeypatch, archived):
     """A 4th delegation hop is rejected (DEPTH_CAP=3)."""
     monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
@@ -741,6 +843,10 @@ async def test_depth_cap_rejected(models, dm, mgr, db, monkeypatch):
         agent_id=c["id"], name="c", working_dir=None,
         origin="delegation", parent_session_id=s_b.id, delegation_request="r",
     )
+    if archived:
+        for ancestor in (root, s_a, s_b):
+            await db.update_session_field(ancestor.id, archived=True)
+            mgr.sessions.pop(ancestor.id)
     # Chain so far: 3 delegation hops (A, B, C). Adding D would make 4.
     with pytest.raises(DelegationError) as excinfo:
         await dm.start_delegation(

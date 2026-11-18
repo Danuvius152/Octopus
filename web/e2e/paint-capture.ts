@@ -1,11 +1,11 @@
-import type { Page, TestInfo } from "@playwright/test";
+import type { CDPSession, Page, TestInfo } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 
 export interface PaintFrame { file: string; timestamp: number }
 
 /** Keep frame acknowledgements and files inside the private CDP session's life. */
 export async function capturePaint(page: Page, info: TestInfo,
-  run: (frames: PaintFrame[], onCleanup: (release: () => unknown) => void) => Promise<void>) {
+  run: (frames: PaintFrame[], onCleanup: (release: () => unknown) => void, session: CDPSession) => Promise<void>) {
   const session = await page.context().newCDPSession(page);
   const frames: PaintFrame[] = [];
   const pending: Promise<void>[] = [];
@@ -30,7 +30,7 @@ export async function capturePaint(page: Page, info: TestInfo,
     await mkdir(info.outputPath("paint-frames"), { recursive: true });
     session.on("Page.screencastFrame", recordFrame);
     await session.send("Page.startScreencast", { format: "jpeg", quality: 90, maxWidth: 1280, maxHeight: 900, everyNthFrame: 1 });
-    await run(frames, (release) => { cleanup.push(release); });
+    await run(frames, (release) => { cleanup.push(release); }, session);
   } catch (error) {
     failures.push(error);
   } finally {

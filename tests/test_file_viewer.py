@@ -392,6 +392,8 @@ async def _patch_showme(monkeypatch):
         captured["reasoning_effort"] = ctx.reasoning_effort
         captured["service_tier"] = ctx.service_tier
         captured["working_dir"] = ctx.working_dir
+        captured["prompt"] = ctx.prompt
+        captured["calls"] = captured.get("calls", 0) + 1
         return '{"path":"answer.md"}'
 
     from server.harness import get_harness
@@ -431,13 +433,105 @@ async def test_showme_exact_path_does_not_require_model_authentication(client, s
     async def forbidden_oneshot(*args, **kwargs):
         pytest.fail("An exact local path must not invoke a model")
 
+    history_reads = []
+    load_messages = session_manager.db.load_messages
+
+    async def observe_history(*args, **kwargs):
+        rows = await load_messages(*args, **kwargs)
+        history_reads.append(rows)
+        return rows
+
+    monkeypatch.setattr(session_manager.db, "load_messages", observe_history)
     monkeypatch.setattr("server.harness.Harness.run_oneshot", forbidden_oneshot)
     direct = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": "plan.md"})
     assert direct.status_code == 200, direct.text
     assert direct.json()["path"] == "plan.md"
+    assert history_reads == []
     inferred = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": "the proposed plan"})
     assert inferred.status_code == 422
     assert "unavailable" in inferred.json()["detail"]
+    assert len(history_reads) == 1
+
+
+async def test_showme_inference_reads_last_twelve_total_rows_before_filtering(
+    client, session_with_files, monkeypatch,
+):
+    sid, _ = session_with_files
+    db = session_manager.db
+    for seq in range(1, 53):
+        await db.append_message(sid, seq, "user", "text", f"OLD CONTEXT {seq}")
+    recent = [
+        {"role": "user", "type": "text", "content": "recent user first"},
+        {"role": "system", "type": "notice", "content": "ignored notice"},
+        {"role": "assistant", "type": "text", "content": "recent assistant"},
+        {"role": "assistant", "type": "tool_use", "tool_name": "Read",
+         "tool_input": {"path": "sub/note.txt"}},
+        {"role": "user", "type": "tool_result", "content": "ignored tool result"},
+        {"role": "assistant", "type": "result", "content": "ignored terminal"},
+        {"role": "user", "type": "text", "content": {"value": "ignored object"}},
+        {"role": "system", "type": "text", "content": "ignored system text"},
+        {"role": "assistant", "type": "thinking", "content": "ignored thinking"},
+        {"role": "assistant", "type": "tool_use", "tool_name": "Bash",
+         "tool_input": {"command": "ignored command"}},
+        {"role": "user", "type": "text", "content": "recent user last"},
+        {"role": "assistant", "type": "text", "content": "recent assistant last"},
+    ]
+    for seq, row in enumerate(recent, 53):
+        await db.append_message(sid, seq, **row)
+    loaded = []
+    load_messages = db.load_messages
+
+    async def observe_history(*args, **kwargs):
+        rows = await load_messages(*args, **kwargs)
+        loaded.append([row["seq"] for row in rows])
+        return rows
+
+    monkeypatch.setattr(db, "load_messages", observe_history)
+    captured = await _patch_showme(monkeypatch)
+    response = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": "the proposed plan"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"path": "answer.md", "message": None}
+    assert loaded == [list(range(53, 65))]
+    assert captured["calls"] == 1
+    prompt = captured["prompt"]
+    assert "OLD CONTEXT" not in prompt
+    assert "ignored" not in prompt
+    assert prompt.index("User: recent user first") < prompt.index("Assistant: recent assistant")
+    assert prompt.index("Assistant used Read with path='sub/note.txt'") < prompt.index("User: recent user last")
+    assert prompt.index("User: recent user last") < prompt.index("Assistant: recent assistant last")
+
+
+@pytest.mark.parametrize("reference", ["../outside.md", "escape-link.md", "missing.md"])
+async def test_showme_unsafe_or_missing_path_still_uses_inference(
+    client, session_with_files, monkeypatch, reference,
+):
+    sid, root = session_with_files
+    (root / "escape-link.md").symlink_to(root.parent / "outside.md")
+    captured = await _patch_showme(monkeypatch)
+    response = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": reference})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"path": "answer.md", "message": None}
+    assert captured["calls"] == 1
+    assert "(none — this is the first interaction)" in captured["prompt"]
+    viewed = await client.get(f"/api/sessions/{sid}/files", params={"path": reference})
+    assert viewed.status_code == (404 if reference == "missing.md" else 403)
+
+
+async def test_showme_exact_path_keeps_original_account_gate(client, session_with_files, monkeypatch):
+    sid, _ = session_with_files
+    _, other_bearer = await create_account(session_manager.db, username="viewer-other")
+
+    async def forbidden_read(*args, **kwargs):
+        pytest.fail("A foreign session must not read history or invoke a model")
+
+    monkeypatch.setattr(session_manager.db, "load_messages", forbidden_read)
+    monkeypatch.setattr("server.harness.Harness.run_oneshot", forbidden_read)
+    response = await client.post(
+        f"/api/sessions/{sid}/showme/resolve", json={"text": "plan.md"},
+        headers={"Authorization": f"Bearer {other_bearer}"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Session not found"
 
 
 @pytest.mark.parametrize("override, expected", [(None, "fast"), ("default", "default"), ("fast", "fast")])

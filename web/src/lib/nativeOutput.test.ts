@@ -36,7 +36,7 @@ test("a tool-only historical window exposes a saved child reference without inve
   expect(nativeDetailAnchor(messages, card)).toBe(40);
 });
 
-beforeEach(() => useSessionStore.setState({ messages: {}, streamingText: {}, streamingTextAttempt: {}, streamingItems: {}, lastAppliedSeq: {}, activeAttempts: {} }));
+beforeEach(() => useSessionStore.setState({ messages: {}, streamingText: {}, streamingItems: {}, lastAppliedSeq: {}, activeAttempts: {} }));
 
 test("a completed native item stays closed while other root and child items keep streaming", () => {
   handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "r", attempt_id: "a" });
@@ -55,7 +55,7 @@ test("a completed native item stays closed while other root and child items keep
 });
 
 test("identified deltas need an observed attempt while identity-free legacy streaming retains its rules", () => {
-  useSessionStore.setState({ activeAttempts: {}, streamingTextAttempt: {} });
+  useSessionStore.setState({ activeAttempts: {} });
   handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Unobserved native attempt", runtime_metadata: identity("root") });
   expect(Object.values(useSessionStore.getState().streamingItems.s || {})).toEqual([]);
   useSessionStore.getState().setActiveAttempt("s", { request_id: "r", attempt_id: "a" });
@@ -64,7 +64,7 @@ test("identified deltas need an observed attempt while identity-free legacy stre
   handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Stale append", runtime_metadata: identity("root") });
   expect(Object.values(useSessionStore.getState().streamingItems.s || {}).map((item) => item.content)).toEqual(["Observed partial"]);
   handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Legacy partial" });
-  expect(useSessionStore.getState().streamingText.s).toBe("Legacy partial");
+  expect(useSessionStore.getState().streamingText.s?.content).toBe("Legacy partial");
   handleWsMessage({ type: "assistant_text", session_id: "s", seq: 1, content: "Legacy complete" });
   expect(useSessionStore.getState().streamingText.s).toBeUndefined();
   expect(useSessionStore.getState().messages.s[0].content).toBe("Legacy complete");

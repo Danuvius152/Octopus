@@ -1,9 +1,10 @@
 import { deferred } from "../test-support/deferred";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { useSessionStore, type BgTask, type SubagentRun, type SessionInfo } from "../stores/sessionStore";
+import { captureStreamingRead, observeAcceptedText, useSessionStore, type BgTask, type SubagentRun, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { applySessionSnapshot, hydrateSession, loadBgTaskSnapshot, loadResearchSnapshot, loadSessionSnapshots, loadSessionSnapshot, observeSession, observeSessionAuxiliary } from "./hydrateSession";
 import { selectSession } from "./selectSession";
+import { nativeItemKey } from "./nativeOutput";
 
 // Real session details always distinguish a missing attempt from explicit null.
 const json = (value: unknown) => new Response(JSON.stringify(
@@ -17,11 +18,196 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
+it("preserves only saturated streams that received text during a higher-watermark detail read", async () => {
+  const attempt = { request_id: "r", attempt_id: "a" };
+  const dispatchState = { ...dispatch("stream-service"), active_request_id: "r", active_operation: "message" as const };
+  useSessionStore.getState().applyDispatchState("s", dispatchState);
+  handleWsMessage({ type: "attempt_started", session_id: "s", ...attempt });
+  const item = (item_id: string) => ({ ...attempt, native: { thread_id: "root", root_thread_id: "root",
+    turn_id: "turn", root_turn_id: "turn", item_id } });
+  const a = item("a"), b = item("b");
+  const send = (content: string, runtime_metadata = attempt) =>
+    handleWsMessage({ type: "assistant_delta", session_id: "s", content, runtime_metadata });
+  const large = "x".repeat(70 * 1024);
+  for (const metadata of [attempt, a, b]) send(large, metadata);
+  const preview = useSessionStore.getState();
+  const first = deferred<Response>(), second = deferred<Response>();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise));
+  const reply = (seq: number, messages: unknown[]) => json({ id: "s", messages, next_message_seq: seq + 1,
+    oldest_loaded_seq: seq, dispatch_state: dispatchState, active_attempt: attempt });
+  const reading = loadSessionSnapshot("s");
+  send("root arrived");
+  send("item a arrived", a);
+  first.resolve(reply(5, [{ role: "user", type: "text", seq: 5, content: "Saved question" }]));
+  await reading;
+  const merged = useSessionStore.getState();
+  expect(merged.lastAppliedSeq.s).toBe(5);
+  expect(merged.streamingText.s).toBe(preview.streamingText.s);
+  expect(Object.keys(merged.streamingItems.s)).toEqual([nativeItemKey(a)]);
+  expect(merged.streamingItems.s[nativeItemKey(a)!]).toBe(preview.streamingItems.s[nativeItemKey(a)!]);
+
+  const completing = loadSessionSnapshot("s");
+  send("another root arrival");
+  send("another item a arrival", a);
+  second.resolve(reply(6, [{ role: "assistant", type: "text", seq: 6, content: "Saved preview",
+    body_state: "preview", detail_ref: "saved-a", runtime_metadata: a }]));
+  await completing;
+  expect(useSessionStore.getState().streamingText.s).toBe(preview.streamingText.s);
+  expect(useSessionStore.getState().streamingItems.s ?? {}).toEqual({});
+  expect(useSessionStore.getState().messages.s.find((row) => row.seq === 6)).toMatchObject({
+    content: "Saved preview", body_state: "preview",
+  });
+});
+
+it("retires both saturated previews when detail confirms a replacement at the same watermark", async () => {
+  const first = { request_id: "r", attempt_id: "first" };
+  const second = { ...first, attempt_id: "second" };
+  const dispatchState = { ...dispatch("stream-service"), active_request_id: "r", active_operation: "message" as const };
+  useSessionStore.getState().applyDispatchState("s", dispatchState);
+  handleWsMessage({ type: "attempt_started", session_id: "s", ...first });
+  handleWsMessage({ type: "user_message", session_id: "s", seq: 5, content: "Saved question" });
+  const native = { thread_id: "root", root_thread_id: "root", turn_id: "turn", root_turn_id: "turn", item_id: "item" };
+  const send = (content: string, runtime_metadata?: typeof first & { native?: typeof native }) =>
+    handleWsMessage({ type: "assistant_delta", session_id: "s", content, runtime_metadata });
+  send("x".repeat(70 * 1024), first);
+  send("x".repeat(17 * 1024), { ...first, native });
+  const original = useSessionStore.getState();
+  let reported = first;
+  vi.stubGlobal("fetch", vi.fn(async () => json({ id: "s", messages: [{ role: "user", type: "text", seq: 5,
+    content: "Saved question" }], next_message_seq: 6, oldest_loaded_seq: 5, dispatch_state: dispatchState, active_attempt: reported })));
+  await loadSessionSnapshot("s");
+  expect(useSessionStore.getState().streamingText.s).toBe(original.streamingText.s);
+  expect(Object.values(useSessionStore.getState().streamingItems.s)[0]).toBe(Object.values(original.streamingItems.s)[0]);
+
+  reported = second;
+  const retired = vi.fn();
+  const release = useSessionStore.subscribe((state) => {
+    if (state.activeAttempts.s?.attempt_id === second.attempt_id) {
+      retired(state.streamingText.s, Object.keys(state.streamingItems.s ?? {}));
+    }
+  });
+  try { await loadSessionSnapshot("s"); }
+  finally { release(); }
+  expect(retired).toHaveBeenCalled();
+  expect(retired.mock.calls.every(([root, items]) => root === undefined && items.length === 0)).toBe(true);
+  expect(useSessionStore.getState().activeAttempts.s).toEqual(second);
+  expect(useSessionStore.getState().streamingText.s).toBeUndefined();
+  expect(Object.values(useSessionStore.getState().streamingItems.s ?? {})).toEqual([]);
+  send("New attempt", second);
+  send("New native item", { ...second, native });
+  handleWsMessage({ type: "attempt_started", session_id: "s", ...second });
+  send("Late attempt", first);
+  handleWsMessage({ type: "result", session_id: "s", seq: 6, ...first, content: "Old attempt result" });
+  send(" without identity");
+  expect(useSessionStore.getState().streamingText.s).toEqual({ content: "New attempt without identity", attempt: second });
+  expect(Object.values(useSessionStore.getState().streamingItems.s).map((item) => item.content)).toEqual(["New native item"]);
+});
+
+it("retires ownerless legacy text at the WS start after detail has already confirmed that attempt", async () => {
+  const attempt = { request_id: "r", attempt_id: "b" };
+  const dispatchState = { ...dispatch("stream-service"), active_request_id: "r", active_operation: "message" as const };
+  useSessionStore.getState().applyDispatchState("s", dispatchState);
+  handleWsMessage({ type: "user_message", session_id: "s", seq: 5, content: "Saved question" });
+  handleWsMessage({ type: "assistant_delta", session_id: "s", content: "Legacy partial" });
+  vi.stubGlobal("fetch", vi.fn(async () => json({ id: "s", messages: [{ role: "user", type: "text", seq: 5,
+    content: "Saved question" }], next_message_seq: 6, oldest_loaded_seq: 5, dispatch_state: dispatchState, active_attempt: attempt })));
+  await loadSessionSnapshot("s");
+  expect(useSessionStore.getState().activeAttempts.s).toEqual(attempt);
+  expect(useSessionStore.getState().streamingText.s).toEqual({ content: "Legacy partial" });
+  const metadata = { ...attempt, native: {
+    thread_id: "root", root_thread_id: "root", turn_id: "turn", root_turn_id: "turn", item_id: "item",
+  } };
+  handleWsMessage({ type: "assistant_delta", session_id: "s", content: "New item", runtime_metadata: metadata });
+  const partial = useSessionStore.getState().streamingItems.s;
+  const observe = vi.fn((state: ReturnType<typeof useSessionStore.getState>) => state.streamingText.s);
+  const release = useSessionStore.subscribe(observe);
+  try { handleWsMessage({ type: "attempt_started", session_id: "s", ...attempt }); }
+  finally { release(); }
+  expect(observe.mock.results.map((result) => result.value)).toEqual([undefined]);
+  expect(useSessionStore.getState().streamingText.s).toBeUndefined();
+  expect(useSessionStore.getState().streamingItems.s).toBe(partial);
+});
+
+it("retains a changed native item across delayed detail decoding without announcing empty text", async () => {
+  const attempt = { request_id: "r", attempt_id: "a" };
+  const dispatchState = { ...dispatch("stream-service"), active_request_id: "r", active_operation: "message" as const };
+  const store = useSessionStore.getState();
+  store.applyDispatchState("s", dispatchState);
+  handleWsMessage({ type: "attempt_started", session_id: "s", ...attempt });
+  const item = (item_id: string) => ({ ...attempt, native: { thread_id: "root", root_thread_id: "root",
+    turn_id: "turn", root_turn_id: "turn", item_id } });
+  const changed = item("changed"), equal = item("equal"), earliest = item("earliest");
+  const send = (content: string, runtime_metadata: typeof changed & { tool_call_id?: string }) =>
+    handleWsMessage({ type: "assistant_delta", session_id: "s", content, runtime_metadata });
+  const large = "x".repeat(17 * 1024);
+  for (const metadata of [earliest, changed, equal]) send(large, metadata);
+  const before = useSessionStore.getState();
+  const body = deferred<unknown>();
+  const decoding = deferred<void>();
+  const response = new Response();
+  vi.spyOn(response, "json").mockImplementation(() => { decoding.resolve(); return body.promise; });
+  vi.stubGlobal("fetch", vi.fn(async () => response));
+  const read = loadSessionSnapshot("s");
+  await decoding.promise;
+  const heard = vi.fn();
+  const release = observeAcceptedText("s", store.accountGeneration, heard);
+  try {
+    send("", { ...equal, native: { ...equal.native } });
+    expect(useSessionStore.getState()).toBe(before);
+    const updated = { ...changed, tool_call_id: "m".repeat(216 * 1024) };
+    send("", updated);
+    const items = useSessionStore.getState().streamingItems.s;
+    expect(Object.keys(items)).toEqual([nativeItemKey(changed), nativeItemKey(equal)]);
+    expect(new TextEncoder().encode(JSON.stringify(items)).length).toBeLessThanOrEqual(256 * 1024);
+    const changedPreview = items[nativeItemKey(changed)!];
+    expect(changedPreview.content).toBe(before.streamingItems.s[nativeItemKey(changed)!].content);
+    expect(changedPreview.runtime_metadata).toBe(updated);
+    expect(heard).not.toHaveBeenCalled();
+    body.resolve({ id: "s", messages: [{ role: "user", type: "text", seq: 5, content: "Saved question" }],
+      next_message_seq: 6, oldest_loaded_seq: 5, dispatch_state: dispatchState, active_attempt: attempt });
+    await read;
+    const merged = useSessionStore.getState().streamingItems.s;
+    expect(Object.keys(merged)).toEqual([nativeItemKey(changed)]);
+    expect(merged[nativeItemKey(changed)!]).toBe(changedPreview);
+  } finally { release(); }
+});
+
+it("distinguishes an evicted native preview rebuilt with the same key and content during a detail read", async () => {
+  const attempt = { request_id: "r", attempt_id: "a" };
+  const dispatchState = { ...dispatch("stream-service"), active_request_id: "r", active_operation: "message" as const };
+  useSessionStore.getState().applyDispatchState("s", dispatchState);
+  handleWsMessage({ type: "attempt_started", session_id: "s", ...attempt });
+  const metadata = (item_id: string) => ({ ...attempt, native: { thread_id: "root", root_thread_id: "root",
+    turn_id: "turn", root_turn_id: "turn", item_id } });
+  const send = (id: string) => handleWsMessage({ type: "assistant_delta", session_id: "s", content: "partial",
+    runtime_metadata: metadata(id) });
+  const key = nativeItemKey(metadata("original"))!;
+  send("original");
+  const original = useSessionStore.getState().streamingItems.s[key];
+  const response = deferred<Response>();
+  vi.stubGlobal("fetch", vi.fn(() => response.promise));
+  const read = loadSessionSnapshot("s");
+  for (let i = 0; i < 32; i++) send(String(i));
+  expect(useSessionStore.getState().streamingItems.s[key]).toBeUndefined();
+  send("original");
+  const rebuilt = useSessionStore.getState().streamingItems.s[key];
+  expect(rebuilt).toEqual(original);
+  expect(rebuilt).not.toBe(original);
+  response.resolve(json({ id: "s", messages: [{ role: "user", type: "text", seq: 5, content: "Saved question" }],
+    next_message_seq: 6, oldest_loaded_seq: 5, dispatch_state: dispatchState, active_attempt: attempt }));
+  await read;
+  const merged = useSessionStore.getState().streamingItems.s;
+  expect(merged[key]).toBe(rebuilt);
+  expect(Object.keys(merged)).toHaveLength(32);
+  expect(merged[nativeItemKey(metadata("0"))!]).toBeUndefined();
+});
+
 it.each(["claude-code", "codex"].flatMap((backend) => [false, true].map((newAttempt) => ({ backend, newAttempt }))))(
   "an accepted terminal clears only its own $backend buffer (new attempt=$newAttempt)", ({ backend, newAttempt }) => {
     useSessionStore.getState().applyDispatchState("s", { ...dispatch("stream-service"), active_request_id: "request", active_operation: "message" });
     handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "request", attempt_id: "old" });
     const start = useSessionStore.getState();
+    const streamingBasis = captureStreamingRead("s");
     if (newAttempt) handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "request", attempt_id: "new" });
     const identity = { request_id: "request", attempt_id: newAttempt ? "new" : "old",
       ...(backend === "codex" ? { native: { thread_id: "root", root_thread_id: "root", turn_id: "turn", root_turn_id: "turn", item_id: "item" } } : {}),
@@ -31,12 +217,12 @@ it.each(["claude-code", "codex"].flatMap((backend) => [false, true].map((newAtte
     const terminal = { role: "system", type: "result", seq: 11, content,
       tool_input: { attempt_context: { request_id: "request", attempt_id: "old" } } };
     expect(applySessionSnapshot("s", { id: "s", messages: [terminal], next_message_seq: 12, oldest_loaded_seq: 11,
-      dispatch_state: { ...dispatch("stream-service"), revision: 1 }, active_attempt: null }, start)).not.toBeNull();
+      dispatch_state: { ...dispatch("stream-service"), revision: 1 }, active_attempt: null }, start, false, streamingBasis)).not.toBeNull();
     handleWsMessage({ type: "result", session_id: "s", seq: 11, content, request_id: "request", attempt_id: "old" });
     handleWsMessage({ type: "assistant_delta", session_id: "s", content: " stale", runtime_metadata: { ...identity, attempt_id: "old" } });
     const state = useSessionStore.getState();
     const partial = backend === "codex" ? Object.values(state.streamingItems.s || {}).map((item) => item.content)
-      : state.streamingText.s ? [state.streamingText.s] : [];
+      : state.streamingText.s ? [state.streamingText.s.content] : [];
     expect(partial).toEqual(newAttempt ? ["Interrupted partial"] : []);
     expect(state.activeAttempts.s).toEqual(newAttempt ? { request_id: "request", attempt_id: "new" } : undefined);
     expect(state.messages.s.map((row) => row.seq)).toEqual([11]);

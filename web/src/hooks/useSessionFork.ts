@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { accountFetch } from "../lib/accountFetch";
 import { isSessionBusy } from "../lib/deferredFork";
 import { sessions as sessionList } from "../lib/sessionList";
@@ -15,16 +15,11 @@ interface Operation {
 
 /** Own the reset receipt / deferred-fork ordering, never another task store. */
 export function useSessionFork() {
-  const pending = useSessionStore((s) => s.pendingForks);
-  const sessions = useSessionStore((s) => s.sessions);
-  const dispatch = useSessionStore((s) => s.dispatchStates);
-  const unavailable = useSessionStore((s) => s.dispatchUnavailable);
-  const questions = useSessionStore((s) => s.pendingQuestions);
   const operations = useRef(new Map<string, Operation>());
   const resets = useRef(new Set<{ sessionId: string }>());
   const mounted = useRef(true);
   const observers = useRef(new Set<() => void>());
-  const [tick, wake] = useState(0);
+  const processPending = useRef<(() => void) | null>(null);
 
   const clearIntent = useCallback((sid: string, intent: Intent) => {
     if (useSessionStore.getState().pendingForks[sid] === intent)
@@ -81,7 +76,7 @@ export function useSessionFork() {
       if (state.accountGeneration !== start.accountGeneration || state.dispatchGeneration !== start.dispatchGeneration ||
           state.activeSessionId !== sid || state.mainView !== start.mainView) {
         current = false;
-        if (resets.current.delete(marker) && mounted.current) wake((n) => n + 1);
+        if (resets.current.delete(marker) && mounted.current) processPending.current?.();
       }
     });
     const stop = () => { current = false; unsubscribe(); };
@@ -107,105 +102,124 @@ export function useSessionFork() {
       unsubscribe();
       observers.current.delete(stop);
       resets.current.delete(marker);
-      if (mounted.current) wake((n) => n + 1);
+      if (mounted.current) processPending.current?.();
     }
   }, [cancelFork]);
 
   useEffect(() => {
-    for (const [sid, operation] of operations.current) {
-      if (!operation.posting && pending[sid] !== operation.intent) {
-        if (operation.timer !== undefined) clearTimeout(operation.timer);
-        operations.current.delete(sid);
+    // Fork eligibility is account business work, not current-chat rendering.
+    // Observe all original intents without committing another session's view.
+    const process = () => {
+      if (!mounted.current) return;
+      const state = useSessionStore.getState();
+      const { pendingForks: pending, sessions, dispatchStates: dispatch,
+        dispatchUnavailable: unavailable, pendingQuestions: questions } = state;
+      for (const [sid, operation] of operations.current) {
+        if (!operation.posting && pending[sid] !== operation.intent) {
+          if (operation.timer !== undefined) clearTimeout(operation.timer);
+          operations.current.delete(sid);
+        }
       }
-    }
-    for (const [sid, intent] of Object.entries(pending)) {
-      if (useSessionStore.getState().pendingForks[sid] !== intent) continue;
-      if ([...resets.current].some((marker) => marker.sessionId === sid)) continue;
-      let operation = operations.current.get(sid);
-      if (operation?.posting || operation?.timer !== undefined) continue;
-      const session = sessions.find((s) => s.id === sid);
-      if (!session) { clearIntent(sid, intent); continue; }
-      const queue = dispatch[sid];
-      if (!queue || unavailable[sid] || isSessionBusy(session.status, queue.items.length,
-          questions[sid]?.length ?? 0, queue.paused)) continue;
-      operation ??= { intent, posting: false, retries: 0 };
-      operation.posting = true;
-      operations.current.set(sid, operation);
-      const original = operation;
-      const release = () => {
-        if (operations.current.get(sid) === original) operations.current.delete(sid);
-      };
-      const start = useSessionStore.getState();
-      const lifetime = sessionList.observe(sid, start);
-      let observing = true;
-      const current = () => observing && mounted.current && sessionList.current(lifetime.observation);
-      const ownsIntent = () => current() && useSessionStore.getState().pendingForks[sid] === intent;
-      let foreground = start.activeSessionId === sid && start.mainView === "chat";
-      const unsubscribe = useSessionStore.subscribe((state) => {
-        if (state.activeSessionId !== sid || state.mainView !== start.mainView) foreground = false;
-      });
-      const finish = () => { unsubscribe(); lifetime.finish(); };
-      const stop = () => { observing = false; finish(); };
-      observers.current.add(stop);
-      const notice = (content: string, isError = false) => {
-        if (current()) useSessionStore.getState().addMessage(sid, { role: "system", type: "notice", content, is_error: isError });
-      };
-      void (async () => {
-        let retry = false;
-        try {
-          const response = await accountFetch(`${window.location.origin}/api/sessions/${sid}/duplicate`, {
-            method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${start.token}` },
-            body: JSON.stringify({ label: intent.label ?? undefined }),
-          });
-          if (!response.ok) {
-            const body = await response.json().catch(() => null);
-            const detail = body?.detail;
-            if (!ownsIntent()) return;
-            if (response.status === 409 && detail?.reason === "fork_blocked_parent_turn_active") {
-              retry = true;
+      for (const [sid, intent] of Object.entries(pending)) {
+        if (useSessionStore.getState().pendingForks[sid] !== intent) continue;
+        if ([...resets.current].some((marker) => marker.sessionId === sid)) continue;
+        let operation = operations.current.get(sid);
+        if (operation?.posting || operation?.timer !== undefined) continue;
+        const session = sessions.find((s) => s.id === sid);
+        if (!session) { clearIntent(sid, intent); continue; }
+        const queue = dispatch[sid];
+        if (!queue || unavailable[sid] || isSessionBusy(session.status, queue.items.length,
+            questions[sid]?.length ?? 0, queue.paused)) continue;
+        operation ??= { intent, posting: false, retries: 0 };
+        operation.posting = true;
+        operations.current.set(sid, operation);
+        const original = operation;
+        const release = () => {
+          if (operations.current.get(sid) === original) operations.current.delete(sid);
+        };
+        const start = useSessionStore.getState();
+        const lifetime = sessionList.observe(sid, start);
+        let observing = true;
+        const current = () => observing && mounted.current && sessionList.current(lifetime.observation);
+        const ownsIntent = () => current() && useSessionStore.getState().pendingForks[sid] === intent;
+        let foreground = start.activeSessionId === sid && start.mainView === "chat";
+        const unsubscribe = useSessionStore.subscribe((state) => {
+          if (state.activeSessionId !== sid || state.mainView !== start.mainView) foreground = false;
+        });
+        const finish = () => { unsubscribe(); lifetime.finish(); };
+        const stop = () => { observing = false; finish(); };
+        observers.current.add(stop);
+        const notice = (content: string, isError = false) => {
+          if (current()) useSessionStore.getState().addMessage(sid, { role: "system", type: "notice", content, is_error: isError });
+        };
+        void (async () => {
+          let retry = false;
+          try {
+            const response = await accountFetch(`${window.location.origin}/api/sessions/${sid}/duplicate`, {
+              method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${start.token}` },
+              body: JSON.stringify({ label: intent.label ?? undefined }),
+            });
+            if (!response.ok) {
+              const body = await response.json().catch(() => null);
+              const detail = body?.detail;
+              if (!ownsIntent()) return;
+              if (response.status === 409 && detail?.reason === "fork_blocked_parent_turn_active") {
+                retry = true;
+                return;
+              }
+              notice(typeof detail === "string" ? detail : detail?.message || `Couldn't fork (HTTP ${response.status}).`, true);
               return;
             }
-            notice(typeof detail === "string" ? detail : detail?.message || `Couldn't fork (HTTP ${response.status}).`, true);
-            return;
-          }
-          const fork = await response.json();
-          if (!current()) return;
-          const completing = ownsIntent();
-          if (completing) clearIntent(sid, intent);
-          const accepted = await sessionList.created(fork, lifetime.observation);
-          if (!accepted || !current() || !completing || useSessionStore.getState().pendingForks[sid]) return;
-          if (foreground) await selectSession(fork.id, fork.agent_id);
-          else notice(`⑂ Fork ready — “${fork.name}”. Open it from the sidebar.`);
-        } catch {
-          if (ownsIntent()) notice("Couldn't fork — network error.", true);
-        } finally {
-          finish();
-          observers.current.delete(stop);
-          original.posting = false;
-          if (retry && ownsIntent()) {
-            original.retries++;
-            if (original.retries > 6) {
-              notice("Couldn't fork — the session stayed busy. Try /fork again.", true);
+            const fork = await response.json();
+            if (!current()) return;
+            const completing = ownsIntent();
+            if (completing) clearIntent(sid, intent);
+            const accepted = await sessionList.created(fork, lifetime.observation);
+            if (!accepted || !current() || !completing || useSessionStore.getState().pendingForks[sid]) return;
+            if (foreground) await selectSession(fork.id, fork.agent_id);
+            else notice(`⑂ Fork ready — “${fork.name}”. Open it from the sidebar.`);
+          } catch {
+            if (ownsIntent()) notice("Couldn't fork — network error.", true);
+          } finally {
+            finish();
+            observers.current.delete(stop);
+            original.posting = false;
+            if (retry && ownsIntent()) {
+              original.retries++;
+              if (original.retries > 6) {
+                notice("Couldn't fork — the session stayed busy. Try /fork again.", true);
+                clearIntent(sid, intent);
+                release();
+              } else {
+                original.timer = setTimeout(() => {
+                  original.timer = undefined;
+                  if (mounted.current) processPending.current?.();
+                }, Math.min(8000, 400 * 2 ** original.retries));
+              }
+            } else {
+              // Also retire observation after a scope change; an unconfirmed POST
+              // must never be replayed automatically. Reference equality preserves
+              // a replacement intent even if the account/service changed meanwhile.
               clearIntent(sid, intent);
               release();
-            } else {
-              original.timer = setTimeout(() => {
-                original.timer = undefined;
-                if (mounted.current) wake((n) => n + 1);
-              }, Math.min(8000, 400 * 2 ** original.retries));
             }
-          } else {
-            // Also retire observation after a scope change; an unconfirmed POST
-            // must never be replayed automatically. Reference equality preserves
-            // a replacement intent even if the account/service changed meanwhile.
-            clearIntent(sid, intent);
-            release();
+            if (mounted.current) processPending.current?.();
           }
-          if (mounted.current) wake((n) => n + 1);
-        }
-      })();
-    }
-  }, [pending, sessions, dispatch, unavailable, questions, tick, clearIntent]);
+        })();
+      }
+    };
+    processPending.current = process;
+    const unsubscribe = useSessionStore.subscribe((state, before) => {
+      if (state.pendingForks !== before.pendingForks || state.sessions !== before.sessions ||
+          state.dispatchStates !== before.dispatchStates || state.dispatchUnavailable !== before.dispatchUnavailable ||
+          state.pendingQuestions !== before.pendingQuestions) process();
+    });
+    process();
+    return () => {
+      unsubscribe();
+      if (processPending.current === process) processPending.current = null;
+    };
+  }, [clearIntent]);
 
   return { queueFork, cancelFork, reset };
 }

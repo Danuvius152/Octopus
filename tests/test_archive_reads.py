@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 
 from server.database import Database
 from server.deps import get_session_manager
+from server.routers.files import router as files_router
 from server.routers.sessions import router
 from server.sessions import SessionManager
 from tests.accounts import create_account
@@ -23,6 +24,7 @@ async def archives(tmp_path):
     await manager.initialize(database)
     app = FastAPI()
     app.include_router(router)
+    app.include_router(files_router)
     app.dependency_overrides[get_session_manager] = lambda: manager
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
@@ -38,6 +40,74 @@ def history_queries(statements):
     # projection are separate from reading archive rows and their messages.
     return [sql for sql in statements if "FROM auth_tokens" not in sql and "FROM agents a" not in sql
             and re.search(r"\b(?:FROM|JOIN)\s+(?:sessions|messages)\b", sql, re.I)]
+
+
+@pytest.mark.parametrize("operation", ["meta", "bytes"])
+async def test_archive_file_reads_only_owned_working_directory(archives, tmp_path, operation):
+    database, manager, client, owner, _ = archives
+    root = tmp_path / "archived-files"
+    root.mkdir()
+    (root / "note.md").write_text("# Original archive file\n", encoding="utf-8")
+    agent = await database.get_system_agent(owner)
+    target = await manager.create_session(agent["id"], "Archive with history", str(root))
+    for seq in range(300):
+        await database.append_message(target.id, seq, "assistant", "text", "Retained history " * 256)
+    await manager.archive_session(target.id, replace=False)
+    suffix = "/files/meta" if operation == "meta" else "/files"
+    statements = []
+    await database.conn.set_trace_callback(statements.append)
+    try:
+        response = await client.get(f"/api/sessions/{target.id}{suffix}", params={"path": "note.md"})
+        assert response.status_code == 200, response.text
+        if operation == "meta":
+            assert response.json()["path"] == "note.md"
+            assert response.json()["size"] == len(b"# Original archive file\n")
+        else:
+            assert response.text == "# Original archive file\n"
+        queries = history_queries(statements)
+        assert len(queries) == 1, "\n".join(queries)
+        assert "messages" not in queries[0].lower()
+        assert re.split(r"\bFROM\b", queries[0], flags=re.I)[0].strip().lower() == "select working_dir"
+        assert target.id in queries[0] and owner in queries[0]
+    finally:
+        await database.conn.set_trace_callback(None)
+
+
+@pytest.mark.parametrize("operation", ["meta", "bytes"])
+async def test_archive_file_binding_keeps_owner_archive_and_path_gates(archives, tmp_path, operation):
+    database, manager, client, owner, other = archives
+    root = tmp_path / "file-gates"
+    root.mkdir()
+    (root / "owned.md").write_text("Original owned file", encoding="utf-8")
+    (tmp_path / "outside.md").write_text("Outside this session", encoding="utf-8")
+    (root / "escape.md").symlink_to(tmp_path / "outside.md")
+    agent = await database.get_system_agent(owner)
+    foreign_agent = await database.get_system_agent(other)
+    archived = await manager.create_session(agent["id"], "Owned archive", str(root))
+    foreign = await manager.create_session(foreign_agent["id"], "Foreign archive", str(root))
+    stored_live = await manager.create_session(agent["id"], "Unregistered live row", str(root))
+    live = await manager.create_session(agent["id"], "Registered live", str(root))
+    await manager.archive_session(archived.id, replace=False)
+    await manager.archive_session(foreign.id, replace=False)
+    assert await database.get_archived_working_dir(archived.id, None) is None
+    # A persisted live row without a current in-memory Session is not an archive.
+    manager.sessions.pop(stored_live.id)
+    suffix = "/files/meta" if operation == "meta" else "/files"
+    for session_id in ("missing-archive", foreign.id, stored_live.id):
+        response = await client.get(f"/api/sessions/{session_id}{suffix}", params={"path": "owned.md"})
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Session not found"
+    for path, expected in (("../outside.md", 403), ("escape.md", 403), ("missing.md", 404)):
+        response = await client.get(f"/api/sessions/{archived.id}{suffix}", params={"path": path})
+        assert response.status_code == expected
+    statements = []
+    await database.conn.set_trace_callback(statements.append)
+    try:
+        response = await client.get(f"/api/sessions/{live.id}{suffix}", params={"path": "owned.md"})
+        assert response.status_code == 200, response.text
+        assert history_queries(statements) == []
+    finally:
+        await database.conn.set_trace_callback(None)
 
 
 async def test_archive_list_round_trips_do_not_grow_with_owned_history(archives, tmp_path):

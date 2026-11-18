@@ -13,7 +13,7 @@ import {
 import { reorderAgentPins, setAgentPinned } from "../api/agents";
 import { connectorInstallations } from "../lib/connectorInstallations";
 import { selectSession } from "../lib/selectSession";
-import { loadSessionSnapshot } from "../lib/hydrateSession";
+import { ArchiveDeadline, postArchive } from "../lib/sessionArchive";
 import { sidebarAgents } from "../lib/sidebarPins";
 import { knownAgentScope, refreshAgents, refreshKnownAgents, withAgentRequest } from "../lib/refreshAgents";
 import { sessions as sessionList } from "../lib/sessionList";
@@ -73,6 +73,9 @@ export function SidebarAgents() {
   const [formCredentialId, setFormCredentialId] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [archiveError, setArchiveError] = useState("");
+  const [archiveConfirmation, setArchiveConfirmation] = useState<{ run: () => Promise<void>; busy: boolean } | null>(null);
+  const archiveObservers = useRef(new Map<string, { stop: () => void; show: () => void }>());
+  const latestArchive = useRef<(() => void) | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const creation = useRef<symbol | null>(null);
@@ -82,11 +85,18 @@ export function SidebarAgents() {
   const headers = { Authorization: `Bearer ${token}` };
 
   useEffect(() => {
+    for (const { stop } of archiveObservers.current.values()) stop();
+    latestArchive.current = null;
+    setArchiveError(""); setArchiveConfirmation(null);
     creation.current = null;
     setCreating(false);
     setCreateError("");
     setFormAgentId(null);
   }, [token, accountGeneration]);
+  useEffect(() => {
+    const observers = archiveObservers.current;
+    return () => { for (const { stop } of observers.values()) stop(); };
+  }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -258,46 +268,82 @@ export function SidebarAgents() {
   // its place, and its history stays — the archived-sessions page restores it
   // (sidebar-pins.md §6). Nothing in the sidebar destroys anything.
   const archiveSession = async (id: string) => {
+    const existing = archiveObservers.current.get(id);
+    if (existing) { existing.show(); return; }
     const start = useSessionStore.getState();
-    const observation = sessionList.capture(start);
-    const current = () => {
-      const store = useSessionStore.getState();
-      return sessionList.current(observation) && store.token === start.token;
+    const tracked = sessionList.observe(id, start, "archive");
+    const { observation } = tracked;
+    const post = new ArchiveDeadline();
+    let confirmation: ArchiveDeadline | undefined;
+    let retired = false, retain = false, checking = false, archived = false;
+    let message = "";
+    const stop = () => {
+      retired = true;
+      if (!sessionList.accountCurrent(observation)) { post.finish(); confirmation?.finish(); }
+      tracked.finish();
+      if (archiveObservers.current.get(id)?.stop === stop) archiveObservers.current.delete(id);
     };
-    const finishArchived = () => {
+    latestArchive.current = stop;
+    const owns = () => !retired && sessionList.accountCurrent(observation);
+    const current = () => owns() && latestArchive.current === stop;
+    const feedback = (next: string, readAgain = false) => {
+      message = next;
+      retain = readAgain;
       if (!current()) return;
+      setArchiveError(message);
+      setArchiveConfirmation(readAgain ? { run: () => confirm(true), busy: checking } : null);
+    };
+    const finishArchived = (manual: boolean) => {
+      if (!owns()) return;
       const store = useSessionStore.getState();
       if (store.sessions.some((row) => row.id === id)) return;
-      if (store.activeSessionId === id) store.setActiveSessionId(null);
-      setArchiveError("");
+      if (current() && !manual && sessionList.current(observation) && store.activeSessionId === id) store.setActiveSessionId(null);
+      feedback("");
     };
-    setArchiveError("");
+    const confirm = async (manual: boolean) => {
+      if (checking || !sessionList.accountCurrent(observation) || manual && retired) return;
+      if (manual) confirmation?.finish();
+      confirmation = manual || !confirmation ? new ArchiveDeadline() : confirmation;
+      checking = true;
+      feedback(archived ? "Archive committed. Checking the session list." : "Archive result is unknown. Checking the session list; the command will not be sent again.", true);
+      const reading = manual ? sessionList.observe(id, useSessionStore.getState(), "archive") : tracked;
+      try {
+        const result = await sessionList.confirmArchive(id, reading.observation, confirmation);
+        if (!owns()) return;
+        if (result?.archived) { archived = true; finishArchived(manual); }
+        else feedback(archived ? "Archive committed. The session list could not be confirmed." :
+          "Archive result is still unknown. Confirm the original archive to check again; the command will not be sent again.", true);
+      } finally {
+        if (manual) reading.finish();
+        checking = false; confirmation.finish();
+        if (current()) setArchiveConfirmation((value) => value ? { ...value, busy: false } : null);
+        if (!retain || !owns()) stop();
+      }
+    };
+    archiveObservers.current.set(id, { stop, show: () => {
+      if (!owns()) return;
+      latestArchive.current = stop;
+      feedback(message, retain);
+    } });
+    feedback("");
     try {
-      const res = await fetch(`${API}/api/sessions/${id}/archive?replace=false`, {
-        method: "POST",
-        headers,
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        if (current()) setArchiveError(typeof body?.detail === "string" ? body.detail : `Could not archive session (HTTP ${res.status}).`);
+      const reply = await postArchive(id, start.token, false, post);
+      if (!sessionList.accountCurrent(observation)) return;
+      if (reply.state === "refused") {
+        feedback(reply.reason || `Could not archive session (HTTP ${reply.status}).`);
         return;
       }
-      sessionList.archive(id, observation);
-      finishArchived();
-    } catch (failure) {
-      if (!current()) return;
-      // The POST may have succeeded before its response was lost. Confirm the
-      // server's session state before changing the local list or selection.
-      try {
-        const detail = await loadSessionSnapshot(id);
-        if (detail?.archived === true) {
-          finishArchived();
-          return;
-        }
-      } catch {
-        // Retain the current selection when the outcome cannot be confirmed.
+      if (reply.state === "unknown") { await confirm(false); return; }
+      archived = true;
+      if (reply.result) {
+        sessionList.archive(id, observation, undefined, reply.result.new_session_id);
+        feedback(`Archive committed. ${reply.result.failure_stage.replaceAll("_", " ")} failed: ${reply.result.message}`);
+        return;
       }
-      if (current()) setArchiveError(failure instanceof Error ? failure.message : "Could not confirm session archival. Refresh and try again.");
+      if (sessionList.archive(id, observation, undefined, null)) finishArchived(false);
+      else await confirm(false);
+    } finally {
+      if (!retain || !owns()) stop();
     }
   };
 
@@ -597,7 +643,10 @@ export function SidebarAgents() {
           className: "btn-agent-add",
         }}
       />
-      {archiveError && <p role="alert" className="px-2 text-xs text-destructive">{archiveError}</p>}
+      {archiveError && <div role="alert" className="px-2 text-xs text-destructive"><p>{archiveError}</p>
+        {archiveConfirmation && <button className="underline" disabled={archiveConfirmation.busy}
+          onClick={() => void archiveConfirmation.run()}>Confirm original archive</button>}
+      </div>}
       {createError && <p role="alert" className="px-2 text-xs text-destructive">{createError}</p>}
       {sessionRead.error && <p role="alert" className="px-2 text-xs text-destructive">
         Sessions not synchronized: {sessionRead.error}

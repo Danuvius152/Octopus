@@ -204,10 +204,41 @@ async def test_live_native_question_replies_on_original_connection(live_product,
 
 async def test_live_unattended_native_question_preserves_partial_effect_and_stops_missing_decision(live_product, tmp_path, monkeypatch):
     from server.harness import codex_app_server
+    from server.harness.run import HarnessRun
 
     manager, database, session, _ = live_product
+    replies = []
+    write = HarnessRun.write_question
+
+    async def observe_reply(run, data, ref):
+        proc = run._process
+        writer = proc.stdin if proc is not None else None
+        if writer is None:
+            await write(run, data, ref)
+            return
+        pipe_write = writer.write
+
+        def observe_write(payload):
+            pipe_write(payload)
+            if payload is data:
+                replies.append((ref, json.loads(payload)))
+
+        with monkeypatch.context() as patch:
+            patch.setattr(writer, "write", observe_write)
+            await write(run, data, ref)
+
+    monkeypatch.setattr(HarnessRun, "write_question", observe_reply)
     monkeypatch.setitem(codex_app_server._REQUIRED_FEATURES, "features.default_mode_request_user_input", True)
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    # Exercise the installed native tool even when the general unattended
+    # guidance would lead a model to report the missing decision immediately.
+    await AgentManager(database).update_agent(session.agent_id, user_id=session.user_id, system_prompt=(
+        "This isolated agent runs a native request_user_input protocol check. "
+        "After the requested independent file write, call request_user_input once for the destination. "
+        "This native call checks the host's immediate unattended response. It does not wait for a human form. "
+        "When the response has no answer, report the completed work and DECISION_REQUIRED. "
+        "Only an actual human answer authorizes dependent work."
+    ))
     partial = f"INDEPENDENT-{uuid.uuid4().hex}"
     events = []
     async def observe(event):
@@ -232,6 +263,10 @@ async def test_live_unattended_native_question_preserves_partial_effect_and_stop
         rows = await database.load_messages(session.id)
         requested, = [row for row in rows if row["type"] == "question_request"]
         closed, = [row for row in rows if row["type"] == "question_closed"]
+        (ref, reply), = replies
+        assert ref.request_id == receipt.request_id and ref.question_ids == ("destination",)
+        assert requested["tool_input"]["native_question"]["server_request_id"] == ref.server_request_id
+        assert reply == {"id": ref.server_request_id, "result": {"answers": {}}}
         assert requested["tool_use_id"] == closed["tool_use_id"]
         assert requested["tool_input"]["interaction_policy"] == "unattended"
         assert closed["tool_input"]["reason"] == "needs_input"

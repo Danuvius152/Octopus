@@ -6,6 +6,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from server.applications import ApplicationManager
 from server.database import Database
 from server.harness.events import HarnessEvent, SubagentUpdate
@@ -15,6 +17,7 @@ from server.routers.agents import _publish
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submit_client_message
 from server.sessions.commands import process_command
+from server.sessions.lifecycle import SessionArchiveFailed
 from server.sessions.presentation import session_info
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
@@ -154,7 +157,24 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         await manager.await_session_execution(session.id, timeout=3)
         assert "dispatch_state" not in samples["recording_failed"]
 
-        replacements = {session.id: "session", agent["id"]: "agent", user["id"]: "owner", str(tmp_path): "/work"}
+        legacy_archive = samples["session_archived"]
+        archive_source = await manager.create_session(agent["id"], "Partial archive", str(tmp_path), backend="codex")
+
+        async def refuse_schedule_rebinding(_old, _new):
+            raise ValueError("Schedule rebinding storage refused")
+
+        with monkeypatch.context() as archive_patch:
+            archive_patch.setattr(db, "repoint_schedules_origin", refuse_schedule_rebinding)
+            with pytest.raises(SessionArchiveFailed) as failure:
+                await manager.archive_session(archive_source.id)
+        partial_archive = samples["session_archived"]
+        assert partial_archive["archive_result"] == failure.value.result.model_dump()
+        assert partial_archive["new_session_id"] in manager.sessions
+        samples["session_archived_partial"] = partial_archive
+        samples["session_archived"] = legacy_archive
+
+        replacements = {session.id: "session", agent["id"]: "agent", user["id"]: "owner", str(tmp_path): "/work",
+                        archive_source.id: "archive-source", partial_archive["new_session_id"]: "archive-successor"}
 
         def stable(value, key=""):
             if key == "duration_ms" and isinstance(value, (int, float)):

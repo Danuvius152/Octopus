@@ -4,8 +4,7 @@ import json
 from dataclasses import dataclass
 
 from . import format
-from .format import DocumentFormat
-from .links import anchor_status, note_name
+from .links import AnchorProjection, anchor_status, note_name
 from .references import candidate_keys
 
 
@@ -17,26 +16,26 @@ class Resolution:
 
 
 class TargetDocuments:
-    """Bodies and parses owned by one catalog batch, on its existing connection."""
+    """Narrow rows and anchor facts owned by one operation's connection."""
 
     def __init__(self, db):
         self.db = db
         self.rows = {}
-        self.parses = {}
+        self.projections = {}
 
     def document(self, target):
         if target not in self.rows:
-            self.rows[target] = self.db.execute("SELECT id,path,revision,text FROM documents WHERE id=?", (target,)).fetchone()
+            self.rows[target] = self.db.execute("SELECT id,path,revision FROM documents WHERE id=?", (target,)).fetchone()
         return self.rows[target]
 
-    def parsed(self, row):
-        # Text distinguishes a candidate overlay from the indexed version even
-        # when it retains the same document identity. Nothing survives the call.
-        key = row["id"], row["revision"] if "revision" in row.keys() else None, row["text"]
-        if key not in self.parses:
-            self.parses[key] = format.parse(row["text"])
-        self.rows[row["id"]] = row
-        return self.parses[key]
+    def anchors(self, row, *, parsed=None):
+        key = row["id"], row["revision"]
+        if key not in self.projections:
+            if parsed is None:
+                text = row["text"] if "text" in row.keys() else self.db.execute("SELECT text FROM documents WHERE id=?", (row["id"],)).fetchone()[0]
+                parsed = format.parse(text)
+            self.projections[key] = AnchorProjection.from_parsed(parsed)
+        return self.projections[key]
 
 
 def initialize(db):
@@ -65,8 +64,8 @@ def index(db, row, metadata):
     return previous | current
 
 
-def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_anchor=True, source_parse: DocumentFormat | None = None, documents=None):
-    """Resolve indexed identities; source_parse belongs to the current source text."""
+def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_anchor=True, documents=None):
+    """Resolve indexed identities, loading anchor facts only for fragments."""
     keys = candidate_keys(reference, parent, source_doc)
     if reference.namespace == "external":
         return Resolution(None, "external", keys)
@@ -110,8 +109,9 @@ def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_ancho
     if current is None:
         return Resolution(target, "missing", keys)
     if check_anchor and reference.fragment and reference.relation in {"wikilink", "markdown_link"}:
-        parsed = source_parse if target == source_doc and source_parse is not None else documents.parsed(current)
-        status = anchor_status(current["text"], reference.fragment, parsed=parsed)
+        # Candidate facts belong to that candidate, never the indexed directory.
+        status = (anchor_status(current["text"], reference.fragment) if target == overlay_id
+                  else documents.anchors(current).status(reference.fragment))
         if status != "resolved":
             return Resolution(target, status, keys)
     return Resolution(target, "resolved", keys)

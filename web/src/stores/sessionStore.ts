@@ -35,9 +35,35 @@ import type {
 // Snapshot rows stay unmarked. Weak references retain no second task state.
 const researchUpdates = new WeakMap<ResearchJob, symbol>();
 
+interface AcceptedTextConsumer { sessionId: string; account: number; notify: () => void }
+// Only openings waiting for their one timeout recovery subscribe. The original
+// acceptance paths notify without retaining a body or publishing another store.
+const acceptedTextConsumers = new Set<AcceptedTextConsumer>();
+const NO_TEXT_CONSUMERS: readonly AcceptedTextConsumer[] = [];
+export function observeAcceptedText(sessionId: string, account: number, notify: () => void): () => void {
+  const consumer = { sessionId, account, notify };
+  acceptedTextConsumers.add(consumer);
+  return () => { acceptedTextConsumers.delete(consumer); };
+}
+function textConsumers(sessionId: string, account: number): readonly AcceptedTextConsumer[] {
+  if (!acceptedTextConsumers.size) return NO_TEXT_CONSUMERS;
+  return [...acceptedTextConsumers].filter((consumer) => consumer.sessionId === sessionId && consumer.account === account);
+}
+function notifyAcceptedText(consumers: readonly AcceptedTextConsumer[]) {
+  for (const consumer of consumers) {
+    if (acceptedTextConsumers.has(consumer) && consumer.account === useSessionStore.getState().accountGeneration) consumer.notify();
+  }
+}
+
 const streamingBytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
-function streamingPreview(value: string, budget: number): string {
-  if (streamingBytes(value) <= budget) return value;
+// Private facts follow the lifetime of each displayed preview.
+const streamingFacts = new WeakMap<{ content: string }, { truncated: boolean; arrival: symbol }>();
+
+function streamingPreview(previous: { content: string } | undefined, chunk: string, budget: number) {
+  const truncated = previous && streamingFacts.get(previous)?.truncated;
+  if (previous && (truncated || !chunk)) return { content: previous.content, truncated: truncated ?? false };
+  const value = (previous?.content ?? "") + chunk;
+  if (streamingBytes(value) <= budget) return { content: value, truncated: false };
   let low = 0, high = Math.min(value.length, budget);
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
@@ -45,7 +71,22 @@ function streamingPreview(value: string, budget: number): string {
     else high = middle - 1;
   }
   if (low && /[\uD800-\uDBFF]/.test(value[low - 1])) low--;
-  return value.slice(0, low) + "…";
+  return { content: value.slice(0, low) + "…", truncated: true };
+}
+
+export interface StreamingReadBasis {
+  root: symbol | undefined;
+  native: Record<string, symbol | undefined>;
+}
+
+export function captureStreamingRead(sessionId: string): StreamingReadBasis {
+  const { streamingText, streamingItems } = useSessionStore.getState();
+  const root = streamingText[sessionId];
+  return {
+    root: root && streamingFacts.get(root)?.arrival,
+    native: Object.fromEntries(Object.entries(streamingItems[sessionId] ?? {}).map(([key, item]) =>
+      [key, streamingFacts.get(item)?.arrival])),
+  };
 }
 const bgUpdates = new WeakMap<BgTask, symbol>();
 const subagentUpdates = new WeakMap<SubagentRun, symbol>();
@@ -114,6 +155,11 @@ export interface Message {
 export interface StreamingItem {
   content: string;
   runtime_metadata: RuntimeMetadata;
+}
+
+interface RootStreamingPreview {
+  content: string;
+  attempt?: AttemptIdentity;
 }
 
 export interface MessagePageBasis {
@@ -320,10 +366,10 @@ interface SessionStore {
 
   messages: Record<string, Message[]>;
   addMessage: (sessionId: string, msg: MessageInput) => void;
-  setMessages: (sessionId: string, msgs: MessageInput[], preserveStreaming?: boolean, nativeBaseline?: Record<string, StreamingItem>) => void;
+  setMessages: (sessionId: string, msgs: MessageInput[]) => void;
   installTranscript: (sessionId: string, snapshot: {
     messages: MessageInput[]; high: number; oldestSeq: number | null; hasMore: boolean;
-  }, nativeBaseline?: Record<string, StreamingItem>, preserveStreaming?: boolean) => boolean;
+  }, streamingBasis?: StreamingReadBasis) => boolean;
   // The transcript arrives windowed to the most recent messages
   // (polish-2026-09.md §4 B2): `oldestSeq` is the lowest seq held for a
   // session and the cursor the next page asks from, `hasMoreMessages` whether
@@ -365,9 +411,7 @@ interface SessionStore {
   // Text the model is streaming right now, per session, accumulated from
   // `assistant_delta` frames and dropped the moment the completed block
   // arrives. Never persisted, never part of `messages`.
-  streamingText: Record<string, string>;
-  // Identity of the current plain-text buffer; retired with that buffer.
-  streamingTextAttempt: Record<string, AttemptIdentity>;
+  streamingText: Record<string, RootStreamingPreview>;
   streamingItems: Record<string, Record<string, StreamingItem>>;
   appendStreamingText: (sessionId: string, chunk: string, metadata?: RuntimeMetadata) => void;
   clearStreamingText: (sessionId: string, attempt?: AttemptIdentity) => void;
@@ -564,7 +608,7 @@ function dispatchUpdate(s: SessionStore, sessionId: string, snapshot: DispatchSt
   return {
     dispatchGeneration: snapshot.generation,
     ...(changed ? { activeAttempts: {}, executionObservations: {}, closedQuestionIds: {}, pendingQuestions: {},
-      sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingText: {}, streamingTextAttempt: {}, streamingItems: {}, contextStates: {} } : {}),
+      sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingText: {}, streamingItems: {}, contextStates: {} } : {}),
     retiredDispatchGenerations: changed ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
     // Equal revision confirms content and invalidates earlier read failures.
     dispatchStates: { ...(changed ? {} : s.dispatchStates),
@@ -591,6 +635,18 @@ function hasTerminalFor(messages: MessageInput[], identity: AttemptIdentity | un
     message.type === "result" && sameAttempt(readAttemptIdentity(message), identity)));
 }
 
+function retainStreamingPreviews(state: SessionStore, sessionId: string, keep: (attempt: AttemptIdentity | undefined) => boolean) {
+  const root = state.streamingText[sessionId];
+  const items = Object.entries(state.streamingItems[sessionId] ?? {});
+  const retained = items.filter(([, item]) => keep(item.runtime_metadata));
+  return {
+    streamingText: root && !keep(root.attempt) ? dropKey(state.streamingText, sessionId) : state.streamingText,
+    streamingItems: retained.length === items.length ? state.streamingItems : retained.length
+      ? { ...state.streamingItems, [sessionId]: Object.fromEntries(retained) }
+      : dropKey(state.streamingItems, sessionId),
+  };
+}
+
 /** Snapshot coverage also rejects old WS. Installation validity additionally
  * needs cursor metadata, which a raw clear/quarantine withdraws independently. */
 export function hasTranscriptBaseline(state: Pick<SessionStore, "lastAppliedSeq" | "oldestSeq" | "hasMoreMessages">, sessionId: string): boolean {
@@ -599,26 +655,60 @@ export function hasTranscriptBaseline(state: Pick<SessionStore, "lastAppliedSeq"
 }
 
 function continuousTranscript(previous: Message[], messages: MessageInput[]): boolean {
+  const persisted = previous.filter((message) => typeof message.seq === "number");
   const first = messages.find((message) => typeof message.seq === "number")?.seq;
   const seqs = new Set(messages.map((message) => message.seq));
-  return first !== undefined && first === previous.find((message) => typeof message.seq === "number")?.seq &&
-    previous.every((message) => message.seq !== undefined && seqs.has(message.seq));
+  return first !== undefined && first === persisted[0]?.seq &&
+    persisted.every((message) => seqs.has(message.seq));
+}
+
+/** Normalized JSON values treat missing optional fields as undefined. */
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => sameJsonValue(value, right[index]));
+  }
+  const a = left as Record<string, unknown>, b = right as Record<string, unknown>;
+  const keys = Object.keys(a).filter(key => a[key] !== undefined);
+  return keys.length === Object.keys(b).filter(key => b[key] !== undefined).length
+    && keys.every(key => Object.hasOwn(b, key) && sameJsonValue(a[key], b[key]));
+}
+
+function shareTranscript(previous: Message[], messages: MessageInput[]): Message[] {
+  const sequenced = new Map(previous.filter(row => typeof row.seq === "number").map(row => [row.seq, row]));
+  const occurrences = new Set(previous);
+  const rows = messages.map(message => {
+    const normalized = normalizeMessage(message);
+    // A copied unsequenced notice does not identify the same occurrence,
+    // even at the same index. Only its actual retained object can prove that.
+    const old = typeof message.seq === "number" ? sequenced.get(message.seq)
+      : occurrences.has(message as Message) ? message as Message : undefined;
+    return old && sameJsonValue(old, normalized) ? old : normalized;
+  });
+  return rows.length === previous.length && rows.every((row, index) => row === previous[index]) ? previous : rows;
 }
 
 function replaceTranscript(state: SessionStore, sessionId: string, messages: MessageInput[], window: symbol | undefined,
-  preserveStreaming: boolean, nativeBaseline?: Record<string, StreamingItem>): Partial<SessionStore> {
-  const keepRoot = preserveStreaming && !hasTerminalFor(messages, state.streamingTextAttempt[sessionId]);
+  preserveStreaming: boolean, streamingBasis?: StreamingReadBasis): Partial<SessionStore> {
+  const root = state.streamingText[sessionId];
+  const keepRoot = root && (preserveStreaming ||
+    (streamingBasis && streamingFacts.get(root)?.arrival !== streamingBasis.root)) &&
+    !hasTerminalFor(messages, root.attempt);
+  const items = state.streamingItems[sessionId];
+  const retainedItems = items && (preserveStreaming || streamingBasis) ? Object.entries(items).filter(([key, item]) =>
+    (preserveStreaming || streamingFacts.get(item)?.arrival !== streamingBasis?.native[key]) &&
+    !hasTerminalFor(messages, item.runtime_metadata) &&
+    !messages.some((message) => message.type === "text" && nativeItemKey(message.runtime_metadata) === key)) : [];
   return {
     ...settledQuestions(state, sessionId, messages),
     messageWindows: { ...state.messageWindows, [sessionId]: window },
-    messages: { ...state.messages, [sessionId]: messages.map(normalizeMessage) },
+    messages: { ...state.messages, [sessionId]: shareTranscript(state.messages[sessionId] ?? [], messages) },
     streamingText: keepRoot ? state.streamingText : dropKey(state.streamingText, sessionId),
-    streamingTextAttempt: keepRoot ? state.streamingTextAttempt : dropKey(state.streamingTextAttempt, sessionId),
-    streamingItems: preserveStreaming || nativeBaseline ? { ...state.streamingItems, [sessionId]: Object.fromEntries(
-      Object.entries(state.streamingItems[sessionId] || {}).filter(([key, item]) =>
-        (preserveStreaming || item !== nativeBaseline?.[key]) && !hasTerminalFor(messages, item.runtime_metadata) &&
-        !messages.some((message) => message.type === "text" && nativeItemKey(message.runtime_metadata) === key)))
-    } : dropKey(state.streamingItems, sessionId),
+    streamingItems: retainedItems.length
+      ? { ...state.streamingItems, [sessionId]: Object.fromEntries(retainedItems) }
+      : dropKey(state.streamingItems, sessionId),
   };
 }
 
@@ -655,6 +745,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   activeAttempts: {},
   executionObservations: {},
   setActiveAttempt: (sessionId, attempt) => set((s) => ({
+    ...(attempt ? retainStreamingPreviews(s, sessionId, (owner) => sameAttempt(attempt, owner)) : {}),
     activeAttempts: attempt ? { ...s.activeAttempts, [sessionId]: attempt } : dropKey(s.activeAttempts, sessionId),
     executionObservations: { ...s.executionObservations, [sessionId]: (s.executionObservations[sessionId] ?? 0) + 1 },
   })),
@@ -678,8 +769,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       if (!patch) return s;
       if (patch.dispatchStates?.[sessionId].active_request_id !== snapshot.active_request_id) return s;
       const attempts = patch.activeAttempts ?? s.activeAttempts;
+      // Detail can see the replacement before attempt_started. Preserve
+      // unidentified legacy text and retire confirmed older owners here.
+      const previews = active && !patch.streamingText && !sameAttempt(attempts[sessionId], active)
+        ? retainStreamingPreviews(s, sessionId, (owner) => !owner || sameAttempt(active, owner)) : {};
       applied = true;
-      return { ...patch, activeAttempts: active ? { ...attempts, [sessionId]: active } : dropKey(attempts, sessionId) };
+      return { ...patch, ...previews, activeAttempts: active ? { ...attempts, [sessionId]: active } : dropKey(attempts, sessionId) };
     });
     return applied;
   },
@@ -860,7 +955,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     messages: dropKey(s.messages, id), pendingQuestions: dropKey(s.pendingQuestions, id),
     closedQuestionIds: dropKey(s.closedQuestionIds, id), pendingForks: dropKey(s.pendingForks, id),
     questionDrafts: Object.fromEntries(Object.entries(s.questionDrafts).filter(([, draft]) => draft.sessionId !== id)),
-    streamingText: dropKey(s.streamingText, id), streamingTextAttempt: dropKey(s.streamingTextAttempt, id),
+    streamingText: dropKey(s.streamingText, id),
     streamingItems: dropKey(s.streamingItems, id),
     subagents: dropKey(s.subagents, id), dispatchStates: dropKey(s.dispatchStates, id),
     contextStates: dropKey(s.contextStates, id),
@@ -876,21 +971,26 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   lastAppliedSeq: {},
 
   messages: {},
-  addMessage: (sessionId, msg) =>
+  addMessage: (sessionId, msg) => {
+    let consumers = NO_TEXT_CONSUMERS;
     set((s) => {
       const current = s.messages[sessionId] || [];
       if (typeof msg.seq === "number" && current.some((message) => message.seq === msg.seq)) return s;
+      if (msg.role === "assistant" && msg.type === "text" && typeof msg.content === "string" && msg.content.length > 0) {
+        consumers = textConsumers(sessionId, s.accountGeneration);
+      }
       const messages = [...current];
       insertMessage(messages, normalizeMessage(msg));
       const itemKey = nativeItemKey(msg.runtime_metadata);
       const identity = readAttemptIdentity(msg);
+      const root = s.streamingText[sessionId];
       // A completed assistant text block supersedes whatever was streaming:
       // drop the buffer in the same update that appends the real message, so
       // the UI never paints both for a frame.
       const streaming =
-        (!itemKey && msg.type === "text" && msg.role === "assistant" && s.streamingText[sessionId] &&
-          (!identity || sameAttempt(identity, s.streamingTextAttempt[sessionId]))) ||
-        (msg.type === "result" && sameAttempt(identity, s.streamingTextAttempt[sessionId]))
+        (!itemKey && msg.type === "text" && msg.role === "assistant" && root &&
+          (!identity || sameAttempt(identity, root.attempt))) ||
+        (msg.type === "result" && sameAttempt(identity, root?.attempt))
           ? dropKey(s.streamingText, sessionId)
           : s.streamingText;
       return {
@@ -900,27 +1000,31 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           [sessionId]: messages,
         },
         streamingText: streaming,
-        streamingTextAttempt: streaming === s.streamingText ? s.streamingTextAttempt : dropKey(s.streamingTextAttempt, sessionId),
         streamingItems: itemKey && msg.type === "text" ? {
           ...s.streamingItems, [sessionId]: dropKey(s.streamingItems[sessionId] || {}, itemKey),
         } : msg.type === "result" && identity ? { ...s.streamingItems, [sessionId]: Object.fromEntries(
           Object.entries(s.streamingItems[sessionId] || {}).filter(([, item]) => !sameAttempt(item.runtime_metadata, identity)))
         } : s.streamingItems,
       };
-    }),
-  setMessages: (sessionId, msgs, preserveStreaming = false, nativeBaseline) =>
+    });
+    // Capture receivers before publication, but deliver after the accepted text
+    // is installed. Departure may cancel a receiver during that publication;
+    // a newly registered successor must never receive its predecessor's output.
+    notifyAcceptedText(consumers);
+  },
+  setMessages: (sessionId, msgs) =>
     set((s) => {
       const previous = s.messages[sessionId] || [];
       const continuous = continuousTranscript(previous, msgs);
       return {
         ...replaceTranscript(s, sessionId, msgs,
-          continuous ? s.messageWindows[sessionId] ?? Symbol() : Symbol(), preserveStreaming, nativeBaseline),
+          continuous ? s.messageWindows[sessionId] ?? Symbol() : Symbol(), false),
         // Preserve the rejection watermark while withdrawing installation proof.
         ...(!continuous ? { oldestSeq: dropKey(s.oldestSeq, sessionId),
           hasMoreMessages: { ...s.hasMoreMessages, [sessionId]: false } } : {}),
       };
     }),
-  installTranscript: (sessionId, snapshot, nativeBaseline, preserveStreaming = false) => {
+  installTranscript: (sessionId, snapshot, streamingBasis) => {
     let applied = false;
     set((s) => {
       if (snapshot.high < (s.lastAppliedSeq[sessionId] ?? -1)) return s;
@@ -938,18 +1042,18 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const merged = [...retained, ...snapshot.messages];
       const sequenced = new Map(merged.filter((message) => typeof message.seq === "number").map((message) => [message.seq!, message]));
       const rows = [...sequenced.values()].sort((a, b) => a.seq! - b.seq!);
-      rows.push(...snapshot.messages.filter((message) => typeof message.seq !== "number").map(normalizeMessage));
+      rows.push(...snapshot.messages.filter((message) => typeof message.seq !== "number"));
       const nextOldest = preservePrefix ? currentOldest : oldest;
       const hasMore = preservePrefix ? Boolean(s.hasMoreMessages[sessionId]) : snapshot.hasMore;
-      const equivalentEmpty = !previous.length && !rows.length && hasTranscriptBaseline(s, sessionId) &&
+      const equivalentEmpty = !previous.some((message) => typeof message.seq === "number") &&
+        !rows.some((message) => typeof message.seq === "number") && hasTranscriptBaseline(s, sessionId) &&
         s.lastAppliedSeq[sessionId] === snapshot.high && currentOldest === nextOldest && s.hasMoreMessages[sessionId] === hasMore;
-      const continuous = equivalentEmpty || continuousTranscript(previous, rows);
+      const continuous = equivalentEmpty || hasTranscriptBaseline(s, sessionId) && continuousTranscript(previous, rows);
       const liveHigh = Math.max(-1, ...previous.map((message) => message.seq ?? -1));
-      const keepStreaming = preserveStreaming || liveHigh >= snapshot.high && Boolean(
-        s.streamingText[sessionId] || Object.keys(s.streamingItems[sessionId] || {}).length);
       applied = true;
       return {
-        ...replaceTranscript(s, sessionId, rows, continuous ? s.messageWindows[sessionId] ?? Symbol() : Symbol(), keepStreaming, nativeBaseline),
+        ...replaceTranscript(s, sessionId, rows,
+          continuous ? s.messageWindows[sessionId] ?? Symbol() : Symbol(), liveHigh >= snapshot.high, streamingBasis),
         oldestSeq: { ...s.oldestSeq, [sessionId]: nextOldest },
         hasMoreMessages: { ...s.hasMoreMessages, [sessionId]: hasMore },
         lastAppliedSeq: { ...s.lastAppliedSeq, [sessionId]: snapshot.high },
@@ -982,9 +1086,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       if (page.length === 0 && hasMore) {
         result = { state: "failed", error: "History page did not extend the window." }; return cur;
       }
-      const messages = [...(cur.messages[sessionId] || [])];
-      const known = new Set(messages.map((message) => message.seq));
+      const previous = cur.messages[sessionId] || [];
+      const known = new Set(previous.map((message) => message.seq));
       const fresh = page.filter((message) => !known.has(message.seq));
+      const messages = fresh.length ? [...previous] : previous;
       fresh.forEach((message) => insertMessage(messages, normalizeMessage(message)));
       result = { state: "merged", added: fresh.length };
       return {
@@ -997,9 +1102,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         ...cur.oldestSeq,
         [sessionId]: page[0]?.seq ?? cur.oldestSeq[sessionId],
       },
-      streamingText: hasTerminalFor(page, cur.streamingTextAttempt[sessionId]) ? dropKey(cur.streamingText, sessionId) : cur.streamingText,
-      streamingTextAttempt: hasTerminalFor(page, cur.streamingTextAttempt[sessionId])
-        ? dropKey(cur.streamingTextAttempt, sessionId) : cur.streamingTextAttempt,
+      streamingText: hasTerminalFor(page, cur.streamingText[sessionId]?.attempt) ? dropKey(cur.streamingText, sessionId) : cur.streamingText,
       streamingItems: { ...cur.streamingItems, [sessionId]: Object.fromEntries(
         Object.entries(cur.streamingItems[sessionId] || {}).filter(([key, item]) =>
           !hasTerminalFor(page, item.runtime_metadata) && !page.some((message) =>
@@ -1014,9 +1117,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   // completed block that follows is the real message, and this is only what
   // lets the UI paint before it arrives.
   streamingText: {},
-  streamingTextAttempt: {},
   streamingItems: {},
-  appendStreamingText: (sessionId, chunk, metadata) =>
+  appendStreamingText: (sessionId, chunk, metadata) => {
+    let consumers = NO_TEXT_CONSUMERS;
     set((s) => {
       const key = nativeItemKey(metadata);
       const identity = readAttemptIdentity(metadata);
@@ -1024,37 +1127,40 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       if (identity && (hasTerminalFor(messages, identity) || !sameAttempt(identity, s.activeAttempts[sessionId]))) return s;
       if (key && messages.some((message) => message.role === "assistant" && message.type === "text" &&
           nativeItemKey(message.runtime_metadata) === key)) return s;
+      if (chunk.length > 0) consumers = textConsumers(sessionId, s.accountGeneration);
       if (key && metadata) {
-        const items = { ...s.streamingItems[sessionId], [key]: { runtime_metadata: metadata,
-          content: streamingPreview((s.streamingItems[sessionId]?.[key]?.content || "") + chunk, 16 * 1024) } };
+        const previous = s.streamingItems[sessionId]?.[key];
+        const { content, truncated } = streamingPreview(previous, chunk, 16 * 1024);
+        const item = previous && content === previous.content && sameJsonValue(previous.runtime_metadata, metadata)
+          ? previous : { content, runtime_metadata: metadata };
+        if (!chunk && item === previous) return s;
+        streamingFacts.set(item, { truncated, arrival: Symbol() });
+        if (item === previous) return s;
+        const items = { ...s.streamingItems[sessionId], [key]: item };
         while (Object.keys(items).length > 32 || streamingBytes(items) > 256 * 1024) delete items[Object.keys(items)[0]];
         return { streamingItems: { ...s.streamingItems, [sessionId]: items } };
       }
+      const root = s.streamingText[sessionId];
+      const attempt = identity ?? s.activeAttempts[sessionId] ?? root?.attempt;
+      const previous = !attempt || sameAttempt(attempt, root?.attempt) ? root : undefined;
+      if (!chunk && previous === root) return s;
+      const { content, truncated } = streamingPreview(previous, chunk, 64 * 1024);
+      const preview = previous && content === previous.content ? previous : { content, attempt };
+      streamingFacts.set(preview, { truncated, arrival: Symbol() });
+      if (preview === previous) return s;
       return {
-      streamingTextAttempt: identity || s.activeAttempts[sessionId]
-        ? { ...s.streamingTextAttempt, [sessionId]: identity || s.activeAttempts[sessionId] }
-        : dropKey(s.streamingTextAttempt, sessionId),
-      streamingText: {
-        ...s.streamingText,
-        [sessionId]: streamingPreview((s.streamingText[sessionId] || "") + chunk, 64 * 1024),
-      },
+        streamingText: { ...s.streamingText, [sessionId]: preview },
       };
-    }),
-  clearStreamingText: (sessionId, attempt) =>
-    set((s) =>
-      s.streamingText[sessionId] === undefined && s.streamingItems[sessionId] === undefined && s.streamingTextAttempt[sessionId] === undefined
-        ? s
-        : {
-          streamingText: !attempt || sameAttempt(attempt, s.streamingTextAttempt[sessionId])
-            ? dropKey(s.streamingText, sessionId) : s.streamingText,
-          streamingTextAttempt: !attempt || sameAttempt(attempt, s.streamingTextAttempt[sessionId])
-            ? dropKey(s.streamingTextAttempt, sessionId) : s.streamingTextAttempt,
-          streamingItems: !attempt ? dropKey(s.streamingItems, sessionId) : {
-            ...s.streamingItems, [sessionId]: Object.fromEntries(Object.entries(s.streamingItems[sessionId] || {})
-              .filter(([, item]) => !sameAttempt(attempt, item.runtime_metadata))),
-          },
-        }
-    ),
+    });
+    notifyAcceptedText(consumers);
+  },
+  clearStreamingText: (sessionId, attempt) => set((s) => {
+    const previews = attempt ? retainStreamingPreviews(s, sessionId, (owner) => !sameAttempt(attempt, owner)) : {
+      streamingText: dropKey(s.streamingText, sessionId),
+      streamingItems: dropKey(s.streamingItems, sessionId),
+    };
+    return previews.streamingText === s.streamingText && previews.streamingItems === s.streamingItems ? s : previews;
+  }),
 
   subagents: {},
   upsertSubagent: (sessionId, run) =>

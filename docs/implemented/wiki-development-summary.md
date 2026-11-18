@@ -444,12 +444,14 @@ compact 列表仅从 SQLite 投影 id、path、title、revision、metadata 和�
 
 同一正文在本次索引或链接校验操作内复用格式解析的 CommonMark tokens、render env 与原坐标映射，搜索章节和引用投影不重复解析。tokens 可被 renderer 修改（如图片 alt），仅归当前正文和当前操作所有，不跨请求缓存或持久化；延迟执行的 catalog 仍按当前正文解析，layout 仍独立检查原始插入片段。原文坐标、YAML 错误保留与持久来源合同保持。
 
-同次 catalog 批处理及链接校验还复用目标文档的读取／解析上下文，以文档身份、
-可用的 revision 和实际文本区分版本；候选 overlay 仍优先，后一次操作重新取得
-当前内容。维护写入校验目标锚点时，每个目标仍须读取真实原件，索引文本不能替代
-原件证明；只在原锁范围内复用本次读取与解析，不增加跨操作缓存、锁或权限。
-`tests/test_wiki_parse_projection.py` 覆盖重复引用、后次原件变化及候选 overlay；
-`test_wiki_reference_batch.py` 保留图发布失败时回滚并不确认文件系统收据的反例。
+同次 catalog 批处理只在当前源处理期间持有其完整格式解析，来源章节仍从原坐标
+映射取得。共享目标读取只保留窄文档行和版本关联的锚点投影，含标题、slug、歧义、
+HTML 锚点及 block 判定所需坐标。无片段引用只使用文档行。候选 overlay 优先并
+沿其自身正文解释，后一次操作重新取得当前版本。维护写入校验目标锚点从真实
+原件取得投影，在原锁范围内复用同次原件读取。重复引用、原件变化、候选 overlay
+和完整解析对象寿命由 `test_wiki_parse_projection.py` 与
+`test_wiki_ast_lifetime.py` 覆盖。图发布失败沿批次事务回滚，文件系统收据保持
+待处理。反例见 `test_wiki_reference_batch.py`。
 
 标题、来源章节和锚点从同份 CommonMark 结构取得，不能分别猜测或配对版本。
 

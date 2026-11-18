@@ -5,7 +5,7 @@ import { enterAccountCredentials } from "./current-account";
 test("saved input survives a page reload and only executes after an explicit new send", async ({ page }) => {
   const session = { id: "recovery-browser", agent_id: "recovery-agent", name: "Recovery conversation", backend: "codex",
     working_dir: "/tmp", created_at: "2026-10-20T00:00:00Z", archived: false, status: "idle" };
-  const execution = { state: "withdrawn", state_version: 2, execution_owner_request_id: "old-request", recoverable_input: true,
+  const execution = { state: "withdrawn", state_version: 2, delivery_state: "none", execution_owner_request_id: "old-request", recoverable_input: true,
     reason_code: "service_restart_before_start" };
   const summary = { client_request_id: "old-client", request_id: "old-request", operation: "message", execution, preview: "Saved input after restart", attachment_count: 0 };
   const frames: Record<string, unknown>[] = [];
@@ -31,13 +31,17 @@ test("saved input survives a page reload and only executes after an explicit new
     if (data.type !== "send_message") return;
     frames.push(data);
     socket.send(JSON.stringify({ type: "submission", session_id: session.id, client_request_id: data.client_request_id,
-      request_id: "new-request", operation: "message", accepted: true, execution: { ...execution, state: "queued", recoverable_input: false } }));
+      request_id: "new-request", operation: "message", accepted: true, execution: { state: "pending", state_version: 1,
+        delivery_state: "none", execution_owner_request_id: "new-request", recoverable_input: false } }));
+    socket.send(JSON.stringify({ type: "user_message", role: "user", session_id: session.id, content: data.content,
+      seq: 1, request_id: "new-request" }));
   }));
   const open = async () => {
     await page.locator(".agent-item", { hasText: "Octo" }).click();
     await page.locator(".session-item", { hasText: session.name }).click();
     await expect(page.getByText("Not executed · input saved")).toBeVisible();
   };
+  await page.clock.install();
   await page.goto("/");
   await enterAccountCredentials(page);
   await open();
@@ -57,4 +61,8 @@ test("saved input survives a page reload and only executes after an explicit new
   await expect.poll(() => frames.length).toBe(1);
   expect(frames[0]).toMatchObject({ content: "Reviewed and edited before sending", recovery_of_client_id: "old-client" });
   expect(frames[0].client_request_id).not.toBe("old-client");
+  await expect(page.getByText("Reviewed and edited before sending", { exact: true })).toBeVisible();
+  await page.clock.fastForward(30_001);
+  await expect(page.getByRole("button", { name: "Retry admission confirmation" })).toHaveCount(0);
+  expect(frames).toHaveLength(1);
 });

@@ -6,27 +6,12 @@ import asyncio
 import json
 
 from server.agent_manager import AgentManager
-from tests import test_delegation_notification_failure as notification_tests
-
-notification_runtime = notification_tests.notification_runtime
-release_model = notification_tests.release_model
-wait_round_finished = notification_tests.wait_round_finished
-
-
-def observe_terminal_deliveries(runtime, monkeypatch):
-    """Record actual public submissions without replacing any receipt."""
-    submit = runtime.manager.start_message
-    delivered = []
-
-    async def observe(session_id, content, **kwargs):
-        receipt = await submit(session_id, content, **kwargs)
-        delivery_id = kwargs.get("delivery_id", "")
-        if delivery_id.startswith("agent-terminal:"):
-            delivered.append((session_id, content, kwargs, receipt))
-        return receipt
-
-    monkeypatch.setattr(runtime.manager, "start_message", observe)
-    return delivered
+from tests.delegation_runtime import notification_runtime as notification_runtime
+from tests.delegation_runtime import (
+    observe_terminal_deliveries,
+    release_model,
+    wait_round_finished,
+)
 
 
 async def test_deleting_child_after_completion_does_not_poison_delegation_drain(

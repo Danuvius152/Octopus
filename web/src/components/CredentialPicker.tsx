@@ -32,11 +32,10 @@ export function CredentialPicker({ session }: { session: SessionInfo }) {
 function SessionCredentialPicker({ session }: { session: SessionInfo }) {
   const token = useSessionStore((s) => s.token);
   const credentials = useSessionStore((s) => s.credentials);
-  const agents = useSessionStore((s) => s.agents);
+  const agent = useSessionStore((s) => s.agents.find(agent => agent.id === session.agent_id));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const agent = agents.find((a) => a.id === session.agent_id);
   const usable = credentials.filter((c) => c.backend === session.backend);
   const effectiveId = session.credential_id ?? agent?.credential_id ?? null;
   const effective = credentials.find((c) => c.id === effectiveId);

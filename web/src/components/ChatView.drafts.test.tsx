@@ -111,7 +111,9 @@ it.each([false, true])("remount never revives a consumed compact command, preser
   view.unmount();
   mount();
   expect(box()).toHaveValue(newer ? "New unsent text" : "");
-  await act(async () => reply.resolve(Response.json({ accepted: true, operation: "compact" })));
+  const [, request] = transport.mock.calls.find(([, init]) => init?.method === "POST")!;
+  await act(async () => reply.resolve(Response.json({ accepted: true, operation: "compact", session_id: a.id,
+    client_request_id: JSON.parse(String(request!.body)).client_request_id })));
   expect(box()).toHaveValue(newer ? "New unsent text" : "");
   expect(transport.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   expect(view.sendMessage).not.toHaveBeenCalled();
@@ -223,7 +225,7 @@ it.each(["getItem", "setItem"] as const)("reports storage %s denial while preser
   edit("Still sendable");
   if (method === "setItem") expect(screen.getByText(/Text draft could not be saved/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));
-  expect(view.sendMessage).toHaveBeenCalledWith(a.id, "Still sendable", undefined, undefined);
+  expect(view.sendMessage).toHaveBeenCalledExactlyOnceWith(a.id, "Still sendable", undefined, undefined, expect.any(String));
   expect(box()).toHaveValue("");
 });
 
@@ -236,7 +238,8 @@ it("keeps compact's original GET identity without clearing a newly edited versio
     if (!path.includes("/submissions") || (!init?.method && !path.includes("/submissions/"))) return Response.json([]);
     requests.push({ url: path, method: init?.method });
     if (init?.method === "POST") throw new TypeError("lost receipt");
-    return accepted ? Response.json({ accepted: true, operation: "compact" }) : new Response("Missing", { status: 404 });
+    return accepted ? Response.json({ accepted: true, operation: "compact", session_id: a.id,
+      client_request_id: path.split("/").at(-1) }) : new Response("Missing", { status: 404 });
   }));
   mount(); edit("/compact");
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));

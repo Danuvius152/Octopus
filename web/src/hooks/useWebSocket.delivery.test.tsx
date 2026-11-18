@@ -45,7 +45,7 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
   }));
   useSessionStore.setState({
     token: "account-bearer", activeSessionId: sid, connected: false, sessions: [],
-    messages: {}, lastAppliedSeq: {}, oldestSeq: {}, streamingText: { [sid]: "incomplete live text" },
+    messages: {}, lastAppliedSeq: {}, oldestSeq: {}, streamingText: { [sid]: { content: "incomplete live text" } },
     dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [], dispatchUnavailable: {},
     pendingQuestions: {}, closedQuestionIds: {}, subagents: {}, bgTasks: {}, delegations: {}, research: {},
   });

@@ -1,6 +1,7 @@
 import { deferred } from "../test-support/deferred";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SessionList } from "./sessionList";
+import { ArchiveDeadline } from "./sessionArchive";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
 const row = (id = "old", status = "running") => ({ id, name: id, status, archived: false } as SessionInfo);
@@ -55,6 +56,104 @@ it("preserves sessions created during a read and coalesces conflicting observati
   expect(calls).toHaveLength(2);
   calls[1].resolve(Response.json([row("old", "idle"), row("created", "idle")])); await flush();
   expect(useSessionStore.getState().sessionRead.stale).toBe(false);
+});
+
+it("keeps another consumer's GET alive while confirming an unknown archive from a later snapshot", async () => {
+  const reading = list.refresh(true);
+  const signal = vi.mocked(fetch).mock.calls[0][1]!.signal!;
+  const tracked = list.observe("old", useSessionStore.getState(), "archive");
+  const confirming = list.confirmArchive("old", tracked.observation);
+  expect(signal.aborted).toBe(false);
+  expect(calls).toHaveLength(1);
+  calls[0].resolve(Response.json([row()]));
+  expect(await reading).toEqual({ state: "pending" });
+  await flush();
+  expect(calls).toHaveLength(2);
+  calls[1].resolve(Response.json([{ ...row(), archived: true }]));
+  expect(await confirming).toEqual({ archived: true, successor: null });
+  tracked.finish();
+});
+
+it.each(["reconnect", "reconnect with link", "new service", "new successor", "restored", "ended"] as const)(
+  "confirms a known archive receipt after %s only within its original authority", async (boundary) => {
+    const original = list.observe("old", useSessionStore.getState(), "archive");
+    const receipt = { successorId: "child", original: original.observation };
+    const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+    const old = { ...row(), archived: true };
+    const child = row("child");
+    const replacement = row("replacement");
+    if (boundary.startsWith("reconnect")) list.connect(source);
+    if (boundary === "reconnect with link") list.archive("old", undefined, child);
+    if (boundary === "new service") useSessionStore.setState({ dispatchGeneration: "replacement-service" });
+    if (boundary === "new successor") list.archive("old", undefined, replacement);
+    if (boundary === "ended") original.finish();
+    const manual = list.observe("old", useSessionStore.getState(), "archive");
+    const confirming = list.confirmArchive("old", manual.observation, undefined, receipt);
+    calls[0].resolve(Response.json(boundary === "restored" ? [row(), child] : [old, child, replacement]));
+    expect(await confirming).toEqual({ archived: boundary !== "restored", successor: boundary === "reconnect with link" ? child : null });
+    manual.finish();
+    if (boundary === "restored") {
+      const after = list.observe("old", useSessionStore.getState(), "archive");
+      const retry = list.confirmArchive("old", after.observation, undefined, receipt);
+      calls[1].resolve(Response.json([old, child]));
+      expect(await retry).toEqual({ archived: true, successor: null });
+      after.finish();
+    }
+    expect(useSessionStore.getState().sessionSuccessors.old).toBe(boundary === "reconnect with link" ? child.id :
+      boundary === "new successor" ? replacement.id : undefined);
+    original.finish();
+  },
+);
+
+it("shares the original confirmation deadline across stale snapshots and overlapping waiters without aborting the shared GET", async () => {
+  const observation = list.observe("old", useSessionStore.getState(), "archive");
+  const budget = new ArchiveDeadline();
+  const first = list.confirmArchive("old", observation.observation, budget);
+  const firstSignal = vi.mocked(fetch).mock.calls[0][1]!.signal!;
+  await vi.advanceTimersByTimeAsync(10_000);
+  list.patch("old", { name: "Changed while reading" });
+  calls[0].resolve(Response.json([row()])); await flush();
+  expect(firstSignal.aborted).toBe(true); // Its own transport completed.
+  expect(calls).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(10_000);
+  const overlap = list.confirmArchive("old", observation.observation, budget);
+  const shared = list.refresh(true);
+  const sharedSignal = vi.mocked(fetch).mock.calls[1][1]!.signal!;
+  await vi.advanceTimersByTimeAsync(9_999);
+  expect(sharedSignal.aborted).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await first).toBeNull();
+  expect(await overlap).toBeNull();
+  expect(sharedSignal.aborted).toBe(false);
+  expect(calls).toHaveLength(2);
+  calls[1].resolve(Response.json([{ ...row(), archived: true }]));
+  // Overlap did not invalidate the already post-effect snapshot, and neither
+  // timed-out waiter had authority to cancel another consumer's read.
+  expect(await shared).toEqual({ state: "applied" });
+  observation.finish();
+});
+
+it.each(["created", "successor"])("gives a later %s lookup only the original confirmation's remaining time", async (lookup) => {
+  const budget = new ArchiveDeadline();
+  const observation = list.observe("old", useSessionStore.getState(), "archive");
+  await vi.advanceTimersByTimeAsync(20_000);
+  let pending: Promise<boolean | SessionInfo | null>;
+  if (lookup === "created") {
+    list.patch("old", { name: "Changed since the POST" });
+    pending = list.created(row("new"), observation.observation, "old", budget);
+  } else {
+    list.archive("old", undefined, row("new"));
+    pending = list.confirmSuccessor("old", observation.observation, budget);
+  }
+  const signal = vi.mocked(fetch).mock.calls[0][1]!.signal!;
+  let settled = false;
+  void pending.then(() => { settled = true; });
+  await vi.advanceTimersByTimeAsync(9_999);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await pending).toBe(lookup === "created" ? false : null);
+  expect(signal.aborted).toBe(false);
+  observation.finish();
 });
 
 it.each(["archived", "deleted"])("confirms a missing selected session after reconnect before treating it as %s", async (outcome) => {
@@ -166,17 +265,20 @@ it("a creation receipt can follow an already observed live identity without repl
   expect(useSessionStore.getState().sessions.find((item) => item.id === "new")?.status).toBe("idle");
 });
 
-it("waits for one accepted snapshot before allowing navigation after creation", async () => {
+it.each([0, 11_000])("waits for a valid snapshot after creation with %i ms between list changes", async (delay) => {
   const oldRead = list.refresh(true), original = list.capture();
   list.patch("old", { status: "idle" });
   const confirmed = list.created(row("new", "running"), original);
+  await vi.advanceTimersByTimeAsync(delay);
   calls[0].resolve(Response.json([row()]));
   expect(await oldRead).toEqual({ state: "pending" }); await flush();
   expect(calls).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(delay);
   list.patch("old", { status: "running" });
   calls[1].resolve(Response.json([row("new", "running")])); await flush();
   expect(calls).toHaveLength(3);
   expect(useSessionStore.getState().sessions.some((item) => item.id === "new")).toBe(false);
+  await vi.advanceTimersByTimeAsync(delay);
   calls[2].resolve(Response.json([row("new", "idle")]));
   expect(await confirmed).toBe(true);
   expect(useSessionStore.getState().sessions).toEqual([row("new", "idle")]);

@@ -246,6 +246,96 @@ it("requires a list started after the closing proof and ignores a pre-proof arch
   expect(useSessionStore.getState().activeSessionId).toBe("A");
 });
 
+it.each(["first generation", "new connection", "new service"] as const)(
+  "scopes a restoration confirmation when its list read is retired by a %s", async boundary => {
+    useSessionStore.setState({ dispatchGeneration: null });
+    render(<Page />);
+    await click("A");
+    const oldRead = deferred<Response>(), newRead = deferred<Response>();
+    heldLists.push(oldRead, newRead);
+    let reads = 0;
+    lists = () => ++reads === 1 ? oldRead.promise : newRead.promise;
+    const savedKey = `octopus.session-restore.v1:${JSON.stringify([user, "A"])}`;
+    await finish(0);
+    expect(reads).toBe(1);
+    await act(async () => {
+      handleWsMessage({ type: "session_unarchived", session_id: "A", session: rows[0],
+        dispatch_state: { generation: "service", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [] } });
+      if (boundary === "new connection") {
+        sessions.connect({ socket: {}, accountGeneration: useSessionStore.getState().accountGeneration });
+      } else if (boundary === "new service") {
+        handleWsMessage({ type: "dispatch_state", session_id: "A",
+          dispatch_state: { generation: "next-service", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [] } });
+      }
+      oldRead.resolve(Response.json([archived("A"), archived("B")]));
+    });
+    expect(reads).toBe(2);
+    expect(useSessionStore.getState().activeSessionId).not.toBe("A");
+    expect(sessionStorage.getItem(savedKey)).not.toBeNull();
+    await act(async () => newRead.resolve(Response.json(rows)));
+    expect(reads).toBe(2);
+    expect(writes).toHaveLength(1);
+    if (boundary === "first generation") {
+      expect(useSessionStore.getState().activeSessionId).toBe("A");
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(sessionStorage.getItem(savedKey)).toBeNull();
+    } else {
+      expect(useSessionStore.getState().activeSessionId).not.toBe("A");
+      expect(screen.getByRole("dialog")).toBeVisible();
+      expect(sessions.restorations.store.getState().entries.A?.phase).toBe("unknown");
+      expect(sessionStorage.getItem(savedKey)).not.toBeNull();
+    }
+  },
+);
+
+it.each(["same scope", "new connection", "new service"] as const)(
+  "checks the adopted read scope after a concurrent restore makes the read pending (%s)", async boundary => {
+    useSessionStore.setState({ dispatchGeneration: null });
+    render(<Page />);
+    await click("A");
+    await click("B");
+    const oldRead = deferred<Response>(), firstGenerationRead = deferred<Response>(), concurrentRead = deferred<Response>();
+    heldLists.push(oldRead, firstGenerationRead, concurrentRead);
+    let reads = 0;
+    const dispatchState = (generation: string) => ({ generation, revision: 1, paused: false,
+      active_request_id: null, active_operation: null, items: [] });
+    lists = async () => {
+      if (++reads === 1) return oldRead.promise;
+      if (reads === 2) return firstGenerationRead.promise;
+      if (reads === 3) {
+        // B has retired A's read as pending, before A can resume its await.
+        if (boundary === "new connection") {
+          sessions.connect({ socket: {}, accountGeneration: useSessionStore.getState().accountGeneration });
+        } else if (boundary === "new service") {
+          handleWsMessage({ type: "dispatch_state", session_id: "A", dispatch_state: dispatchState("next-service") });
+        }
+        return concurrentRead.promise;
+      }
+      return Response.json(rows);
+    };
+    const savedKey = `octopus.session-restore.v1:${JSON.stringify([user, "A"])}`;
+    await finish(0);
+    expect(reads).toBe(1);
+    act(() => handleWsMessage({ type: "session_unarchived", session_id: "A", session: rows[0], dispatch_state: dispatchState("service") }));
+    await act(async () => {});
+    expect(reads).toBe(2);
+    expect(sessionStorage.getItem(savedKey)).not.toBeNull();
+    await finish(1);
+    if (boundary === "same scope") {
+      expect(reads).toBe(3);
+      await act(async () => concurrentRead.resolve(Response.json(rows)));
+      expect(sessions.restorations.store.getState().entries.A?.phase).toBe("ready");
+      expect(sessionStorage.getItem(savedKey)).toBeNull();
+    } else {
+      expect(reads).toBe(4);
+      expect(sessions.restorations.store.getState().entries.A?.phase).toBe("unknown");
+      expect(JSON.parse(sessionStorage.getItem(savedKey)!)).toEqual(writes[0].identity);
+      expect(useSessionStore.getState().activeSessionId).not.toBe("A");
+    }
+    expect(writes.map(write => write.id)).toEqual(["A", "B"]);
+  },
+);
+
 it.each([404, 503, "network"] as const)("keeps unknown restoration occupied when confirmation fails: %s", async failure => {
   render(<Page />); await click("A");
   query = async () => { if (failure === "network") throw new Error("Network unavailable"); return Response.json({}, { status: failure }); };

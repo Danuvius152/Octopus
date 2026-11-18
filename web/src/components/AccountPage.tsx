@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import {
   IconCopy,
@@ -26,13 +26,7 @@ import { Label } from "./ui/label";
 
 const API = `${window.location.origin}/api/auth`;
 
-/** GET a route, or `null` if it refuses or the server is unreachable.
- *
- * Everything on this page is a read whose failure mode is "show nothing"
- * rather than "throw inside the sidebar" — the auth routes answer 401 to a
- * bearer that has just been replaced, and 403 to the admin sections when you
- * are not one, and neither is worth an error banner.
- */
+/** Identity and read-only workspace discovery retain their optional display. */
 async function getJson<T>(url: string, headers?: HeadersInit): Promise<T | null> {
   try {
     const res = await fetch(url, headers ? { headers } : undefined);
@@ -45,7 +39,8 @@ async function getJson<T>(url: string, headers?: HeadersInit): Promise<T | null>
 /** Current account settings, password, and administrator controls. */
 export function AccountPage({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const token = useSessionStore((s) => s.token);
-  return <AccountSettings key={token} token={token} onToggleSidebar={onToggleSidebar} />;
+  const account = useSessionStore((s) => s.accountGeneration);
+  return <AccountSettings key={`${account}:${token}`} token={token} onToggleSidebar={onToggleSidebar} />;
 }
 
 function AccountSettings({ token, onToggleSidebar }: { token: string; onToggleSidebar?: () => void }) {
@@ -259,6 +254,8 @@ function WorkspaceForm({ info, editor }: { info: WorkspaceInfo | null; editor?: 
 }
 
 function ChangePassword({ headers }: { headers: () => HeadersInit }) {
+  const operation = useRef<object | null>(null);
+  useEffect(() => () => { operation.current = null; }, []);
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [busy, setBusy] = useState(false);
@@ -266,6 +263,11 @@ function ChangePassword({ headers }: { headers: () => HeadersInit }) {
   const [done, setDone] = useState(false);
 
   const submit = async () => {
+    if (operation.current) return;
+    const original = {};
+    operation.current = original;
+    const account = useSessionStore.getState().accountGeneration;
+    const owns = () => operation.current === original && useSessionStore.getState().accountGeneration === account;
     setBusy(true);
     setError(null);
     setDone(false);
@@ -275,8 +277,10 @@ function ChangePassword({ headers }: { headers: () => HeadersInit }) {
         headers: headers(),
         body: JSON.stringify({ current_password: current, new_password: next }),
       });
+      if (!owns()) return;
       if (!res.ok) {
         const data = await res.json().catch(() => null);
+        if (!owns()) return;
         setError(
           typeof data?.detail === "string"
             ? data.detail
@@ -288,9 +292,12 @@ function ChangePassword({ headers }: { headers: () => HeadersInit }) {
       setNext("");
       setDone(true);
     } catch {
-      setError("Could not reach Octopus.");
+      if (owns()) setError("Could not reach Octopus.");
     } finally {
-      setBusy(false);
+      if (operation.current === original) {
+        operation.current = null;
+        if (useSessionStore.getState().accountGeneration === account) setBusy(false);
+      }
     }
   };
 
@@ -320,7 +327,10 @@ function ChangePassword({ headers }: { headers: () => HeadersInit }) {
             value={next}
             onChange={(e) => setNext(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") void submit();
+              if (e.key === "Enter" && !isImeComposing(e.nativeEvent)) {
+                e.preventDefault();
+                void submit();
+              }
             }}
           />
         </div>
@@ -340,55 +350,176 @@ function ChangePassword({ headers }: { headers: () => HeadersInit }) {
   );
 }
 
-function Invites({ headers }: { headers: () => HeadersInit }) {
-  const [invites, setInvites] = useState<InviteInfo[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+async function accountError(response: Response, fallback: string): Promise<string> {
+  const body = await response.json().catch(() => null);
+  return typeof body?.detail === "string" ? body.detail : `${fallback} — HTTP ${response.status}`;
+}
 
-  // Bumped after a create or a revoke; the effect below is the only thing that
-  // reads the list, so there is one path onto the screen rather than two.
-  const [reload, setReload] = useState(0);
+type AccountAction = {
+  label: string;
+  succeeded?: boolean;
+  phase: "writing" | "confirming" | "unknown" | "unconfirmed" | "failed" | "done";
+  message: string;
+};
 
+function holdsAccountAction(action: AccountAction | undefined) {
+  return action !== undefined && action.phase !== "failed" && action.phase !== "done";
+}
+
+/** One mounted table owns publication and the actions covered by each read. */
+function useAccountList<T>(route: string, headers: () => HeadersInit) {
+  const [state, setState] = useState<{ data: T[] | null; loading: boolean; error: string | null }>({
+    data: null, loading: true, error: null,
+  });
+  const lifetime = useRef({ account: useSessionStore.getState().accountGeneration, active: true });
+  const reading = useRef(0);
+  const [actions, setActions] = useState<Record<string, AccountAction>>({});
+  const operations = useRef(new Map<string, {
+    owner: typeof lifetime.current; label: string; writing: boolean; checking: boolean; succeeded: boolean;
+  }>());
   useEffect(() => {
-    let alive = true;
-    getJson<InviteInfo[]>(`${API}/invites`, headers()).then((rows) => {
-      if (alive && rows) setInvites(rows);
+    const owner = { account: useSessionStore.getState().accountGeneration, active: true };
+    lifetime.current = owner;
+    const originalOperations = operations.current;
+    return () => { owner.active = false; originalOperations.clear(); };
+  }, []);
+  const read = useCallback(async () => {
+    const owner = lifetime.current;
+    const owns = () => owner.active && lifetime.current === owner
+      && useSessionStore.getState().accountGeneration === owner.account;
+    if (!owns()) return false;
+    const sequence = ++reading.current;
+    const current = () => owns() && reading.current === sequence;
+    // A newer read takes over every settled write it starts after. It cannot
+    // confirm a write whose reply is still outstanding, or identify a lost one.
+    const covered = [...operations.current.entries()].filter(([, operation]) => operation.owner === owner && !operation.writing);
+    for (const [, operation] of covered) operation.checking = true;
+    setActions(previous => {
+      const next = { ...previous };
+      for (const [key, operation] of covered) next[key] = { label: operation.label, succeeded: operation.succeeded,
+        phase: "confirming", message: "Reading the current list to confirm…" };
+      return next;
     });
-    return () => {
-      alive = false;
+    setState(previous => ({ ...previous, loading: true, error: null }));
+    const settle = (loaded: boolean) => {
+      const updates: Record<string, AccountAction> = {};
+      for (const [key, operation] of covered) {
+        if (operations.current.get(key) !== operation) continue;
+        operation.checking = false;
+        if (loaded && operation.succeeded) {
+          operations.current.delete(key);
+          updates[key] = { label: operation.label, succeeded: true, phase: "done", message: "Write confirmed." };
+        } else {
+          updates[key] = { label: operation.label, succeeded: operation.succeeded,
+            phase: loaded ? "unknown" : "unconfirmed",
+            message: loaded ? "List refreshed. Write result unknown; this read cannot confirm the original operation."
+              : operation.succeeded ? "Write succeeded; confirmation failed." : "Write result unknown; confirmation failed." };
+        }
+      }
+      setActions(previous => ({ ...previous, ...updates }));
     };
-  }, [headers, reload]);
-
-  const create = async () => {
-    setBusy(true);
-    setError(null);
     try {
-      const res = await fetch(`${API}/invites`, {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify({ max_uses: 1, ttl_days: 14 }),
-      });
-      if (!res.ok) {
-        setError(`Could not create an invite — HTTP ${res.status}`);
+      const response = await fetch(`${API}/${route}`, { headers: headers() });
+      if (!response.ok) throw new Error(await accountError(response, `Could not load ${route}`));
+      const data = await response.json() as T[];
+      if (!current()) return false;
+      setState(previous => ({ ...previous, data, error: null }));
+      settle(true);
+      return true;
+    } catch (error) {
+      if (current()) {
+        setState(previous => ({ ...previous, error: error instanceof Error ? error.message : "Could not reach Octopus." }));
+        settle(false);
+      }
+      return false;
+    } finally {
+      if (current()) setState(previous => ({ ...previous, loading: false }));
+    }
+  }, [route, headers]);
+  useEffect(() => { void read(); }, [read]);
+  const confirm = useCallback(async (key: string) => {
+    const original = operations.current.get(key);
+    const owns = () => original !== undefined && operations.current.get(key) === original
+      && original.owner.active && lifetime.current === original.owner
+      && useSessionStore.getState().accountGeneration === original.owner.account;
+    if (!original || original.writing || original.checking || !owns()) return;
+    await read();
+  }, [read]);
+  const change = async (key: string, label: string, path: string, init: RequestInit) => {
+    const owner = lifetime.current;
+    if (!owner.active || useSessionStore.getState().accountGeneration !== owner.account || operations.current.has(key)) return;
+    const original = { owner, label, writing: true, checking: false, succeeded: false };
+    operations.current.set(key, original);
+    const owns = () => operations.current.get(key) === original && owner.active && lifetime.current === owner
+      && useSessionStore.getState().accountGeneration === owner.account;
+    setActions(previous => ({ ...previous, [key]: { label, phase: "writing", message: "Saving…" } }));
+    try {
+      const response = await fetch(`${API}/${path}`, { ...init, headers: headers() });
+      if (!owns()) return;
+      if (!response.ok) {
+        const message = await accountError(response, "Could not save the change");
+        if (!owns()) return;
+        operations.current.delete(key);
+        setActions(previous => ({ ...previous, [key]: { label, phase: "failed", message } }));
         return;
       }
-      setReload((n) => n + 1);
+      original.writing = false;
+      original.succeeded = true;
+      await confirm(key);
     } catch {
-      setError("Could not reach Octopus.");
-    } finally {
-      setBusy(false);
+      if (!owns()) return;
+      original.writing = false;
+      setActions(previous => ({ ...previous, [key]: { label, phase: "unknown", message: "Could not reach Octopus. Write result unknown." } }));
     }
   };
+  return { ...state, read, actions, change, confirm };
+}
 
-  const revoke = async (code: string) => {
-    await fetch(`${API}/invites/${encodeURIComponent(code)}`, {
-      method: "DELETE",
-      headers: headers(),
-    }).catch(() => null);
-    setReload((n) => n + 1);
-  };
+function ListFeedback({ route, list }: { route: string; list: {
+  loading: boolean; error: string | null; read: () => Promise<boolean>;
+} }) {
+  return <div className="mb-3 space-y-2">
+    {list.loading && <p role="status">Loading {route}…</p>}
+    {list.error && <p role="alert" className="text-xs text-destructive">{list.error}</p>}
+    <Button size="sm" variant="outline" onClick={() => { void list.read(); }}>
+      {list.error ? `Retry loading ${route}` : `Refresh ${route}`}
+    </Button>
+  </div>;
+}
 
+function ActionFeedback({ actions, confirm }: {
+  actions: Record<string, AccountAction>; confirm: (key: string) => Promise<void>;
+}) {
+  return Object.entries(actions).map(([key, action]) => <div key={key} className="mt-2 text-xs">
+    <p role={action.phase === "failed" || action.phase === "unknown" || action.phase === "unconfirmed" ? "alert" : "status"}>
+      {action.label}: {action.message}
+    </p>
+    {(action.phase === "unknown" || action.phase === "unconfirmed") && <Button size="sm" variant="outline" onClick={() => { void confirm(key); }}>
+      {action.phase === "unknown" ? "Check status" : "Retry confirmation"}
+    </Button>}
+  </div>);
+}
+
+function inviteAvailable(invite: InviteInfo, now: number) {
+  return !invite.revoked_at && invite.used_count < invite.max_uses
+    && (!invite.expires_at || Date.parse(invite.expires_at) > now);
+}
+
+function Invites({ headers }: { headers: () => HeadersInit }) {
+  const list = useAccountList<InviteInfo>("invites", headers);
+  const invites = list.data ?? [];
   const live = invites.filter((i) => !i.revoked_at);
+  const [availabilityTime, setAvailabilityTime] = useState(Date.now);
+  const now = availabilityTime;
+  useEffect(() => {
+    const current = Date.now();
+    const next = list.data?.reduce((deadline, invite) => inviteAvailable(invite, availabilityTime) && invite.expires_at
+      ? Math.min(deadline, Date.parse(invite.expires_at)) : deadline, Infinity) ?? Infinity;
+    if (!Number.isFinite(next)) return;
+    // One table-owned timer refreshes copy eligibility at its next expiry.
+    const timer = window.setTimeout(() => setAvailabilityTime(Date.now()), Math.min(Math.max(0, next - current), 2_147_483_647));
+    return () => window.clearTimeout(timer);
+  }, [list.data, availabilityTime]);
 
   return (
     <Section
@@ -400,15 +531,18 @@ function Invites({ headers }: { headers: () => HeadersInit }) {
           size="sm"
           variant="outline"
           className="btn-new-invite"
-          disabled={busy}
-          onClick={create}
+          disabled={holdsAccountAction(list.actions["new-invite"])}
+          onClick={() => { void list.change("new-invite", "New invite", "invites", {
+            method: "POST", body: JSON.stringify({ max_uses: 1, ttl_days: 14 }),
+          }); }}
         >
           <IconPlus size={14} />
           New invite
         </Button>
       }
     >
-      {live.length === 0 ? (
+      <ListFeedback route="invites" list={list} />
+      {list.data !== null && (live.length === 0 ? (
         <p className="invites-empty text-[12.5px] text-gray-700">
           No live invites.
         </p>
@@ -427,30 +561,33 @@ function Invites({ headers }: { headers: () => HeadersInit }) {
                 {invite.expires_at
                   ? ` · expires ${invite.expires_at.slice(0, 10)}`
                   : ""}
+                {invite.expires_at && Date.parse(invite.expires_at) <= now ? " · expired" : ""}
+                {invite.used_count >= invite.max_uses ? " · exhausted" : ""}
               </span>
-              <button
+              {!list.actions[`invite:${invite.code}`]?.succeeded && inviteAvailable(invite, now) && <button
                 type="button"
                 className="btn-copy-invite rounded p-1 text-gray-700 hover:bg-gray-100"
                 aria-label="Copy invite code"
-                onClick={() =>
-                  navigator.clipboard?.writeText(invite.code).catch(() => {})
-                }
+                onClick={() => {
+                  if (inviteAvailable(invite, Date.now())) void navigator.clipboard?.writeText(invite.code).catch(() => {});
+                }}
               >
                 <IconCopy size={15} />
-              </button>
+              </button>}
               <button
                 type="button"
                 className="btn-revoke-invite rounded p-1 text-gray-700 hover:bg-gray-100"
                 aria-label="Revoke invite"
-                onClick={() => revoke(invite.code)}
+                disabled={holdsAccountAction(list.actions[`invite:${invite.code}`])}
+                onClick={() => { void list.change(`invite:${invite.code}`, invite.code, `invites/${encodeURIComponent(invite.code)}`, { method: "DELETE" }); }}
               >
                 <IconTrash size={15} />
               </button>
             </li>
           ))}
         </ul>
-      )}
-      {error && <p className="invites-error mt-2 text-xs text-destructive">{error}</p>}
+      ))}
+      <ActionFeedback actions={list.actions} confirm={list.confirm} />
     </Section>
   );
 }
@@ -462,44 +599,16 @@ function People({
   headers: () => HeadersInit;
   me: string | null;
 }) {
-  const [people, setPeople] = useState<UserInfo[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  const [reload, setReload] = useState(0);
-
-  useEffect(() => {
-    let alive = true;
-    getJson<UserInfo[]>(`${API}/users`, headers()).then((rows) => {
-      if (alive && rows) setPeople(rows);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [headers, reload]);
-
-  const setDisabled = async (id: string, disabled: boolean) => {
-    const res = await fetch(`${API}/users/${id}/disabled`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ disabled }),
-    }).catch(() => null);
-    if (res && !res.ok) {
-      const data = await res.json().catch(() => null);
-      setError(
-        typeof data?.detail === "string"
-          ? data.detail
-          : `Could not update the account — HTTP ${res.status}`
-      );
-    }
-    setReload((n) => n + 1);
-  };
-
+  const list = useAccountList<UserInfo>("users", headers);
+  const people = list.data ?? [];
   return (
     <Section
       className="account-people"
       title="People"
       description="Disabling an account revokes its tokens and stops it signing in. Nothing it made is deleted."
     >
+      <ListFeedback route="users" list={list} />
+      {list.data !== null && people.length === 0 && <p>No people.</p>}
       <ul className="divide-y divide-gray-200 rounded-lg border border-gray-200">
         {people.map((p) => (
           <li key={p.id} className="person-row flex items-center gap-3 px-3 py-2">
@@ -521,7 +630,10 @@ function People({
                 type="button"
                 className="btn-toggle-disabled rounded p-1 text-gray-700 hover:bg-gray-100"
                 aria-label={p.disabled_at ? "Enable account" : "Disable account"}
-                onClick={() => setDisabled(p.id, !p.disabled_at)}
+                disabled={holdsAccountAction(list.actions[`user:${p.id}`])}
+                onClick={() => { void list.change(`user:${p.id}`, p.username, `users/${encodeURIComponent(p.id)}/disabled`, {
+                  method: "POST", body: JSON.stringify({ disabled: !p.disabled_at }),
+                }); }}
               >
                 {p.disabled_at ? (
                   <IconUserCheck size={15} />
@@ -533,7 +645,7 @@ function People({
           </li>
         ))}
       </ul>
-      {error && <p className="people-error mt-2 text-xs text-destructive">{error}</p>}
+      <ActionFeedback actions={list.actions} confirm={list.confirm} />
     </Section>
   );
 }

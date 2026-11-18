@@ -16,6 +16,7 @@ import type { components } from "./contracts";
 export type WorkspaceEditReceipt = components["schemas"]["WorkspaceEditReceipt"];
 
 export type ClientSubmissionStatus = components["schemas"]["ClientSubmissionStatus"];
+export type SessionArchiveResult = components["schemas"]["SessionArchiveResult"];
 export type ClientSubmissionSummary = components["schemas"]["ClientSubmissionSummary"];
 export type SubmissionRecoveryPage = components["schemas"]["SubmissionRecoveryPage"];
 

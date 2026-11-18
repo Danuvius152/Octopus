@@ -130,8 +130,8 @@ require editing a second positional map. These internal records do not widen
 public response schemas. Partial/aggregate queries retain their own projections;
 there is no global row factory or storage format change.
 
-Archived-session reads share one explicit column declaration and decoder. The
-collection filters account and archived status before joining messages, then
+Complete archived-session reads share one explicit column declaration and
+decoder. The collection filters account and archived status before joining messages, then
 aggregates physical message count and the next sequence floor in one query,
 retaining empty archives and original order without a silent row cap. Physical
 count is not DISTINCT seq: duplicate history remains detectable rather than
@@ -141,6 +141,21 @@ remain indistinguishable. Restore retains the original lifecycle locks,
 eligibility, reservation and publication boundaries. `tests/test_archive_reads.py`
 checks real public consumers, query growth, empty/gapped/duplicate histories and
 account isolation.
+
+### Narrow session bindings
+
+File metadata and byte requests use the live session directory when available.
+For archived sessions, the lookup selects only `working_dir` by session ID,
+account and the archived flag. Absent and foreign rows both yield 404. File
+resolution and authorization remain with the [file viewer](frontend-interaction-state.md#文件查看意图).
+
+Delegation relation reads project only session ID, owner, agent, origin and
+parent ID, including archived rows. An ancestor walk opens a read snapshot at
+the first live miss and reuses it for subsequent missing IDs. A failed relation
+CAS checks the original parent and child together in one read snapshot. The
+caller compares exact owners and bindings, using present rows to distinguish
+changed relations from deletion. The snapshot ends with the walk or CAS check.
+Admission and cleanup are owned by [delegation](agent-collaboration.md#invocation-and-identity).
 
 ### Message range index
 

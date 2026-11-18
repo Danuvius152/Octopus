@@ -122,10 +122,10 @@
       "active_request_id": null,
       "generation": "service",
       "items": [],
-      "paused": true,
-      "revision": 17
+      "paused": false,
+      "revision": 2
     },
-    "session_id": "session",
+    "session_id": "archive-source",
     "type": "dispatch_state"
   },
   "question_request": {
@@ -267,6 +267,30 @@
     "name": "Contract session",
     "new_session_id": null,
     "old_session_id": "session",
+    "type": "session_archived"
+  },
+  "session_archived_partial": {
+    "archive_result": {
+      "archived": true,
+      "failure_stage": "schedule_rebinding",
+      "message": "Schedule rebinding storage refused",
+      "new_session_id": "archive-successor",
+      "old_session_id": "archive-source"
+    },
+    "dispatch_state": {
+      "active_operation": null,
+      "active_request_id": null,
+      "generation": "service",
+      "items": [],
+      "paused": false,
+      "revision": 3
+    },
+    "model": null,
+    "name": "Partial archive",
+    "new_session_id": "archive-successor",
+    "old_session_id": "archive-source",
+    "reasoning_effort": null,
+    "service_tier": null,
     "type": "session_archived"
   },
   "session_unarchived": {

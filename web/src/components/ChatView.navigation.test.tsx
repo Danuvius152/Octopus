@@ -7,6 +7,7 @@ import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { sessions } from "../lib/sessionList";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { observeSession } from "../lib/hydrateSession";
+import { deferred } from "../test-support/deferred";
 
 const a = { id: "a", name: "A", agent_id: "agent", status: "idle", backend: "codex",
   created_at: "2026-11-12", working_dir: "/tmp", archived: false,
@@ -32,7 +33,7 @@ beforeEach(() => {
     dispatchGeneration: "service", retiredDispatchGenerations: [],
   });
 });
-afterEach(() => { cleanup(); useSessionStore.getState().setToken(""); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); useSessionStore.getState().setToken(""); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it.each(["application", "schedules"] as const)("archive broadcasts preserve %s foreground and existing successor content", async (mainView) => {
   server();
@@ -151,6 +152,256 @@ it("reports an archive refusal with its server reason and never confirms or retr
   expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname === "/api/sessions")).toHaveLength(0);
 });
 
+it.each(["headers", "success body", "error body"])("bounds the original archive %s and offers only manual read after confirmation expires", async (stage) => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const api = server();
+  mount();
+  api.holdList();
+  command("/archive");
+  if (stage !== "headers") {
+    const response = new Response(null, { status: stage === "success body" ? 201 : 500 });
+    response.json = () => new Promise(() => {});
+    await api.complete(response);
+  }
+  await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
+  expect(screen.queryByText(/Archive result is unknown/)).toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  const post = api.fetcher.mock.calls.find(([, init]) => init?.method === "POST")!;
+  expect(post[1]!.signal!.aborted).toBe(true);
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is still unknown");
+  expect(screen.getByRole("button", { name: "Confirm original archive" })).toBeEnabled();
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  // The timed-out POST body/header can arrive later, but has no remaining
+  // authority over this confirmation or the original operation's feedback.
+  if (stage === "headers") await api.complete(Response.json(child));
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is still unknown");
+  await api.confirmList();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Confirm original archive" })); });
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it.each([201, 409])("shares the POST header/body deadline and rejects a late HTTP %s body during manual confirmation", async (status) => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const api = server();
+  mount(); api.holdList(); command("/archive");
+  await act(async () => { await vi.advanceTimersByTimeAsync(29_000); });
+  const body = deferred<unknown>();
+  const response = new Response(null, { status });
+  response.json = () => body.promise;
+  await api.complete(response);
+  await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+  expect(screen.queryByRole("alert")).toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  const manual = screen.getByRole("button", { name: "Confirm original archive" });
+  fireEvent.click(manual);
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+  expect(manual).toBeDisabled();
+  // The old body has no authority over this successor read or its deadline.
+  await act(async () => body.resolve(status === 201 ? child : { detail: "Late refusal" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  fireEvent.click(manual);
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expect(manual).toBeEnabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is still unknown");
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("keeps a restored session's new archive separate from an old partial HTTP failure", async () => {
+  const api = server();
+  const previous = api.fetcher.getMockImplementation()!;
+  const old = deferred<Response>(), next = deferred<Response>();
+  const posts = [old, next];
+  let count = 0;
+  api.fetcher.mockImplementation(async (url, init) => init?.method === "POST"
+    ? posts[count++].promise : previous(url, init));
+  mount();
+  command("/archive");
+  api.setRows([b, child, { ...a, archived: true }]);
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
+  api.setRows([a, b, child]);
+  act(() => handleWsMessage({ type: "session_unarchived", session_id: a.id, session: a }));
+  command("/archive");
+  await act(async () => old.resolve(Response.json({ old_session_id: a.id, archived: true,
+    new_session_id: child.id, failure_stage: "successor_configuration", message: "Old configuration failure" }, { status: 500 })));
+  expect(screen.queryByText(/Old configuration failure/)).toBeNull();
+  const newer = { ...child, id: "newer-successor", name: "New successor" };
+  api.setRows([b, child, newer, { ...a, archived: true }]);
+  await act(async () => next.resolve(Response.json(newer, { status: 201 })));
+  await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(newer.id));
+  expect(count).toBe(2);
+  expect(screen.queryByText(/Old configuration failure/)).toBeNull();
+});
+
+it.each(["successor_creation", "successor_configuration", "schedule_rebinding"])("preserves archive effect and known successor when %s fails", async (failure_stage) => {
+  const api = server();
+  mount();
+  command("/archive");
+  const new_session_id = failure_stage === "successor_creation" ? null : child.id;
+  const result = { old_session_id: a.id, archived: true, new_session_id, failure_stage, message: "Storage refused" };
+  await api.complete(Response.json(result, { status: 500 }));
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive committed");
+  expect(screen.getByRole("alert")).toHaveTextContent("Storage refused");
+  expect(screen.queryByText(/Archive refused/)).toBeNull();
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(useSessionStore.getState().archivedSessions.map((row) => row.id)).toContain(a.id);
+  expect(useSessionStore.getState().sessionSuccessors[a.id] ?? null).toBe(new_session_id);
+  if (new_session_id) expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("retains the original archive through disconnect and uses a new read scope without reviving navigation", async () => {
+  const api = server();
+  const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+  sessions.connect(source);
+  await act(async () => {});
+  mount();
+  command("/archive");
+  act(() => sessions.disconnect(source));
+  await api.loseResponse();
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is still unknown");
+  const next = { ...source, socket: {} };
+  act(() => sessions.connect(next));
+  await act(async () => {});
+  // The known direct successor arrives in the new connection; a manual
+  // observation can confirm it but cannot restore the original navigation.
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Confirm original archive" })); });
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(useSessionStore.getState().sessionSuccessors[a.id]).toBe(child.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  sessions.disconnect(next);
+});
+
+it("confirms the successor known from partial HTTP success after an unrelated list change", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  api.holdList();
+  act(() => sessions.patch(b.id, { status: "running" }));
+  await api.complete(Response.json({ old_session_id: a.id, archived: true, new_session_id: child.id,
+    failure_stage: "successor_configuration", message: "Storage refused" }, { status: 500 }));
+  expect(screen.getByRole("alert")).toHaveTextContent("Storage refused");
+  await waitFor(() => expect(api.listPending()).toBe(true));
+  await api.confirmList();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible());
+  expect(useSessionStore.getState().sessionSuccessors[a.id]).toBe(child.id);
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("retires a late partial archive link when restoration arrives without the first archive broadcast", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  act(() => handleWsMessage({ type: "session_unarchived", session_id: a.id, session: a }));
+  expect(useSessionStore.getState().sessions.map((row) => row.id)).toContain(a.id);
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: null }));
+  api.holdList();
+  api.setRows([b, child, { ...a, archived: true }]);
+  const fresh = sessions.refresh(true);
+  await api.complete(Response.json({ old_session_id: a.id, archived: true, new_session_id: child.id,
+    failure_stage: "successor_configuration", message: "Old partial archive" }, { status: 500 }));
+  await api.confirmList();
+  await fresh;
+  await waitFor(() => expect(useSessionStore.getState().sessionRead.stale).toBe(false));
+  const state = useSessionStore.getState();
+  expect(state.archivedSessions.map((row) => row.id)).toContain(a.id);
+  expect(state.sessions.map((row) => row.id)).toContain(child.id);
+  expect(state.sessionSuccessors[a.id]).toBeUndefined();
+  expect(screen.getByRole("alert")).toHaveTextContent("Old partial archive");
+  expect(screen.queryByRole("button", { name: "Open successor" })).toBeNull();
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("retires a full archive receipt after unmount, restoration and another archive without a successor", async () => {
+  const api = server();
+  const previous = mount();
+  command("/archive");
+  previous.unmount();
+  mount();
+  api.setRows([b, child, { ...a, archived: true }]);
+  act(() => handleWsMessage({ type: "session_unarchived", session_id: a.id, session: a }));
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: null }));
+  await api.complete(Response.json(child, { status: 201 }));
+  const state = useSessionStore.getState();
+  expect(state.archivedSessions.map((row) => row.id)).toContain(a.id);
+  expect(state.sessions.map((row) => row.id)).toContain(child.id);
+  expect(state.sessionSuccessors[a.id]).toBeUndefined();
+  expect(state.activeSessionId).toBe(a.id);
+  expect(screen.queryByRole("button", { name: "Open successor" })).toBeNull();
+});
+
+it("keeps a new queued fork when an older partial archive receipt arrives after restoration", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  const live = { ...a, status: "running" } as const;
+  api.setRows([live, b, child]);
+  act(() => handleWsMessage({ type: "session_unarchived", session_id: a.id, session: live }));
+  act(() => useSessionStore.getState().setPendingFork(a.id, "After restoration"));
+  const newFork = useSessionStore.getState().pendingForks[a.id];
+  await api.complete(Response.json({ old_session_id: a.id, archived: true, new_session_id: child.id,
+    failure_stage: "successor_configuration", message: "Old partial archive" }, { status: 500 }));
+  expect(useSessionStore.getState().pendingForks[a.id]).toBe(newFork);
+  expect(useSessionStore.getState().sessions.map((row) => row.id)).toContain(a.id);
+  expect(useSessionStore.getState().sessionSuccessors[a.id]).toBeUndefined();
+});
+
+it.each(["broadcast first", "refusal first"])("settles a second archive's explicit refusal with %s", async (order) => {
+  const api = server();
+  const first = deferred<Response>(), second = deferred<Response>();
+  const previous = api.fetcher.getMockImplementation()!;
+  const posts = [first, second];
+  api.fetcher.mockImplementation(async (url, init) => init?.method === "POST"
+    ? posts.shift()!.promise : previous(url, init));
+  const archive_result = { old_session_id: a.id, archived: true, new_session_id: child.id,
+    failure_stage: "successor_configuration", message: "First archive setup failed" };
+  const broadcast = () => act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id,
+    new_session_id: child.id, name: child.name, archive_result }));
+  const refuse = () => act(async () => second.resolve(Response.json({ detail: "Second archive refused" }, { status: 404 })));
+  mount();
+  command("/archive");
+  command("/archive");
+  api.setRows([b, child, { ...a, archived: true }]);
+  if (order === "broadcast first") {
+    broadcast();
+    expect(screen.getByRole("alert")).toHaveTextContent("Session archived. Successor configuration failed: First archive setup failed");
+    await refuse();
+  } else { await refuse(); broadcast(); }
+  await act(async () => first.resolve(Response.json(archive_result, { status: 500 })));
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive refused (HTTP 404): Second archive refused");
+  expect(useSessionStore.getState().sessionSuccessors[a.id]).toBe(child.id);
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
+});
+
+it("shows shared archive activity while the local HTTP headers are pending", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  const archive_result = { old_session_id: a.id, archived: true, new_session_id: child.id,
+    failure_stage: "successor_configuration", message: "Inherited model could not be saved" };
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id,
+    name: child.name, archive_result }));
+  expect(screen.getByRole("alert")).toHaveTextContent("Session archived");
+  expect(screen.getByRole("alert")).toHaveTextContent("Inherited model could not be saved");
+  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  await api.loseResponse();
+  expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
+  expect(screen.getByRole("alert")).toHaveTextContent("Inherited model could not be saved");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
 it.each(["network", "json", "shape", "null"])("confirms an unknown %s archive by reading without replaying the command", async (failure) => {
   const api = server();
   mount();
@@ -177,11 +428,14 @@ it("confirms a lost archive reply through a fresh read after an older GET, prese
   await waitFor(() => expect(api.listPending()).toBe(true));
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
   const readsBefore = api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname === "/api/sessions").length;
+  const oldSignal = api.fetcher.mock.calls.find(([url]) => new URL(url).pathname === "/api/sessions")![1]!.signal!;
   await api.loseResponse();
-  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname === "/api/sessions")).toHaveLength(readsBefore + 1);
+  expect(oldSignal.aborted).toBe(false);
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname === "/api/sessions")).toHaveLength(readsBefore);
   await api.confirmList();
   await oldRead;
   await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname === "/api/sessions")).toHaveLength(readsBefore + 1);
   expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
 
@@ -194,6 +448,179 @@ it("retains an unknown archive result when confirmation fails, without a write r
   await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Archive result is still unknown"));
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("keeps a concurrent archive broadcast separate from a lost local POST result", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  api.setRows([b, child, { ...a, archived: true }]);
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
+    archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
+      failure_stage: "successor_configuration", message: "Other tab's settings failed" } }));
+  api.holdList();
+  await api.loseResponse();
+  expect(api.listPending()).toBe(true);
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  await api.confirmList();
+  expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
+  expect(screen.getByRole("alert")).toHaveTextContent("Other tab's settings failed");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("keeps the shared failure stage when a partial broadcast arrives during manual confirmation", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  api.failList(true);
+  await api.loseResponse();
+  const manual = await screen.findByRole("button", { name: "Confirm original archive" });
+  api.failList(false);
+  api.holdList();
+  fireEvent.click(manual);
+  await waitFor(() => expect(api.listPending()).toBe(true));
+  api.setRows([b, child, { ...a, archived: true }]);
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
+    archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
+      failure_stage: "schedule_rebinding", message: "Schedule settings were unavailable" } }));
+  await api.confirmList();
+  expect(screen.getByRole("alert")).toHaveTextContent("Schedule rebinding failed: Schedule settings were unavailable");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("shows partial archive activity after a lost POST's GET has confirmed only the archived row", async () => {
+  const api = server();
+  mount();
+  command("/archive");
+  api.setRows([b, { ...a, archived: true }]);
+  await api.loseResponse();
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed"));
+  api.setRows([b, child, { ...a, archived: true }]);
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
+    archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
+      failure_stage: "schedule_rebinding", message: "Late schedule failure" } }));
+  expect(screen.getByRole("alert")).toHaveTextContent("Late schedule failure");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("receives partial archive activity on reconnect before a manual confirmation", async () => {
+  const api = server();
+  const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+  sessions.connect(source);
+  await act(async () => {});
+  mount();
+  command("/archive");
+  act(() => sessions.disconnect(source));
+  await api.loseResponse();
+  const manual = await screen.findByRole("button", { name: "Confirm original archive" });
+  api.setRows([b, child, { ...a, archived: true }]);
+  const next = { ...source, socket: {} };
+  act(() => sessions.connect(next));
+  await act(async () => {});
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
+    archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
+      failure_stage: "successor_configuration", message: "Settings failure after reconnect" } }, next));
+  expect(screen.getByRole("alert")).toHaveTextContent("Settings failure after reconnect");
+  expect(manual).toBeEnabled();
+  await act(async () => { fireEvent.click(manual); });
+  expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
+  expect(screen.getByRole("alert")).toHaveTextContent("Settings failure after reconnect");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  sessions.disconnect(next);
+});
+
+it.each([true, false])("continues an in-flight archive confirmation across its first generation (partial: %s)", async (partial) => {
+  const api = server();
+  useSessionStore.setState({ dispatchGeneration: null, retiredDispatchGenerations: [], dispatchStates: {}, sessionMembership: {} });
+  mount();
+  api.holdList();
+  command("/archive");
+  await api.loseResponse();
+  await waitFor(() => expect(api.listPending()).toBe(true));
+  api.setRows([b, child, { ...a, archived: true }]);
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
+    dispatch_state: dispatch, ...(partial ? { archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
+      failure_stage: "successor_configuration", message: "First generation partial result" } } : {}) }));
+  await api.confirmList();
+  if (partial) {
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown"));
+    expect(screen.getByRole("alert")).toHaveTextContent("First generation partial result");
+    expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  } else {
+    await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
+  }
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it.each(["before", "after"])("retains manual confirmation when a shared failure arrives %s the failed read", async (arrival) => {
+  const api = server();
+  mount();
+  command("/archive");
+  api.failList(true);
+  api.holdList();
+  await api.loseResponse();
+  await waitFor(() => expect(api.listPending()).toBe(true));
+  api.setRows([b, child, { ...a, archived: true }]);
+  const broadcast = () => act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id,
+    new_session_id: child.id, name: child.name,
+    archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
+      failure_stage: "schedule_rebinding", message: "Schedule work failed" } }));
+  if (arrival === "before") broadcast();
+  await api.confirmList();
+  if (arrival === "after") broadcast();
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is still unknown");
+  expect(screen.getByRole("alert")).toHaveTextContent("Schedule work failed");
+  expect(screen.getByRole("button", { name: "Confirm original archive" })).toBeEnabled();
+  act(() => handleWsMessage({ type: "session_unarchived", session_id: a.id, session: a }));
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is still unknown");
+  expect(screen.getByRole("alert")).not.toHaveTextContent("Schedule work failed");
+  expect(screen.getByRole("button", { name: "Confirm original archive" })).toBeEnabled();
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("confirms a lost POST after the first archive frame establishes the service generation", async () => {
+  const api = server();
+  useSessionStore.setState({ dispatchGeneration: null, retiredDispatchGenerations: [], dispatchStates: {}, sessionMembership: {} });
+  mount();
+  command("/archive");
+  api.setRows([b, child, { ...a, archived: true }]);
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
+    dispatch_state: dispatch, archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
+      failure_stage: "successor_configuration", message: "Original settings failed" } }));
+  api.holdList();
+  await api.loseResponse();
+  await waitFor(() => expect(api.listPending()).toBe(true));
+  await api.confirmList();
+  expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
+  expect(screen.getByRole("alert")).toHaveTextContent("Original settings failed");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
+it("clears the previous direct successor after a no-replacement archive following reconnect", async () => {
+  const api = server();
+  api.setRows([b, child, { ...a, archived: true }]);
+  const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+  sessions.connect(source);
+  await act(async () => {});
+  mount();
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
+  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  act(() => sessions.disconnect(source));
+  const next = { ...source, socket: {} };
+  act(() => sessions.connect(next));
+  await act(async () => {});
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: null }));
+  expect(useSessionStore.getState().sessionSuccessors[a.id]).toBeUndefined();
+  expect(screen.queryByRole("button", { name: "Open successor" })).toBeNull();
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  sessions.disconnect(next);
 });
 
 it.each(["draft", "leave-return", "token"])("retires late archive feedback after %s", async (boundary) => {

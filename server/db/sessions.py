@@ -9,7 +9,8 @@ changed.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -118,6 +119,14 @@ _DELEGATION_RELATION = (
     "WHERE child.origin = 'delegation' "
     "AND parent.user_id IS child.user_id AND target.user_id IS child.user_id "
 )
+
+
+@dataclass(frozen=True)
+class SessionRelation:
+    agent_id: str | None
+    user_id: str | None
+    origin: str
+    parent_session_id: str | None
 
 
 class DelegationWorkPending(Exception):
@@ -244,6 +253,30 @@ class SessionsMixin(DatabaseBase):
             if row is None:
                 return None
             return {"id": row[0], "agent_id": row[1], "user_id": row[2], "archived": bool(row[3])}
+
+    @asynccontextmanager
+    async def session_relation_snapshot(
+        self,
+    ) -> AsyncIterator[Callable[[tuple[str, ...]], Awaitable[dict[str, SessionRelation]]]]:
+        """Read exact session IDs in one snapshot, including archived rows.
+
+        The caller compares exact owners. Hide foreign rows here and a CAS
+        miss could mistake a changed binding for physical deletion.
+        """
+        async with self.transaction(write=False) as tx:
+            async def read(session_ids: tuple[str, ...]) -> dict[str, SessionRelation]:
+                placeholders = ", ".join("?" for _ in session_ids)
+                rows = await tx.fetch_all(
+                    "SELECT id, agent_id, user_id, origin, parent_session_id "
+                    f"FROM sessions WHERE id IN ({placeholders})",
+                    session_ids,
+                )
+                return {
+                    session_id: SessionRelation(agent_id, user_id, origin or "user", parent_id)
+                    for session_id, agent_id, user_id, origin, parent_id in rows
+                }
+
+            yield read
 
     async def load_delegation_states(self) -> list[dict[str, Any]]:
         """Load future round snapshots, including archived child conversations."""
@@ -505,6 +538,15 @@ class SessionsMixin(DatabaseBase):
             )
         return [{**_decode_session(row[:-3]), "message_count": row[-3],
                  "next_message_seq": row[-2], "duplicate_seqs": row[-1]} for row in rows]
+
+    async def get_archived_working_dir(self, session_id: str, user_id: str | None) -> str | None:
+        """File reads need only the exact owned archive's directory binding."""
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                "SELECT working_dir FROM sessions WHERE id = ? AND user_id IS ? AND archived = 1",
+                (session_id, user_id),
+            )
+        return row[0] if row is not None else None
 
     async def count_messages(self, session_id: str) -> int:
         async with self.transaction(write=False) as tx:

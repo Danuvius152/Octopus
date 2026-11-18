@@ -3,7 +3,8 @@ import { decodeWsEvent } from "./wsEvents";
 import producers from "./wsProducerFixtures.json";
 import recording from "./recordingReplay.json";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { useSessionStore } from "../stores/sessionStore";
+import { sessions } from "./sessionList";
+import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
 beforeEach(() => useSessionStore.setState(useSessionStore.getInitialState(), true));
 
@@ -31,8 +32,25 @@ it.each(["stash@{0}", "a".repeat(40)])("preserves recovery reference %s without 
 
 // test_ws_contract.py runs the Python constructors and checks this same file;
 // the Owner's structured outcome has its independent recordingReplay producer.
-it.each(Object.entries(producers))("decodes the real %s producer with additive fields", (type, event) => {
-  expect(decodeWsEvent({ ...event, future_field: true })).toMatchObject({ kind: "event", event: { type } });
+it.each(Object.entries(producers))("decodes the real %s producer with additive fields", (_sample, event) => {
+  expect(decodeWsEvent({ ...event, future_field: true })).toMatchObject({ kind: "event", event: { type: event.type } });
+});
+
+it("applies the real partial archive frame as shared activity and a successor relationship", () => {
+  const frame = producers.session_archived_partial;
+  const source = { ...producers.session_unarchived.session, id: frame.old_session_id } as SessionInfo;
+  useSessionStore.setState({ sessions: [source], activeSessionId: source.id });
+  const tracked = sessions.observe(source.id, useSessionStore.getState(), "archive");
+  try {
+    handleWsMessage(frame);
+    const state = useSessionStore.getState();
+    expect(sessions.archiveActivity(source.id, tracked.observation)).toEqual(frame.archive_result);
+    expect(state.archivedSessions).toEqual([{ ...source, archived: true }]);
+    expect(state.sessionSuccessors[source.id]).toBe(frame.new_session_id);
+    expect(state.activeSessionId).toBe(source.id);
+  } finally {
+    tracked.finish();
+  }
 });
 
 it("keeps the original structured Owner outcome through the decoder and store", () => {
@@ -65,6 +83,15 @@ it.each([
 
 it("reports an unknown extension separately from an invalid supported event", () => {
   expect(decodeWsEvent({ type: "future_extension", seq: 100 })).toEqual({ kind: "unknown", type: "future_extension" });
+});
+
+it.each([
+  { old_session_id: "other-old" }, { new_session_id: "other-new" },
+  { archived: false }, { failure_stage: "publication" }, { failure_stage: ["schedule_rebinding"] }, { message: null },
+])("rejects an archive result that contradicts its envelope or contract: %j", (changed) => {
+  expect(decodeWsEvent({ type: "session_archived", old_session_id: "old", new_session_id: "new", name: "Successor",
+    archive_result: { old_session_id: "old", new_session_id: "new", archived: true,
+      failure_stage: "successor_configuration", message: "Storage unavailable", ...changed } }).kind).toBe("invalid");
 });
 
 it("feeds real producers into their original consumers without inventing missing Research cards", () => {
