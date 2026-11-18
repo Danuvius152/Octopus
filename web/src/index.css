@@ -510,6 +510,22 @@ body {
   --bottom-bar-pad: 1.25rem;
 }
 
+.chat-view {
+  container: chat / inline-size;
+}
+
+/* The chat column can be narrow even when the viewport fits the sidebar. */
+@container chat (max-width: 40rem) {
+  .chat-header {
+    padding-inline: 0.75rem;
+    gap: 0.5rem;
+  }
+
+  .chat-header :is(.crumb-lead, .crumb-sep, .chat-model-label, .credential-label, .conn-label) {
+    display: none;
+  }
+}
+
 @media (max-width: 768px) {
   /* A phone has no room to spend 20px of screen under the composer. */
   .chat-input-bar {
@@ -562,7 +578,7 @@ summary {
     opacity: 0.5;
   }
 
-  .session-item:not(.active) .btn-session-archive,
+  .session-item:not(.active) .btn-session-archive:not([aria-busy="true"]),
   .application-item:not(.active) .btn-application-pin,
   .application-item:not(.active) .btn-application-unpin,
   .agent-item:not(.expanded) .btn-agent-pin,

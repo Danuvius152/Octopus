@@ -40,6 +40,9 @@ function motionViewport(bottomRemainder = 0, revealGrowth = 0, stopAtReveal = fa
     let footerHeight = 0;
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       const viewport = this.closest<HTMLElement>(".chat-messages");
+      if (viewport && this.hasAttribute("data-chat-rows")) {
+        return new DOMRect(0, -viewport.scrollTop, 800, height - footerHeight);
+      }
       if (viewport && this.firstElementChild?.hasAttribute("data-chat-footer")) {
         // One real layout change at the reveal boundary, with no subsequent
         // token or ResizeObserver delivery to rescue a missing write check.
@@ -168,20 +171,22 @@ it("self-verifies Footer growth during reveal layout without another output or r
   expect(motion.pending()).toBe(0);
 });
 
-it("hands output after a qualified reveal to normal following", () => {
+it("reaches the latest output on the first revealed frame, then resumes normal following", () => {
   const motion = motionViewport(0, 0, true);
-  // The reveal layout has committed. Subsequent output belongs to follow,
-  // even when it arrives before the next browser frame or resize delivery.
+  // The reveal layout has committed. A live line can still grow before the
+  // first revealed frame, without a separate resize notification.
   motion.grow(23, false);
   act(() => useSessionStore.setState({ sessions: [{ ...session, status: "running" }],
     streamingText: { [session.id]: { content: "Output before the first revealed frame\n" } } }));
   expect(screen.getByText("Output before the first revealed frame")).toBeVisible();
-  expect(motion.viewport.scrollTop, "initial no longer writes after the qualified reveal").toBe(600);
   motion.tick(16);
-  expect(motion.viewport.scrollTop).toBeGreaterThan(600);
-  expect(motion.viewport.scrollTop).toBeLessThan(623);
-  for (let index = 0; index < 12; index++) motion.tick(16);
   expect(motion.viewport.scrollTop).toBe(623);
+  motion.grow(300);
+  motion.tick(16);
+  expect(motion.viewport.scrollTop).toBeGreaterThan(623);
+  expect(motion.viewport.scrollTop).toBeLessThan(923);
+  for (let index = 0; index < 32; index++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(923);
   expect(motion.pending()).toBe(0);
 });
 

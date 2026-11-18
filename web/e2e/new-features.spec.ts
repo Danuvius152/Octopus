@@ -1597,13 +1597,13 @@ test.describe("/archive command", () => {
     const fresh = await arc.json();
 
     // Preserve direct archived navigation without opening a live snapshot.
-    // Force the first service generation to arrive during the restoration's
-    // inclusive read. The existing contract keeps the original operation for
-    // read-only confirmation when that read is retired as obsolete.
+    // Deliver the first service generation during the restoration's first
+    // inclusive read. Fail the read under the adopted generation to exercise
+    // confirmation of the original operation.
     let release!: () => void;
     const event = new Promise<void>((resolve) => { release = resolve; });
     const writes: { operation_id: string; service_generation: string }[] = [];
-    let gated = false;
+    let readsAfterWrite = 0;
     await page.routeWebSocket("**/ws?*", (socket) => {
       const server = socket.connectToServer();
       server.onMessage(async (message) => {
@@ -1620,8 +1620,9 @@ test.describe("/archive command", () => {
       return module.useSessionStore.getState().dispatchGeneration;
     };
     await page.route("**/api/sessions?include_archived=true", async (route) => {
-      if (!writes.length || gated) return route.fallback();
-      gated = true;
+      if (!writes.length || readsAfterWrite >= 2) return route.fallback();
+      readsAfterWrite++;
+      if (readsAfterWrite === 2) return route.fulfill({ status: 503, json: { detail: "Confirmation temporarily unavailable" } });
       const response = await route.fetch();
       release();
       // Observe the actual store; the test never writes its generation.
@@ -1662,8 +1663,11 @@ test.describe("/archive command", () => {
       .locator(".archived-session-row", { hasText: ITEM_NAME })
       .locator(".btn-archived-unarchive")
       .click();
-    await expect(page.getByRole("alert")).toHaveText("Could not synchronize restored sessions. Retry confirmation.");
+    const confirmationError = page.getByText("Could not synchronize restored sessions. Retry confirmation.", { exact: true });
+    await expect(page.getByRole("alert").and(confirmationError)).toBeVisible();
     expect(writes).toHaveLength(1);
+    expect(readsAfterWrite).toBe(2);
+    expect(await page.evaluate(generation)).toBe(writes[0].service_generation);
     const confirmation = page.waitForRequest((sent) => sent.method() === "GET" &&
       new URL(sent.url()).pathname.endsWith(`/${imp.id}/restoration`));
     await page.getByRole("button", { name: "Confirm restoration", exact: true }).click();

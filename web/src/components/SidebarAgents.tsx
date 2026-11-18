@@ -73,6 +73,7 @@ export function SidebarAgents() {
   const [formCredentialId, setFormCredentialId] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [archiveError, setArchiveError] = useState("");
+  const [archivesInFlight, setArchivesInFlight] = useState<ReadonlySet<string>>(() => new Set());
   const [archiveConfirmation, setArchiveConfirmation] = useState<{ run: () => Promise<void>; busy: boolean } | null>(null);
   const archiveObservers = useRef(new Map<string, { stop: () => void; show: () => void }>());
   const latestArchive = useRef<(() => void) | null>(null);
@@ -87,6 +88,7 @@ export function SidebarAgents() {
   useEffect(() => {
     for (const { stop } of archiveObservers.current.values()) stop();
     latestArchive.current = null;
+    setArchivesInFlight(new Set());
     setArchiveError(""); setArchiveConfirmation(null);
     creation.current = null;
     setCreating(false);
@@ -273,15 +275,27 @@ export function SidebarAgents() {
     const start = useSessionStore.getState();
     const tracked = sessionList.observe(id, start, "archive");
     const { observation } = tracked;
+    let foreground = start.activeSessionId === id && start.mainView === "chat";
+    const unwatch = foreground ? useSessionStore.subscribe((state) => {
+      if (state.activeSessionId !== id || state.mainView !== "chat" || state.accountGeneration !== start.accountGeneration) {
+        retireForeground();
+      }
+    }) : undefined;
+    function retireForeground() {
+      foreground = false;
+      unwatch?.();
+    }
     const post = new ArchiveDeadline();
     let confirmation: ArchiveDeadline | undefined;
     let retired = false, retain = false, checking = false, archived = false;
     let message = "";
     const stop = () => {
       retired = true;
+      retireForeground();
       if (!sessionList.accountCurrent(observation)) { post.finish(); confirmation?.finish(); }
       tracked.finish();
       if (archiveObservers.current.get(id)?.stop === stop) archiveObservers.current.delete(id);
+      if (latestArchive.current === stop) latestArchive.current = null;
     };
     latestArchive.current = stop;
     const owns = () => !retired && sessionList.accountCurrent(observation);
@@ -297,7 +311,10 @@ export function SidebarAgents() {
       if (!owns()) return;
       const store = useSessionStore.getState();
       if (store.sessions.some((row) => row.id === id)) return;
-      if (current() && !manual && sessionList.current(observation) && store.activeSessionId === id) store.setActiveSessionId(null);
+      if (!manual && foreground && sessionList.archiveObservationCurrent(id, observation)) {
+        retireForeground();
+        store.setActiveSessionId(null);
+      }
       feedback("");
     };
     const confirm = async (manual: boolean) => {
@@ -317,7 +334,7 @@ export function SidebarAgents() {
         if (manual) reading.finish();
         checking = false; confirmation.finish();
         if (current()) setArchiveConfirmation((value) => value ? { ...value, busy: false } : null);
-        if (!retain || !owns()) stop();
+        if (manual && (!retain || !owns())) stop();
       }
     };
     archiveObservers.current.set(id, { stop, show: () => {
@@ -325,6 +342,7 @@ export function SidebarAgents() {
       latestArchive.current = stop;
       feedback(message, retain);
     } });
+    setArchivesInFlight((pending) => new Set(pending).add(id));
     feedback("");
     try {
       const reply = await postArchive(id, start.token, false, post);
@@ -343,6 +361,12 @@ export function SidebarAgents() {
       if (sessionList.archive(id, observation, undefined, null)) finishArchived(false);
       else await confirm(false);
     } finally {
+      retireForeground();
+      if (owns()) setArchivesInFlight((pending) => {
+        const next = new Set(pending);
+        next.delete(id);
+        return next;
+      });
       if (!retain || !owns()) stop();
     }
   };
@@ -555,6 +579,7 @@ export function SidebarAgents() {
             {visible.map((s) => {
               const isActive =
                 mainView === "chat" && s.id === activeSessionId;
+              const archiving = archivesInFlight.has(s.id);
               return (
                 <div
                   key={s.id}
@@ -597,17 +622,19 @@ export function SidebarAgents() {
                     </span>
                   )}
                   <button
-                    className={`btn-session-archive inline-flex size-5 shrink-0 items-center justify-center rounded-md text-gray-600 opacity-0 transition-opacity hover:bg-warn-bg hover:text-warn-foreground group-hover/session:opacity-100 ${
-                      isActive ? "" : "ml-auto"
-                    }`}
+                    className={`btn-session-archive inline-flex size-5 shrink-0 items-center justify-center rounded-md text-gray-600 transition-opacity ${
+                      archiving ? "opacity-100" : "opacity-0 hover:bg-warn-bg hover:text-warn-foreground group-hover/session:opacity-100"
+                    } ${isActive ? "" : "ml-auto"}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       archiveSession(s.id);
                     }}
-                    title="Archive session"
+                    disabled={archiving}
+                    aria-busy={archiving || undefined}
+                    title={archiving ? "Archiving session…" : "Archive session"}
                     aria-label={`Archive ${s.name}`}
                   >
-                    <IconArchive size={12} />
+                    {archiving ? <IconLoader2 size={12} className="motion-safe:animate-spin" /> : <IconArchive size={12} />}
                   </button>
                 </div>
               );

@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
-import { mockChatViewport } from "./chatViewport.test-support";
+import { mockChatItemLayout, mockChatViewport } from "./chatViewport.test-support";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { sessions } from "../lib/sessionList";
 import { handleWsMessage } from "../hooks/useWebSocket";
@@ -78,6 +78,10 @@ it("keeps existing list order when an archive broadcast is duplicated", () => {
 });
 
 function mount() {
+  mockChatItemLayout();
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains("chat-messages") ? 600 : 0;
+  });
   return render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
     <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()}
       connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
@@ -140,6 +144,161 @@ function server() {
     confirmDetail: async () => { heldDetail = undefined; await act(async () => finishDetail?.()); },
   };
 }
+
+it("keeps the source selected when a file was attached while archive was in flight", async () => {
+  const api = server();
+  const previous = api.fetcher.getMockImplementation()!;
+  api.fetcher.mockImplementation(async (url, init) => new URL(url).pathname.endsWith("/attachments")
+    ? Response.json({ id: "new-file", filename: "notes.txt" }) : previous(url, init));
+  mount();
+  command("/archive");
+  fireEvent.change(screen.getByTestId("attachment-file-input"), { target: { files: [new File(["read later"], "notes.txt")] } });
+  await api.complete();
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+  expect(api.fetcher.mock.calls.some(([url]) => new URL(url).pathname === `/api/sessions/${child.id}/attachments`)).toBe(false);
+});
+
+it("settles an automatically confirmed archive after an attachment revokes handoff", async () => {
+  const api = server();
+  const previous = api.fetcher.getMockImplementation()!;
+  api.fetcher.mockImplementation(async (url, init) => new URL(url).pathname.endsWith("/attachments")
+    ? Response.json({ id: "new-file", filename: "notes.txt" }) : previous(url, init));
+  mount();
+  command("/archive");
+  fireEvent.change(screen.getByTestId("attachment-file-input"), {
+    target: { files: [new File(["read later"], "notes.txt")] },
+  });
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
+  api.holdList();
+  await api.loseResponse();
+  expect(screen.getByRole("alert")).toHaveTextContent("Checking the session list");
+  await api.confirmList();
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed. Viewing the archived conversation.");
+  expect(screen.queryByRole("button", { name: "Confirm original archive" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  expect(api.fetcher.mock.calls.some(([url]) => new URL(url).pathname === `/api/sessions/${child.id}`)).toBe(false);
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+});
+
+it("can still confirm the original uncertain archive after attaching a file", async () => {
+  const api = server();
+  api.failList(true);
+  const previous = api.fetcher.getMockImplementation()!;
+  api.fetcher.mockImplementation(async (url, init) => new URL(url).pathname.endsWith("/attachments")
+    ? Response.json({ id: "new-file", filename: "notes.txt" }) : previous(url, init));
+  mount();
+  command("/archive");
+  await api.loseResponse();
+  const confirmation = screen.getByRole("button", { name: "Confirm original archive" });
+  expect(confirmation).toBeEnabled();
+  fireEvent.change(screen.getByTestId("attachment-file-input"), {
+    target: { files: [new File(["read later"], "notes.txt")] },
+  });
+  api.failList(false);
+  fireEvent.click(confirmation);
+  await waitFor(() => expect(useSessionStore.getState().archivedSessions.map((row) => row.id)).toEqual([a.id]));
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+});
+
+it("keeps the source readable when the waiting successor is archived", async () => {
+  const api = server();
+  api.holdDetail(child.id);
+  mount();
+  command("/archive");
+  await api.complete();
+  await waitFor(() => expect(api.detailPending()).toBe(true));
+  api.setRows([b, { ...a, archived: true }, { ...child, archived: true }]);
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: child.id, new_session_id: null }));
+  await api.confirmDetail();
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+});
+
+it.each(["empty", "preexisting reply", "unavailable"] as const)(
+  "waits for the actual successor transcript when its list count is zero: %s", async (outcome) => {
+  const api = server();
+  api.holdDetail(child.id);
+  const previous = api.fetcher.getMockImplementation()!;
+  api.fetcher.mockImplementation(async (url, init) => {
+    const response = await previous(url, init);
+    if (init?.method === "POST" || new URL(url).pathname !== `/api/sessions/${child.id}`) return response;
+    if (outcome === "unavailable") return Response.json({ detail: "Detail unavailable" }, { status: 503 });
+    return Response.json({ ...await response.json(), messages: [],
+      oldest_loaded_seq: null, next_message_seq: 0, has_more_messages: false });
+  });
+  useSessionStore.setState({ messages: { a: [{ role: "assistant", type: "text", seq: 1, content: "Original history" }] } });
+  const view = mount();
+  fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
+  command("/archive");
+  await api.complete();
+  await waitFor(() => expect(api.detailPending()).toBe(true));
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(screen.getByText("Original history")).toBeVisible();
+  if (outcome === "preexisting reply") {
+    act(() => useSessionStore.getState().addMessage(child.id, {
+      role: "assistant", type: "text", seq: 1, content: "Reply accepted before detail",
+    }));
+  }
+  await api.confirmDetail();
+  if (outcome === "preexisting reply") {
+    await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
+    expect(screen.getByText("Reply accepted before detail")).toBeVisible();
+  }
+  expect(view.container.querySelector("[data-chat-session][inert]")).toBeNull();
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+  if (outcome === "empty") {
+    expect(useSessionStore.getState().activeSessionId).toBe(child.id);
+    expect(screen.getByRole("textbox")).toHaveValue("");
+    expect(view.container.querySelector(".chat-messages")).toBeVisible();
+  } else if (outcome === "unavailable") {
+    expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+    expect(screen.getByText("Original history")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load session state (HTTP 503)");
+  }
+});
+
+it("resumes a hidden successor's remaining budget and ignores layout after it expires", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+  const visibility = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  const api = server();
+  const view = mount();
+  const layout = vi.mocked(HTMLElement.prototype.getBoundingClientRect).getMockImplementation()!;
+  let ready = false;
+  vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(function (this: HTMLElement) {
+    if (!ready && this.hasAttribute("data-index") && this.closest(`[data-chat-session="${child.id}"]`)) return new DOMRect();
+    return layout.call(this);
+  });
+  command("/archive");
+  await api.complete();
+  const staged = () => view.container.querySelector(`[data-chat-session="${child.id}"]`);
+  expect(staged()).toHaveAttribute("inert");
+  act(() => vi.advanceTimersByTime(900));
+  act(() => {
+    visibility.mockReturnValue(true);
+    document.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(20_000);
+  });
+  expect(staged()).toHaveAttribute("inert");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  act(() => {
+    visibility.mockReturnValue(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(1099);
+  });
+  expect(staged()).toHaveAttribute("inert");
+  act(() => vi.advanceTimersByTime(1));
+  expect(staged()).toBeNull();
+  expect(screen.getByRole("alert")).toHaveTextContent("The successor could not be positioned");
+  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  ready = true;
+  act(() => document.dispatchEvent(new Event("visibilitychange")));
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+});
 
 it("reports an archive refusal with its server reason and never confirms or retries the write", async () => {
   const api = server();
@@ -705,7 +864,7 @@ async function launch(mode: "archive" | "rewind") {
 
 it.each((["archive", "rewind"] as const).flatMap((mode) =>
   (["http-first", "ws-first"] as const).map((order) => ({ mode, order }))))(
-  "$mode enters the confirmed result through normal selection after $order and owns its draft", async ({ mode, order }) => {
+  "$mode enters the readable result after $order and owns its draft", async ({ mode, order }) => {
   const api = server();
   mount();
   await launch(mode);
@@ -713,7 +872,7 @@ it.each((["archive", "rewind"] as const).flatMap((mode) =>
   if (order === "ws-first") act(() => handleWsMessage(event));
   await api.complete();
   act(() => { handleWsMessage(event); handleWsMessage(event); });
-  expect(useSessionStore.getState().activeSessionId).toBe(child.id);
+  await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
   expect(useSessionStore.getState().activeAgentId).toBe(child.agent_id);
   expect(screen.queryByTestId("fork-dialog")).toBeNull();
   expect(document.querySelector("textarea")).toHaveValue(mode === "rewind" ? child.fork_prefilled_prompt : "");
@@ -768,7 +927,7 @@ it.each((["archive", "rewind"] as const).flatMap((mode) =>
       .map(([url]) => new URL(url).searchParams.has("include_archived"))).toEqual([false, true]);
     await api.complete();
     if (outcome === "archived") {
-      expect(useSessionStore.getState().activeSessionId).toBe(child.id);
+      await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
       expect(useSessionStore.getState().sessionSuccessors).toEqual({ a: child.id });
       expect(useSessionStore.getState().archivedSessions.map((row) => row.id)).toContain(a.id);
     } else {
@@ -811,7 +970,7 @@ it.each((["archive", "rewind"] as const).flatMap((mode) =>
     await api.confirmList();
     await waitFor(() => expect(useSessionStore.getState().sessionRead).toMatchObject({ loading: false, stale: false }));
     if (outcome === "archived") {
-      expect(useSessionStore.getState().activeSessionId).toBe(child.id);
+      await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
       expect(useSessionStore.getState().sessionSuccessors).toEqual({ a: child.id });
     } else {
       expect(useSessionStore.getState().activeSessionId).not.toBe(child.id);

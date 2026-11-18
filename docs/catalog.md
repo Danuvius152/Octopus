@@ -65,7 +65,7 @@
 | 未完成计划 | 状态 | 范围 |
 |---|---|---|
 | [Agent 协作许可与人工控制](plans/agent-collaboration-controls.md) | proposed | 调用许可、进度展示与人工接管的待决范围。 |
-| [App 配置与交互能力](plans/application-evolution.md) | proposed | App secret、问题交互和版本恢复的待决需求。 |
+| [App 配置与交互能力](plans/application-evolution.md) | proposed | App secret、问题交互、版本恢复和 SmartReader 阅读上下文覆盖的待决需求。 |
 | [Codex 自定义原生角色](plans/codex-native-roles.md) | proposed | Codex 尚无与已保存子角色配置对应的原生角色映射。 |
 | [Connector 完整结果与权限](plans/connector-capabilities.md) | proposed | 超长结果取回和写入权限政策的待决范围。 |
 | [DeepSeek 后端支持缺口](plans/deepseek-harness-backend.md) | proposed | DeepSeek 尚未注册为独立 Harness backend。 |

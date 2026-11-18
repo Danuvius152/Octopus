@@ -83,6 +83,33 @@ application/research output and private publication resources keep their owners.
   without implementation. Status changes do not grant implementation,
   publication or production authority.
 
+### Implement tickets
+
+1. Keep the design context through `to-tickets` when preparing a spec and its
+   tickets. For implementation, select an eligible ticket and confirm its
+   baseline includes its resolved blockers. On resume, check the current
+   candidate, recorded evidence and running checks before claiming work.
+2. Use `implement` for a single ticket. For an authorized multi-ticket batch,
+   one coordinating session starts one eligible ticket at a time, each in a
+   fresh implementer context. Give the implementer the ticket, spec and current
+   integration candidate. The coordinator owns integration and tracker updates.
+3. Use `tdd` where possible at the agreed test seams. Run the ticket's
+   [affected checks](../testing.md#fast-checks-during-development)
+   and review its fixed diff against the acceptance criteria and repo standards.
+   Return a recoverable candidate and links to checks and review results. The
+   coordinator accepts and integrates the ticket, records the integrated
+   revision or snapshot and evidence under `## Answer`, and sets `Status: resolved`.
+4. After the current ticket resolves, the coordinator automatically starts the
+   next eligible ticket in the authorized batch from that integrated candidate.
+   If acceptance fails, address it on the current ticket. On interruption,
+   leave pointers to the spec, candidate and current or next eligible ticket
+   so a coordinator can resume from the recorded state.
+
+For a multi-ticket delivery batch, hand off the accepted changes as a recoverable
+candidate and commit at the agreed delivery boundary. Follow the
+[verification policy](../testing.md#fast-checks-during-development) for the
+combined regression and full gate schedule.
+
 ## Lifecycle
 
 `.scratch/`, `docs/review/` and the account workspace are temporary. Before

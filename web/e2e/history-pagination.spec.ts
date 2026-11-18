@@ -4,10 +4,11 @@ import { enterAccountCredentials } from "./current-account";
 import type { Message } from "../src/stores/sessionStore";
 import type { RuntimeMetadata } from "../src/api";
 
-for (const scenario of ["mixed", "child-only", "interrupted", "deep-mixed", "deep-child-only"] as const) {
+for (const scenario of ["mixed", "child-only", "interrupted", "deep-mixed", "deep-child-only", "live-footer"] as const) {
 const childOnly = scenario === "child-only" || scenario === "deep-child-only";
 const deep = scenario.startsWith("deep-");
 test(scenario === "interrupted" ? "navigation after history merge retires queued positioning" :
+  scenario === "live-footer" ? "history prepend keeps the live paragraph reached while waiting for the older page" :
   `history prepend keeps the visible ${deep ? "paragraph" : "row"} and offset across ${scenario} regrouping and live tail appends`, async ({ page }) => {
   const session = { id: "history-window", agent_id: "history-agent", name: "Reading history", backend: "codex",
     status: "idle", archived: false, working_dir: "/tmp", created_at: "2026-11-02T00:00:00Z" };
@@ -55,15 +56,70 @@ test(scenario === "interrupted" ? "navigation after history merge retires queued
   if (deep) await page.evaluate(() => document.fonts.ready);
   // Reach history through native navigation, which carries reading intent;
   // layout-driven position changes deliberately do not retire following.
-  if (deep) {
-    // Isolate merge positioning from Chromium's animated Home while this
-    // previously unmeasured tall row changes the navigation range.
-    await scroller.evaluate((element) => {
-      element.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
-      element.scrollTop = 0;
-    });
-  } else await scroller.press("Home");
+  await scroller.press("Home");
   await expect.poll(() => pages.length).toBe(1);
+  if (scenario === "live-footer") {
+    socket.send(JSON.stringify({ type: "status", session_id: session.id, status: "running" }));
+    socket.send(JSON.stringify({ type: "assistant_delta", session_id: session.id,
+      content: Array.from({ length: 160 }, (_, index) => `Live paragraph ${index + 1}.\n\n`).join("") }));
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Live paragraph 160.");
+    await scroller.hover();
+    const gap = () => scroller.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+    await page.mouse.wheel(0, 100000);
+    await expect.poll(gap).toBeLessThanOrEqual(2);
+    await page.mouse.wheel(0, -1000);
+    await expect.poll(gap).toBeGreaterThan(950);
+    const track = await scroller.evaluateHandle((viewport) => {
+      function passage(marker: string) {
+        const text = viewport.querySelector(".msg-streaming-text")?.firstChild;
+        if (!(text instanceof Text)) return undefined;
+        const index = text.data.indexOf(marker);
+        if (index === -1) return undefined;
+        const range = document.createRange();
+        range.setStart(text, index); range.setEnd(text, index + marker.length);
+        return range.getBoundingClientRect();
+      }
+      const view = viewport.getBoundingClientRect();
+      const anchor = Array.from({ length: 160 }, (_, index) => `Live paragraph ${index + 1}.`).find((marker) => {
+        const box = passage(marker);
+        return !!box && box.top > view.top + 30 && box.bottom < view.bottom;
+      });
+      if (!anchor) throw new Error("A live passage did not reach the reading viewport");
+      const offset = passage(anchor)!.top - view.top;
+      const savedRowInView = Array.from(viewport.querySelectorAll("[data-message-key]")).some((row) => {
+        const box = row.getBoundingClientRect();
+        return box.top < view.bottom && box.bottom > view.top;
+      });
+      const samples: (number | null)[] = [];
+      let frame = 0;
+      const sample = () => {
+        const box = passage(anchor);
+        const view = viewport.getBoundingClientRect();
+        samples.push(box && box.top >= view.top && box.bottom <= view.bottom ? box.top - view.top - offset : null);
+        frame = requestAnimationFrame(sample);
+      };
+      sample();
+      return { savedRowInView, stop: () => { cancelAnimationFrame(frame); return samples; } };
+    });
+    try {
+      expect(await track.evaluate((reading) => reading.savedRowInView)).toBe(false);
+      const before = await scroller.evaluate((element) => element.scrollHeight);
+      await pages[0].fulfill({ json: { messages: Array.from({ length: 40 }, (_, index) => row(160 + index)),
+        oldest_loaded_seq: 160, has_more_messages: false } });
+      await expect(scroller.getByText("Loading earlier messages…")).toHaveCount(0);
+      await expect.poll(() => scroller.evaluate((element) => element.scrollHeight)).toBeGreaterThan(before + 100);
+      await scroller.evaluate(async () => {
+        for (let frame = 0; frame < 12; frame++) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      });
+      const offsets = await track.evaluate((reading) => reading.stop());
+      expect(offsets.filter((offset) => offset === null || Math.abs(offset) > 2)).toEqual([]);
+    } finally {
+      await track.evaluate((reading) => reading.stop());
+      await track.dispose();
+    }
+    expect(pages).toHaveLength(1);
+    return;
+  }
   const anchor = deep ? scroller.getByRole("heading", { name: "Paragraph 50", exact: true }) :
     scroller.getByText("History row 200", { exact: true });
   if (deep) {
@@ -139,10 +195,7 @@ test(scenario === "interrupted" ? "navigation after history merge retires queued
       return maximum;
     }, (await scroller.boundingBox())!.y + before);
     expect(drift, "the calibrated paragraph remains stable after the merge").toBeLessThanOrEqual(2);
-    await scroller.evaluate((element) => {
-      element.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
-      element.scrollTop = 0;
-    });
+    await scroller.press("Home");
   }
   }
   await expect(scroller.locator(".subagent-card")).toHaveCount(1);

@@ -23,7 +23,7 @@ function uploadState(file: File, ownerSessionId: string | null, generation: numb
 }
 
 /** A File is the draft; an upload ID belongs to one session and attempt. */
-export function useDraftAttachments(activeSessionId: string | null) {
+export function useDraftAttachments(activeSessionId: string | null, onEdit?: () => void) {
   // These handles identify Files only within this draft, never wire requests.
   const scope = useId();
   const sequence = useRef(0);
@@ -87,6 +87,7 @@ export function useDraftAttachments(activeSessionId: string | null) {
   }, []);
 
   const addFiles = useCallback((files: File[]) => {
+    if (files.length) onEdit?.();
     const incoming = files.map((file) => ({ uid: `${scope}-${++sequence.current}`, file }));
     setDraft((current) => {
       if (current.owner === null) return current;
@@ -99,21 +100,23 @@ export function useDraftAttachments(activeSessionId: string | null) {
         })),
       ] };
     });
-  }, [scope]);
+  }, [scope, onEdit]);
   const removeAttachment = useCallback((uid: string) => {
+    onEdit?.();
     setAttachments((current) => current.filter((file) => file.uid !== uid));
-  }, [setAttachments]);
+  }, [onEdit, setAttachments]);
   const retryAttachment = useCallback((uid: string) => {
     setAttachments((current) => current.map((file) => file.uid !== uid ? file : {
       ...file, ...uploadState(file.file, file.ownerSessionId, file.generation + 1),
     }));
   }, [setAttachments]);
   const restoreAttachments = useCallback((files: PendingAttachment[]) => {
+    onEdit?.();
     // Rejected input may refer to deleted IDs even in its original session.
     setAttachments(files.map((file) => ({
       ...file, ...uploadState(file.file, activeSessionId, file.generation + 1),
     })));
-  }, [activeSessionId, setAttachments]);
+  }, [activeSessionId, onEdit, setAttachments]);
   const dismissRejectedFiles = useCallback(() => setDraft((current) => ({ ...current, rejected: [] })), []);
   const clearAttachments = useCallback(() => setDraft((current) => ({ ...current, attachments: [], rejected: [] })), []);
   const unready = draft.rejected.length > 0 || attachments.some((file) => file.ownerSessionId !== activeSessionId || file.status !== "ready" || !file.meta);

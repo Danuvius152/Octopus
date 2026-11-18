@@ -89,7 +89,7 @@ function SessionCredentialPicker({ session }: { session: SessionInfo }) {
               effective?.needs_reconnect ? "bg-warn" : "bg-warn/70"
             }`}
           />
-          {label}
+          <span className="credential-label">{label}</span>
           <IconChevronDown size={12} className="opacity-60" />
         </button>
       </DropdownMenuTrigger>

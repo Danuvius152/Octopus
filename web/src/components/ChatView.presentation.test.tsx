@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
-import { mockChatViewport } from "./chatViewport.test-support";
+import { mockChatItemLayout, mockChatViewport } from "./chatViewport.test-support";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { sessions } from "../lib/sessionList";
 import { applyTranscript } from "../lib/transcript";
@@ -48,13 +48,13 @@ it("opens trusted content immediately at expiry and retires delayed positioning 
   const scroll = vi.fn();
   viewport.scrollTo = scroll;
   const late = [...frames.values()];
-  view.container.querySelector<HTMLElement>("[data-chat-preparation]")!.focus();
+  screen.getByLabelText("Conversation preparation").focus();
   // No frame or row commit is needed to authorize showing the trusted list.
   act(() => vi.advanceTimersByTime(2000));
   expect(viewport).toBeVisible();
   expect(viewport).not.toHaveAttribute("inert");
   expect(viewport).not.toHaveAttribute("aria-hidden");
-  expect(view.container.querySelector("[data-chat-preparation]")).toBeNull();
+  expect(screen.queryByLabelText("Conversation preparation")).toBeNull();
   expect(screen.queryByRole("button", { name: "Retry positioning" })).toBeNull();
   expect(screen.getByText(/Automatic positioning did not finish/)).toBeVisible();
   expect(screen.getByText(/Automatic positioning did not finish/)).toBe(status);
@@ -72,8 +72,8 @@ it.each(["opening", "composer"])("does not let a pending timeout focus handoff o
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
   applyTranscript("cold", { messages: useSessionStore.getState().messages.cold,
     oldest_loaded_seq: 50, next_message_seq: 51 });
-  const view = chat();
-  const overlay = view.container.querySelector<HTMLElement>("[data-chat-preparation]")!;
+  chat();
+  const overlay = screen.getByLabelText("Conversation preparation");
   overlay.focus();
   expect(document.activeElement).toBe(overlay);
   const composer = screen.getByRole("textbox");
@@ -1237,8 +1237,10 @@ it("keeps the remaining preparation budget paused across a window replacement un
 
 it.each(["position first", "deadline first"])("settles reveal and expiry in either delivery order: %s", (order) => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-  useSessionStore.setState({ messages: {} });
-  applyTranscript("cold", { messages: [], next_message_seq: 0, oldest_loaded_seq: null, has_more_messages: false });
+  mockChatItemLayout();
+  useSessionStore.getState().updateSessionStatus("cold", "idle");
+  applyTranscript("cold", { messages: useSessionStore.getState().messages.cold,
+    oldest_loaded_seq: 50, next_message_seq: 51 });
   const frames = new Map<number, FrameRequestCallback>();
   let serial = 0;
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.set(++serial, callback); return serial; });

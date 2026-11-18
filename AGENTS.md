@@ -97,9 +97,9 @@ collection, exclusions, restoration and verification in the same change.
 
 ## Verification
 
-Start with the target regression and affected checks. Before committing code,
-complete the gates in `scripts/check.sh`; before release, apply the
-[release matrix](docs/testing.md#release-and-documentation-checks).
+Start with the target regression and affected checks. Run the
+[delivery batch's full gate](docs/testing.md#full-checks-before-code-commits) before committing code.
+Before release, apply the [release matrix](docs/testing.md#release-and-documentation-checks).
 Documentation-only changes need links, index and diff checks.
 
 Give each check one executor and reuse valid results. The
@@ -180,6 +180,8 @@ and their derived specs/tickets stay in `.scratch/<task>/`. All other temporary
 artifacts, including grill logs and scripts, use the account workspace. Read
 [local task conventions](docs/agents/issue-tracker.md) before publishing or
 fetching specs, tickets or maps. Routine work does not require tickets.
+Before starting or resuming implementation from tickets, follow the
+[ticket implementation procedure](docs/agents/issue-tracker.md#implement-tickets).
 
 ### Triage labels
 

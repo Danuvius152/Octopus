@@ -27,42 +27,40 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-// Real Virtuoso owns its size tree. Every observe receives its initial RO
-// notification. A fault can delay the library's queued scan from an old RO;
-// a new itemSize binding must install sizes through its own real observation.
+// Drive the public viewport geometry and frame timing with real Virtuoso
+// rendering. The reported extent can lag the actual last row.
 function layout() {
   let serial = 0;
   let tailHeight = 80;
-  let holdLists = false;
+  let reportedTailHeight: number | undefined;
   let clampBottom = false;
   let hidden = false;
   let deferredScrollEvents = false;
   let beforeRowsCommit: (() => void) | undefined;
   const frames = new Map<number, FrameRequestCallback>();
-  const delayed = new Map<number, { observer: ResizeObserver; callback: FrameRequestCallback }>();
-  let delivering: ResizeObserver | null = null;
   const observations = new Map<ResizeObserver, { callback: ResizeObserverCallback; elements: Map<Element, string | null> }>();
-  const listObservers = new Set<ResizeObserver>();
-  const stalledObservers = new Set<ResizeObserver>();
   const rectangle = vi.mocked(HTMLElement.prototype.getBoundingClientRect).getMockImplementation()!;
+  const footerHeight = (element: HTMLElement) => element.querySelector("[data-chat-footer]")?.childElementCount ? 120 : 0;
   vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-    if (this.dataset.index === "14") return new DOMRect(0, 1120 - (this.closest(".chat-messages")?.scrollTop ?? 0), 800, tailHeight);
+    const viewport = this.closest(".chat-messages");
+    const top = 1120 - (viewport?.scrollTop ?? 0);
+    if (this.dataset.index === "14") return new DOMRect(0, top, 800, tailHeight);
+    if (this.firstElementChild?.hasAttribute("data-chat-footer")) {
+      return new DOMRect(0, top + tailHeight, 800, footerHeight(this));
+    }
     return rectangle.call(this);
   });
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     const id = ++serial;
-    if (delivering && (stalledObservers.has(delivering) || holdLists && listObservers.has(delivering))) {
-      delayed.set(id, { observer: delivering, callback });
-    } else frames.set(id, callback);
+    frames.set(id, callback);
     return id;
   });
-  vi.stubGlobal("cancelAnimationFrame", (id: number) => { frames.delete(id); delayed.delete(id); });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => { frames.delete(id); });
   vi.stubGlobal("ResizeObserver", class implements ResizeObserver {
     constructor(callback: ResizeObserverCallback) { observations.set(this, { callback, elements: new Map() }); }
     observe(element: Element) {
       observations.get(this)!.elements.set(element, null);
-      if (element.getAttribute("data-testid") === "virtuoso-item-list") listObservers.add(this);
     }
     unobserve(element: Element) { observations.get(this)!.elements.delete(element); }
     disconnect() { observations.get(this)!.elements.clear(); }
@@ -71,7 +69,7 @@ function layout() {
     return this.classList.contains("chat-messages") ? 600 : 0;
   });
   vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
-    return this.classList.contains("chat-messages") ? 1120 + tailHeight : 0;
+    return this.classList.contains("chat-messages") ? 1120 + (reportedTailHeight ?? tailHeight) + footerHeight(this) : 0;
   });
   function CommitProbe() {
     const rows = useSessionStore((state) => state.messages[session.id]);
@@ -98,53 +96,37 @@ function layout() {
       const signature = Array.from(element.children).map((child) => (child as HTMLElement).dataset.index ?? "").join(",");
       if (signature === previous) continue;
       elements.set(element, signature);
-      delivering = observer;
-      try { callback([{ target: element } as ResizeObserverEntry], observer); }
-      finally { delivering = null; }
+      callback([{ target: element } as ResizeObserverEntry], observer);
     }
   });
-  return { viewport, view, writes, listObservers, tick,
+  return { viewport, view, writes, tick,
     deferScrollEvents: (defer: boolean) => { deferredScrollEvents = defer; },
     beforeRowsCommit: (callback: () => void) => { beforeRowsCommit = callback; },
-    stallOldListObservers: () => { for (const observer of listObservers) stalledObservers.add(observer); },
-    holdLists: (hold: boolean) => {
-      holdLists = hold;
-      if (!hold) for (const [id, work] of delayed) if (!stalledObservers.has(work.observer)) {
-        delayed.delete(id); frames.set(id, work.callback);
+    reportExtent: (value?: number) => act(() => {
+      reportedTailHeight = value;
+      const size = { blockSize: viewport.clientHeight, inlineSize: viewport.clientWidth };
+      const entry = { target: viewport, contentRect: viewport.getBoundingClientRect(),
+        contentBoxSize: [size], borderBoxSize: [size], devicePixelContentBoxSize: [size] };
+      for (const [observer, { callback, elements }] of observations) {
+        if (elements.has(viewport)) callback([entry], observer);
       }
-    },
-    releaseOld: () => {
-      stalledObservers.clear();
-      for (const [id, work] of delayed) frames.set(id, work.callback);
-      delayed.clear();
-    },
-    deliverOldScans: () => {
-      let count = 0;
-      act(() => {
-        for (const [id, work] of delayed) if (stalledObservers.has(work.observer)) {
-          delayed.delete(id); work.callback(performance.now()); count++;
-        }
-      });
-      return count;
-    },
+    }),
     visibility: (value: boolean) => act(() => { hidden = value; document.dispatchEvent(new Event("visibilitychange")); }),
     clamp: (clamp: boolean) => { clampBottom = clamp; },
     takeFrames: () => { const batch = [...frames.values()]; frames.clear(); return batch; },
-    settle: () => { for (let i = 0; i < 16; i++) tick(); },
+    settle: (deliverResize = true) => { for (let i = 0; i < 16; i++) tick(deliverResize); },
     height: (value: number) => { tailHeight = value; } };
 }
 
 it("reveals a same-height same-tail window without waiting for a natural resize", () => {
   const browser = layout(); browser.settle();
   expect(browser.viewport).toBeVisible();
-  const bindings = browser.listObservers.size;
   browser.writes.length = 0;
   act(() => install(5));
   expect(browser.viewport, "a real window withdraws its predecessor's reveal before probing").not.toBeVisible();
-  browser.settle();
+  browser.settle(false);
   expect(browser.viewport).toBeVisible();
   expect(browser.viewport.scrollTop).toBe(600);
-  expect(browser.listObservers.size, "already installed geometry needs no active re-observation").toBe(bindings);
   expect(browser.writes.every((write) => write.hidden)).toBe(true);
 });
 
@@ -244,7 +226,7 @@ it.each(["root", "native"])("reveals the normal same-tail window during zero-pub
     browser.tick(false); // Size notifications stay withheld while normal positioning completes.
   }
   expect(browser.viewport).toBeVisible();
-  expect(browser.viewport.scrollTop).toBe(600);
+  expect(browser.viewport.scrollTop).toBe(720);
   expect(browser.view.getByTestId("streaming-text").textContent).toBe(shown);
   expect(browser.writes.every((write) => write.hidden)).toBe(true);
   act(() => vi.advanceTimersByTime(2000));
@@ -279,18 +261,15 @@ it.each([1, 5])("checks the current operation against the old row commit before 
     const oldRow = browser.view.getByText("Saved row 14").closest<HTMLElement>("[data-index]")!;
     const measurement = vi.mocked(HTMLElement.prototype.getBoundingClientRect);
     const measuredBefore = measurement.mock.contexts.length;
-    const lookup = vi.spyOn(browser.viewport, "querySelector");
+    browser.viewport.scrollTop = browser.viewport.scrollHeight - browser.viewport.clientHeight;
     const currentFrames = browser.takeFrames();
     expect(currentFrames.length).toBeGreaterThan(0);
     browser.deferScrollEvents(true);
     for (const frame of currentFrames) frame(performance.now());
     browser.deferScrollEvents(false);
-    expect(lookup, "the successor reached its DOM proof check, rather than returning as a retired operation")
-      .toHaveBeenCalledWith('[data-index="14"]');
     expect(measurement.mock.contexts.slice(measuredBefore).filter((element) => element === oldRow),
       "old committed text cannot supply the current operation's physical measurement").toEqual([]);
     expect(browser.viewport).not.toBeVisible();
-    lookup.mockRestore();
   });
   act(() => install(first, "New tail text with the same key and height"));
   expect(checked).toBe(true);
@@ -300,79 +279,37 @@ it.each([1, 5])("checks the current operation against the old row commit before 
   expect(browser.viewport.scrollTop).toBe(600);
 });
 
-it("uses a pending re-observation for the latest equivalent content commit", () => {
+it("waits for a new extent before revealing the latest accepted text", () => {
   const browser = layout(); browser.settle();
-  const bindings = browser.listObservers.size;
-  browser.stallOldListObservers(); browser.holdLists(true); browser.height(180);
-  act(() => install(5));
+  browser.reportExtent(80); browser.height(180);
+  act(() => install(5, "Earlier replacement"));
   browser.settle();
-  expect(browser.listObservers.size).toBe(bindings + 1);
-  for (let i = 0; i < 20; i++) {
-    // Alternating a copied equivalent snapshot and a real same-height text
-    // commit must not mint a fresh allowance for this unresolved geometry.
-    act(() => install(5, `Current same-height tail ${Math.floor(i / 2)}`));
-    browser.tick();
-  }
-  expect(browser.listObservers.size, "same-height new Message objects cannot renew the unresolved quota").toBe(bindings + 1);
-  browser.height(280);
-  act(() => install(5)); browser.tick();
-  browser.holdLists(false); browser.settle();
+  expect(browser.viewport).not.toBeVisible();
+  act(() => install(5, "Latest replacement"));
+  browser.settle();
+  expect(browser.viewport).not.toBeVisible();
+  browser.reportExtent(); browser.settle();
   expect(browser.viewport).toBeVisible();
-  expect(browser.view.getByText("Saved row 14")).toBeInTheDocument();
-  expect(browser.viewport.scrollTop).toBe(800);
-  expect(browser.listObservers.size).toBe(bindings + 1);
+  expect(browser.view.getByText("Latest replacement")).toBeVisible();
+  expect(browser.viewport.scrollTop).toBe(700);
+  expect(browser.writes.every((write) => write.hidden)).toBe(true);
 });
 
-it("renews geometry installation after a real A→B→A change within one position", () => {
+it("accepts late geometry while hidden without revealing or writing until resume", () => {
   const browser = layout(); browser.settle();
-  const bindings = browser.listObservers.size;
-  browser.clamp(true); browser.stallOldListObservers(); browser.height(180);
+  browser.reportExtent(80); browser.height(180);
   act(() => install(5)); browser.settle();
   expect(browser.viewport).not.toBeVisible();
-  expect(browser.listObservers.size).toBe(bindings + 1);
-  browser.stallOldListObservers(); browser.height(80);
-  act(() => install(5)); browser.settle();
-  expect(browser.listObservers.size, "the settled installation does not permanently trust installed=true").toBe(bindings + 2);
-  browser.clamp(false); browser.settle();
-  expect(browser.viewport).toBeVisible();
-  expect(browser.viewport.scrollTop).toBe(600);
-});
-
-it("detects a later installation gap even when its last measured geometry is unchanged", () => {
-  const browser = layout(); browser.settle();
-  const bindings = browser.listObservers.size;
-  browser.clamp(true); browser.stallOldListObservers(); browser.height(180);
-  act(() => install(5)); browser.settle();
-  expect(browser.listObservers.size).toBe(bindings + 1);
-  // A delayed old library scan installs a transient physical size. Restore the
-  // DOM before the application's next frame: its old proof is still 180px,
-  // but the public tree now has a genuine new gap at that same geometry.
-  browser.height(80);
-  expect(browser.deliverOldScans()).toBeGreaterThan(0);
-  browser.height(180); browser.stallOldListObservers(); browser.settle();
-  expect(browser.listObservers.size).toBe(bindings + 2);
-  browser.clamp(false); browser.settle();
-  expect(browser.viewport).toBeVisible();
-  expect(browser.viewport.scrollTop).toBe(700);
-});
-
-it("installs a pending re-observation while hidden without revealing or writing until resume", () => {
-  const browser = layout(); browser.settle();
-  const bindings = browser.listObservers.size;
-  browser.stallOldListObservers(); browser.holdLists(true); browser.height(180);
-  act(() => install(5)); browser.settle();
-  expect(browser.listObservers.size).toBe(bindings + 1);
   browser.visibility(true);
   const top = browser.viewport.scrollTop;
   browser.writes.length = 0;
-  browser.holdLists(false); browser.settle();
+  browser.reportExtent(); browser.settle();
   expect(browser.writes).toEqual([]);
   expect(browser.viewport.scrollTop).toBe(top);
   expect(browser.viewport).not.toBeVisible();
   browser.visibility(false); browser.settle();
   expect(browser.viewport).toBeVisible();
   expect(browser.viewport.scrollTop).toBe(700);
-  expect(browser.listObservers.size).toBe(bindings + 1);
 });
 
 it("does not let a pre-pause frame consume the resumed position's frame", () => {
@@ -390,11 +327,11 @@ it("does not let a pre-pause frame consume the resumed position's frame", () => 
 
 it.each(["before commit", "after commit"])("retires old measurement frames on A→B→A %s", (delivery) => {
   const browser = layout(); browser.settle();
-  browser.stallOldListObservers(); browser.height(180);
+  browser.clamp(true); browser.height(180);
   act(() => install(5));
   for (let i = 0; i < 3; i++) browser.tick();
-  browser.releaseOld();
   const callbacks = browser.takeFrames();
+  expect(callbacks.length).toBeGreaterThan(0);
   browser.writes.length = 0;
   act(() => {
     useSessionStore.getState().setActiveSessionId("other");
@@ -403,20 +340,8 @@ it.each(["before commit", "after commit"])("retires old measurement frames on A�
   });
   if (delivery === "after commit") act(() => { for (const callback of callbacks) callback(performance.now()); });
   expect(browser.writes.filter((write) => !write.hidden)).toEqual([]);
+  browser.clamp(false);
   browser.settle();
   const viewport = browser.view.container.querySelector<HTMLElement>(".chat-messages")!;
   expect(viewport).toBeVisible();
-});
-
-it("re-observes once to install changed geometry when the old observer has no resize", () => {
-  const browser = layout(); browser.settle();
-  expect(browser.viewport).toBeVisible();
-  const bindings = browser.listObservers.size;
-  browser.stallOldListObservers();
-  browser.height(180);
-  act(() => install(5));
-  browser.settle();
-  expect(browser.listObservers.size, "one bounded public itemSize replacement installs the real height").toBe(bindings + 1);
-  expect(browser.viewport).toBeVisible();
-  expect(browser.viewport.scrollTop).toBe(700);
 });

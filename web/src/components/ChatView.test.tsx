@@ -891,3 +891,54 @@ it("restores a server-saved input without sending, then explicitly sends a new r
   expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Reviewed and edited input", undefined, undefined, expect.any(String), "old-client");
   vi.unstubAllGlobals();
 });
+
+it("retires saved-input previews and reads when another session is selected", async () => {
+  const other = { ...session, id: "other-session", name: "Other chat" };
+  useSessionStore.setState({ token: "recoverable-input-test", sessions: [session, other], mainView: "chat" });
+  const detail = deferred<Response>();
+  const otherPage = deferred<Response>();
+  const execution = { state: "withdrawn", state_version: 2, execution_owner_request_id: "old-request", recoverable_input: true };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/submissions/old-client")) return detail.promise;
+    if (url.endsWith(`/${other.id}/submissions`)) return otherPage.promise;
+    if (url.endsWith("/submissions")) return Response.json({ items: [{ client_request_id: "old-client",
+      request_id: "old-request", execution, preview: "Original saved input", attachment_count: 0 }] });
+    return Response.json([]);
+  }));
+  try {
+    setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Review saved input" }));
+    act(() => useSessionStore.getState().setActiveSessionId(other.id));
+    expect(screen.queryByText("Original saved input")).toBeNull();
+    await act(async () => detail.resolve(new Response(null, { status: 503 })));
+    expect(screen.queryByText(/Couldn't read saved input/)).toBeNull();
+  } finally {
+    await act(async () => otherPage.resolve(Response.json({ items: [] })));
+    vi.unstubAllGlobals();
+  }
+});
+
+it("retires a saved-input restore after editing the draft and clearing it again", async () => {
+  useSessionStore.setState({ token: "recoverable-input-test" });
+  const detail = deferred<Response>();
+  const execution = { state: "withdrawn", state_version: 2, execution_owner_request_id: "old-request", recoverable_input: true };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/submissions/old-client")) return detail.promise;
+    if (url.endsWith("/submissions")) return Response.json({ items: [{ client_request_id: "old-client",
+      request_id: "old-request", execution, preview: "Original saved input", attachment_count: 0 }] });
+    return Response.json([]);
+  }));
+  try {
+    const { input } = setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Restore to input" }));
+    fireEvent.change(input, { target: { value: "New draft" } });
+    fireEvent.change(input, { target: { value: "" } });
+    await act(async () => detail.resolve(Response.json({ session_id: session.id, client_request_id: "old-client",
+      request_id: "old-request", execution, input: { kind: "message", content: "Original saved input",
+        attachment_ids: [], attachments: [] } })));
+    expect(input).toHaveValue("");
+    expect(screen.getByText(/conversation or draft changed/)).toBeVisible();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

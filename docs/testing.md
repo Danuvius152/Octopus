@@ -5,7 +5,8 @@ keeps the everyday summary; this file owns the complete requirements and command
 
 ## Verification
 
-Use affected checks during development and the full gate before a code commit.
+Run affected checks during development. Run the full gate at the delivery
+batch's code-commit boundary.
 `knowledge_eval` and `wiki_perf` are independent opt-in tiers outside commit
 and release gates; commands and selection rules are below.
 
@@ -85,6 +86,11 @@ Get feedback on each change promptly with the smallest relevant test set:
 - **Integration changes:** add the specific offline API/browser regression
   needed to exercise the changed boundary. Run live tests when the question
   needs the installed CLI or provider, using this installation's selection.
+
+Verify each ticket with the checks that exercise its acceptance criteria and
+affected behavior. After related tickets are integrated, run the focused
+regression for their shared behavior. Reserve the full gate for the integrated
+delivery candidate at the [code-commit boundary](#full-checks-before-code-commits).
 
 Reuse unchanged preparation across read-only variations and keep the assertions
 for each case. Content reads that supply authorization evidence remain real
@@ -203,10 +209,11 @@ residual cache directories do not. Local environment setup belongs to
 
 ## Full checks before code commits
 
-Complete the check set defined in [`scripts/check.sh`](../scripts/check.sh)
-before committing code. Choose one executor: a combined script run, or the
-hook plus checks it does not cover. Reuse successful results under the policy
-above; a commit does not itself invalidate them.
+Run the check set defined in [`scripts/check.sh`](../scripts/check.sh) once on
+the final candidate before the agreed delivery batch's code commit. A standalone
+code change is its own batch. Choose one executor, either the combined script
+or the hook plus checks it does not cover. If the candidate changes, reuse
+valid results under the policy above and rerun affected required checks.
 
 When applicable hook commands already have valid passing evidence, exclude
 only those commands for that commit with

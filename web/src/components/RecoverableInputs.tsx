@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ClientSubmissionStatus, ClientSubmissionSummary, SubmissionRecoveryPage } from "../api";
 import { accountFetch as fetch } from "../lib/accountFetch";
+import { chatDraft } from "../lib/chatDraft";
 import { useSessionStore } from "../stores/sessionStore";
 import { Button } from "./ui/button";
 
@@ -69,6 +70,8 @@ export function RecoverableInputs({ sessionId, connected, disabled, onRestore }:
     const controller = new AbortController();
     requests.current.add(controller);
     const restore = onRestore;
+    const draft = operation === "restore" ? chatDraft() : null;
+    const draftVersion = draft?.store.getState().version;
     setBusy(item.client_request_id); setError("");
     try {
       const url = `${api}/${encodeURIComponent(item.client_request_id)}`;
@@ -96,7 +99,8 @@ export function RecoverableInputs({ sessionId, connected, disabled, onRestore }:
         files.push(new File([blob], meta.filename, { type: meta.mime_type }));
       }
       if (controller.signal.aborted) return;
-      if (latestRestore.current !== restore || useSessionStore.getState().activeSessionId !== sessionId) {
+      if (!draft?.current() || draft.store.getState().version !== draftVersion ||
+        latestRestore.current !== restore || useSessionStore.getState().activeSessionId !== sessionId) {
         throw new Error("The conversation or draft changed. Clear the draft and restore the saved input again.");
       }
       restore(saved, files);

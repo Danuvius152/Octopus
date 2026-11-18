@@ -2,39 +2,7 @@ import { expect, test, type WebSocketRoute } from "./test";
 import { enterAccountCredentials } from "./current-account";
 import type { Message } from "../src/stores/sessionStore";
 import { capturePaint } from "./paint-capture";
-
-test("public Virtuoso size snapshots require separate real tail measurement evidence", async ({ page }, info) => {
-  await page.goto("/");
-  const probe = await page.evaluateHandle(async () => {
-    const path = "/e2e/virtuoso-measurement.ts";
-    const module = await import(path) as typeof import("./virtuoso-measurement");
-    return module.mountMeasurementProbe();
-  });
-  try {
-    await expect(page.getByText("Probe row 0", { exact: true })).toBeVisible();
-    await expect.poll(() => probe.evaluate((probe) => probe.geometry().height)).toBe(400);
-    await expect.poll(() => probe.evaluate((probe) => probe.snapshot()?.ranges.length ?? 0)).toBeGreaterThan(0);
-    const estimated = await probe.evaluate((probe) => probe.snapshot());
-    expect(estimated?.ranges.some((range) => range.startIndex <= 39 && range.endIndex >= 39 && range.size === 80)).toBe(true);
-    expect(await probe.evaluate((probe) => probe.measurements())).toEqual([]);
-    await probe.evaluate((probe) => probe.tail());
-    await expect.poll(() => probe.evaluate((probe) => probe.measurements().length)).toBeGreaterThan(0);
-    expect((await probe.evaluate((probe) => probe.measurements()))[0].height).toBe(80);
-    await probe.evaluate((probe) => probe.grow());
-    await expect.poll(() => probe.evaluate((probe) => probe.measurements().at(-1)?.height)).toBe(1000);
-    const measured = await probe.evaluate((probe) => probe.measurements());
-    const duringPublish = measured.find((measurement) => measurement.height === 1000)?.installed;
-    expect(duringPublish?.ranges.some((range) => range.startIndex <= 39 && range.endIndex >= 39 && range.size === 80)).toBe(true);
-    await expect.poll(() => probe.evaluate((probe) => probe.snapshot()?.ranges.some(
-      (range) => range.startIndex <= 39 && range.endIndex >= 39 && range.size === 1000))).toBe(true);
-    await info.attach("public-size-timing.json", { contentType: "application/json", body: JSON.stringify({ estimated, measured,
-      installed: await probe.evaluate((probe) => probe.snapshot()) }) });
-  } finally {
-    await info.attach("probe-final-layout.json", { contentType: "application/json", body: JSON.stringify(
-      await probe.evaluate((probe) => ({ geometry: probe.geometry(), measured: probe.measurements(), state: probe.snapshot() }))) });
-    await probe.evaluate((probe) => probe.dispose()); await probe.dispose();
-  }
-});
+import { writeFile } from "node:fs/promises";
 
 // The same fixture is run against the source revision before preparation is
 // implemented. Compositor frames are paint evidence; rAF describes geometry.
@@ -99,7 +67,7 @@ for (const target of ["Other parent", "Vera child"]) {
         const recorder = await page.evaluateHandle(() => {
           type Sample = { at: number; owner: string; visible: boolean; gap: number; preparing: boolean; rows: string[];
             extent: number; height: number; footerHeight: number; footerLength: number; footerHash: number;
-            rowPositions: Record<string, number> };
+            rowPositions: Record<string, number>; latestOffset: number | null; tailInView: boolean };
           const samples: Sample[] = [];
           const reveals: Sample[] = [];
           let clickAt = 0;
@@ -111,7 +79,19 @@ for (const target of ["Other parent", "Vera child"]) {
           const snapshot = (): Sample => {
             const element = document.querySelector<HTMLElement>(".chat-messages");
             const bounds = element?.getBoundingClientRect();
-            const footerText = element?.querySelector("[data-chat-footer]")?.parentElement?.textContent ?? "";
+            const latest = Array.from(element?.querySelectorAll("h3") ?? []).find((heading) => heading.textContent === "Latest saved output");
+            const marker = latest?.getBoundingClientRect();
+            const footer = element?.querySelector("[data-chat-footer]");
+            const footerText = footer?.parentElement?.textContent ?? "";
+            const liveText = footer?.querySelector(".msg-streaming-text")?.lastChild;
+            let tail = marker;
+            if (liveText instanceof Text && liveText.data.trimEnd()) {
+              const end = liveText.data.trimEnd().length;
+              const range = document.createRange();
+              range.setStart(liveText, end - 1);
+              range.setEnd(liveText, end);
+              tail = range.getBoundingClientRect();
+            }
             // An idle/running spinner is not first visible transcript content.
             const rows = element ? Array.from(element.querySelectorAll<HTMLElement>("[data-message-key], .msg-streaming"))
               .filter((row) => {
@@ -126,7 +106,10 @@ for (const target of ["Other parent", "Vera child"]) {
               footerLength: footerText.length, footerHash: Array.from(footerText).reduce((hash, char) => Math.imul(hash ^ char.charCodeAt(0), 16777619), 2166136261),
               rowPositions: Object.fromEntries(Array.from(element?.querySelectorAll<HTMLElement>("[data-message-key]") ?? [])
                 .map((row) => [row.dataset.messageKey!, row.getBoundingClientRect().top - (bounds?.top ?? 0) + (element?.scrollTop ?? 0)])),
-              preparing: !!document.querySelector("[data-chat-preparation]"), rows };
+              preparing: !!document.querySelector("[data-chat-preparation]"), rows,
+              tailInView: !!bounds && !!tail && tail.top >= bounds.top && tail.bottom <= bounds.bottom + 1,
+              latestOffset: bounds && marker && marker.top >= bounds.top && marker.bottom <= bounds.bottom + 1
+                ? marker.top - bounds.top : null };
           };
           // Separate the DOM reveal from later frame sampling: output or another
           // layout commit may arrive between them. Paint evidence stays in trace.
@@ -135,9 +118,13 @@ for (const target of ["Other parent", "Vera child"]) {
           const observer = new MutationObserver(() => {
             const element = document.querySelector(".chat-messages");
             if (element !== observed) { observed = element; visible = false; }
-            const next = !!element && getComputedStyle(element).visibility === "visible";
-            if (next && !visible) reveals.push(snapshot());
-            visible = next;
+            if (!element || getComputedStyle(element).visibility !== "visible") { visible = false; return; }
+            if (visible) return;
+            const next = snapshot();
+            if (next.visible) {
+              reveals.push(next);
+              visible = true;
+            }
           });
           observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["style"] });
           const sample = () => {
@@ -152,7 +139,9 @@ for (const target of ["Other parent", "Vera child"]) {
         onCleanup(() => recorder.evaluate((record) => record.stop()));
         onCleanup(() => recorder.dispose());
         const results: { destination: string; latency: number; preparationFrames: number; firstGap: number; samples: unknown;
-          revealLatency: number | null; revealGap: number | null; footerGrowth: number; viewportLoss: number; historyExtentChange: number | null }[] = [];
+          revealLatency: number | null; revealGap: number | null; footerGrowth: number; viewportLoss: number;
+          historyExtentChange: number | null; latestMovement: number | null;
+          firstTailInView: boolean; revealTailInView: boolean }[] = [];
         const historyChanges: { destination: string; at: number; extent: number; movedRows: string[] }[] = [];
         if (streaming) outputTimer = setInterval(() => {
           for (const session of sessions) socket.send(JSON.stringify({ type: "assistant_delta", session_id: session.id,
@@ -179,9 +168,12 @@ for (const target of ["Other parent", "Vera child"]) {
           }
           results.push({ destination, latency: first!.at - record.clickAt,
             revealLatency: reveal ? reveal.at - record.clickAt : null, revealGap: reveal?.gap ?? null,
+            firstTailInView: first!.tailInView, revealTailInView: reveal?.tailInView ?? false,
             footerGrowth: reveal ? Math.max(0, first!.footerHeight - reveal.footerHeight) : 0,
             viewportLoss: reveal ? Math.max(0, reveal.height - first!.height) : 0,
             historyExtentChange: reveal ? first!.extent - first!.footerHeight - (reveal.extent - reveal.footerHeight) : null,
+            latestMovement: first?.latestOffset == null ? null : Math.max(...owned.filter((sample) => sample.visible)
+              .map((sample) => sample.latestOffset === null ? Infinity : Math.abs(sample.latestOffset - first.latestOffset!))),
             preparationFrames: owned.filter((sample) => sample.preparing).length, firstGap: first!.gap, samples: record });
         }
         const latencies = results.map((result) => result.latency).sort((a, b) => a - b);
@@ -189,21 +181,37 @@ for (const target of ["Other parent", "Vera child"]) {
           viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1,
           timeOrigin: await page.evaluate(() => performance.timeOrigin), paintFrames, historyChanges,
           median: latencies[Math.ceil(latencies.length * 0.5) - 1], p95: latencies[Math.ceil(latencies.length * 0.95) - 1], results };
-        await info.attach("warm-presentation.json", { body: JSON.stringify(report), contentType: "application/json" });
+        clearInterval(outputTimer);
+        await page.locator(".session-item", { hasText: "Original parent" }).click();
+        await expect(page.locator(".chat-header")).toContainText("Original parent");
+        await page.locator(".session-item", { hasText: target }).click();
+        const viewport = (await scroller.boundingBox())!;
+        await page.mouse.move(viewport.x + viewport.width / 2, viewport.y + viewport.height / 2);
+        await expect(scroller).toBeVisible();
+        const gap = () => scroller.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+        const beforeWheel = await gap();
+        await page.mouse.wheel(0, -420);
+        try {
+          // Rows measured above the reader can change scrollTop even when the
+          // reader moves through the expected amount of visible content.
+          await expect.poll(gap, { message: "the first upward wheel leaves the tail" }).toBeGreaterThan(beforeWheel + 120);
+        } finally {
+          const path = info.outputPath("warm-presentation.json");
+          await writeFile(path, JSON.stringify({ ...report, wheel: { before: beforeWheel, after: await gap() } }));
+          await info.attach("warm-presentation.json", { path, contentType: "application/json" });
+        }
         if (!report.baseline) {
-          // Report latency for comparison. The user accepted the measured 131.8ms
-          // p95 rather than adding complexity solely to meet the initial 100ms goal.
-          expect(results.filter((result) => !streaming && (result.revealGap === null || result.revealGap > 1))
+          expect(results.map((result) => result.preparationFrames), "warm views show no preparation notice").toEqual(results.map(() => 0));
+          expect(results.filter((result) => result.revealGap === null || result.revealGap > 1)
             .map(({ destination, revealGap }) => ({ destination, revealGap })), "DOM reveal is already positioned").toEqual([]);
-          // With no new output, both observations must already be positioned.
-          // During output, MO and rAF can follow further commits. They cannot
-          // timestamp the layout handoff or prove a paint. Keep content versions
-          // and compositor frames for that review, and reject historical layout
-          // corrections after reveal independently of normal Footer following.
-          expect(results.filter((result) => !streaming && (result.firstGap > 1 || Math.abs(result.historyExtentChange ?? Infinity) > 1))
-            .map(({ destination, firstGap, historyExtentChange }) =>
-              ({ destination, firstGap, historyExtentChange })), "paused first visible sample is already positioned").toEqual([]);
-          expect(historyChanges, "revealed historical extent and mounted row positions stay calibrated").toEqual([]);
+          expect(results.filter((result) => !result.firstTailInView || !result.revealTailInView)
+            .map(({ destination, firstGap, revealGap }) => ({ destination, firstGap, revealGap })),
+          "the current last line fits in the first visible viewport").toEqual([]);
+          // Estimates above the reader may still change. Measure the readable
+          // text itself in the viewport so those changes are only diagnostic.
+          expect(results.filter((result) => !streaming && (result.firstGap > 1 || (result.latestMovement ?? Infinity) > 2))
+            .map(({ destination, firstGap, latestMovement }) =>
+              ({ destination, firstGap, latestMovement })), "the same paused tail text remains in place").toEqual([]);
         }
       });
     });

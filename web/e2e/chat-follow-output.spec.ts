@@ -3,6 +3,7 @@ import { enterAccountCredentials } from "./current-account";
 import type { Message, PendingQuestion } from "../src/stores/sessionStore";
 import type { RuntimeMetadata } from "../src/api";
 import type { Locator, Route } from "@playwright/test";
+import { capturePaint } from "./paint-capture";
 
 // Chromium headless hides native scrollbars by default. A real thumb drag
 // needs the actual scrollbar, rather than an empty CSS-reserved gutter.
@@ -109,19 +110,87 @@ async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [],
   return { scroller, gap, send, settle, output, session, pages, replaceOnReconnect };
 }
 
+for (const native of [false, true]) {
+  test(`saving a live reply preserves the paragraph already in view (${native ? "native item" : "root text"})`, async ({ page }, info) => {
+    const { scroller, gap, send, settle } = await openChat(page);
+    const content = Array.from({ length: 150 }, (_, index) =>
+      `Section ${index + 100} contains part of the same reply, with enough words to wrap across the viewport.`).join(" ");
+    const runtime = native ? { runtime_metadata: identity("root", "root-item") } : {};
+    send({ type: "assistant_delta", content, ...runtime });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Section 249");
+    await expect.poll(gap).toBeLessThanOrEqual(2);
+    await scroller.hover();
+    await page.mouse.wheel(0, -1120);
+    await expect.poll(gap).toBeGreaterThan(900);
+    await settle();
+    await capturePaint(page, info, async (paintFrames) => {
+      const reading = await scroller.evaluateHandle((viewport) => {
+        const bounds = viewport.getBoundingClientRect();
+        const live = viewport.querySelector(".msg-streaming-text")?.firstChild;
+        if (!live?.textContent) throw new Error("Live reply was not mounted");
+        const range = document.createRange();
+        const words = [...live.textContent.matchAll(/Section \d{3}/g)];
+        const marker = words.find(({ index, 0: text }) => {
+          range.setStart(live, index!);
+          range.setEnd(live, index! + text.length);
+          const rect = range.getBoundingClientRect();
+          return rect.top > bounds.top + 100 && rect.bottom < bounds.bottom - 100;
+        });
+        if (!marker) throw new Error("No live text at the current reading position");
+        const paragraph = range.getBoundingClientRect();
+        const offset = paragraph.top - bounds.top;
+        const getOffset = (node: Node | null | undefined) => {
+          if (!node?.textContent?.includes(marker[0])) return null;
+          const index = node.textContent.indexOf(marker[0]);
+          range.setStart(node, index);
+          range.setEnd(node, index + marker[0].length);
+          return range.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset;
+        };
+        const savedText = () => viewport.querySelector('[data-message-key="message:41"] .msg-content p')?.firstChild;
+        const samples: { at: number; saved: boolean; delta: number | null }[] = [];
+        let frame = requestAnimationFrame(function sample(at) {
+          const saved = savedText();
+          samples.push({ at, saved: !!saved, delta: getOffset(saved ?? viewport.querySelector(".msg-streaming-text")?.firstChild) });
+          frame = requestAnimationFrame(sample);
+        });
+        return { paragraph: paragraph.toJSON(), currentOffset: () => getOffset(savedText()), stop: () => {
+          cancelAnimationFrame(frame);
+          return samples;
+        } };
+      });
+      await settle();
+      const savingAt = await page.evaluate(() => performance.timeOrigin + performance.now());
+      let evidence;
+      try {
+        send({ type: "assistant_text", seq: 41, content, ...runtime });
+        await expect(scroller.getByTestId("streaming-text")).toHaveCount(0);
+        await expect.poll(() => reading.evaluate((frame) => Math.abs(frame.currentOffset() ?? Infinity))).toBeLessThanOrEqual(2);
+        await expect.poll(gap).toBeGreaterThan(900);
+        await settle();
+      } finally {
+        evidence = await reading.evaluate((frame) => ({ samples: frame.stop(), paragraph: frame.paragraph }));
+        await reading.dispose();
+        await info.attach("live-transfer-offsets", { body: JSON.stringify({ ...evidence, savingAt, paintFrames }), contentType: "application/json" });
+      }
+      expect(evidence.samples.filter(({ delta }) => delta === null || Math.abs(delta) > 2),
+        "the same paragraph stays in view through the transfer").toEqual([]);
+    });
+  });
+}
+
 for (const count of [0, 40]) {
 test(`a static tall Footer completes first presentation with ${count ? "saved history" : "no displayed rows"}`, async ({ page }) => {
   let gate!: Awaited<ReturnType<typeof page.evaluateHandle<{
-    flush: () => void; release: () => void;
+    count: () => number; flush: () => void; release: () => void;
   }>>>;
-  const { scroller, gap, send } = await openChat(page, count, [], async () => {
+  const { scroller, gap, send, settle } = await openChat(page, count, [], async () => {
     gate = await page.evaluateHandle(() => {
       const request = window.requestAnimationFrame, cancel = window.cancelAnimationFrame;
       let serial = 0;
       const pending = new Map<number, FrameRequestCallback>();
       window.requestAnimationFrame = (callback) => { const id = --serial; pending.set(id, callback); return id; };
       window.cancelAnimationFrame = (id) => { if (id < 0) pending.delete(id); else cancel(id); };
-      return { flush: () => {
+      return { count: () => pending.size, flush: () => {
         const batch = [...pending.values()]; pending.clear();
         for (const callback of batch) callback(performance.now());
       }, release: () => {
@@ -144,6 +213,25 @@ test(`a static tall Footer completes first presentation with ${count ? "saved hi
     expect(revealed, "the last output does not require another token or an idle interval").toBe(true);
     expect(await gap()).toBeLessThanOrEqual(1);
     await expectFooterMarkerInViewport(scroller);
+    if (count) {
+      // Let Chromium deliver the first upward wheel with the reveal's
+      // positioning callback still queued. Late output arrives in that gap.
+      expect(await gate.evaluate((queued) => queued.count())).toBeGreaterThan(0);
+      const before = await scroller.evaluate((element) => element.scrollTop);
+      const box = (await scroller.boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.wheel(0, -320);
+      const top = () => scroller.evaluate((element) => element.scrollTop);
+      await expect.poll(top).toBeLessThan(before - 200);
+      const reading = await top();
+      send({ type: "assistant_delta", content: "\n\n" + "More output after the first wheel.\n\n".repeat(40) });
+      await expect(scroller.getByTestId("streaming-text")).toContainText("More output after the first wheel.");
+      expect(await gap()).toBeGreaterThan(700);
+      expect(Math.abs(await top() - reading)).toBeLessThanOrEqual(2);
+      await gate.evaluate((queued) => queued.release());
+      await settle();
+      expect(Math.abs(await top() - reading)).toBeLessThanOrEqual(2);
+    }
   } finally { await gate.evaluate((queued) => queued.release()); await gate.dispose(); }
 });
 }

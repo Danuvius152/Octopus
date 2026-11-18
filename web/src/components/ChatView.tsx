@@ -3,120 +3,71 @@ import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
 import { ArchiveDeadline, postArchive } from "../lib/sessionArchive";
 import { createResearch } from "../lib/research";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { useStore } from "zustand";
 import { chatDraft, prefillChatDraft } from "../lib/chatDraft";
 import {
-  IconArrowUp,
-  IconCpu,
   IconFile,
   IconMenu2,
   IconPaperclip,
-  IconPlayerStop,
   IconX,
 } from "@tabler/icons-react";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
+  hasEmptyTranscript,
   hasTranscriptBaseline,
-  observeAcceptedText,
   useSessionStore,
   type Message,
-  type PendingQuestion,
   type SessionInfo,
-  type StreamingItem,
-  type SubagentRun,
 } from "../stores/sessionStore";
 import { ForkDialog } from "./ForkDialog";
 import { ResearchCard } from "./ResearchCard";
 import { RecoverableInputs } from "./RecoverableInputs";
 import type { ClientSubmissionStatus, SessionArchiveResult } from "../api";
 import { WikiJobCards } from "./WikiJobCards";
-import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
-import { MessageBubble } from "./MessageBubble";
-import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
-import { matchesPendingQuestion } from "../lib/questionPresentation";
+import { ChatTranscript, type TranscriptPreparation } from "./ChatTranscript";
+import { ChatComposer } from "./ChatComposer";
 import { DispatchQueue, type CancelCompact } from "./DispatchQueue";
 import { ContextMeter } from "./ContextMeter";
 import { CommandNotices } from "./CommandNotices";
 import { SessionAuxiliaryNotice } from "./SessionAuxiliaryNotice";
-import { MessageTime } from "./MessageTime";
 import { ModelPickerDialog } from "./ModelPickerDialog";
 import { isImeComposing } from "../lib/composerKeys";
-import { isNativeChild, nativeChatMessages } from "../lib/nativeOutput";
-import { caretWantsHistory } from "../lib/composerHistory";
 import { useComposerHistory } from "../hooks/useComposerHistory";
 import { OctopusLogo } from "./OctopusLogo";
-import { CredentialPicker } from "./CredentialPicker";
-import { PageHeader } from "./PageHeader";
-import { QuestionPrompt, type AnswerPayload } from "./QuestionPrompt";
+import { ChatSessionHeading } from "./ChatSessionHeading";
+import type { AnswerPayload } from "./QuestionPrompt";
 import { QuestionDraftRecovery } from "./QuestionDraftRecovery";
 import { beginQuestionTransmission, finishQuestionTransmission } from "../lib/questionDrafts";
-import {
-  SlashCommandMenu,
-  buildRememberPrompt,
-  filterSlashCommands,
-  type SlashCommand,
-} from "./SlashCommandMenu";
+import { buildRememberPrompt } from "./SlashCommandMenu";
 import { Button } from "./ui/button";
 import { useSessionFork } from "../hooks/useSessionFork";
-import { observeOlderMessages } from "../lib/transcript";
-import { selectSession } from "../lib/selectSession";
+import { selectSession, showSession } from "../lib/selectSession";
 import { observeSession } from "../lib/hydrateSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { classifySubmission, newSubmissionId, readSubmission, type QuestionCommandTarget, type SubmissionReply } from "../lib/submission";
 import { MAX_ATTACHMENTS_PER_MESSAGE, useDraftAttachments, type PendingAttachment } from "../hooks/useDraftAttachments";
 
-const EMPTY_MESSAGES: Message[] = [];
-const EMPTY_STREAMING_ITEMS: Record<string, StreamingItem> = {};
-const EMPTY_SUBAGENTS: Record<string, SubagentRun> = {};
-
-/** True on a device whose primary input can't hover — a phone or tablet.
- *
- * Read at the moment of the keystroke rather than cached in state: a tablet
- * with a keyboard attached mid-session changes the answer, and this is cheap.
- */
-function isTouchDevice(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(hover: none)").matches
-  );
+interface SuccessorPresentation {
+  sessionId: string;
+  account: number;
+  key: string;
+  preparation: TranscriptPreparation;
 }
 
-/** A nested output pane can consume navigation or block scroll chaining.
- * Downward input at the physical boundary still belongs to the main list. */
-function canScrollChat(viewport: HTMLElement | null, target: EventTarget | null, up: boolean, from = viewport?.scrollTop ?? 0): boolean {
-  if (!viewport?.clientHeight || up && from <= 0) return false;
-  let element = target instanceof Element ? target : null;
-  // The preparation surface overlays this same list while its layout stays
-  // measurable. Navigation there has the same owner as navigation on the list.
-  if (element?.closest("[data-chat-preparation]")?.parentElement?.querySelector(".chat-messages") === viewport) element = viewport;
-  while (element && element !== viewport) {
-    const style = getComputedStyle(element);
-    if (/^(auto|scroll)$/.test(style.overflowY) && element.scrollHeight > element.clientHeight
-      && ((up ? element.scrollTop > 0 : element.scrollHeight - element.clientHeight - element.scrollTop > 0)
-        || style.overscrollBehaviorY !== "auto")) return false;
-    element = element.parentElement;
-  }
-  return element === viewport;
+interface ArchiveIntent {
+  sessionId: string;
+  account: number;
 }
 
-function atLoadedStart(viewport: HTMLElement, first: Message | undefined): boolean {
-  if (viewport.scrollTop <= 4) return true;
-  if (!first || viewport.scrollTop > viewport.clientHeight) return false;
-  const row = viewport.querySelector<HTMLElement>("[data-message-key]");
-  if (row?.dataset.messageKey !== chatMessageKey(first)) return false;
-  const top = row.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
-  return top >= -2 && top < viewport.clientHeight;
+interface ArchiveLayout extends ArchiveIntent {
+  controlsHeight: number;
+  viewportHeight: number;
 }
 
-function captureReadingAnchor(viewport: HTMLElement) {
-  const bounds = viewport.getBoundingClientRect();
-  const visible = Array.from(viewport.querySelectorAll<HTMLElement>("[data-message-key]")).find((element) => {
-    const rectangle = element.getBoundingClientRect();
-    return rectangle.bottom > bounds.top && rectangle.top < bounds.bottom;
-  });
-  return visible ? { key: visible.dataset.messageKey!, offset: visible.getBoundingClientRect().top - bounds.top } : null;
+function SessionContextMeter({ sessionId, archived }: { sessionId: string; archived?: boolean }) {
+  const snapshot = useSessionStore((state) => state.contextStates[sessionId]);
+  return <ContextMeter state={snapshot?.state} pending={snapshot?.pending} historical={archived} />;
 }
 
 function ArchivedSuccessor({ sessionId }: { sessionId: string }) {
@@ -184,123 +135,6 @@ interface Props {
   onOpenSchedules: () => void;
 }
 
-const EMPTY_QUESTIONS: PendingQuestion[] = [];
-
-// Keep the component type stable as its live contents change. Replacing the
-// Footer component on every delta unmounts it and disrupts size observation.
-function ChatFooter({ context }: { context?: { footer: ReactNode; onLayout: () => void } }) {
-  const footer = context?.footer;
-  const onLayout = context?.onLayout;
-  useLayoutEffect(() => { onLayout?.(); }, [footer, onLayout]);
-  return <div data-chat-footer>{footer}</div>;
-}
-// Local notices have no persisted seq. Their occurrence identity follows the
-// immutable store message through prepends, without retaining another transcript.
-const localMessageKeys = new WeakMap<Message, string>();
-let localMessageSerial = 0;
-
-function chatMessageKey(message: Message): string {
-  if (message.type === "native_subagent") {
-    const source = message.runtime_metadata;
-    return source && message.tool_input?.native_thread_id && message.tool_input?.native_turn_id
-      ? JSON.stringify(["child", source.request_id, source.attempt_id, message.tool_input.native_thread_id, message.tool_input.native_turn_id])
-      : `child:${message.tool_input?.card_id}`;
-  }
-  if (message.seq !== undefined) return `message:${message.seq}`;
-  let key = localMessageKeys.get(message);
-  if (!key) { key = `local-message:${++localMessageSerial}`; localMessageKeys.set(message, key); }
-  return key;
-}
-
-interface ChatViewportView {
-  sessionId: string | null;
-  account: number;
-  window: symbol | undefined;
-}
-interface ViewportScope {
-  view: ChatViewportView;
-  viewport: HTMLElement;
-}
-interface ReadingHandoff {
-  view: ChatViewportView;
-  anchor: ReturnType<typeof captureReadingAnchor>;
-  physical?: { viewport: HTMLElement; top: number; restored?: true };
-  scrollbarPosition?: { viewport: HTMLElement; top: number };
-}
-function pendingReadingHandoff(handoff: ReadingHandoff | null, view: ChatViewportView, viewport: HTMLElement) {
-  return handoff !== null && (handoff.view !== view || !!handoff.scrollbarPosition ||
-    (handoff.physical?.viewport ?? viewport) !== viewport);
-}
-function restoredReadingAt(handoff: ReadingHandoff | null, view: ChatViewportView, viewport: HTMLElement) {
-  const physical = handoff?.physical;
-  if (handoff?.view === view && physical?.restored && physical.viewport === viewport &&
-    physical.top === viewport.scrollTop) return physical;
-}
-function movedFromScrollbarPosition(handoff: ReadingHandoff, viewport: HTMLElement) {
-  const guard = handoff.scrollbarPosition;
-  return guard?.viewport === viewport && guard.top !== viewport.scrollTop &&
-    guard.top <= viewport.scrollHeight - viewport.clientHeight;
-}
-type ViewportPosition = ViewportScope & {
-  frame: number | null;
-} & ({ kind: "initial"; tail: TailMeasurement | null; checking: boolean;
-  installation: TailInstallation | null } |
-  { kind: "restore"; handoff: ReadingHandoff; limit: number } |
-  { kind: "history"; key: string; offset: number; physicalTop: number; expectedTop?: number; alignedHeight?: number });
-interface TailMeasurement {
-  message: Message;
-  element: HTMLElement;
-  index: number;
-  height: number;
-  width: number;
-  installed: boolean;
-}
-type InitialPosition = Extract<ViewportPosition, { kind: "initial" }>;
-interface TailInstallation {
-  element: HTMLElement;
-  index: number;
-  height: number;
-  width: number;
-  requested: boolean;
-  delivered: boolean;
-}
-interface MeasurementBinding {
-  token: symbol;
-  operation: InitialPosition;
-  demand: TailInstallation;
-}
-interface InitialPresentation {
-  phase: "preparing" | "revealing" | "ready" | "reading" | "incomplete";
-  remaining: number;
-  since: number | null;
-  deadline: number | null;
-  error?: string;
-  timedOut?: boolean;
-  timeoutHint?: boolean;
-  recovery?: { pending: boolean; release: () => void };
-  automaticReturn?: boolean;
-}
-function newPresentation(): InitialPresentation {
-  return { phase: "preparing", remaining: 2000, since: null, deadline: null };
-}
-function pausePreparation(owner: InitialPresentation) {
-  if (owner.deadline !== null) window.clearTimeout(owner.deadline);
-  owner.deadline = null;
-  if (owner.since !== null) owner.remaining = Math.max(0, owner.remaining - Math.max(0, performance.now() - owner.since));
-  owner.since = null;
-}
-interface NavigationContact {
-  sessionId: string | null;
-  account: number;
-  source: "pointer" | "touch" | "scrollbar";
-  id: number;
-  y: number;
-  top: number;
-  invalid: boolean;
-  pointers: Map<number, string>;
-  touch: { id: number; y: number; multiple: boolean } | null;
-}
-
 export function ChatView({
   sendMessage,
   interrupt,
@@ -314,7 +148,8 @@ export function ChatView({
   const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const draftOwner = useSessionStore((s) => s.identity?.user_id);
   const textDraft = chatDraft();
-  const { text: input, saveError } = useStore(textDraft.store);
+  const inputOccupied = useStore(textDraft.store, (draft) => draft.text.length > 0);
+  const saveError = useStore(textDraft.store, (draft) => draft.saveError);
   const pendingFileRestore = useRef<{
     account: number; sessionId: string; requestId: string; version: number;
   } | null>(null);
@@ -324,15 +159,41 @@ export function ChatView({
   }, [textDraft]);
   useEffect(() => () => textDraft.clearConsumed(), [textDraft]);
   const mounted = useRef(true);
-  const archiveObservers = useRef(new Set<() => void>());
+  const archiveObserver = useRef<{ stop: () => void; revokeHandoff: () => void } | null>(null);
+  const revokeArchiveHandoff = useCallback(() => archiveObserver.current?.revokeHandoff(), []);
+  const [preparingSuccessor, setPreparingSuccessor] = useState<SuccessorPresentation | null>(null);
+  // Ordinary selection keeps the current composer mounted. A handoff adopts
+  // the prepared pane's key so it keeps the exact transcript already laid out.
+  const [foregroundKey, setForegroundKey] = useState("chat");
+  const successorSerial = useRef(0);
+  const [archiveLayout, setArchiveLayout] = useState<ArchiveLayout | null>(null);
+  const conversationControls = useRef<HTMLDivElement | null>(null);
+  const focusAfterArchive = useRef<HTMLElement | null>(null);
+  // Concurrent receipts can outlive their openings. Only their own source's
+  // current view needs to allow for early dispatch updates.
+  const archiveWrites = useRef(new Set<ArchiveIntent>());
+  const archiveInFlight = useCallback(({ sessionId, account }: ArchiveIntent) =>
+    Array.from(archiveWrites.current).some((write) => write.sessionId === sessionId && write.account === account), []);
+  const preserveArchiveLayout = useCallback(({ sessionId, account }: ArchiveIntent) => {
+    const controls = conversationControls.current;
+    const pane = controls?.parentElement;
+    if (!controls || pane?.dataset.chatSession !== sessionId) return;
+    const controlsHeight = controls.getBoundingClientRect().height;
+    if (controlsHeight <= 0) return;
+    const viewportHeight = pane.querySelector(".chat-messages")?.getBoundingClientRect().height ?? 0;
+    setArchiveLayout((layout) => {
+      if (layout?.sessionId !== sessionId || layout.account !== account) return { sessionId, account, controlsHeight, viewportHeight };
+      const keptHeight = Math.max(layout.controlsHeight, controlsHeight);
+      if (keptHeight === layout.controlsHeight && viewportHeight === layout.viewportHeight) return layout;
+      return { ...layout, controlsHeight: keptHeight, viewportHeight };
+    });
+  }, []);
   useEffect(() => {
     mounted.current = true;
-    const observers = archiveObservers.current;
     return () => {
       mounted.current = false;
       pendingFileRestore.current = null;
-      for (const stop of observers) stop();
-      observers.clear();
+      archiveObserver.current?.stop();
     };
   }, []);
   const [restoredInput, setRestoredInput] = useState<{ sessionId: string; clientId: string } | null>(null);
@@ -355,7 +216,7 @@ export function ChatView({
     return owner;
   }, []);
   const [archiveFeedback, setArchiveFeedback] = useState<{
-    intent: { account: number; sessionId: string }; version: number;
+    intent: ArchiveIntent; version: number;
     observation: SessionObservation; message: string; activity: string | null;
     confirm?: () => Promise<void>; checking?: boolean;
   } | null>(null);
@@ -377,10 +238,6 @@ export function ChatView({
     instance: number; sessionId: string; parentName: string; account: number; seq?: number;
   } | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  // Slash-command autocomplete: which item is highlighted, and whether the
-  // user dismissed the menu with Esc (re-opens as soon as they type again).
-  const [slashIndex, setSlashIndex] = useState(0);
-  const [slashDismissed, setSlashDismissed] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composerHistory = useComposerHistory(textDraft, textareaRef);
   const resetHistory = composerHistory.reset;
@@ -390,29 +247,45 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const transcriptBaseline = useSessionStore((s) => activeSessionId ? hasTranscriptBaseline(s, activeSessionId) : false);
-  const transcriptReadError = useSessionStore((s) => activeSessionId ? s.transcriptReadErrors[activeSessionId] : undefined);
+  const mainView = useSessionStore((s) => s.mainView);
+  const composerRevision = useRef(0);
   const viewing = useRef<{ account: number; sessionId: string } | null>(null);
   useEffect(() => {
     const unsubscribe = useSessionStore.subscribe((state, before) => {
-      if (state.accountGeneration !== before.accountGeneration || state.activeSessionId !== before.activeSessionId ||
-          state.mainView !== before.mainView || state.viewer !== before.viewer) {
+      const sameConversation = state.activeSessionId === before.activeSessionId && state.accountGeneration === before.accountGeneration;
+      if (!sameConversation) {
+        composerRevision.current += 1;
+        setArchiveLayout(null);
+      } else if (state.activeSessionId && state.archivedSessions !== before.archivedSessions) {
+        const sessionId = state.activeSessionId;
+        const wasArchived = before.archivedSessions.some((row) => row.id === sessionId);
+        if (wasArchived && state.sessions.some((row) => row.id === sessionId)) {
+          setArchiveLayout(null);
+        } else if (!wasArchived && state.mainView === "chat" && state.archivedSessions.some((row) => row.id === sessionId)) {
+          preserveArchiveLayout({ sessionId, account: state.accountGeneration });
+          const active = document.activeElement;
+          if (active instanceof HTMLElement && conversationControls.current?.contains(active)) {
+            focusAfterArchive.current = active;
+          }
+        }
+      }
+      if (!sameConversation || state.mainView !== before.mainView || state.viewer !== before.viewer) {
+        focusAfterArchive.current = null;
         viewing.current = null;
         submissionCommand.current = null;
         pendingFileRestore.current = null;
       }
     });
     return () => { viewing.current = null; unsubscribe(); };
-  }, []);
-  const composerRevision = useRef(0);
+  }, [preserveArchiveLayout]);
   const compactSending = useRef<AbortController | null>(null);
   useEffect(() => () => {
     compactSending.current?.abort();
     compactSending.current = null;
   }, [activeSessionId, accountGeneration]);
-  useEffect(() => { composerRevision.current += 1; }, [input, activeSessionId, accountGeneration]);
-  const contextSnapshot = useSessionStore((s) => activeSessionId ? s.contextStates[activeSessionId] : null);
-  const contextState = contextSnapshot?.state;
+  useEffect(() => textDraft.store.subscribe((draft, before) => {
+    if (draft.text !== before.text) composerRevision.current += 1;
+  }), [textDraft]);
   const researchCreations = useRef(new Set<AbortController>());
   useEffect(() => {
     const operations = researchCreations.current;
@@ -420,7 +293,7 @@ export function ChatView({
   }, [activeSessionId]);
   const { attachments: pendingAttachments, addFiles: addAttachmentFiles, removeAttachment, retryAttachment,
     restoreAttachments, clearAttachments, rejectedFiles, dismissRejectedFiles, unready,
-    readyIds: readyAttachmentIds } = useDraftAttachments(activeSessionId);
+    readyIds: readyAttachmentIds } = useDraftAttachments(activeSessionId, revokeArchiveHandoff);
   const addFiles = useCallback((files: File[]) => {
     pendingFileRestore.current = null;
     addAttachmentFiles(files);
@@ -468,960 +341,39 @@ export function ChatView({
       if (result && result.outcome?.code !== "attachment_unavailable") submittedDrafts.current.delete(requestId);
     }
   }), []);
-  const messages = useSessionStore((s) => activeSessionId ? s.messages[activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES);
-  const streamingText = useSessionStore((s) => activeSessionId ? s.streamingText[activeSessionId]?.content ?? "" : "");
-  const streamingItems = useSessionStore((s) => activeSessionId ? s.streamingItems[activeSessionId] ?? EMPTY_STREAMING_ITEMS : EMPTY_STREAMING_ITEMS);
-  const subagentSnapshots = useSessionStore((s) => activeSessionId ? s.subagents[activeSessionId] ?? EMPTY_SUBAGENTS : EMPTY_SUBAGENTS);
-  const nativeStreaming = useMemo(() => Object.entries(streamingItems)
-    .filter(([, item]) => !isNativeChild(item.runtime_metadata)), [streamingItems]);
   const activeSession = useSessionStore((s) => s.sessions.find(session => session.id === activeSessionId)
     ?? s.archivedSessions.find(session => session.id === activeSessionId));
+  const staged = preparingSuccessor?.account === accountGeneration ? preparingSuccessor : null;
+  const stagedSession = useSessionStore((state) => staged ? state.sessions.find((session) => session.id === staged.sessionId) : undefined);
   const activeAgent = useSessionStore((s) => s.agents.find(agent => agent.id === activeSession?.agent_id));
-  // Display name for assistant attribution throughout the chat. Harness-
-  // neutral fallback when the session has no owning agent.
-  const agentLabel = activeAgent?.name || "Assistant";
   const isArchived = !!activeSession?.archived;
   const transcriptDamaged = activeSession?.transcript_integrity === "duplicate_seq";
+  useLayoutEffect(() => {
+    if (!activeSessionId || mainView !== "chat") return;
+    if (!isArchived) {
+      if (archiveLayout?.sessionId === activeSessionId && archiveLayout.account === accountGeneration) return;
+      const owner = { sessionId: activeSessionId, account: accountGeneration };
+      if (archiveInFlight(owner)) preserveArchiveLayout(owner);
+      return;
+    }
+    const source = focusAfterArchive.current;
+    focusAfterArchive.current = null;
+    const pane = conversationControls.current?.parentElement;
+    if (source && !source.isConnected && document.activeElement === document.body && pane?.dataset.chatSession === activeSessionId) {
+      pane.querySelector<HTMLElement>(".chat-messages:not([inert]), [data-chat-initial-surface]")?.focus({ preventScroll: true });
+    }
+  }, [accountGeneration, activeSessionId, archiveInFlight, archiveLayout, isArchived, mainView, preserveArchiveLayout]);
   const restoreSavedInput = useCallback((saved: ClientSubmissionStatus, files: File[]) => {
-    if (!activeSessionId || saved.session_id !== activeSessionId || input.length || pendingAttachments.length || isArchived || transcriptDamaged || !saved.input || saved.input.kind !== "message") return;
+    if (!activeSessionId || saved.session_id !== activeSessionId || textDraft.store.getState().text || pendingAttachments.length || isArchived || transcriptDamaged || !saved.input || saved.input.kind !== "message") return;
     setInput(saved.input.content);
     addFiles(files);
     setRequiredAttachmentCount(saved.input.attachment_ids.length);
     resetHistory();
     setRestoredInput({ sessionId: activeSessionId, clientId: saved.client_request_id });
     textareaRef.current?.focus();
-  }, [activeSessionId, input, pendingAttachments, isArchived, transcriptDamaged, addFiles, setInput, resetHistory]);
+  }, [activeSessionId, pendingAttachments, isArchived, transcriptDamaged, addFiles, setInput, resetHistory, textDraft]);
   const dispatchState = useSessionStore((s) => activeSessionId ? s.dispatchStates[activeSessionId] : undefined);
-  const activeRequestId = dispatchState?.active_request_id;
-  const chatMessages = useMemo(() => nativeChatMessages(messages,
-    Object.values(subagentSnapshots), activeRequestId),
-  [messages, subagentSnapshots, activeRequestId]);
-  const dispatchPaused = dispatchState?.paused ?? false;
-  const pendingQuestions = useSessionStore((s) => activeSessionId ? s.pendingQuestions[activeSessionId] ?? EMPTY_QUESTIONS : EMPTY_QUESTIONS);
   const { queueFork, cancelFork, reset } = useSessionFork();
-
-  // A prepend can also move or regroup child cards. Preserve the actual
-  // visible identity and offset, independently of total row counts.
-  const virtuoso = useRef<VirtuosoHandle>(null);
-  const scroller = useRef<HTMLElement | null>(null);
-  // A local observation of the existing identities survives React batching:
-  // leaving A retires its work even when B→A completes before the next commit.
-  const [viewportView, setViewportView] = useState<ChatViewportView>(() => {
-    const state = useSessionStore.getState();
-    return { sessionId: state.activeSessionId, account: state.accountGeneration,
-      window: state.activeSessionId ? state.messageWindows[state.activeSessionId] : undefined };
-  });
-  const currentView = useRef<ChatViewportView | null>(null);
-  // The opening owns reading intent; a window/node replacement only hands off
-  // its optional position. A native scrollbar contact can outlive the commit.
-  const readingHandoff = useRef<ReadingHandoff | null>(null);
-  const [readingBoundary, setReadingBoundary] = useState(false);
-  const initialPresentation = useRef<InitialPresentation>(newPresentation());
-  const [presentation, setPresentation] = useState(() => ({ owner: initialPresentation.current, phase: initialPresentation.current.phase }));
-  const publishPresentation = useCallback((owner: InitialPresentation, phase: InitialPresentation["phase"]) => {
-    if (owner !== initialPresentation.current) return;
-    owner.phase = phase;
-    setPresentation({ owner, phase });
-  }, []);
-  const position = useRef<ViewportPosition | null>(null);
-  // Keep just the current node/window's last real tail measurement. A reader
-  // can request latest without causing another resize of an unchanged row.
-  const measuredTail = useRef<(ViewportScope & TailMeasurement) | null>(null);
-  const committedRows = useRef(new WeakMap<HTMLElement, {
-    view: ChatViewportView; message: Message; index: number;
-  }>());
-  // React publishes only callback identity; the original position owns the
-  // request and releases its DOM/operation references when it retires.
-  const measurementRequest = useRef<MeasurementBinding | null>(null);
-  const [measurementVersion, setMeasurementVersion] = useState<symbol>();
-  const projectedMessages = useRef(chatMessages);
-  // Input retires follow intent before queued layout work can overwrite it.
-  // Position alone cannot distinguish native navigation from virtual layout.
-  const following = useRef(true);
-  const followFrame = useRef<(ViewportScope & { frame: number; time: number }) | null>(null);
-  const reducedMotion = useRef<MediaQueryList | null>(null);
-  const viewportObserver = useRef<ResizeObserver | null>(null);
-  const lastScrollTop = useRef(0);
-  // After contact release, native scroll evidence ends at scrollend or 500ms
-  // without forward progress. An active contact owns its complete input stream;
-  // neither its ordinary scroll notifications nor elapsed time restore follow.
-  const downwardNavigation = useRef<(ViewportScope & { top: number; until: number; contact?: NavigationContact }) | null>(null);
-  const navigationContact = useRef<NavigationContact | null>(null);
-  const focusReading = useRef<{ owner: InitialPresentation; source: Element } | null>(null);
-  const cancelFollow = useCallback((view?: ChatViewportView) => {
-    const work = followFrame.current;
-    if (!work || view && work.view !== view) return;
-    cancelAnimationFrame(work.frame);
-    followFrame.current = null;
-  }, []);
-  const retirePosition = useCallback((operation = position.current) => {
-    if (operation && operation.frame !== null) cancelAnimationFrame(operation.frame);
-    if (operation) operation.frame = null;
-    if (measurementRequest.current?.operation === operation) measurementRequest.current = null;
-    if (position.current === operation) position.current = null;
-  }, []);
-  const currentViewportView = useCallback((view: ChatViewportView) => {
-    const state = useSessionStore.getState();
-    return currentView.current === view && state.mainView === "chat" && state.accountGeneration === view.account &&
-      state.activeSessionId === view.sessionId &&
-      (view.sessionId ? state.messageWindows[view.sessionId] : undefined) === view.window;
-  }, []);
-  const currentPosition = useCallback((operation: ViewportPosition) => {
-    return position.current === operation && scroller.current === operation.viewport &&
-      currentViewportView(operation.view);
-  }, [currentViewportView]);
-  const readTail = useCallback((operation: InitialPosition) => {
-    const viewport = operation.viewport;
-    const rows = projectedMessages.current;
-    const message = rows.at(-1);
-    const index = rows.length - 1;
-    let previous = operation.tail;
-    if (previous && (previous.message !== message || previous.index !== index || previous.width !== viewport.clientWidth)) previous = null;
-    const element = viewport.querySelector<HTMLElement>(`[data-index="${index}"]`);
-    const committed = element ? committedRows.current.get(element) : undefined;
-    if (message && element && committed?.view === operation.view && committed.message === message && committed.index === index &&
-      element.closest(".chat-messages") === viewport) {
-      const rectangle = element.getBoundingClientRect();
-      if (rectangle.width > 0 && rectangle.height > 0) {
-        if (!previous || previous.element !== element || previous.height !== rectangle.height) {
-          previous = { message, element, index, height: rectangle.height, width: viewport.clientWidth, installed: false };
-        }
-      } else previous = null;
-    } else if (element || previous?.element.isConnected) {
-      // An unmounted tail keeps its acquired proof while visiting a tall Footer.
-      // A mounted node with a different commit cannot stand in for current text.
-      previous = null;
-    }
-    operation.tail = previous;
-    if (previous) measuredTail.current = { view: operation.view, viewport, ...previous };
-    return previous;
-  }, []);
-  const followMeasuredOutput = useCallback(() => {
-    const viewport = scroller.current;
-    const view = currentView.current;
-    if (!view?.sessionId || !viewport || followFrame.current) return;
-    const sessionId = view.sessionId;
-    const canAdvance = () => scroller.current === viewport && following.current && !navigationContact.current &&
-      !position.current && !document.hidden && viewport.clientHeight > 0 && currentViewportView(view) &&
-      hasTranscriptBaseline(useSessionStore.getState(), sessionId);
-    if (!canAdvance()) return;
-    if (!reducedMotion.current && typeof window.matchMedia === "function") {
-      reducedMotion.current = window.matchMedia("(prefers-reduced-motion: reduce)");
-    }
-    const work = { view, viewport, frame: 0, time: performance.now() };
-    followFrame.current = work;
-    const current = () => followFrame.current === work && canAdvance();
-    const stop = () => { if (followFrame.current === work) followFrame.current = null; };
-    const advance = () => {
-      if (!current()) { stop(); return; }
-      // Sample execution time consistently with creation. A delivered frame
-      // timestamp can precede the request during the same rendering update.
-      const time = performance.now();
-      const dt = time - work.time;
-      // The target belongs to the measured DOM, including the live Footer.
-      // Keep this owner throughout the write: another height notification
-      // updates its next sample instead of starting a parallel movement.
-      const top = viewport.scrollTop;
-      const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-      const gap = bottom - top;
-      if (gap > 0 && dt > 0 && current()) {
-        const next = reducedMotion.current?.matches ? bottom
-          : top + Math.min(gap, Math.max(1, gap * (1 - Math.exp(-dt / 60))));
-        virtuoso.current?.scrollTo({ top: bottom - next <= 2 ? bottom : next, behavior: "auto" });
-      }
-      if (!current()) { stop(); return; }
-      lastScrollTop.current = viewport.scrollTop;
-      // Equal/coarse readings cannot retire an unfinished target. Keep its
-      // time origin until a positive interval permits the next actual write.
-      if (dt > 0) work.time = time;
-      // A write can synchronously expose a newer extent or be clamped by the
-      // browser. Rounded size properties can leave a fractional bottom gap;
-      // settle within tolerance using current geometry, not the old target.
-      if (viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop > 2 && current()) {
-        work.frame = requestAnimationFrame(advance);
-      } else {
-        initialPresentation.current.automaticReturn = false;
-        stop();
-      }
-    };
-    work.frame = requestAnimationFrame(advance);
-  }, [currentViewportView]);
-  const retireRecovery = useCallback((owner = initialPresentation.current) => {
-    const recovery = owner.recovery;
-    owner.recovery = undefined;
-    owner.automaticReturn = false;
-    recovery?.release();
-  }, []);
-  const resumeVisibleFollowing = useCallback((reason?: "accepted-output") => {
-    const view = currentView.current;
-    if (!view?.sessionId || !currentViewportView(view) ||
-      !hasTranscriptBaseline(useSessionStore.getState(), view.sessionId)) return;
-    const owner = initialPresentation.current;
-    retireRecovery(owner);
-    owner.automaticReturn = reason === "accepted-output";
-    retirePosition(); cancelFollow();
-    downwardNavigation.current = null;
-    readingHandoff.current = null;
-    following.current = true;
-    setReadingBoundary(false);
-    owner.timeoutHint = false;
-    // Following grants visible movement; it does not manufacture the retired
-    // initial operation's measurement proof or open a new preparation budget.
-    publishPresentation(owner, "reading");
-    followMeasuredOutput();
-  }, [cancelFollow, currentViewportView, followMeasuredOutput, publishPresentation, retirePosition, retireRecovery]);
-  const consumeTimeoutRecovery = useCallback((owner = initialPresentation.current) => {
-    if (owner !== initialPresentation.current || !owner.recovery?.pending || document.hidden ||
-      !scroller.current?.clientHeight || navigationContact.current) return;
-    resumeVisibleFollowing("accepted-output");
-  }, [resumeVisibleFollowing]);
-  useLayoutEffect(() => () => retireRecovery(), [retireRecovery]);
-  const failPreparation = useCallback((owner: InitialPresentation, error: string) => {
-    if (owner !== initialPresentation.current || owner.phase !== "preparing" && owner.phase !== "revealing") return;
-    pausePreparation(owner);
-    retirePosition(); cancelFollow();
-    following.current = false;
-    owner.error = error;
-    publishPresentation(owner, "incomplete");
-  }, [cancelFollow, retirePosition, publishPresentation]);
-  const expirePreparation = useCallback((owner: InitialPresentation) => {
-    const view = currentView.current;
-    const viewport = scroller.current;
-    if (owner !== initialPresentation.current || !view?.sessionId || !currentViewportView(view) ||
-      !hasTranscriptBaseline(useSessionStore.getState(), view.sessionId)) return;
-    pausePreparation(owner);
-    retirePosition(); cancelFollow();
-    following.current = false;
-    downwardNavigation.current = null;
-    readingHandoff.current = viewport ? { view, anchor: captureReadingAnchor(viewport),
-      physical: { viewport, top: viewport.scrollTop } } : null;
-    const focused = document.activeElement;
-    focusReading.current = focused && viewport?.parentElement?.querySelector("[data-chat-preparation]")?.contains(focused)
-      ? { owner, source: focused } : null;
-    owner.timedOut = true;
-    owner.timeoutHint = true;
-    const recovery = { pending: false, release: () => {} };
-    owner.recovery = recovery;
-    // Register at the timeout boundary itself. An effect would miss accepted
-    // output between expiry and React's next commit, including zero publication.
-    recovery.release = observeAcceptedText(view.sessionId, view.account, () => {
-      if (owner !== initialPresentation.current || owner.recovery !== recovery) return;
-      recovery.pending = true;
-      consumeTimeoutRecovery(owner);
-    });
-    publishPresentation(owner, "reading");
-  }, [cancelFollow, consumeTimeoutRecovery, retirePosition, currentViewportView, publishPresentation]);
-  const preparationBudget = useCallback(function updateBudget() {
-    const owner = initialPresentation.current;
-    const view = currentView.current;
-    const viewport = scroller.current;
-    const active = (owner.phase === "preparing" || owner.phase === "revealing") && view?.sessionId &&
-      currentViewportView(view) && hasTranscriptBaseline(useSessionStore.getState(), view.sessionId) &&
-      viewport?.clientHeight && !document.hidden && !navigationContact.current;
-    if (!active) { pausePreparation(owner); return; }
-    if (owner.since !== null) return;
-    if (owner.remaining <= 0) { expirePreparation(owner); return; }
-    owner.since = performance.now();
-    owner.deadline = window.setTimeout(() => {
-      if (owner !== initialPresentation.current) return;
-      pausePreparation(owner);
-      updateBudget();
-    }, owner.remaining);
-  }, [currentViewportView, expirePreparation]);
-  const pauseFollowing = useCallback((source?: "handoff" | "details") => {
-    retireRecovery();
-    following.current = false;
-    cancelFollow();
-    retirePosition();
-    downwardNavigation.current = null;
-    const viewport = scroller.current;
-    const view = currentView.current;
-    if (source !== "handoff" && viewport?.clientHeight && view && currentViewportView(view)) {
-      // Expanding details can precede the restoration write's scroll report
-      // without changing the current position or its source.
-      const restored = source === "details" ? restoredReadingAt(readingHandoff.current, view, viewport) : undefined;
-      readingHandoff.current = { view, anchor: captureReadingAnchor(viewport), physical: restored ?? { viewport, top: viewport.scrollTop } };
-    }
-    const owner = initialPresentation.current;
-    pausePreparation(owner);
-    publishPresentation(owner, "reading");
-  }, [cancelFollow, retirePosition, currentViewportView, publishPresentation, retireRecovery]);
-  const pauseForReading = useCallback((event: MouseEvent<HTMLElement>) => {
-    const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest("button[aria-expanded], summary")) pauseFollowing("details");
-  }, [pauseFollowing]);
-  const navigate = useCallback((up: boolean, from: number, contact?: NavigationContact) => {
-    const viewport = scroller.current;
-    const view = currentView.current;
-    if (!viewport?.clientHeight || document.hidden || !view || !currentViewportView(view)) return;
-    if (viewport.scrollTop > 0) setPagingReady(true);
-    pauseFollowing();
-    if (!up && !contact?.invalid) {
-      if (!navigationContact.current && viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4) {
-        resumeVisibleFollowing();
-      } else downwardNavigation.current = { view, viewport, top: from, until: performance.now() + 500, contact };
-    }
-  }, [pauseFollowing, currentViewportView, resumeVisibleFollowing]);
-  const invalidateNavigationContact = useCallback((contact: NavigationContact) => {
-    contact.invalid = true;
-    if (downwardNavigation.current?.contact === contact) downwardNavigation.current = null;
-  }, []);
-  const startNavigationContact = useCallback((source: NavigationContact["source"], id: number, y: number, pointerType?: string) => {
-    const viewport = scroller.current;
-    const view = currentView.current;
-    if (!viewport?.clientHeight || document.hidden || !view || !currentViewportView(view)) return;
-    cancelFollow();
-    const operation = position.current;
-    if (operation?.frame !== null && operation?.frame !== undefined) cancelAnimationFrame(operation.frame);
-    if (operation) operation.frame = null;
-    downwardNavigation.current = null;
-    // Contact suspends writes. The current reading decision remains with the
-    // opening, including any input that arrives during this contact.
-    navigationContact.current = { source, id, y, top: viewport.scrollTop,
-      invalid: false, pointers: new Map(pointerType === undefined ? [] : [[id, pointerType]]),
-      touch: null, sessionId: view.sessionId, account: view.account };
-    preparationBudget();
-  }, [cancelFollow, currentViewportView, preparationBudget]);
-  // Automatic paging needs a genuine departure from the physical top.
-  // Settling or cancelling an initial target at mount-time 0 does not grant it.
-  const [pagingReady, setPagingReady] = useState(false);
-  const [atTop, setAtTop] = useState(false);
-  // Failure stops automatic retries at the same top. The manual entry stays usable.
-  const [olderStalled, setOlderStalled] = useState(false);
-  const reportPagingPosition = useCallback((viewport: HTMLElement) => {
-    if (viewport.scrollHeight <= viewport.clientHeight) {
-      setAtTop(false);
-      return;
-    }
-    const atStart = atLoadedStart(viewport, projectedMessages.current[0]);
-    setAtTop(atStart);
-    if (!atStart) setOlderStalled(false);
-    if (!position.current && viewport.scrollTop > 4) setPagingReady(true);
-  }, []);
-  const restorePhysicalReading = useCallback((view: ChatViewportView, viewport: HTMLElement, top: number) => {
-    viewport.scrollTop = top;
-    // Keep the actual application write as the current reading sample. Its
-    // delayed scroll notification must not become a new navigation report.
-    readingHandoff.current = { view, anchor: null, physical: { viewport, top: viewport.scrollTop, restored: true } };
-  }, []);
-  const positionMeasuredOutput = useCallback(function schedulePosition() {
-    preparationBudget();
-    const operation = position.current;
-    if (!operation || !currentPosition(operation) || !operation.viewport.clientHeight || document.hidden || navigationContact.current || operation.frame !== null) return;
-    const frame = requestAnimationFrame(() => {
-      if (operation.frame !== frame) return;
-      operation.frame = null;
-      if (!currentPosition(operation) || !operation.viewport.clientHeight || document.hidden || navigationContact.current) return;
-      const viewport = operation.viewport;
-      const rows = projectedMessages.current;
-      if (operation.kind === "restore") {
-        const handoff = operation.handoff;
-        const physical = handoff.physical;
-        if (readingHandoff.current !== handoff || !physical) { retirePosition(operation); return; }
-        if (movedFromScrollbarPosition(handoff, viewport)) {
-          readingHandoff.current = null;
-          retirePosition(operation);
-          return;
-        }
-        const limit = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-        if (limit < physical.top && limit !== operation.limit) {
-          operation.limit = limit;
-          schedulePosition();
-          return;
-        }
-        retirePosition(operation);
-        restorePhysicalReading(operation.view, viewport, Math.min(physical.top, limit));
-        return;
-      }
-      const finish = () => {
-        if (!currentPosition(operation)) return;
-        // A replacement can commit before the browser delivers this write's
-        // scroll event. Publish the reading handoff with the position itself.
-        if (!following.current) {
-          const anchor = captureReadingAnchor(viewport);
-          readingHandoff.current = { view: operation.view, anchor };
-        }
-        retirePosition(operation);
-        if (operation.kind === "initial") {
-          setAtTop(atLoadedStart(viewport, rows[0]));
-          setPagingReady(viewport.scrollTop > 4);
-        }
-        followMeasuredOutput();
-      };
-      if (operation.kind === "initial") {
-        if (!operation.view.sessionId || !hasTranscriptBaseline(useSessionStore.getState(), operation.view.sessionId)) return;
-        const write = (top: number) => {
-          if (!currentPosition(operation) || Math.abs(top - viewport.scrollTop) <= 1) return;
-          virtuoso.current?.scrollTo({ top, behavior: "auto" });
-          // Every actual application write owns its next verification. The
-          // final token, resize or browser scroll notification may never arrive.
-          schedulePosition();
-        };
-        const tail = rows.at(-1);
-        const measured = readTail(operation);
-        if (tail && !measured) {
-          // A tall Footer can put the historical tail outside overscan. Probe
-          // the row first; it need not remain mounted at the physical bottom.
-          virtuoso.current?.scrollIntoView({ index: rows.length - 1, calculateViewLocation: ({ itemTop, viewportTop }) => {
-            const top = Math.max(0, Math.min(viewport.scrollHeight - viewport.clientHeight,
-              viewport.scrollTop + itemTop - viewportTop));
-            write(top);
-            return null;
-          } });
-          return;
-        }
-        const positioned = () => {
-          if (!currentPosition(operation)) return;
-          const gap = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
-          if (gap > 1) { write(Math.max(0, viewport.scrollHeight - viewport.clientHeight)); return; }
-          const owner = initialPresentation.current;
-          if (owner.phase === "preparing") publishPresentation(owner, "revealing");
-          else if (owner.phase !== "revealing") finish();
-        };
-        if (measured) {
-          if (!operation.checking) {
-            operation.checking = true;
-            virtuoso.current?.getState((state) => {
-              operation.checking = false;
-              if (!currentPosition(operation)) return;
-              // A detail may have recommitted equivalent content while this
-              // read was pending. Verify the latest commit, not its old object.
-              const latest = readTail(operation);
-              if (!latest) { schedulePosition(); return; }
-              latest.installed = state.ranges.some((range) => range.startIndex <= latest.index && range.endIndex >= latest.index &&
-                range.size === latest.height);
-              if (latest.installed) {
-                operation.installation = null;
-                positioned();
-                return;
-              }
-              let demand = operation.installation;
-              const sameGeometry = demand && demand.element === latest.element && demand.index === latest.index &&
-                demand.height === latest.height && demand.width === latest.width;
-              if (!demand || !sameGeometry && (!demand.requested || demand.delivered)) {
-                demand = { element: latest.element, index: latest.index, height: latest.height, width: latest.width,
-                  requested: false, delivered: false };
-                operation.installation = demand;
-                // Give an already queued natural measurement its one check
-                // before requesting a new public observation.
-                schedulePosition();
-              } else if (!demand.requested) {
-                demand.requested = true;
-                const binding = { token: Symbol(), operation, demand };
-                measurementRequest.current = binding;
-                setMeasurementVersion(binding.token);
-              } else if (!sameGeometry && !demand.delivered) {
-                Object.assign(demand, { element: latest.element, index: latest.index, height: latest.height, width: latest.width });
-              }
-            });
-          }
-          return;
-        }
-        positioned();
-        return;
-      }
-      // A native scroll can arrive after pointerup, even without a delivered
-      // scroll event yet. A guarded handoff yields to any intervening movement.
-      const canCorrect = () => {
-        if (!currentPosition(operation) || navigationContact.current) return false;
-        if (operation.expectedTop === undefined || operation.expectedTop === viewport.scrollTop) return true;
-        finish();
-        return false;
-      };
-      if (!canCorrect()) return;
-      const index = rows.findIndex((message) => chatMessageKey(message) === operation.key);
-      if (index < 0) {
-        viewport.scrollTop = Math.max(0, Math.min(operation.physicalTop, viewport.scrollHeight - viewport.clientHeight));
-        setReadingBoundary(true);
-        finish(); return;
-      }
-      const element = Array.from(viewport.querySelectorAll<HTMLElement>("[data-message-key]"))
-        .find((row) => row.dataset.messageKey === operation.key);
-      if (element) {
-        const delta = element.getBoundingClientRect().top - viewport.getBoundingClientRect().top - operation.offset;
-        if (Math.abs(delta) > 1 && currentPosition(operation)) {
-          operation.alignedHeight = undefined;
-          const before = viewport.scrollTop;
-          viewport.scrollTop += delta;
-          if (operation.expectedTop !== undefined) operation.expectedTop = viewport.scrollTop;
-          // This write can change the virtual range and its measured extent.
-          // Verify the same anchor after that layout instead of retiring on
-          // the pre-write geometry. A physical clamp still ends the operation.
-          if (viewport.scrollTop !== before) { schedulePosition(); return; }
-        } else if (operation.alignedHeight !== viewport.scrollHeight) {
-          // Moving to the anchor can change the rendered range. Confirm the
-          // aligned position after that range's measurement affects layout.
-          operation.alignedHeight = viewport.scrollHeight;
-          schedulePosition();
-          return;
-        }
-        finish();
-      } else {
-        operation.alignedHeight = undefined;
-        // Probe the row itself before applying an offset inside a tall row:
-        // an unmounted row may currently be estimated as only one short line.
-        // A transient projection beyond the physical list is not usable yet;
-        // the existing render/measurement notifications deliver its successor.
-        // Returning null avoids starting the library's index retry lifecycle.
-        virtuoso.current?.scrollIntoView({ index, calculateViewLocation: ({ itemTop, viewportTop }) => {
-          if (canCorrect() && viewport.clientHeight) {
-            const top = viewport.scrollTop + itemTop - viewportTop;
-            if (top >= 0 && top < viewport.scrollHeight && Math.abs(top - viewport.scrollTop) > 1 && currentPosition(operation)) {
-              virtuoso.current?.scrollTo({ top, behavior: "auto" });
-              if (operation.expectedTop !== undefined) operation.expectedTop = viewport.scrollTop;
-              schedulePosition();
-            }
-          }
-          return null;
-        } });
-      }
-    });
-    operation.frame = frame;
-  }, [currentPosition, followMeasuredOutput, preparationBudget, publishPresentation, readTail, retirePosition, restorePhysicalReading]);
-  const measureItem = useCallback((element: HTMLElement, field: "offsetHeight" | "offsetWidth") => {
-    const rectangle = element.getBoundingClientRect();
-    const size = field === "offsetHeight" ? rectangle.height : rectangle.width;
-    const binding = measurementRequest.current;
-    const operation = binding?.operation;
-    if (field === "offsetHeight" && binding && binding.token === measurementVersion && operation && currentPosition(operation) &&
-      (!operation.installation || operation.installation === binding.demand)) {
-      const latest = readTail(operation);
-      if (latest?.element === element) {
-        binding.demand.delivered = true;
-        // Virtuoso 4.18.6 rebinds its list RO when itemSize changes. The real
-        // size is installed after return; even equal measurements owe a check.
-        positionMeasuredOutput();
-      }
-    }
-    return size;
-  }, [measurementVersion, currentPosition, readTail, positionMeasuredOutput]);
-  const restoreReading = useCallback((view: ChatViewportView, viewport: HTMLElement) => {
-    if (!currentViewportView(view) || !viewport.clientHeight || document.hidden || navigationContact.current) return;
-    const handoff = readingHandoff.current;
-    const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    if (handoff?.scrollbarPosition?.viewport === viewport && handoff.scrollbarPosition.top > maxTop) {
-      // A geometrically impossible prior offset is no witness of movement.
-      handoff.scrollbarPosition = undefined;
-    }
-    const guard = handoff?.scrollbarPosition;
-    const pending = position.current?.kind === "restore" ? position.current : null;
-    if (handoff && movedFromScrollbarPosition(handoff, viewport)) {
-      if (pending) retirePosition(pending);
-      readingHandoff.current = null;
-      reportPagingPosition(viewport);
-      return;
-    }
-    const physical = handoff?.physical;
-    // A visible pane may get its viewport box before the old list extent.
-    if (handoff && !handoff.anchor && physical?.viewport === viewport && handoff.view.window === view.window &&
-      physical.top > maxTop) {
-      if (!pending) {
-        position.current = { kind: "restore", view, viewport, frame: null, handoff, limit: maxTop };
-      }
-      positionMeasuredOutput();
-      return;
-    }
-    if (pending) retirePosition(pending);
-    readingHandoff.current = null;
-    if (handoff?.anchor) {
-      position.current = { kind: "history", view, viewport, ...handoff.anchor, frame: null,
-        physicalTop: physical?.viewport === viewport ? physical.top : 0,
-        expectedTop: guard ? viewport.scrollTop : undefined };
-      positionMeasuredOutput();
-    } else if (physical?.viewport === viewport) {
-      restorePhysicalReading(view, viewport, Math.min(physical.top, maxTop));
-      if (handoff?.view.window !== view.window) setReadingBoundary(true);
-    } else {
-      restorePhysicalReading(view, viewport, 0);
-      setReadingBoundary(true);
-    }
-  }, [currentViewportView, positionMeasuredOutput, reportPagingPosition, restorePhysicalReading, retirePosition]);
-  const measuredOutput = useCallback(() => {
-    preparationBudget();
-    const viewport = scroller.current;
-    if (!viewport?.clientHeight || document.hidden) {
-      cancelFollow();
-      const operation = position.current;
-      if (operation?.frame !== null && operation?.frame !== undefined) cancelAnimationFrame(operation.frame);
-      if (operation) operation.frame = null;
-      return;
-    }
-    const view = currentView.current;
-    if (!following.current && view && initialPresentation.current.phase !== "incomplete" &&
-      pendingReadingHandoff(readingHandoff.current, view, viewport)) {
-      restoreReading(view, viewport);
-    }
-    positionMeasuredOutput();
-    consumeTimeoutRecovery();
-    followMeasuredOutput();
-  }, [cancelFollow, consumeTimeoutRecovery, positionMeasuredOutput, followMeasuredOutput, preparationBudget, restoreReading]);
-  const releaseNavigationContact = useCallback((contact: NavigationContact, y: number) => {
-    if (navigationContact.current !== contact) return;
-    navigationContact.current = null;
-    const viewport = scroller.current;
-    const view = currentView.current;
-    const canMeasure = viewport?.clientHeight && view && contact.sessionId === view.sessionId &&
-      contact.account === view.account && currentViewportView(view);
-    const owner = initialPresentation.current;
-    const scrollbar = contact.source === "scrollbar";
-    if (scrollbar && (owner.recovery || owner.automaticReturn) &&
-      (!canMeasure || contact.invalid || y === contact.y)) {
-      // A same-coordinate native release may start scrolling after pointerup.
-      // Keep reading until an explicit return supplies a new permission.
-      pauseFollowing(readingHandoff.current?.scrollbarPosition ? "handoff" : undefined);
-      measuredOutput();
-      return;
-    }
-    // A primary scrollbar release can show movement without pointermove.
-    // A handoff invalidates the old geometry for returning down, but the
-    // mouse can still withdraw permission to move the reader's position.
-    if (scrollbar && y !== contact.y) pauseFollowing();
-    else if (scrollbar && !following.current && position.current?.kind === "history") retirePosition();
-    if (following.current) readingHandoff.current = null;
-    if (!canMeasure) return;
-    const navigation = downwardNavigation.current;
-    const directed = navigation?.viewport === viewport && navigation.view === view;
-    // Native thumb drags may omit pointermove. Touch release instead requires
-    // direction established by this contact, so inner scrolling or a tap cannot
-    // turn an unrelated main-list displacement into a return to following.
-    const returned = (!contact.invalid && scrollbar && y > contact.y && viewport.scrollTop > contact.top || directed && viewport.scrollTop >= navigation.top) &&
-      viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4;
-    if (returned) resumeVisibleFollowing();
-    else if (directed) {
-      navigation.contact = undefined;
-      navigation.until = performance.now() + 500;
-    }
-    if (directed) readingHandoff.current = null;
-    measuredOutput();
-  }, [currentViewportView, measuredOutput, pauseFollowing, resumeVisibleFollowing, retirePosition]);
-  useEffect(() => {
-    // The opening owns a held contact, even if its original viewport is
-    // replaced or the release lands outside the list. Geometry stays scoped.
-    const pointerDown = (event: PointerEvent) => {
-      const contact = navigationContact.current;
-      if (!contact || contact.touch && event.pointerType === "touch" || contact.pointers.has(event.pointerId)) return;
-      contact.pointers.set(event.pointerId, event.pointerType);
-      contact.invalid = true;
-      downwardNavigation.current = null;
-    };
-    const pointerEnd = (event: PointerEvent) => {
-      const contact = navigationContact.current;
-      if (!contact || !contact.pointers.delete(event.pointerId)) return;
-      if (event.type === "pointercancel") invalidateNavigationContact(contact);
-      const y = event.type === "pointerup" && event.pointerId === contact.id ? event.clientY : contact.y;
-      if (!contact.touch && !contact.pointers.size) {
-        releaseNavigationContact(contact, y);
-      } else if (contact.source === "scrollbar" && y !== contact.y) {
-        pauseFollowing();
-      }
-    };
-    const touchStart = (event: TouchEvent) => {
-      const contact = navigationContact.current;
-      if (contact?.touch && event.touches.length > 1) {
-        contact.touch.multiple = true;
-        invalidateNavigationContact(contact);
-      }
-    };
-    const touchEnd = (event: TouchEvent) => {
-      const contact = navigationContact.current;
-      if (!contact?.touch) return;
-      const { id, multiple } = contact.touch;
-      const touch = Array.from(event.changedTouches).find((item) => item.identifier === id);
-      if (!touch && !multiple) return;
-      if (event.type === "touchcancel" || event.touches.length) invalidateNavigationContact(contact);
-      if (!event.touches.length) {
-        contact.touch = null;
-        if (!contact.pointers.size) releaseNavigationContact(contact, contact.y);
-      }
-    };
-    window.addEventListener("pointerdown", pointerDown, true);
-    window.addEventListener("pointerup", pointerEnd, true);
-    window.addEventListener("pointercancel", pointerEnd, true);
-    window.addEventListener("touchstart", touchStart, true);
-    window.addEventListener("touchend", touchEnd, true);
-    window.addEventListener("touchcancel", touchEnd, true);
-    return () => {
-      window.removeEventListener("pointerdown", pointerDown, true);
-      window.removeEventListener("pointerup", pointerEnd, true);
-      window.removeEventListener("pointercancel", pointerEnd, true);
-      window.removeEventListener("touchstart", touchStart, true);
-      window.removeEventListener("touchend", touchEnd, true);
-      window.removeEventListener("touchcancel", touchEnd, true);
-    };
-  }, [invalidateNavigationContact, pauseFollowing, releaseNavigationContact]);
-  useEffect(() => {
-    const visibilityChanged = () => {
-      // A hidden page may stop delivering frames altogether. Retire now;
-      // returning starts from the current extent and a fresh execution clock.
-      measuredOutput();
-    };
-    document.addEventListener("visibilitychange", visibilityChanged);
-    return () => document.removeEventListener("visibilitychange", visibilityChanged);
-  }, [cancelFollow, measuredOutput]);
-  const startInitialPosition = useCallback((viewport: HTMLElement) => {
-    retirePosition();
-    downwardNavigation.current = null;
-    if (navigationContact.current?.source !== "scrollbar") readingHandoff.current = null;
-    const owner = initialPresentation.current;
-    // Timeout retires initial for the entire opening, including later window
-    // and DOM handoffs. A new follow permission uses the visible follow owner.
-    if (owner.timedOut) { followMeasuredOutput(); return; }
-    if (owner.phase !== "preparing") publishPresentation(owner, "preparing");
-    const view = currentView.current;
-    if (!view?.sessionId || !currentViewportView(view)) return;
-    const measured = measuredTail.current;
-    position.current = { kind: "initial", view, viewport, frame: null,
-      tail: measured?.view === view && measured.viewport === viewport ? measured : null, checking: false,
-      installation: null };
-    positionMeasuredOutput();
-  }, [retirePosition, positionMeasuredOutput, currentViewportView, publishPresentation, followMeasuredOutput]);
-  const retryHistoryRead = useCallback(() => {
-    const view = currentView.current;
-    if (!view?.sessionId || !currentViewportView(view)) return;
-    void observeSession(view.sessionId, "detail").done.catch(() => {});
-  }, [currentViewportView]);
-  const saveReadingHandoff = useCallback((view: ChatViewportView, viewport: HTMLElement) => {
-    const scrollbar = navigationContact.current?.source === "scrollbar";
-    const previous = readingHandoff.current;
-    const guard = previous?.scrollbarPosition;
-    // A second retirement can precede the first usable measurement. Keep the
-    // outstanding handoff until it is consumed or native movement supersedes it.
-    if (previous && (!viewport.clientHeight || pendingReadingHandoff(previous, view, viewport) &&
-      (!guard || guard.viewport.scrollTop === guard.top))) return;
-    const top = viewport.scrollTop;
-    const operation = position.current;
-    const correction = operation?.kind === "history" && operation.view === view && operation.viewport === viewport ? operation : null;
-    // Rebind a pending anchor only while its own position witness still
-    // holds. A second handoff must not make an obsolete anchor current again.
-    const current = correction && (correction.expectedTop === undefined || correction.expectedTop === top) ? correction : null;
-    const anchor = current ? { key: current.key, offset: current.offset }
-      : viewport.clientHeight ? captureReadingAnchor(viewport) : null;
-    readingHandoff.current = { view, anchor,
-      physical: { viewport, top: current?.physicalTop ?? top },
-      scrollbarPosition: scrollbar || guard || correction?.expectedTop !== undefined ? { viewport, top } : undefined };
-  }, []);
-  const setScroller = useCallback((element: HTMLElement | Window | null) => {
-    const next = element instanceof HTMLElement ? element : null;
-    const previous = scroller.current;
-    if (previous === next) return;
-    setPagingReady(false);
-    setOlderStalled(false);
-    measuredTail.current = null;
-    const view = currentView.current;
-    if (previous && view && currentViewportView(view)) {
-      const keepReading = !following.current || navigationContact.current?.source === "scrollbar";
-      if (keepReading) saveReadingHandoff(view, previous);
-      else readingHandoff.current = null;
-    }
-    cancelFollow();
-    retirePosition();
-    downwardNavigation.current = null;
-    viewportObserver.current?.disconnect();
-    viewportObserver.current = null;
-    if (navigationContact.current) navigationContact.current.invalid = true;
-    scroller.current = next;
-    const handoff = readingHandoff.current;
-    const guard = handoff?.scrollbarPosition;
-    if (next && handoff && guard && guard.viewport !== next) {
-      const scrollbarPosition = { viewport: next, top: next.scrollTop };
-      if (guard.viewport.scrollTop === guard.top) handoff.scrollbarPosition = scrollbarPosition;
-      else readingHandoff.current = { view: handoff.view, anchor: null, physical: scrollbarPosition, scrollbarPosition };
-    }
-    const viewport = scroller.current;
-    lastScrollTop.current = viewport?.scrollTop ?? 0;
-    if (next) {
-      // Virtuoso publishes this ref after layout effects. Attach to the
-      // actual node, even when a replacement commits while chat is hidden.
-      if (initialPresentation.current.phase !== "incomplete") {
-        if (following.current) startInitialPosition(next);
-        else if (view) restoreReading(view, next);
-      }
-      viewportObserver.current = new ResizeObserver(measuredOutput);
-      viewportObserver.current.observe(next);
-    }
-  }, [cancelFollow, retirePosition, startInitialPosition, measuredOutput, currentViewportView, saveReadingHandoff, restoreReading]);
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  const olderRead = useRef<ReturnType<typeof observeOlderMessages> | null>(null);
-  const hasOlder = useSessionStore((s) =>
-    activeSessionId ? Boolean(s.hasMoreMessages[activeSessionId]) : false
-  );
-  useLayoutEffect(() => useSessionStore.subscribe((state, before) => {
-    const sid = state.activeSessionId;
-    // Hiding chat retires viewport work but keeps the same conversation opening.
-    const sameOpening = state.accountGeneration === before.accountGeneration && sid === before.activeSessionId;
-    const messageWindow = sid ? state.messageWindows[sid] : undefined;
-    const windowChanged = messageWindow !== (sid ? before.messageWindows[sid] : undefined);
-    const wasChat = before.mainView === "chat";
-    if (sameOpening && wasChat === (state.mainView === "chat") && !windowChanged) return;
-    // Retire synchronously at the store boundary, before React can batch a
-    // departure and return into identical selected values.
-    pausePreparation(initialPresentation.current);
-    if (!sameOpening || windowChanged) {
-      setPagingReady(false);
-      setOlderStalled(false);
-    }
-    const view = currentView.current;
-    const viewport = scroller.current;
-    if (!sameOpening) {
-      focusReading.current = null;
-      retireRecovery();
-      readingHandoff.current = null;
-      following.current = true;
-      setReadingBoundary(false);
-      initialPresentation.current = newPresentation();
-      publishPresentation(initialPresentation.current, "preparing");
-      navigationContact.current = null;
-    } else if (wasChat && view && viewport &&
-      (!following.current || navigationContact.current?.source === "scrollbar")) {
-      saveReadingHandoff(view, viewport);
-    }
-    if (sameOpening && windowChanged && following.current && !initialPresentation.current.timedOut &&
-      initialPresentation.current.phase !== "preparing" && initialPresentation.current.phase !== "incomplete") {
-      publishPresentation(initialPresentation.current, "preparing");
-    }
-    currentView.current = null;
-    measuredTail.current = null;
-    cancelFollow(); retirePosition();
-    downwardNavigation.current = null;
-    if (navigationContact.current) navigationContact.current.invalid = true;
-    olderRead.current?.cancel(); olderRead.current = null;
-    setViewportView({ sessionId: sid, account: state.accountGeneration, window: messageWindow });
-  }), [cancelFollow, retirePosition, publishPresentation, retireRecovery, saveReadingHandoff]);
-  useLayoutEffect(() => {
-    currentView.current = viewportView;
-    cancelFollow();
-    retirePosition();
-    setLoadingOlder(false);
-    setAtTop(false);
-    const viewport = scroller.current;
-    const phase = initialPresentation.current.phase;
-    if (viewport && phase !== "incomplete") {
-      if (!following.current) restoreReading(viewportView, viewport);
-      else if (phase === "preparing" || phase === "revealing") startInitialPosition(viewport);
-      measuredOutput();
-    }
-    return () => {
-      cancelFollow(viewportView);
-      if (position.current?.view === viewportView) retirePosition(position.current);
-      if (currentView.current === viewportView) {
-        measuredTail.current = null;
-        pausePreparation(initialPresentation.current);
-        currentView.current = null;
-        readingHandoff.current = null;
-        downwardNavigation.current = null; navigationContact.current = null;
-        olderRead.current?.cancel(); olderRead.current = null;
-      }
-    };
-  }, [viewportView, cancelFollow, retirePosition, startInitialPosition, restoreReading, measuredOutput]);
-  const loadOlder = useCallback(() => {
-    const sid = activeSessionId;
-    const view = currentView.current;
-    if (!sid || !view || view.sessionId !== sid || !currentViewportView(view) || olderRead.current?.current()) return;
-    pauseFollowing();
-    setAtTop(false);
-    setLoadingOlder(true);
-    let mergedPosition: ViewportPosition | null = null;
-    const read = observeOlderMessages(sid, () => {
-      if (!currentViewportView(view)) return;
-      setAtTop(false);
-      const element = scroller.current;
-      if (!element?.clientHeight) return;
-      const anchor = captureReadingAnchor(element);
-      retirePosition();
-      downwardNavigation.current = null;
-      const top = element.scrollTop;
-      mergedPosition = anchor ? { kind: "history", view, viewport: element, ...anchor, frame: null, physicalTop: top,
-        expectedTop: navigationContact.current?.source === "scrollbar" ? top : undefined } : null;
-      position.current = mergedPosition;
-    });
-    olderRead.current = read;
-    void read.done.then((result) => {
-      // Store publication and this view's request status have different lives.
-      // An obsolete connection must release its own spinner, while an old view
-      // can never settle a replacement view's request.
-      if (olderRead.current !== read || !currentViewportView(view)) return;
-      olderRead.current = null;
-      setLoadingOlder(false);
-      if (!read.current() || result.state === "obsolete") {
-        retirePosition(mergedPosition);
-        setOlderStalled(true);
-        return;
-      }
-      if (result.state === "failed" || result.state === "in_flight" || result.state === "merged" && result.added === 0) {
-        retirePosition(mergedPosition);
-        setOlderStalled(true);
-      }
-    });
-  }, [activeSessionId, pauseFollowing, retirePosition, currentViewportView]);
-
-  useLayoutEffect(() => {
-    projectedMessages.current = chatMessages;
-    positionMeasuredOutput();
-  }, [chatMessages, loadingOlder, transcriptBaseline, positionMeasuredOutput]);
-
-  useLayoutEffect(() => {
-    const request = focusReading.current;
-    if (!request) return;
-    if (request.owner !== initialPresentation.current) { focusReading.current = null; return; }
-    if (presentation.owner !== request.owner || presentation.phase !== "reading") return;
-    focusReading.current = null;
-    // Removing the overlay normally leaves focus on body. A later explicit
-    // focus choice (especially the composer) owns itself and must be preserved.
-    if (document.activeElement === request.source || !request.source.isConnected && document.activeElement === document.body) {
-      scroller.current?.focus({ preventScroll: true });
-    }
-  }, [presentation]);
-
-  useLayoutEffect(() => {
-    if (transcriptDamaged || !transcriptBaseline && transcriptReadError) {
-      failPreparation(initialPresentation.current, transcriptDamaged ? "Conversation history is damaged." : transcriptReadError!);
-    } else if (transcriptBaseline) {
-      const owner = initialPresentation.current;
-      if (owner.phase === "incomplete") {
-        // A successful reread repairs data availability, not positioning proof.
-        owner.error = undefined;
-        publishPresentation(owner, "reading");
-      }
-      if (owner.timedOut) measuredOutput();
-    }
-  }, [transcriptBaseline, transcriptReadError, transcriptDamaged, presentation.owner, failPreparation, measuredOutput, publishPresentation]);
-
-  useLayoutEffect(() => {
-    const owner = presentation.owner;
-    if (owner !== initialPresentation.current || presentation.phase !== "revealing" || owner.phase !== "revealing") return;
-    const operation = position.current;
-    if (operation?.kind !== "initial" || !currentPosition(operation)) return;
-    const viewport = operation.viewport;
-    const tail = projectedMessages.current.at(-1);
-    const footer = viewport.querySelector<HTMLElement>("[data-chat-footer]")?.parentElement;
-    const positioned = !document.hidden && viewport.clientHeight > 0 &&
-      (!tail || operation.tail?.installed && operation.tail.message === tail && operation.tail.width === viewport.clientWidth) &&
-      viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 1 &&
-      (!footer || footer.getBoundingClientRect().bottom - viewport.getBoundingClientRect().bottom <= 1);
-    if (!positioned) {
-      publishPresentation(owner, "preparing");
-      positionMeasuredOutput();
-      return;
-    }
-    pausePreparation(owner);
-    retirePosition(operation);
-    publishPresentation(owner, "ready");
-    setAtTop(atLoadedStart(viewport, projectedMessages.current[0]));
-    setPagingReady(viewport.scrollTop > 4);
-    followMeasuredOutput();
-  }, [presentation, chatMessages, currentPosition, publishPresentation, positionMeasuredOutput, retirePosition, followMeasuredOutput]);
-
-  // Physical scroll events supply current top geometry. An estimated initial
-  // range or a delayed library top report cannot arm history by itself.
-  useEffect(() => {
-    const viewport = scroller.current;
-    const view = currentView.current;
-    if (atTop && pagingReady && hasOlder && !loadingOlder && !olderStalled && !position.current &&
-        view && viewport && viewport.clientHeight > 0 && !pendingReadingHandoff(readingHandoff.current, view, viewport) &&
-        atLoadedStart(viewport, projectedMessages.current[0])) {
-      loadOlder();
-    }
-  }, [atTop, pagingReady, hasOlder, loadingOlder, olderStalled, loadOlder]);
 
   // Prefilled chat input on fork open (session-rewind.md §6.1). When the
   // active session carries a non-null fork_prefilled_prompt (the rewound user
@@ -1432,7 +384,6 @@ export function ChatView({
     prefillChatDraft(textDraft, activeSessionId, activeSession?.fork_prefilled_prompt);
   }, [activeSessionId, activeSession?.fork_prefilled_prompt, draftOwner, textDraft]);
 
-  const isRunning = activeSession?.status === "running";
   // Whether a message typed right now goes INTO the running turn or queues
   // behind it. A harness capability the server reports per session
   // (inline-steering.md §12) — the button must not promise one and do the
@@ -1443,7 +394,7 @@ export function ChatView({
       !dispatchState?.items.some((item) => item.operation === "compact"));
 
   const restoreRejectedInput = useCallback((message: Message) => {
-    if (!activeSessionId || input.length > 0 || pendingAttachments.length > 0) return;
+    if (!activeSessionId || textDraft.store.getState().text || pendingAttachments.length > 0) return;
     const recovery = message.tool_input?.rejected_input as { content?: unknown; attachment_ids?: unknown } | undefined;
     if (typeof recovery?.content !== "string" || !Array.isArray(recovery.attachment_ids)) return;
     const requestId = message.outcome?.request_id;
@@ -1464,111 +415,13 @@ export function ChatView({
       };
     }
     textareaRef.current?.focus();
-  }, [activeSessionId, input.length, pendingAttachments.length, restoreAttachments, setInput, resetHistory, textDraft]);
+  }, [activeSessionId, pendingAttachments.length, restoreAttachments, setInput, resetHistory, textDraft]);
 
-  // The body per message shape. Wrapped by `renderMessage` below, which is
-  // where the hover-revealed timestamp is attached — one place, so every shape
-  // gets it rather than each branch of MessageBubble growing its own.
-  const renderMessageBody = useCallback(
-    (_index: number, msg: Message) => {
-      if (msg.type === "question_request") {
-        const pending = pendingQuestions.find(
-          (q) => matchesPendingQuestion(msg, q)
-        );
-        if (pending && activeSessionId) {
-          return (
-            <QuestionPrompt
-              question={pending}
-              sessionId={activeSessionId}
-              agentLabel={agentLabel}
-              onSnooze={snoozeQuestion ? (id, target) => snoozeQuestion(activeSessionId, id, target) : undefined}
-              onSubmit={(id, answers, target) =>
-                answerQuestion(activeSessionId, id, answers, target)
-              }
-            />
-          );
-        }
-        // Already answered or no live state — render a compact summary so the
-        // chat history shows what was asked.
-        const questions =
-          (msg.tool_input?.questions as PendingQuestion["questions"]) || [];
-        return (
-          <div className="msg msg-question msg-question-done rounded-lg border-[0.7px] border-dashed border-border bg-muted/30 overflow-hidden opacity-75">
-            <div className="question-header flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground">
-              <span aria-hidden className="text-xs">?</span>
-              <strong>{agentLabel} asked</strong>
-              {msg.tool_input?.interaction_policy === "human" && msg.tool_input?.wait_mode === "blocking" &&
-                <span>Human blocking question · no automatic question deadline</span>}
-              {msg.tool_input?.interaction_policy === "human" && msg.tool_input?.wait_mode === "optional" &&
-                <span>Human optional question</span>}
-              {typeof msg.tool_input?.deadline === "string" && <span>Original question deadline: {msg.tool_input.deadline}</span>}
-            </div>
-            <div className="question-body px-3 pb-3 space-y-1">
-              {questions.map((q, i) => (
-                <div className="question-item" key={i}>
-                  <div className="question-text text-sm text-foreground leading-relaxed">
-                    {q.question}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      }
-      return (
-        <MessageBubble
-          message={msg}
-          sessionId={activeSessionId ?? ""}
-          agentName={activeAgent?.name}
-          agentAvatar={activeAgent?.avatar}
-          onFork={(seq) => { if (activeSessionId) setForkDialog({ sessionId: activeSessionId,
-            instance: ++forkDialogSequence.current, parentName: activeSession?.name || "Session", account: accountGeneration, seq }); }}
-          onRestoreInput={restoreRejectedInput}
-          restoreInputDisabled={input.length > 0 || pendingAttachments.length > 0}
-        />
-      );
-    },
-    [
-      activeSessionId,
-      activeSession?.name,
-      accountGeneration,
-      answerQuestion,
-      snoozeQuestion,
-      pendingQuestions,
-      restoreRejectedInput,
-      input.length,
-      pendingAttachments.length,
-      activeAgent?.name,
-      activeAgent?.avatar,
-      agentLabel,
-    ]
-  );
-
-  const renderMessage = useCallback(
-    (index: number, msg: Message) => {
-      const body = msg.type === "question_request" && !pendingQuestions.some((question) => matchesPendingQuestion(msg, question))
-        ? <MessageDetails sessionId={activeSessionId!} message={msg}>{(full) => full === msg
-          ? renderMessageBody(index, msg)
-          : <SavedMessageRecord message={full} label="Full saved question record" />}</MessageDetails>
-        : renderMessageBody(index, msg);
-      if (body === null) return body;
-      return (
-        <div className="msg-row group/msg relative" data-message-key={chatMessageKey(msg)} ref={(row) => {
-          const element = row?.parentElement;
-          if (!element) return;
-          const committed = { view: viewportView, message: msg, index };
-          committedRows.current.set(element, committed);
-          return () => {
-            if (committedRows.current.get(element) === committed) committedRows.current.delete(element);
-          };
-        }}>
-          {body}
-          <MessageTime iso={msg.created_at} />
-        </div>
-      );
-    },
-    [renderMessageBody, pendingQuestions, activeSessionId, viewportView]
-  );
+  const openMessageFork = useCallback((seq: number) => {
+    if (!activeSessionId) return;
+    setForkDialog({ sessionId: activeSessionId, instance: ++forkDialogSequence.current,
+      parentName: activeSession?.name || "Session", account: accountGeneration, seq });
+  }, [activeSessionId, activeSession?.name, accountGeneration]);
 
   // ---- attachments: upload, paste, drop, picker, chips ------------------
 
@@ -1622,92 +475,7 @@ export function ChatView({
 
   const hasUploadInFlight = unready || pendingAttachments.length < requiredAttachmentCount;
 
-  // While a turn runs: the text the model is producing right now, or the
-  // loading dots when it hasn't produced any yet (it's thinking, or running a
-  // tool). Rendered through MessageBubble so a partial answer looks exactly
-  // like the finished one and doesn't jump when it's replaced — it carries no
-  // `seq`, so the fork affordance stays off it.
-  // What the top of a windowed transcript says. Silent when the whole thing is
-  // loaded, so an ordinary short conversation looks exactly as it did.
-  const olderHeader = useCallback(() => {
-    if (!hasOlder) return null;
-    return (
-      <div className="chat-older-notice px-4 py-3 text-center text-xs text-muted-foreground">
-        {loadingOlder ? (
-          <span className="chat-older-loading">Loading earlier messages…</span>
-        ) : (
-          <button
-            type="button"
-            className="btn-load-older rounded-md px-2 py-1 hover:bg-accent hover:text-foreground"
-            onClick={loadOlder}
-          >
-            Load earlier messages
-          </button>
-        )}
-      </div>
-    );
-  }, [hasOlder, loadingOlder, loadOlder]);
-
-  const footer = useMemo(() => {
-    if (!isRunning) return null;
-    if (streamingText || nativeStreaming.length) {
-      return (
-        <div className="msg-streaming" data-testid="streaming-text">
-          {streamingText && <MessageBubble
-            message={{ role: "assistant", type: "text", content: streamingText }}
-            sessionId={activeSessionId ?? ""}
-            agentName={activeAgent?.name}
-            agentAvatar={activeAgent?.avatar}
-            plain
-          />}
-          {nativeStreaming.map(([key, item]) => <MessageBubble key={key}
-            message={{ role: "assistant", type: "text", ...item }} sessionId={activeSessionId || ""}
-            agentName={activeAgent?.name} agentAvatar={activeAgent?.avatar} plain />)}
-        </div>
-      );
-    }
-    return (
-      <div className="msg msg-loading flex items-center gap-1.5 px-3 py-2">
-        <span className="loading-dot inline-block size-2 rounded-full bg-muted-foreground/60 animate-pulse [animation-delay:-0.32s]" />
-        <span className="loading-dot inline-block size-2 rounded-full bg-muted-foreground/60 animate-pulse [animation-delay:-0.16s]" />
-        <span className="loading-dot inline-block size-2 rounded-full bg-muted-foreground/60 animate-pulse" />
-      </div>
-    );
-  }, [
-    isRunning,
-    streamingText,
-    nativeStreaming,
-    activeSessionId,
-    activeAgent?.name,
-    activeAgent?.avatar,
-  ]);
-
-  // Slash-command autocomplete state, derived from the current input.
-  const slashCommands = useMemo(() => filterSlashCommands(input), [input]);
-  const showSlashMenu = slashCommands.length > 0 && !slashDismissed;
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value);
-    // Editing ends the walk: the next ArrowUp starts from the newest again.
-    resetHistory();
-    // Any edit re-arms the menu and resets the highlight to the top match.
-    setSlashIndex(0);
-    setSlashDismissed(false);
-  };
-
-  // Complete a slash command into the composer: name + trailing space so the
-  // caret lands in the args position and the menu hides (whitespace ends the
-  // command-typing state). For no-arg commands the trailing space is trimmed
-  // away by handleSend's matching.
-  const completeSlash = (cmd: SlashCommand) => {
-    setInput(`${cmd.name} `);
-    setSlashIndex(0);
-    setSlashDismissed(false);
-    // Focus now so completion cannot move a later text selection.
-    textareaRef.current?.focus();
-  };
-
-  const submitTurn = (content: string) => {
+  const submitTurn = (content: string, input: string) => {
     if (!activeSessionId || hasUploadInFlight) return;
     let draftId: string;
     try {
@@ -1789,7 +557,7 @@ export function ChatView({
     }
   };
 
-  const submitCompact = async () => {
+  const submitCompact = async (input: string) => {
     if (!activeSessionId || compactSending.current) return;
     if (rejectedDrafts.some((draft) => draft.sessionId === activeSessionId && draft.compactDraft && draft.uncertain)) {
       setSubmissionError("Confirm the original compaction request before submitting it again.");
@@ -1872,11 +640,14 @@ export function ChatView({
 
   const handleSend = async () => {
     if (composerHistory.isWaiting()) return;
-    if (!activeSessionId) return;
+    const foreground = useSessionStore.getState();
+    if (!activeSessionId || foreground.activeSessionId !== activeSessionId || foreground.mainView !== "chat" ||
+      foreground.archivedSessions.some((session) => session.id === activeSessionId)) return;
+    const input = textDraft.store.getState().text;
     const trimmed = input.trim();
     if (/^\/compact(?:\s|$)/.test(trimmed)) {
       if (trimmed !== "/compact") { setSubmissionError("Usage: /compact (no arguments)."); return; }
-      await submitCompact();
+      await submitCompact(input);
       return;
     }
     // Allow attachment-only turns — if the user attached files and
@@ -1899,18 +670,19 @@ export function ChatView({
       return;
     }
 
-    // /archive command — intercept client-side. Hides the current
-    // session and seamlessly swaps the active id to a fresh session
-    // with the same name/working_dir/credential_id. The user sees an
-    // empty chat under the same sidebar entry.
+    // The source remains readable until the confirmed direct successor is ready.
     if (trimmed.toLowerCase() === "/archive") {
       setInput("");
       const start = useSessionStore.getState();
       const intent = { account: start.accountGeneration, sessionId: activeSessionId };
+      let handoffAllowed = !pendingAttachments.length && !rejectedFiles.length && !requiredAttachmentCount;
+      // Dispatch can clear its controls before archive membership arrives.
+      archiveWrites.current.add(intent);
+      preserveArchiveLayout(intent);
       viewing.current = intent;
       const version = textDraft.store.getState().version;
       setArchiveFeedback(null);
-      for (const retire of archiveObservers.current) retire();
+      archiveObserver.current?.stop();
       const tracked = sessionList.observe(activeSessionId, start, "archive");
       const { observation } = tracked;
       let foreground = start.activeSessionId === activeSessionId && start.mainView === "chat";
@@ -1922,9 +694,16 @@ export function ChatView({
       let archived = false;
       const post = new ArchiveDeadline();
       let confirmation: ArchiveDeadline | undefined;
+      let retirePreparation: (() => void) | undefined;
+      let targetStillCurrent: (() => boolean) | undefined;
       let unsubscribe = () => {};
+      const revokeHandoff = () => {
+        handoffAllowed = false;
+        retirePreparation?.();
+      };
       const stop = () => {
         retired = true; foreground = false;
+        revokeHandoff();
         const accountEnded = !sessionList.accountCurrent(observation);
         if (accountEnded) { post.finish(); confirmation?.finish(); }
         // A bounded command still observes restoration and deletion while
@@ -1933,8 +712,9 @@ export function ChatView({
           unsubscribe();
           tracked.finish();
         }
-        archiveObservers.current.delete(stop);
+        if (archiveObserver.current === ownership) archiveObserver.current = null;
       };
+      const ownership = { stop, revokeHandoff };
       const current = () => mounted.current && foreground && viewing.current === intent &&
         sessionList.accountCurrent(observation) && textDraft.current() && textDraft.store.getState().version === version;
       const keepObserving = () => current() &&
@@ -1965,6 +745,69 @@ export function ChatView({
         feedback(partialMessage);
       };
       const ownsArchiveEffect = () => sessionList.archiveObservationCurrent(activeSessionId, observation);
+      const prepareSuccessor = (id: string) => new Promise<void>((done) => {
+        const target = () => {
+          if (!handoffAllowed || !current() || !ownsArchiveEffect()) return undefined;
+          const state = useSessionStore.getState();
+          if (state.sessionSuccessors[activeSessionId] !== id || !state.archivedSessions.some((row) => row.id === activeSessionId)) return undefined;
+          return state.sessions.find((row) => row.id === id && !row.archived);
+        };
+        if (!target()) { done(); return; }
+        const key = `successor:${++successorSerial.current}`;
+        const reading = observeSession(id);
+        const finish = (promoted: boolean) => {
+          if (retirePreparation !== retire) return;
+          retirePreparation = undefined;
+          targetStillCurrent = undefined;
+          if (!promoted) {
+            reading.cancel();
+            if (mounted.current) setPreparingSuccessor((pane) => pane?.key === key ? null : pane);
+          }
+          done();
+        };
+        const retire = () => finish(false);
+        retirePreparation = retire;
+        targetStillCurrent = () => Boolean(target());
+        const fail = (message: string) => {
+          if (retirePreparation !== retire) return;
+          feedback(message);
+          finish(false);
+        };
+        const promote = (prepared: boolean) => {
+          const successor = target();
+          if (!successor || !hasTranscriptBaseline(useSessionStore.getState(), id) || successor.transcript_integrity === "duplicate_seq") {
+            finish(false);
+            return;
+          }
+          preparation.committing = true;
+          finish(true);
+          flushSync(() => {
+            if (prepared) {
+              setForegroundKey(key);
+              setPreparingSuccessor(null);
+            }
+            showSession(id, successor.agent_id);
+          });
+        };
+        const preparation: TranscriptPreparation = {
+          current: () => retirePreparation === retire && Boolean(target()),
+          committing: false,
+          commit: () => promote(true),
+          fail,
+        };
+        void reading.done.then((detail) => {
+          const successor = target();
+          if (retirePreparation !== retire || !successor) { finish(false); return; }
+          const state = useSessionStore.getState();
+          if (!detail || !hasTranscriptBaseline(state, id) || successor.transcript_integrity === "duplicate_seq") {
+            fail("The successor's conversation could not be loaded. You can open it from the archived conversation.");
+            return;
+          }
+          if (hasEmptyTranscript(state, successor)) {
+            promote(false);
+          } else setPreparingSuccessor({ sessionId: id, account: intent.account, key, preparation });
+        }, (error: unknown) => fail(error instanceof Error ? error.message : "The successor's conversation could not be loaded."));
+      });
       const cancelOriginalFork = () => {
         const original = start.pendingForks[activeSessionId];
         if (ownsArchiveEffect() && original && useSessionStore.getState().pendingForks[activeSessionId] === original) cancelFork(activeSessionId);
@@ -2000,12 +843,11 @@ export function ChatView({
             return;
           }
           archived = true;
+          const message = "Archive confirmed. Viewing the archived conversation.";
+          feedback(hasPostResult ? message : `${message} Original command result is unknown.`);
           if (result.successor && !manual && current() && ownsArchiveEffect() &&
               useSessionStore.getState().sessionSuccessors[activeSessionId] === result.successor.id) {
-            await selectSession(result.successor.id, result.successor.agent_id);
-          } else {
-            const message = "Archive confirmed. Viewing the archived conversation.";
-            feedback(hasPostResult ? message : `${message} Original command result is unknown.`);
+            await prepareSuccessor(result.successor.id);
           }
         } finally {
           if (reading !== tracked) reading.finish();
@@ -2018,12 +860,13 @@ export function ChatView({
       const unsubscribeList = useSessionStore.subscribe((state) => {
         if (!sessionList.accountCurrent(observation)) { stop(); return; }
         if (state.activeSessionId !== activeSessionId || state.mainView !== "chat") foreground = false;
+        if (targetStillCurrent && !targetStillCurrent()) retirePreparation?.();
         syncActivity();
         if (!posting && !checking && !keepObserving()) stop();
       });
       const unsubscribeDraft = textDraft.store.subscribe((state) => { if (state.version !== version) stop(); });
       unsubscribe = () => { unsubscribeList(); unsubscribeDraft(); };
-      archiveObservers.current.add(stop);
+      archiveObserver.current = ownership;
       try {
         const reply = await postArchive(activeSessionId, start.token, true, post);
         if (!sessionList.accountCurrent(observation)) return;
@@ -2064,9 +907,14 @@ export function ChatView({
           return;
         }
         cancelOriginalFork();
-        if (current()) await selectSession(fresh.id, fresh.agent_id);
+        await prepareSuccessor(fresh.id);
       } finally {
         posting = false;
+        archiveWrites.current.delete(intent);
+        if (mounted.current && !archiveInFlight(intent) &&
+            !useSessionStore.getState().archivedSessions.some((row) => row.id === activeSessionId)) {
+          setArchiveLayout((layout) => layout?.sessionId === intent.sessionId && layout.account === intent.account ? null : layout);
+        }
         if (!keepObserving()) stop();
       }
       return;
@@ -2242,7 +1090,7 @@ export function ChatView({
         setInput("");
         return;
       }
-      submitTurn(buildRememberPrompt(note));
+      submitTurn(buildRememberPrompt(note), input);
       return;
     }
 
@@ -2326,79 +1174,7 @@ export function ChatView({
       return;
     }
 
-    submitTurn(trimmed);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    // An IME is mid-composition — Chinese/Japanese/Korean input, where the
-    // keystrokes build a candidate the user then commits. During that, Enter
-    // *confirms the candidate*; the arrows *move through candidates*; none of
-    // it is text navigation or a send. Safari on macOS is the case that bit a
-    // user: committing a Chinese word with Enter fired this handler and sent
-    // the half-typed message. The composing keydown is flagged either as
-    // `isComposing` (the standard) or `keyCode === 229` (older WebKit), so we
-    // bow out on both and let the IME own the keys until composition ends.
-    if (isImeComposing(e.nativeEvent as KeyboardEvent)) return;
-    // When the slash-command menu is open it captures navigation keys:
-    // arrows move the highlight, Enter/Tab complete, Esc dismisses (without
-    // bubbling to the global Esc-to-interrupt handler).
-    if (showSlashMenu) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSlashIndex((i) => (i + 1) % slashCommands.length);
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSlashIndex(
-          (i) => (i - 1 + slashCommands.length) % slashCommands.length
-        );
-        return;
-      }
-      if (e.key === "Enter" || e.key === "Tab") {
-        e.preventDefault();
-        const cmd = slashCommands[Math.min(slashIndex, slashCommands.length - 1)];
-        if (cmd) completeSlash(cmd);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        setSlashDismissed(true);
-        return;
-      }
-    }
-    // Shell-style history. Only when the slash menu is closed (it owns the
-    // arrows above), without modifiers, and only while the caret is on the
-    // first/last line — so a recalled multi-line message is still navigable
-    // with the same keys.
-    if (
-      (e.key === "ArrowUp" || e.key === "ArrowDown") &&
-      !e.shiftKey &&
-      !e.metaKey &&
-      !e.ctrlKey &&
-      !e.altKey
-    ) {
-      const ta = e.currentTarget as HTMLTextAreaElement;
-      const caret = ta.selectionStart ?? 0;
-      const collapsed = (ta.selectionEnd ?? caret) === caret;
-      const dir = e.key === "ArrowUp" ? "up" : "down";
-      if (collapsed && caretWantsHistory(ta.value, caret, dir)) {
-        if (composerHistory.recall(dir, ta.value)) {
-          e.preventDefault();
-          return;
-        }
-      }
-    }
-
-    if (e.key === "Enter" && !e.shiftKey && !isTouchDevice()) {
-      // Touch keyboards have no Shift+Enter worth reaching for, and a return
-      // key that sends makes a second paragraph impossible to type. On a
-      // phone Enter is a newline and the send button — which is right there
-      // under your thumb — sends (mobile.md §3).
-      e.preventDefault();
-      handleSend();
-    }
+    submitTurn(trimmed, input);
   };
 
   // Global Esc handler — interrupt the current turn whether or not the
@@ -2425,93 +1201,6 @@ export function ChatView({
     return () => window.removeEventListener("keydown", onEsc);
   }, [interrupt]);
 
-  const renderStatusBadge = (status: string | undefined) => {
-    const base = "status-badge font-mono text-[11px]";
-    if (status === "running") {
-      return (
-        <span className={`${base} status-running inline-flex items-center gap-1.5 text-primary`}>
-          <span className="inline-block size-1.5 rounded-full bg-primary animate-pulse" />
-          running
-        </span>
-      );
-    }
-    // Idle stays in the DOM as a test hook and a low-key cue.
-    return <span className={`${base} status-idle text-gray-700`}>idle</span>;
-  };
-
-  // Delegation child sessions get a small banner under the header that
-  // names the parent agent + session and offers a "Open parent" link.
-  // The parent_session_id field is set by DelegationManager when the
-  // child Session row is created (agent-collaboration.md §4.1).
-  const parentSession = useSessionStore((s) => activeSession?.parent_session_id
-    ? s.sessions.find(session => session.id === activeSession.parent_session_id)
-      ?? s.archivedSessions.find(session => session.id === activeSession.parent_session_id) : undefined);
-  const parentAgent = useSessionStore((s) => s.agents.find(agent => agent.id === parentSession?.agent_id));
-  const openParent = () => {
-    if (!parentSession) return;
-    void selectSession(parentSession.id, parentSession.agent_id);
-  };
-
-  const header = (
-    <PageHeader
-      className="chat-header"
-      onToggleSidebar={onToggleSidebar}
-      icon={
-        activeSession && activeAgent ? (
-          <span className="tile tile-plain shrink-0" aria-hidden>
-            {activeAgent.avatar || "🐙"}
-          </span>
-        ) : undefined
-      }
-      crumbs={
-        activeSession
-          ? [activeAgent?.name ?? "Agent", activeSession.name || "Session"]
-          : ["Octopus"]
-      }
-      meta={activeSession ? renderStatusBadge(activeSession.status) : undefined}
-      actions={
-        <>
-          {activeSession && (
-            <Button
-              className="btn-model-settings" variant="ghost" size="sm"
-              title="Model, reasoning and speed settings" aria-label="Model, reasoning and speed settings"
-              onClick={() => setModelPickerOpen(true)}
-            >
-              <IconCpu size={16} />
-              <span className="hidden sm:inline">Model{activeSession.reasoning_effort || activeAgent?.reasoning_effort ? ` · ${activeSession.reasoning_effort || activeAgent?.reasoning_effort}` : " & reasoning"}</span>
-              {activeSession.backend === "codex" && (activeSession.service_tier || activeAgent?.service_tier) === "fast" && <span className="font-mono text-xs">Fast</span>}
-            </Button>
-          )}
-          {activeSession && <CredentialPicker session={activeSession} />}
-          <span
-            className={`conn-status ${connected ? "on" : "off"} pill ${
-              connected ? "pill-success" : "pill-warn"
-            }`}
-            title={connected ? "Connected" : "Disconnected"}
-          >
-            <span className={`dot ${connected ? "" : "animate-pulse"}`} />
-            {/* The word is the first thing to go on a phone; the dot and its
-              * colour say the same thing in 6px (mobile.md §4). */}
-            <span className="conn-label">
-              {connected ? "Connected" : "Disconnected"}
-            </span>
-          </span>
-        </>
-      }
-    />
-  );
-
-  // Fork sessions get a banner mirroring the delegation one
-  // (session-rewind.md §6.4): "Forked from <parent> at message N".
-  // The parent may be deleted (dangling ref) → "(deleted session)".
-  const forkParentSession = useSessionStore((s) => activeSession?.forked_from_session_id
-    ? s.sessions.find(session => session.id === activeSession.forked_from_session_id)
-      ?? s.archivedSessions.find(session => session.id === activeSession.forked_from_session_id) : undefined);
-  const openForkParent = () => {
-    if (!forkParentSession) return;
-    void selectSession(forkParentSession.id, forkParentSession.agent_id);
-  };
-
   // The dialog confirmed the fork in SessionList; switch to it and load its
   // copied history. The composer adopts fork_prefilled_prompt (§6.1).
   const handleForked = async (fork: SessionInfo, observation: SessionObservation) => {
@@ -2519,82 +1208,13 @@ export function ChatView({
     await selectSession(fork.id, fork.agent_id);
   };
 
-  const forkBanner =
-    activeSession?.forked_from_session_id != null ? (
-      <div
-        className="chat-fork-banner flex items-center gap-2 px-4 py-1.5 shrink-0 border-b border-border bg-primary/5 text-xs text-muted-foreground"
-        data-testid="fork-banner"
-      >
-        <span className="text-primary" aria-hidden>
-          ⑂
-        </span>
-        <span>
-          Forked from{" "}
-          <span className="font-medium text-foreground">
-            {forkParentSession?.name ?? "(deleted session)"}
-          </span>
-          {activeSession.fork_is_full_copy ? (
-            <>{" "}— full copy of the working dir</>
-          ) : (
-            <>
-              {" "}at message{" "}
-              <strong>{(activeSession.fork_after_seq ?? -1) + 1}</strong>
-            </>
-          )}
-        </span>
-        {forkParentSession && (
-          <button
-            type="button"
-            onClick={openForkParent}
-            className="btn-open-fork-parent ml-auto text-primary hover:underline"
-          >
-            back to parent →
-          </button>
-        )}
-      </div>
-    ) : null;
-
-  const delegationBanner =
-    activeSession?.parent_session_id ? (
-      <div
-        className="chat-delegation-banner flex items-center gap-2 px-4 py-1.5 shrink-0 border-b border-border bg-primary/5 text-xs text-muted-foreground"
-        data-testid="delegation-banner"
-      >
-        <span className="text-primary">↑</span>
-        <span>
-          Delegated from{" "}
-          <span className="font-medium text-foreground">
-            {parentAgent?.name || "another agent"}
-          </span>
-          {parentSession && (
-            <>
-              {" "}(session{" "}
-              <code className="font-mono text-[10px]">
-                {parentSession.id.slice(0, 8)}
-              </code>
-              )
-            </>
-          )}
-        </span>
-        {parentSession && (
-          <button
-            type="button"
-            onClick={openParent}
-            className="btn-open-parent ml-auto text-primary hover:underline"
-          >
-            Open parent →
-          </button>
-        )}
-      </div>
-    ) : null;
-
-  const savedDrafts = <div className="shrink-0 max-h-72 overflow-auto px-6">
+  const renderSavedDrafts = (sessionId: string | null, archived: boolean) => <div className="shrink-0 max-h-72 overflow-auto px-6">
           {saveError && <p role="alert" className="mb-2 text-sm text-destructive">{saveError}</p>}
           {submissionError && submissionError.command === submissionCommand.current &&
-            submissionError.command.account === accountGeneration && submissionError.command.sessionId === activeSessionId &&
+            submissionError.command.account === accountGeneration && submissionError.command.sessionId === sessionId &&
             <p role="alert" className="mb-2 text-sm text-destructive">{submissionError.message}</p>}
           {archiveFeedback && (archiveFeedback.message || archiveFeedback.activity) && viewing.current === archiveFeedback.intent &&
-            archiveFeedback.intent.account === accountGeneration && archiveFeedback.intent.sessionId === activeSessionId &&
+            archiveFeedback.intent.account === accountGeneration && archiveFeedback.intent.sessionId === sessionId &&
             textDraft.store.getState().version === archiveFeedback.version && sessionList.accountCurrent(archiveFeedback.observation) &&
             <div role="alert" className="mb-2 text-sm text-destructive">
               {archiveFeedback.message && <p>{archiveFeedback.message}</p>}
@@ -2602,18 +1222,18 @@ export function ChatView({
               {archiveFeedback.confirm && <Button size="sm" variant="outline" disabled={archiveFeedback.checking}
                 onClick={() => void archiveFeedback.confirm?.()}>Confirm original archive</Button>}
             </div>}
-          {activeSessionId && <QuestionDraftRecovery sessionId={activeSessionId}
-            composerOccupied={input.length > 0 || pendingAttachments.length > 0 || isArchived}
+          {sessionId && <QuestionDraftRecovery sessionId={sessionId}
+            composerOccupied={inputOccupied || pendingAttachments.length > 0 || archived}
             onAcceptedInput={retainSubmittedInput}
             onContinue={(key, content, attachments) => {
-              setInput(content); setRestoredQuestion({ key, sessionId: activeSessionId });
+              setInput(content); setRestoredQuestion({ key, sessionId: sessionId });
               restoreAttachments(attachments);
               setRestoredInput(null); resetHistory(); textareaRef.current?.focus();
             }} />}
           {rejectedDrafts.map((draft) => (
             <div key={draft.id} role="alert" className="mb-2 rounded-md border border-destructive/40 p-3 text-sm">
               <p>{draft.reason}</p>
-              {(!activeSessionId || isArchived) && <p>Open an active conversation to restore this draft.</p>}
+              {(!sessionId || archived) && <p>Open an active conversation to restore this draft.</p>}
               <details><summary>Saved draft</summary>
                 <pre className="max-h-40 overflow-auto whitespace-pre-wrap">{draft.text}</pre>
                 {draft.attachments.map((attachment) => <p key={attachment.uid}>
@@ -2628,12 +1248,12 @@ export function ChatView({
                 disabled={draft.confirming}
                 onClick={() => void confirmSubmission(draft)}>{draft.confirming ? "Confirming…" : "Retry admission confirmation"}</Button>}
               <Button size="sm" variant="outline" className="mt-2"
-                disabled={draft.readOnly || Boolean(draft.uncertain) || !activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0}
+                disabled={draft.readOnly || Boolean(draft.uncertain) || !sessionId || archived || inputOccupied || pendingAttachments.length > 0}
                 onClick={() => {
-                  if (draft.readOnly || draft.uncertain || !activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0) return;
+                  if (draft.readOnly || draft.uncertain || !sessionId || archived || textDraft.store.getState().text || pendingAttachments.length > 0) return;
                   setInput(draft.text);
-                  setRestoredInput(draft.recoveryOfClientId && draft.sessionId === activeSessionId
-                    ? { sessionId: activeSessionId, clientId: draft.recoveryOfClientId } : null);
+                  setRestoredInput(draft.recoveryOfClientId && draft.sessionId === sessionId
+                    ? { sessionId: sessionId, clientId: draft.recoveryOfClientId } : null);
                   restoreAttachments(draft.attachments);
                   setRequiredAttachmentCount(0);
                   resetHistory();
@@ -2642,7 +1262,7 @@ export function ChatView({
                 }}>Restore draft</Button>
               <Button size="sm" variant="ghost" className="ml-2 mt-2"
                 onClick={() => setRejectedDrafts((drafts) => drafts.filter((item) => item.id !== draft.id))}>Discard saved draft</Button>
-              {(input.length > 0 || pendingAttachments.length > 0) && <p className="mt-1 text-xs text-muted-foreground">Clear the current draft to restore this one.</p>}
+              {(inputOccupied || pendingAttachments.length > 0) && <p className="mt-1 text-xs text-muted-foreground">Clear the current draft to restore this one.</p>}
             </div>
           ))}
   </div>;
@@ -2650,9 +1270,8 @@ export function ChatView({
   if (!activeSessionId) {
     return (
       <div className="chat-view flex-1 flex flex-col min-h-0">
-        {header}
-        {delegationBanner}
-        {savedDrafts}
+        <ChatSessionHeading connected={connected} onToggleSidebar={onToggleSidebar} />
+        {renderSavedDrafts(null, false)}
         <div className="chat-empty flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center text-gray-700">
           {/* The one place the mark gets room to be itself — nothing else is
             * competing for attention on an empty canvas. */}
@@ -2679,7 +1298,135 @@ export function ChatView({
     );
   }
 
-  const showReadingNotice = readingBoundary || presentation.owner.timedOut && !following.current;
+  const renderPane = (sessionId: string, session: SessionInfo | undefined, key: string, preparation?: TranscriptPreparation) => {
+    const archived = !!session?.archived;
+    const damaged = session?.transcript_integrity === "duplicate_seq";
+    const editing = !preparation && !archived && !damaged;
+    const occupied = !preparation && (inputOccupied || pendingAttachments.length > 0);
+    const keptLayout = !preparation && archiveLayout?.account === accountGeneration && archiveLayout.sessionId === sessionId
+      ? archiveLayout : null;
+    // Let the footer yield on resize without enlarging an already short reading viewport on archive.
+    const readingFloor = keptLayout?.viewportHeight ? `min(3rem, ${keptLayout.viewportHeight}px)` : "3rem";
+    return (
+      <div key={`${accountGeneration}:${key}`} data-chat-session={sessionId} inert={preparation ? true : undefined} aria-hidden={preparation ? true : undefined}
+        className={`flex flex-col min-h-0 ${preparation ? "absolute inset-0 invisible opacity-0 pointer-events-none" : "relative flex-1"}`}>
+        <ChatSessionHeading session={session} connected={connected} onToggleSidebar={onToggleSidebar}
+          onOpenModel={preparation ? undefined : () => setModelPickerOpen(true)} />
+        <ChatTranscript key={`transcript:${sessionId}`} sessionId={sessionId} session={session} preparation={preparation}
+          minimumViewportHeight={archived ? readingFloor : undefined}
+          answerQuestion={answerQuestion} snoozeQuestion={snoozeQuestion} onFork={openMessageFork}
+          onRestoreInput={archived || damaged ? undefined : restoreRejectedInput} restoreInputDisabled={occupied} />
+
+        <div ref={preparation ? undefined : conversationControls}
+          className={archived ? "flex flex-col overflow-y-auto" : "flex flex-col"}
+          style={keptLayout ? { flexBasis: keptLayout.controlsHeight } : undefined}>
+          <div className="research-card-wrap shrink-0 px-4 empty:hidden">
+            <WikiJobCards key={sessionId} sessionId={sessionId} />
+            <ResearchCard sessionId={sessionId} />
+          </div>
+          <DispatchQueue key={`dispatch:${sessionId}`} sessionId={sessionId} archived={archived} readOnly={archived || damaged} onCancelCompact={cancelCompact} />
+          <CommandNotices sessionId={sessionId} />
+          <SessionAuxiliaryNotice sessionId={sessionId} />
+          <RecoverableInputs key={`recovery:${sessionId}`} sessionId={sessionId} connected={connected}
+            disabled={archived || damaged || occupied} onRestore={restoreSavedInput} />
+          {renderSavedDrafts(sessionId, archived)}
+          {archived || damaged ? (
+            <div className="chat-archived-banner px-4 py-3 border-t border-border bg-muted/40 text-sm text-muted-foreground flex items-center justify-between gap-3 grow shrink-0">
+              {damaged ? <span>History review is required before continuing this conversation.</span> : <span>
+                This session is <strong className="text-foreground">archived</strong>{" "}
+                — viewing read-only history. Unarchive from the sidebar to continue the conversation.
+              </span>}
+              {archived && <ArchivedSuccessor key={`successor:${sessionId}`} sessionId={sessionId} />}
+              <SessionContextMeter key={`context:${sessionId}`} sessionId={sessionId} archived={archived} />
+            </div>
+          ) : (
+            <ChatComposer sessionId={sessionId} editor={editing ? { draft: textDraft, textarea: textareaRef,
+              history: composerHistory, edit: setInput, send: handleSend, stop: () => void interrupt(sessionId),
+              attach: () => fileInputRef.current?.click(), paste: handlePaste,
+              canAttach: pendingAttachments.length < MAX_ATTACHMENTS_PER_MESSAGE,
+              uploadPending: hasUploadInFlight, hasAttachments: readyAttachmentIds.length > 0 } : undefined}
+              contextMeter={<SessionContextMeter key={sessionId} sessionId={sessionId} />}
+              running={session?.status === "running"} canSteer={preparation ? !!session?.can_steer : canSteer}>
+            {editing && <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                hidden
+                data-testid="attachment-file-input"
+                onChange={(e) => {
+                  const files = Array.from(e.target.files ?? []);
+                  addFiles(files);
+                  // Reset so picking the same file twice in a row still fires.
+                  e.target.value = "";
+                }}
+              />
+
+              {rejectedFiles.length > 0 && <div role="alert" className="px-3 pt-2 text-sm text-destructive">
+                <p>These files were not attached:</p>
+                <ul>{rejectedFiles.map((file, index) => <li key={index}>{file.name}: {file.reason}</li>)}</ul>
+                <button type="button" className="underline" onClick={dismissRejectedFiles}>Continue with attached files</button>
+              </div>}
+              {pendingAttachments.length < requiredAttachmentCount && <div role="alert" className="px-3 pt-2 text-sm text-destructive">
+                Re-attach {requiredAttachmentCount} {requiredAttachmentCount === 1 ? "file" : "files"} to send the complete message.
+                <button type="button" className="ml-2 underline" onClick={() => {
+                  setInput(""); clearAttachments(); setRequiredAttachmentCount(0); setRestoredInput(null);
+                }}>Discard draft</button>
+              </div>}
+              {pendingAttachments.length > 0 && (
+                <div
+                  className="chat-attachment-chips flex flex-wrap gap-2 px-3 pt-2"
+                  aria-label="Attachments"
+                >
+                  {pendingAttachments.map((p) => (
+                    <div
+                      key={p.uid}
+                      className={`attachment-pending inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs ${
+                        p.status === "error"
+                          ? "border-destructive/60 bg-destructive/5 text-destructive"
+                          : "border-border bg-muted/40 text-foreground"
+                      }`}
+                      title={
+                        p.status === "error"
+                          ? p.error || "upload failed"
+                          : p.file.name
+                      }
+                    >
+                      <IconFile
+                        size={14}
+                        className="text-muted-foreground shrink-0"
+                      />
+                      <span className="font-medium truncate max-w-[10rem]">
+                        {p.file.name}
+                      </span>
+                      {p.status === "uploading" && (
+                        <span className="text-muted-foreground">uploading…</span>
+                      )}
+                      {p.status === "error" && (
+                        <button type="button" className="text-destructive underline"
+                          aria-label={`Retry ${p.file.name}`} onClick={() => retryAttachment(p.uid)}>failed · retry</button>
+                      )}
+                      <button
+                        type="button"
+                        className="attachment-remove text-muted-foreground hover:text-foreground"
+                        aria-label={`Remove ${p.file.name}`}
+                        onClick={() => removeAttachment(p.uid)}
+                      >
+                        <IconX size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+            </>}
+            </ChatComposer>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div
       className="chat-view flex-1 flex flex-col min-h-0 relative"
@@ -2688,25 +1435,6 @@ export function ChatView({
       onDragOver={isArchived || transcriptDamaged ? undefined : handleDragOver}
       onDrop={isArchived || transcriptDamaged ? undefined : handleDrop}
     >
-      {header}
-      {forkBanner}
-      {delegationBanner}
-      <div className={showReadingNotice ? "shrink-0 px-4 py-2 text-sm text-muted-foreground" : "sr-only"}>
-        <p role="status" aria-atomic="true" data-chat-timeout={presentation.owner.timeoutHint || undefined}>
-          {presentation.owner.timeoutHint && "Automatic positioning did not finish. Loaded content is available."}
-        </p>
-        {presentation.owner.timeoutHint && <>
-          {presentation.owner.recovery && <p>New output will return to the latest content unless you choose to read here.</p>}
-          <Button size="sm" variant="ghost" aria-label="Dismiss positioning notice" onClick={() => {
-            presentation.owner.timeoutHint = false;
-            publishPresentation(presentation.owner, presentation.owner.phase);
-          }}>Dismiss</Button>
-        </>}
-        {readingBoundary && <p role="status">The previous reading position is unavailable. Showing loaded content.</p>}
-        {showReadingNotice && <Button size="sm" variant="ghost" onClick={() => resumeVisibleFollowing()}>Jump to latest</Button>}
-      </div>
-      {transcriptDamaged && activeSessionId && <TranscriptIntegrityNotice key={activeSessionId} sessionId={activeSessionId} />}
-
       {activeSession && (
         <ModelPickerDialog
           session={activeSession}
@@ -2752,413 +1480,10 @@ export function ChatView({
         </div>
       )}
 
-      <div className="relative flex flex-1 min-h-0"
-        onClickCapture={pauseForReading}
-        onWheelCapture={(event) => {
-          const viewport = scroller.current;
-          if (!viewport || !event.deltaY || event.ctrlKey) return;
-          // Composited wheel scrolling may move the DOM before React receives
-          // its passive capture event. Keep the pre-scroll bound as evidence.
-          const up = event.deltaY < 0;
-          const from = up ? Math.max(viewport.scrollTop, lastScrollTop.current) : Math.min(viewport.scrollTop, lastScrollTop.current);
-          if (!canScrollChat(viewport, event.target, up, from)) return;
-          navigate(up, from);
-        }}
-        onKeyDown={(event) => {
-          if (event.defaultPrevented || event.altKey || event.metaKey || event.ctrlKey && !["Home", "End"].includes(event.key)) return;
-          const up = ["ArrowUp", "PageUp", "Home"].includes(event.key) || event.key === " " && event.shiftKey;
-          const down = ["ArrowDown", "PageDown", "End"].includes(event.key) || event.key === " " && !event.shiftKey;
-          if ((!up && !down) || !canScrollChat(scroller.current, event.target, up)) return;
-          const target = event.target instanceof HTMLElement ? event.target : null;
-          if (target?.isContentEditable || target?.closest("input, textarea, select, [role=textbox]")) return;
-          if (event.key === " " && target?.closest("button, a[href], summary, [role=button]")) return;
-          navigate(up, scroller.current!.scrollTop);
-        }}
-        onPointerDownCapture={(event) => {
-          const viewport = scroller.current;
-          const touchOrPen = event.pointerType === "touch" || event.pointerType === "pen";
-          let scrollbar = false;
-          if (viewport && !touchOrPen && event.button === 0 && event.target === viewport &&
-            (canScrollChat(viewport, viewport, true) || canScrollChat(viewport, viewport, false))) {
-            const left = viewport.getBoundingClientRect().left + viewport.clientLeft;
-            scrollbar = event.clientX < left || event.clientX >= left + viewport.clientWidth;
-          }
-          const contact = navigationContact.current;
-          if (scrollbar && (contact || event.isPrimary)) {
-            const correction = position.current;
-            if (correction?.kind === "history" && currentPosition(correction)) {
-              // Snapshot the position before native movement. Never rebase
-              // a correction that was already guarded by an earlier contact.
-              correction.expectedTop ??= correction.viewport.scrollTop;
-            }
-            const view = currentView.current;
-            const handoff = readingHandoff.current;
-            if (handoff && viewport && view && currentViewportView(view) && pendingReadingHandoff(handoff, view, viewport)) {
-              handoff.scrollbarPosition ??= { viewport, top: viewport.scrollTop };
-            }
-          }
-          if (contact) {
-            if (scrollbar && contact.source !== "scrollbar") {
-              contact.source = "scrollbar";
-              contact.id = event.pointerId;
-              contact.y = event.clientY;
-            }
-            return;
-          }
-          downwardNavigation.current = null;
-          if (event.isPrimary && (touchOrPen || scrollbar)) {
-            startNavigationContact(scrollbar ? "scrollbar" : "pointer", event.pointerId, event.clientY, event.pointerType);
-          }
-        }}
-        onPointerMoveCapture={(event) => {
-          const pointer = navigationContact.current;
-          if (!pointer || pointer.source === "touch" || pointer.id !== event.pointerId) return;
-          if (pointer.source === "scrollbar") {
-            if (event.clientY !== pointer.y) pauseFollowing();
-            return;
-          }
-          if (event.clientY === pointer.y) return;
-          const up = event.clientY > pointer.y;
-          pointer.y = event.clientY;
-          if (canScrollChat(scroller.current, event.target, up)) navigate(up, pointer.top, pointer);
-        }}
-        onTouchStartCapture={(event) => {
-          downwardNavigation.current = null;
-          const viewport = scroller.current;
-          if (!viewport || !event.touches.length) return;
-          const touch = event.touches[0];
-          if (!navigationContact.current) startNavigationContact("touch", touch.identifier, touch.clientY);
-          const contact = navigationContact.current;
-          if (!contact) return;
-          if (!contact.touch) {
-            // TouchEvent owns only touch pointers after takeover. A held
-            // scrollbar or pen still owns its own release.
-            if (contact.source === "pointer" && contact.pointers.get(contact.id) === "touch") {
-              contact.source = "touch";
-            } else if (contact.source !== "touch") contact.invalid = true;
-            contact.touch = { id: touch.identifier, y: touch.clientY, multiple: false };
-            for (const [id, type] of contact.pointers) {
-              if (type === "touch") contact.pointers.delete(id);
-            }
-          }
-          if (event.touches.length > 1) {
-            contact.touch.multiple = true;
-            contact.invalid = true;
-          }
-        }}
-        onTouchMoveCapture={(event) => {
-          const contact = navigationContact.current;
-          if (!contact?.touch) return;
-          if (event.touches.length !== 1) {
-            contact.touch.multiple = true;
-            invalidateNavigationContact(contact);
-            return;
-          }
-          const touch = event.touches[0];
-          const gesture = contact.touch;
-          if (gesture.multiple || touch.identifier !== gesture.id || touch.clientY === gesture.y) return;
-          const up = touch.clientY > gesture.y;
-          gesture.y = touch.clientY;
-          // A held scrollbar retains control of downward movement during
-          // mixed input. A touch-only gesture can still retire old geometry.
-          if (!up && contact.source !== "touch") return;
-          const viewport = scroller.current;
-          if (!viewport) return;
-          const from = up ? Math.max(viewport.scrollTop, lastScrollTop.current) : Math.min(viewport.scrollTop, lastScrollTop.current);
-          if (canScrollChat(viewport, event.target, up, from)) navigate(up, contact.top, contact);
-        }}
-      >
-      <Virtuoso
-        style={{ visibility: presentation.phase === "preparing" || presentation.phase === "incomplete" ? "hidden" : undefined }}
-        inert={presentation.phase === "preparing" || presentation.phase === "incomplete" ? true : undefined}
-        aria-hidden={presentation.phase === "preparing" || presentation.phase === "incomplete" ? true : undefined}
-        itemSize={measureItem}
-        ref={virtuoso}
-        scrollerRef={setScroller}
-        key={`transcript:${activeSessionId}`}
-        className="chat-messages flex-1 min-h-0"
-        data={chatMessages}
-        itemContent={renderMessage}
-        computeItemKey={(_index, message) => chatMessageKey(message)}
-        itemsRendered={positionMeasuredOutput}
-        onScrollEnd={() => { if (!navigationContact.current) downwardNavigation.current = null; }}
-        onScroll={(event) => {
-          const viewport = event.currentTarget;
-          const view = currentView.current;
-          if (viewport !== scroller.current || !viewport.clientHeight || !view || !currentViewportView(view)) return;
-          const top = viewport.scrollTop;
-          const bottom = viewport.scrollHeight - viewport.clientHeight - top <= 4;
-          const correction = position.current;
-          if (!navigationContact.current && correction && currentPosition(correction) &&
-            (correction.kind === "history" && correction.expectedTop !== undefined && correction.expectedTop !== top ||
-              correction.kind === "restore" && correction.handoff === readingHandoff.current &&
-              movedFromScrollbarPosition(correction.handoff, viewport))) {
-            // Give the same native scroll report to paging after yielding
-            // the old correction, even if no later scroll event arrives.
-            if (correction.kind === "restore") readingHandoff.current = null;
-            retirePosition(correction);
-          }
-          if (navigationContact.current && navigationContact.current.source !== "scrollbar") navigationContact.current.top = Math.min(navigationContact.current.top, top);
-          if (!position.current && !navigationContact.current) {
-            const navigation = downwardNavigation.current;
-            if (navigation && (navigation.viewport !== viewport || performance.now() > navigation.until ||
-              !currentViewportView(navigation.view) || top < lastScrollTop.current)) {
-              downwardNavigation.current = null;
-            } else if (navigation && top > lastScrollTop.current) {
-              navigation.until = performance.now() + 500;
-              if (bottom && top > navigation.top) {
-                resumeVisibleFollowing();
-              }
-            }
-          }
-          const handoff = readingHandoff.current;
-          const restoreReport = restoredReadingAt(handoff, view, viewport);
-          if (!position.current && !restoreReport && !pendingReadingHandoff(handoff, view, viewport)) {
-            reportPagingPosition(viewport);
-            if (!following.current) {
-              const anchor = captureReadingAnchor(viewport);
-              readingHandoff.current = { view, anchor };
-            }
-          }
-          lastScrollTop.current = top;
-        }}
-        totalListHeightChanged={measuredOutput}
-        followOutput={false}
-        increaseViewportBy={{ top: 400, bottom: 400 }}
-        components={{ Header: olderHeader, Footer: ChatFooter }}
-        context={{ footer, onLayout: measuredOutput }}
-      />
-
-      {(presentation.phase === "preparing" || presentation.phase === "incomplete") && <div data-chat-preparation
-        tabIndex={0} aria-label="Conversation preparation"
-        className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-4 text-sm text-muted-foreground">
-        <p role="status">{presentation.phase === "incomplete" ? "Conversation unavailable" : transcriptBaseline ? "Positioning latest output…" : "Loading conversation…"}</p>
-        {presentation.owner.error && <p>{presentation.owner.error}</p>}
-        <Button size="sm" variant="outline" onClick={() => pauseFollowing()}>Browse loaded content</Button>
-        {presentation.phase === "incomplete" && <Button size="sm" variant="outline" onClick={retryHistoryRead}>Retry loading</Button>}
-      </div>}
-      </div>
-
-      <div aria-label="Questions outside the history window" className="max-h-[40vh] shrink-0 overflow-y-auto empty:hidden"
-        onClickCapture={pauseForReading}>
-      {pendingQuestions.filter((question) => !chatMessages.some((message) =>
-        matchesPendingQuestion(message, question))).map((question) =>
-        <div key={`${activeSessionId}:${question.question_id}:${question.attempt_id}`} className="px-4 py-2">
-          <QuestionPrompt sessionId={activeSessionId!} question={question} agentLabel={agentLabel}
-            onSnooze={snoozeQuestion ? (id, target) => snoozeQuestion(activeSessionId!, id, target) : undefined}
-            onSubmit={(id, answers, target) => answerQuestion(activeSessionId!, id, answers, target)} />
-        </div>)}
-      </div>
-
-      {activeSessionId && (
-        <div className="research-card-wrap shrink-0 px-4 empty:hidden">
-          <WikiJobCards key={activeSessionId} sessionId={activeSessionId} />
-          <ResearchCard sessionId={activeSessionId} />
-        </div>
-      )}
-
-      {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} archived={isArchived}
-        readOnly={isArchived || transcriptDamaged} onCancelCompact={cancelCompact} />}
-      {activeSessionId && <CommandNotices sessionId={activeSessionId} />}
-      {activeSessionId && <SessionAuxiliaryNotice sessionId={activeSessionId} />}
-
-      {activeSessionId && <RecoverableInputs key={`recovery-${activeSessionId}`} sessionId={activeSessionId} connected={connected}
-        disabled={isArchived || transcriptDamaged || input.length > 0 || pendingAttachments.length > 0}
-        onRestore={restoreSavedInput} />}
-
-      {savedDrafts}
-      {isArchived || transcriptDamaged ? (
-        <div className="chat-archived-banner px-4 py-3 border-t border-border bg-muted/40 text-sm text-muted-foreground flex items-center justify-between gap-3 shrink-0">
-          {transcriptDamaged ? <span>History review is required before continuing this conversation.</span> : <span>
-            This session is <strong className="text-foreground">archived</strong>{" "}
-            — viewing read-only history. Unarchive from the sidebar to
-            continue the conversation.
-          </span>}
-          {isArchived && activeSessionId && <ArchivedSuccessor key={`${accountGeneration}:${activeSessionId}`} sessionId={activeSessionId} />}
-          <ContextMeter key={activeSessionId} state={contextState} historical={isArchived} pending={contextSnapshot?.pending} />
-        </div>
-      ) : (
-        <div className="chat-input-bar shrink-0 bg-background px-6 pb-5 pt-2">
-
-          {dispatchPaused && <p className="dispatch-pause-hint mb-2 text-xs text-muted-foreground">
-            Your next message takes priority. Pending results stay paused until you resume processing.
-          </p>}
-          {/* `relative` anchors the slash-command menu, which floats just
-              above the composer (bottom-full) like the Claude Code CLI. */}
-          <div className="relative">
-          {showSlashMenu && (
-            <SlashCommandMenu
-              commands={slashCommands}
-              activeIndex={slashIndex}
-              onSelect={completeSlash}
-              onHoverIndex={setSlashIndex}
-              className="absolute inset-x-0 bottom-full mb-2"
-            />
-          )}
-          {/* Rounded card containing chips + textarea + bottom action row.
-              Layout copied from VM0 (zero-composer) but tuned shorter
-              for Octopus' chat panel: the textarea auto-grows with
-              content (field-sizing-content) so the empty composer is a
-              single comfortable line, not a hero-sized block. */}
-          <div className="zero-composer overflow-hidden rounded-[14px] border border-gray-400 bg-card transition-colors focus-within:border-primary focus-within:ring-[3px] focus-within:ring-primary/10">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              hidden
-              data-testid="attachment-file-input"
-              onChange={(e) => {
-                const files = Array.from(e.target.files ?? []);
-                addFiles(files);
-                // Reset so picking the same file twice in a row still fires.
-                e.target.value = "";
-              }}
-            />
-
-            {rejectedFiles.length > 0 && <div role="alert" className="px-3 pt-2 text-sm text-destructive">
-              <p>These files were not attached:</p>
-              <ul>{rejectedFiles.map((file, index) => <li key={index}>{file.name}: {file.reason}</li>)}</ul>
-              <button type="button" className="underline" onClick={dismissRejectedFiles}>Continue with attached files</button>
-            </div>}
-            {pendingAttachments.length < requiredAttachmentCount && <div role="alert" className="px-3 pt-2 text-sm text-destructive">
-              Re-attach {requiredAttachmentCount} {requiredAttachmentCount === 1 ? "file" : "files"} to send the complete message.
-              <button type="button" className="ml-2 underline" onClick={() => {
-                setInput(""); clearAttachments(); setRequiredAttachmentCount(0); setRestoredInput(null);
-              }}>Discard draft</button>
-            </div>}
-            {pendingAttachments.length > 0 && (
-              <div
-                className="chat-attachment-chips flex flex-wrap gap-2 px-3 pt-2"
-                aria-label="Attachments"
-              >
-                {pendingAttachments.map((p) => (
-                  <div
-                    key={p.uid}
-                    className={`attachment-pending inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs ${
-                      p.status === "error"
-                        ? "border-destructive/60 bg-destructive/5 text-destructive"
-                        : "border-border bg-muted/40 text-foreground"
-                    }`}
-                    title={
-                      p.status === "error"
-                        ? p.error || "upload failed"
-                        : p.file.name
-                    }
-                  >
-                    <IconFile
-                      size={14}
-                      className="text-muted-foreground shrink-0"
-                    />
-                    <span className="font-medium truncate max-w-[10rem]">
-                      {p.file.name}
-                    </span>
-                    {p.status === "uploading" && (
-                      <span className="text-muted-foreground">uploading…</span>
-                    )}
-                    {p.status === "error" && (
-                      <button type="button" className="text-destructive underline"
-                        aria-label={`Retry ${p.file.name}`} onClick={() => retryAttachment(p.uid)}>failed · retry</button>
-                    )}
-                    <button
-                      type="button"
-                      className="attachment-remove text-muted-foreground hover:text-foreground"
-                      aria-label={`Remove ${p.file.name}`}
-                      onClick={() => removeAttachment(p.uid)}
-                    >
-                      <IconX size={12} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {composerHistory.waiting && <p role="status" className="px-3 text-xs text-muted-foreground">Loading full history message…</p>}
-            {composerHistory.error && <p role="alert" className="px-3 text-xs text-destructive">{composerHistory.error}</p>}
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={
-                isRunning
-                  ? "Send to queue, or press Esc to interrupt…"
-                  : "Send a message…"
-              }
-              rows={1}
-              enterKeyHint={isTouchDevice() ? "enter" : "send"}
-              // field-sizing-content makes the textarea grow with its
-              // content (Tailwind v4 / native CSS), so the empty state is
-              // one comfortable line and we don't need JS auto-grow.
-              // max-h caps growth before it eats the chat.
-              className="w-full resize-none field-sizing-content bg-transparent px-3 pt-2 pb-0 text-sm text-foreground placeholder:text-muted-foreground/50 border-0 outline-none focus:outline-none focus:ring-0 max-h-48"
-            />
-
-            <div className="composer-actions flex items-center justify-between gap-2 px-1.5 pb-1.5">
-              <div className="flex items-center gap-1 text-muted-foreground">
-                <button
-                  type="button"
-                  className="btn btn-attach inline-flex items-center justify-center size-8 rounded-lg transition-colors duration-200 hover:bg-accent hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
-                  aria-label="Attach file"
-                  title="Attach file"
-                  disabled={
-                    pendingAttachments.length >= MAX_ATTACHMENTS_PER_MESSAGE
-                  }
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <IconPaperclip size={16} stroke={1.5} />
-                </button>
-                <ContextMeter key={activeSessionId} state={contextState} pending={contextSnapshot?.pending} />
-              </div>
-              <div className="flex items-center gap-1">
-                {isRunning ? (
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    size="sm"
-                    className="btn btn-stop rounded-lg h-8 w-8 p-0 shrink-0"
-                    onClick={() =>
-                      activeSessionId && interrupt(activeSessionId)
-                    }
-                    aria-label="Stop"
-                    title="Stop (Esc)"
-                  >
-                    <IconPlayerStop size={14} />
-                  </Button>
-                ) : null}
-                <Button
-                  type="button"
-                  size="sm"
-                  className="btn btn-send size-9 shrink-0 rounded-full p-0"
-                  onClick={handleSend}
-                  disabled={
-                    composerHistory.waiting ||
-                    (hasUploadInFlight && !/^\/compact(?:\s|$)/.test(input.trim())) ||
-                    (!input.trim() && readyAttachmentIds.length === 0)
-                  }
-                  aria-label={
-                    isRunning
-                      ? canSteer
-                        ? "Send to running turn"
-                        : "Queue message"
-                      : "Send message"
-                  }
-                  title={
-                    isRunning
-                      ? canSteer
-                        ? "Send into the running turn — the agent gets it at its next step"
-                        : "Queue (current turn is running)"
-                      : "Send"
-                  }
-                >
-                  <IconArrowUp size={16} />
-                </Button>
-              </div>
-            </div>
-          </div>
-          </div>
-        </div>
-      )}
+      {[
+        renderPane(activeSessionId, activeSession, foregroundKey),
+        staged && stagedSession ? renderPane(staged.sessionId, stagedSession, staged.key, staged.preparation) : null,
+      ]}
     </div>
   );
 }

@@ -654,6 +654,16 @@ export function hasTranscriptBaseline(state: Pick<SessionStore, "lastAppliedSeq"
     state.hasMoreMessages[sessionId] !== undefined;
 }
 
+export function hasEmptyTranscript(
+  state: Pick<SessionStore, "lastAppliedSeq" | "oldestSeq" | "hasMoreMessages" | "messages" | "subagents">,
+  session: SessionInfo,
+): boolean {
+  const id = session.id;
+  return hasTranscriptBaseline(state, id) && !state.hasMoreMessages[id] && session.status !== "running" &&
+    session.transcript_integrity !== "duplicate_seq" && !state.messages[id]?.length &&
+    !Object.keys(state.subagents[id] ?? {}).length;
+}
+
 function continuousTranscript(previous: Message[], messages: MessageInput[]): boolean {
   const persisted = previous.filter((message) => typeof message.seq === "number");
   const first = messages.find((message) => typeof message.seq === "number")?.seq;

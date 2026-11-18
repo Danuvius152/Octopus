@@ -39,9 +39,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it.each(["before commit", "after successor commit"])("retires a pending position on A→B→A %s", (delivery) => {
-  // A confirmed empty history with a tall Footer exercises position ownership
-  // without substituting fixed item sizes for the real tail-measurement proof.
-  useSessionStore.setState({ messages: {} });
+  // Empty saved history with live output still needs initial positioning.
+  useSessionStore.setState({
+    sessions: [{ ...session, status: "running" }],
+    messages: {},
+    streamingText: { [session.id]: { content: "A live reply" } },
+  });
   applyTranscript(session.id, { messages: [], oldest_loaded_seq: null, next_message_seq: 0 });
   const view = render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
     <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()}
