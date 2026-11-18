@@ -386,6 +386,26 @@ it("keeps an upward thumb drag in reading when native movement emits no pointerm
   expect(motion.pending()).toBe(0);
 });
 
+it.each(["at release", "after release", "after deadline"] as const)(
+  "uses the release deadline for the first upward thumb displacement %s", (timing) => {
+    const motion = motionViewport();
+    const jump = () => screen.queryByRole("button", { name: "Jump to latest" });
+    thumbEvent(motion.viewport, "pointerdown", 500);
+    motion.tick(650);
+    expect(jump()).toBeNull();
+    if (timing === "at release") motion.viewport.scrollTop = 400;
+    thumbEvent(motion.viewport, "pointerup", 380);
+    if (timing !== "at release") {
+      expect(jump()).toBeNull();
+      motion.tick(timing === "after deadline" ? 550 : 16);
+      motion.viewport.scrollTop = 400;
+      fireEvent.scroll(motion.viewport);
+    }
+    if (timing === "after deadline") expect(jump()).toBeNull();
+    else expect(jump()).toBeVisible();
+  },
+);
+
 it("retains the original following intent through a window replacement during an unmoved thumb contact", () => {
   const motion = motionViewport();
   thumbEvent(motion.viewport, "pointerdown", 500);

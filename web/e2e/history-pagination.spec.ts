@@ -4,11 +4,25 @@ import { enterAccountCredentials } from "./current-account";
 import type { Message } from "../src/stores/sessionStore";
 import type { RuntimeMetadata } from "../src/api";
 
-for (const scenario of ["mixed", "child-only", "interrupted", "deep-mixed", "deep-child-only", "live-footer"] as const) {
+function holdAnimationFrames() {
+  const request = window.requestAnimationFrame, cancel = window.cancelAnimationFrame;
+  let serial = 0;
+  const pending = new Map<number, FrameRequestCallback>();
+  window.requestAnimationFrame = (callback) => { const id = --serial; pending.set(id, callback); return id; };
+  window.cancelAnimationFrame = (id) => { if (id < 0) pending.delete(id); else cancel(id); };
+  return {
+    flush: () => { for (const id of [...pending.keys()]) { const callback = pending.get(id); pending.delete(id); callback?.(performance.now()); } },
+    release: () => { window.requestAnimationFrame = request; window.cancelAnimationFrame = cancel;
+      for (const callback of pending.values()) request(callback); pending.clear(); },
+  };
+}
+
+for (const scenario of ["mixed", "child-only", "interrupted", "deep-mixed", "deep-child-only", "live-footer", "jump-latest"] as const) {
 const childOnly = scenario === "child-only" || scenario === "deep-child-only";
 const deep = scenario.startsWith("deep-");
 test(scenario === "interrupted" ? "navigation after history merge retires queued positioning" :
   scenario === "live-footer" ? "history prepend keeps the live paragraph reached while waiting for the older page" :
+  scenario === "jump-latest" ? "jump to latest keeps following when a pending older page arrives" :
   `history prepend keeps the visible ${deep ? "paragraph" : "row"} and offset across ${scenario} regrouping and live tail appends`, async ({ page }) => {
   const session = { id: "history-window", agent_id: "history-agent", name: "Reading history", backend: "codex",
     status: "idle", archived: false, working_dir: "/tmp", created_at: "2026-11-02T00:00:00Z" };
@@ -37,8 +51,8 @@ test(scenario === "interrupted" ? "navigation after history merge retires queued
     else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
     else if (path === "/api/sessions") data = [session];
     else if (path === `/api/sessions/${session.id}/messages`) {
-      expect(url.searchParams.get("before_seq")).toBe("200");
       pages.push(route);
+      expect(url.searchParams.get("before_seq")).toBe("200");
       return;
     } else if (path === `/api/sessions/${session.id}`) data = { ...session,
       messages, next_message_seq: 261, oldest_loaded_seq: 200, has_more_messages: true, pending_questions: [], subagents: [helper],
@@ -47,6 +61,7 @@ test(scenario === "interrupted" ? "navigation after history merge retires queued
     await route.fulfill({ json: data });
   });
   await page.routeWebSocket("**/ws?*", (ws) => { socket = ws; });
+  if (scenario === "jump-latest") await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
   await enterAccountCredentials(page);
   await page.locator(".agent-item", { hasText: "Octo" }).click();
@@ -58,6 +73,41 @@ test(scenario === "interrupted" ? "navigation after history merge retires queued
   // layout-driven position changes deliberately do not retire following.
   await scroller.press("Home");
   await expect.poll(() => pages.length).toBe(1);
+  if (scenario === "jump-latest") {
+    const jump = page.getByRole("button", { name: "Jump to latest" });
+    const gap = () => scroller.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+    await expect(jump).toBeVisible();
+    const gate = await page.evaluateHandle(holdAnimationFrames);
+    try {
+      await jump.press("Enter");
+      await expect(jump).toHaveCount(0);
+      expect(await gap()).toBeGreaterThan(1000);
+
+      const before = await scroller.evaluate((element) => element.scrollHeight);
+      await pages[0].fulfill({ json: { messages: Array.from({ length: 40 }, (_, index) => row(160 + index)),
+        oldest_loaded_seq: 160, has_more_messages: true } });
+      await expect(scroller.getByRole("button", { name: "Load earlier messages" })).toBeAttached();
+      await expect.poll(() => scroller.evaluate((element) => element.scrollHeight)).toBeGreaterThan(before + 100);
+      expect(await gap()).toBeGreaterThan(1000);
+      const remaining = await gate.evaluate((queued) => {
+        queued.flush();
+        const element = document.querySelector(".chat-messages")!;
+        return element.scrollHeight - element.clientHeight - element.scrollTop;
+      });
+      expect(remaining).toBeLessThanOrEqual(2);
+    } finally {
+      await gate.evaluate((queued) => queued.release());
+      await gate.dispose();
+    }
+
+    socket.send(JSON.stringify({ type: "status", session_id: session.id, status: "running" }));
+    socket.send(JSON.stringify({ type: "assistant_delta", session_id: session.id, content: "Live while returning to latest" }));
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Live while returning to latest");
+    await expect.poll(gap).toBeLessThanOrEqual(2);
+    await expect(scroller.getByTestId("streaming-text")).toBeInViewport();
+    await expect(pages).toHaveLength(1);
+    return;
+  }
   if (scenario === "live-footer") {
     socket.send(JSON.stringify({ type: "status", session_id: session.id, status: "running" }));
     socket.send(JSON.stringify({ type: "assistant_delta", session_id: session.id,
@@ -143,18 +193,7 @@ test(scenario === "interrupted" ? "navigation after history merge retires queued
   for (const seq of [261, 262]) socket.send(JSON.stringify({ ...row(seq), type: "assistant_text", session_id: session.id }));
   // Hold browser scheduling, not product helpers. This exposes a reader's
   // navigation between a merge's first position and its queued correction.
-  const gate = scenario === "interrupted" ? await page.evaluateHandle(() => {
-    const request = window.requestAnimationFrame, cancel = window.cancelAnimationFrame;
-    let serial = 0;
-    const pending = new Map<number, FrameRequestCallback>();
-    window.requestAnimationFrame = (callback) => { const id = --serial; pending.set(id, callback); return id; };
-    window.cancelAnimationFrame = (id) => { if (id < 0) pending.delete(id); else cancel(id); };
-    return {
-      flush: () => { for (const id of [...pending.keys()]) { const callback = pending.get(id); pending.delete(id); callback?.(performance.now()); } },
-      release: () => { window.requestAnimationFrame = request; window.cancelAnimationFrame = cancel;
-        for (const callback of pending.values()) request(callback); pending.clear(); },
-    };
-  }) : null;
+  const gate = scenario === "interrupted" ? await page.evaluateHandle(holdAnimationFrames) : null;
   try {
   const oldest = deep ? 120 : 196;
   await pages[0].fulfill({ json: {

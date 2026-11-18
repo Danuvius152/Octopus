@@ -733,7 +733,7 @@ async def test_background_stops_surviving_group_after_parent_exits(background, t
         session_id=session.id, working_dir=str(tmp_path), command=shlex.join([sys.executable, "-c", parent]),
         timeout_seconds=1 if stop == "timeout" else 30, idle_timeout_seconds=0,
     )
-    await wait_until(child_pid.exists)
+    await wait_until(lambda: child_pid.exists() and bool(child_pid.read_text()))
     pid = int(child_pid.read_text())
     pgid = os.getpgid(pid)
     try:

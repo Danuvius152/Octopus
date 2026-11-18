@@ -322,7 +322,7 @@ export function SidebarAgents() {
       if (manual) confirmation?.finish();
       confirmation = manual || !confirmation ? new ArchiveDeadline() : confirmation;
       checking = true;
-      feedback(archived ? "Archive committed. Checking the session list." : "Archive result is unknown. Checking the session list; the command will not be sent again.", true);
+      if (manual) feedback(message, true);
       const reading = manual ? sessionList.observe(id, useSessionStore.getState(), "archive") : tracked;
       try {
         const result = await sessionList.confirmArchive(id, reading.observation, confirmation);

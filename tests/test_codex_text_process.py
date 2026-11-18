@@ -2,11 +2,11 @@
 
 import asyncio
 import json
-import os
 import sys
 import threading
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -169,8 +169,13 @@ async def test_cancelled_worker_retires_native_control_and_its_descendant(text_b
         with pytest.raises(asyncio.CancelledError):
             await task
         for pid in pids:
-            with pytest.raises(ProcessLookupError):
-                os.kill(pid, 0)
+            # After SIGKILL the gate's subreaper may still own an exited
+            # descendant's PID. No living process may survive cancellation.
+            try:
+                state = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()[0]
+            except FileNotFoundError:
+                continue
+            assert state in {"Z", "X"}, f"Native control process {pid} survived cancellation"
     finally:
         if not task.done():
             task.cancel()

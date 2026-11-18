@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SidebarAgents } from "./SidebarAgents";
+import { sessions as sessionList } from "../lib/sessionList";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
 import { deferred } from "../test-support/deferred";
 
@@ -127,7 +128,8 @@ it.each(["headers", "success body", "error body"])("bounds sidebar archive %s an
   }, false, async () => blocked ? new Promise(() => {}) : Response.json([{ ...session, archived: true }]));
   await archive();
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-  expect(screen.getByText(/Archive result is unknown/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "Archive ideas" })).toHaveAttribute("aria-busy", "true");
+  expect(screen.queryByRole("alert")).toBeNull();
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
   expect(screen.getByText(/Archive result is still unknown/)).toBeVisible();
   const button = screen.getByRole("button", { name: "Confirm original archive" });
@@ -152,18 +154,25 @@ it("confirms network-lost archival before any session establishes a dispatch gen
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
-it("archives after a successful 204 without duplicating a preceding server event", async () => {
-  mockServer(async () => {
-    const store = useSessionStore.getState();
-    store.setSessions([]);
-    store.setArchivedSessions([{ ...session, archived: true }]);
-    return new Response(null, { status: 204 });
-  });
+it("confirms a successful 204 silently after a preceding archive event", async () => {
+  const reply = deferred<Response>();
+  const list = deferred<Response>();
+  const confirm = vi.fn(() => list.promise);
+  const fetcher = mockServer(() => reply.promise, true, confirm);
   await archive();
+  await act(async () => {
+    sessionList.archive(session.id, undefined, undefined, null);
+    reply.resolve(new Response(null, { status: 204 }));
+  });
+  await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+  expect(screen.queryByRole("alert")).toBeNull();
+
+  await act(async () => list.resolve(Response.json([{ ...session, archived: true }])));
   await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBeNull());
   expect(useSessionStore.getState().sessions).toEqual([]);
   expect(useSessionStore.getState().archivedSessions).toEqual([{ ...session, archived: true }]);
   expect(screen.queryByRole("alert")).toBeNull();
+  expect(fetcher.mock.calls.filter(([url]) => String(url).includes("/archive?"))).toHaveLength(1);
 });
 
 it("does not change another account after a late successful response", async () => {

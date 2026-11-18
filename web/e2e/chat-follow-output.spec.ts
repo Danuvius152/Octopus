@@ -433,6 +433,8 @@ test("a late downward scroll after expansion cannot restore follow intent", asyn
 
 test("chat follows output after a card, preserves history reading and resumes at the bottom", async ({ page }) => {
   const { scroller, gap, send, settle, output } = await openChat(page);
+  const jump = page.getByRole("button", { name: "Jump to latest" });
+  await expect(jump).toHaveCount(0);
   send({ type: "assistant_text", seq: 41, content: "Choose the next step", tool_input: { native_item: {
     type: "agentMessage", id: "question", questions: [{ title: "Choose the next step", options: ["Continue", "Review"] }],
   } } });
@@ -447,9 +449,12 @@ test("chat follows output after a card, preserves history reading and resumes at
   await page.mouse.wheel(0, 10000);
   await expect.poll(gap).toBeLessThanOrEqual(2);
 
+  const viewport = await scroller.boundingBox();
   await scroller.hover();
   await page.mouse.wheel(0, -350);
   await expect.poll(gap).toBeGreaterThan(200);
+  await expect(jump).toBeVisible();
+  expect(await scroller.boundingBox()).toEqual(viewport);
   const top = await scroller.evaluate((element) => element.scrollTop);
   send({ type: "assistant_delta", content: output("While reading history") });
   await expect(scroller.getByTestId("streaming-text")).toContainText("While reading history line 12");
@@ -463,8 +468,10 @@ test("chat follows output after a card, preserves history reading and resumes at
   }, top);
   expect(drift).toBeLessThanOrEqual(2);
 
-  await page.mouse.wheel(0, 10000);
+  await jump.press("Enter");
   await expect.poll(gap).toBeLessThanOrEqual(2);
+  await expect(jump).toHaveCount(0);
+  await expect(scroller).toBeFocused();
   send({ type: "assistant_delta", content: output("Resumed output") });
   await expect(scroller.getByTestId("streaming-text")).toContainText("Resumed output line 12");
   await settle();
@@ -998,6 +1005,8 @@ test(`upward ${navigation} invalidates measured output work before its animation
     }
   }
   if (navigation === "PageUp" || navigation === "touch") await settle();
+  const jump = page.getByRole("button", { name: "Jump to latest" });
+  await expect(jump).toBeVisible();
   const parked = await scroller.evaluate((element) => element.scrollTop);
   await settle();
   expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - parked)).toBeLessThanOrEqual(2);
@@ -1009,6 +1018,7 @@ test(`upward ${navigation} invalidates measured output work before its animation
   await scroller.hover();
   await page.mouse.wheel(0, 100000);
   await expect.poll(gap).toBeLessThanOrEqual(2);
+  await expect(jump).toHaveCount(0);
   send({ type: "assistant_delta", content: output("After returning") });
   await expect(scroller.getByTestId("streaming-text")).toContainText("After returning line 12");
   await expect.poll(gap).toBeLessThanOrEqual(2);
@@ -1034,6 +1044,7 @@ test(`holding the native scrollbar during output preserves ${readingHistory ? "h
     await settle();
     await expect.poll(gap).toBeGreaterThan(100);
     expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - before)).toBeLessThanOrEqual(2);
+    if (!readingHistory) await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
   } finally {
     await page.mouse.up();
   }
@@ -1044,6 +1055,137 @@ test(`holding the native scrollbar during output preserves ${readingHistory ? "h
   if (readingHistory) {
     expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - before)).toBeLessThanOrEqual(2);
   } else await expect.poll(gap).toBeLessThanOrEqual(2);
+});
+}
+
+test("clicking above the native scrollbar thumb offers a return to the latest output", async ({ page }) => {
+  const { scroller, gap, settle } = await openChat(page);
+  await scroller.evaluate((element) => { element.style.scrollbarGutter = "stable"; });
+  await settle();
+  const thumb = await scroller.evaluate(scrollbarThumb);
+  const trackY = (await scroller.boundingBox())!.y + 64;
+  expect(thumb.gutter).toBeGreaterThan(0);
+  await page.mouse.move(thumb.x, trackY);
+  await page.mouse.down();
+  try {
+    await expect.poll(gap).toBeGreaterThan(200);
+  } finally {
+    await page.mouse.up();
+  }
+  await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+});
+
+test("reversing a native scrollbar drag upward offers a return to the latest output", async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page, 4);
+  const jump = page.getByRole("button", { name: "Jump to latest" });
+  await scroller.evaluate((element) => { element.style.scrollbarGutter = "stable"; });
+  send({ type: "tool_result", seq: 5, output: "Open this saved detail without scrolling." });
+  const header = scroller.locator(".msg-tool-result .tool-header");
+  await expect(header).toBeVisible();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await header.click();
+  // Keep the native thumb's range stable as it reverses across live output.
+  send({ type: "assistant_delta", content: "New output while reading.\n".repeat(80) });
+  await expect.poll(gap).toBeGreaterThan(700);
+  await scroller.evaluate((element) => {
+    element.scrollTop = element.scrollHeight - element.clientHeight - 450;
+  });
+  await settle();
+  await expect(jump).toHaveCount(0);
+
+  const top = () => scroller.evaluate((element) => element.scrollTop);
+  const before = await top();
+  const thumb = await scroller.evaluate(scrollbarThumb);
+  expect(thumb.gutter).toBeGreaterThan(0);
+  await page.mouse.move(thumb.x, thumb.y);
+  await page.mouse.down();
+  try {
+    await page.mouse.move(thumb.x, thumb.y + 24);
+    await expect.poll(top).toBeGreaterThan(before + 40);
+    await settle();
+    await expect(jump).toHaveCount(0);
+    await page.mouse.move(thumb.x, thumb.y - 80);
+    await expect.poll(top).toBeLessThan(before - 100);
+    await expect(jump).toBeVisible();
+  } finally {
+    await page.mouse.up();
+  }
+});
+
+test("Home offers a return when layout grows before the first scroll notification", async ({ page }) => {
+  const { scroller, gap } = await openChat(page);
+  await scroller.evaluate((element) => {
+    const original = element.scrollTo.bind(element);
+    element.scrollTo = ((options: ScrollToOptions | number, y?: number) => {
+      if (typeof options === "number") original(options, y!);
+      else original(options);
+      if (typeof options === "number" || options.top !== 0 || options.behavior !== "instant") return;
+      const viewport = element.querySelector("[data-viewport-type]")!;
+      const spacer = document.createElement("div");
+      spacer.style.height = "120px";
+      spacer.dataset.layoutAfterHome = String(element.scrollTop);
+      viewport.appendChild(spacer);
+    }) as typeof element.scrollTo;
+  });
+  await scroller.press("Home");
+  await expect(scroller.locator("[data-layout-after-home]")).toHaveAttribute("data-layout-after-home", "0");
+  await expect.poll(gap).toBeGreaterThan(200);
+  await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+});
+
+for (const input of ["cancelled wheel", "stationary thumb"] as const) {
+test(`a ${input} and restored layout range do not offer a jump`, async ({ page }) => {
+  const { scroller, gap, settle } = await openChat(page);
+  await scroller.evaluate((element) => {
+    const spacer = document.createElement("div");
+    spacer.dataset.testLayoutSpacer = "";
+    spacer.style.height = "120px";
+    const content = element.querySelector("[data-viewport-type]");
+    if (!content) throw new Error("Missing Virtuoso layout viewport");
+    content.appendChild(spacer);
+    element.style.overflowAnchor = "none";
+    element.style.scrollbarGutter = "stable";
+    element.scrollTop = element.scrollHeight;
+  });
+  await settle();
+  await scroller.evaluate((element, input) => {
+    const spacer = element.querySelector<HTMLElement>("[data-test-layout-spacer]")!;
+    const changeLayout = (event: Event) => {
+      if (input === "cancelled wheel") event.preventDefault();
+      const before = element.scrollTop;
+      const height = element.scrollHeight;
+      spacer.style.height = "0px";
+      const clamped = element.scrollTop;
+      spacer.style.height = "120px";
+      const restored = element.scrollHeight;
+      spacer.dataset.movement = JSON.stringify({ before, clamped, height, restored, cancelled: event.defaultPrevented });
+    };
+    element.addEventListener(input === "cancelled wheel" ? "wheel" : "pointerdown", changeLayout,
+      { once: true, passive: false });
+  }, input);
+  if (input === "cancelled wheel") {
+    await scroller.hover();
+    await page.mouse.wheel(0, -120);
+  } else {
+    const thumb = await scroller.evaluate(scrollbarThumb);
+    expect(thumb.gutter).toBeGreaterThan(0);
+    await page.mouse.move(thumb.x, thumb.y);
+    await page.mouse.down();
+  }
+  try {
+    const spacer = scroller.locator("[data-test-layout-spacer]");
+    await expect(spacer).toHaveAttribute("data-movement", /cancelled/);
+    const movement = JSON.parse((await spacer.getAttribute("data-movement"))!);
+    if (input === "cancelled wheel") expect(movement.cancelled).toBe(true);
+    expect(movement.restored).toBe(movement.height);
+    expect(movement.before - movement.clamped).toBeGreaterThan(80);
+    await expect.poll(gap).toBeGreaterThan(60);
+    await settle();
+    await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
+  } finally {
+    if (input === "stationary thumb") await page.mouse.up();
+  }
+  await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
 });
 }
 
@@ -1136,6 +1278,7 @@ test(`expanding a saved tool with ${activation} at the bottom preserves reading 
   await expect(scroller.getByTestId("streaming-text")).toContainText("While reading tool details line 12");
   await settle();
   expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - position)).toBeLessThanOrEqual(2);
+  await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
   await scroller.hover({ position: { x: 5, y: 20 } });
   await page.mouse.wheel(0, 100000);
   await expect.poll(gap).toBeLessThanOrEqual(2);

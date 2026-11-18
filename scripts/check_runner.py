@@ -214,6 +214,21 @@ class GateChildren:
             raise Interrupted(self.pending)
         return self.process
 
+    def reap_exited_orphans(self):
+        # Reap adopted descendants during the gate so their former process
+        # groups can disappear while tests are still waiting for retirement.
+        # Popen alone owns the original child's exit status.
+        for pid in children():
+            if self.process is None or pid != self.process.pid:
+                os.waitpid(pid, os.WNOHANG)
+
+    def wait(self, process: subprocess.Popen) -> int:
+        while True:
+            try:
+                return process.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                self.reap_exited_orphans()
+
     def retire(self):
         active = not self.deferred
         self.deferred = True
@@ -221,16 +236,9 @@ class GateChildren:
         notified: set[int] = set()
         try:
             while True:
-                # Popen alone owns the original child's real exit status.
                 if self.process is not None:
                     self.process.poll()
-                    if self.process.returncode is not None:
-                        notified.discard(self.process.pid)
-                remaining = children()
-                for pid in remaining:
-                    if self.process is None or pid != self.process.pid:
-                        reaped, _ = os.waitpid(pid, os.WNOHANG)
-                        notified.discard(reaped)
+                self.reap_exited_orphans()
                 remaining = children()
                 notified.intersection_update(remaining)
                 if not remaining:
@@ -311,7 +319,7 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
                     row.update(status="failed", execution_error=str(error))
                     print(error, file=sys.stderr)
                     return
-                row["returncode"] = process.wait()
+                row["returncode"] = owner.wait(process)
             else:
                 log = output / (gate.id + ".log")
                 row["log"] = str(log)
@@ -338,7 +346,9 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
                                 # A descendant may still hold stdout after the
                                 # original child exits. Retire it, then drain.
                                 owner.retire()
-                    row["returncode"] = process.wait()
+                            else:
+                                owner.reap_exited_orphans()
+                    row["returncode"] = owner.wait(process)
                     stream.flush()
                     os.fsync(stream.fileno())
         row["status"] = "passed" if row["returncode"] == 0 else "failed"

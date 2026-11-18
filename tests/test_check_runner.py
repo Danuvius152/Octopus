@@ -283,6 +283,33 @@ def test_parent_exit_retires_session_descendant_and_restores_subreaper(tmp_path,
         assert row["returncode"] == 7 and row["status"] == "failed"
 
 
+@pytest.mark.parametrize("save_evidence", [False, True])
+def test_reaps_exited_orphan_while_gate_is_running(tmp_path, fixed_inputs, save_evidence):
+    output = tmp_path / "evidence" if save_evidence else None
+    program = """
+import os
+import time
+from pathlib import Path
+
+reader, writer = os.pipe()
+launcher = os.fork()
+if launcher == 0:
+    os.close(reader)
+    if os.fork() == 0:
+        os.write(writer, str(os.getpid()).encode())
+    os._exit(0)
+os.close(writer)
+os.waitpid(launcher, 0)
+with os.fdopen(reader) as pipe:
+    orphan = Path("/proc") / pipe.read()
+deadline = time.monotonic() + 3
+while orphan.exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+assert not orphan.exists(), "Exited orphan outlived its running gate"
+"""
+    assert runner.run_checks(tmp_path, [gate(tmp_path, "orphan", program)], output) == 0
+
+
 def test_repeated_cancel_retires_generation_spawned_during_term(tmp_path):
     root = Path(__file__).resolve().parents[1]
     ready, spawned, later, output = (tmp_path / name for name in ("ready", "spawned", "later", "evidence"))

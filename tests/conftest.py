@@ -13,6 +13,14 @@ import pytest
 
 pytest_plugins = ["tests.wiki_cost_probe"]
 
+# Pytest fixtures, tempfile calls and subprocesses share this disk-backed
+# default. Plugins may have already cached Python's system temporary directory.
+if not any(os.environ.get(variable) for variable in ("TMPDIR", "TEMP", "TMP")):
+    _TEST_TEMP_ROOT = Path.home() / ".cache" / "octopus-tests"
+    _TEST_TEMP_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(_TEST_TEMP_ROOT)
+    tempfile.tempdir = str(_TEST_TEMP_ROOT)
+
 # Override env vars before any module imports Settings, so tests
 # don't pick up values from the user's .env file.
 os.environ["OCTOPUS_AUTH_TOKEN"] = "changeme"

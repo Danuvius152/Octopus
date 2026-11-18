@@ -39,6 +39,10 @@ function canScrollChat(viewport: HTMLElement | null, target: EventTarget | null,
   return element === viewport;
 }
 
+function sampleScroll(viewport: HTMLElement) {
+  return { top: viewport.scrollTop, maximum: Math.max(0, viewport.scrollHeight - viewport.clientHeight) };
+}
+
 function atLoadedStart(viewport: HTMLElement, first: Message | undefined): boolean {
   if (viewport.scrollTop <= 4) return true;
   if (!first || viewport.scrollTop > viewport.clientHeight) return false;
@@ -314,6 +318,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   // its optional position. A native scrollbar contact can outlive the commit.
   const readingHandoff = useRef<ReadingHandoff | null>(null);
   const [readingBoundary, setReadingBoundary] = useState(false);
+  const [scrolledIntoHistory, setScrolledIntoHistory] = useState(false);
   const initialPresentation = useRef<InitialPresentation>(newPresentation(!preparation && empty ? "ready" : "preparing"));
   const [presentation, setPresentation] = useState(() => ({ owner: initialPresentation.current, phase: initialPresentation.current.phase }));
   const publishPresentation = useCallback((owner: InitialPresentation, phase: InitialPresentation["phase"]) => {
@@ -330,11 +335,12 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   const followFrame = useRef<(ViewportScope & { frame: number; time: number }) | null>(null);
   const reducedMotion = useRef<MediaQueryList | null>(null);
   const viewportObserver = useRef<ResizeObserver | null>(null);
-  const lastScrollTop = useRef(0);
-  // After contact release, native scroll evidence ends at scrollend or 500ms
-  // without forward progress. An active contact owns its complete input stream;
-  // neither its ordinary scroll notifications nor elapsed time restore follow.
-  const downwardNavigation = useRef<(ViewportScope & { top: number; until: number; contact?: NavigationContact }) | null>(null);
+  const contentObserver = useRef<MutationObserver | null>(null);
+  const lastScroll = useRef({ top: 0, maximum: 0 });
+  // Native scroll needs direction from current input. After contact release,
+  // the evidence ends at scrollend or 500ms without progress.
+  const scrollNavigation = useRef<(ViewportScope & { top: number; until: number; contact?: NavigationContact } &
+    ({ direction: "up"; maximum: number; wheel?: WheelEvent } | { direction: "down" })) | null>(null);
   const navigationContact = useRef<NavigationContact | null>(null);
   const focusReading = useRef<{ owner: InitialPresentation; source: Element } | null>(null);
   const cancelFollow = useCallback((view?: ChatViewportView) => {
@@ -405,7 +411,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         virtuoso.current?.scrollTo({ top: bottom - next <= 2 ? bottom : next, behavior: "auto" });
       }
       if (!current()) { stop(); return; }
-      lastScrollTop.current = viewport.scrollTop;
+      lastScroll.current = sampleScroll(viewport);
       // Equal/coarse readings cannot retire an unfinished target. Keep its
       // time origin until a positive interval permits the next actual write.
       if (dt > 0) work.time = time;
@@ -435,10 +441,11 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     retireRecovery(owner);
     owner.automaticReturn = reason === "accepted-output";
     retirePosition(); cancelFollow();
-    downwardNavigation.current = null;
+    scrollNavigation.current = null;
     readingHandoff.current = null;
     following.current = true;
     setReadingBoundary(false);
+    setScrolledIntoHistory(false);
     owner.timeoutHint = false;
     // Following grants visible movement; it does not manufacture the retired
     // initial operation's measurement proof or open a new preparation budget.
@@ -472,7 +479,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       return;
     }
     following.current = false;
-    downwardNavigation.current = null;
+    scrollNavigation.current = null;
     readingHandoff.current = viewport ? { view, anchor: captureReadingAnchor(viewport),
       physical: { viewport, top: viewport.scrollTop } } : null;
     const focused = document.activeElement;
@@ -513,7 +520,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     following.current = false;
     cancelFollow();
     retirePosition();
-    downwardNavigation.current = null;
+    scrollNavigation.current = null;
     const viewport = scroller.current;
     const view = currentView.current;
     if (source !== "handoff" && viewport?.clientHeight && view && currentViewportView(view)) {
@@ -530,22 +537,79 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest("button[aria-expanded], summary")) pauseFollowing("details");
   }, [pauseFollowing]);
-  const navigate = useCallback((up: boolean, from: number, contact?: NavigationContact) => {
+  const pauseForScrollbar = useCallback((contact: NavigationContact) => {
+    const navigation = scrollNavigation.current;
+    pauseFollowing();
+    if (!contact.invalid && navigation?.contact === contact) scrollNavigation.current = navigation;
+  }, [pauseFollowing]);
+  const rebaseScrollbarAfterLayout = useCallback((viewport: HTMLElement, sample?: ReturnType<typeof sampleScroll>) => {
+    const navigation = scrollNavigation.current;
+    if (navigation?.direction !== "up" || navigation.viewport !== viewport || navigation.contact?.source !== "scrollbar") {
+      contentObserver.current?.disconnect();
+      return;
+    }
+    if (navigation.contact === navigationContact.current) {
+      Object.assign(navigation, sample ?? sampleScroll(viewport));
+    } else {
+      scrollNavigation.current = null;
+      contentObserver.current?.disconnect();
+    }
+  }, []);
+  const observeUpwardScroll = useCallback((viewport: HTMLElement, view: ChatViewportView,
+    sample = sampleScroll(viewport), source: "scroll" | "measure" | "home" = "scroll") => {
+    const navigation = scrollNavigation.current;
+    if (navigation?.direction !== "up") return;
+    const { top, maximum } = sample;
+    const scrollbar = navigation.contact?.source === "scrollbar";
+    const held = navigation.contact !== undefined && navigation.contact === navigationContact.current;
+    if (navigation.viewport !== viewport || navigation.view !== view || !currentViewportView(view) ||
+      navigation.wheel?.defaultPrevented ||
+      navigation.contact?.invalid || (!held && performance.now() > navigation.until) ||
+      (position.current && !scrollbar)) {
+      scrollNavigation.current = null;
+      return;
+    }
+    // A layout clamp can lower scrollTop before the original range returns.
+    // The native scroll report alone contains no intermediate geometry.
+    if (scrollbar && contentObserver.current?.takeRecords().length) {
+      rebaseScrollbarAfterLayout(viewport, sample);
+      return;
+    }
+    if ((source !== "home" && maximum !== navigation.maximum) || (source !== "measure" && top > navigation.top)) {
+      if (scrollbar) rebaseScrollbarAfterLayout(viewport, sample);
+      else scrollNavigation.current = null;
+      return;
+    }
+    if (source === "measure" || top === navigation.top) return;
+    navigation.top = top;
+    navigation.until = performance.now() + 500;
+    if (maximum - top <= 4) return;
+    scrollNavigation.current = null;
+    if (scrollbar || following.current) pauseFollowing();
+    setScrolledIntoHistory(true);
+  }, [currentViewportView, pauseFollowing, rebaseScrollbarAfterLayout]);
+  const navigate = useCallback((up: boolean, from: number, contact?: NavigationContact, wheel?: WheelEvent) => {
     const viewport = scroller.current;
     const view = currentView.current;
     if (!viewport?.clientHeight || document.hidden || !view || !currentViewportView(view)) return false;
     if (viewport.scrollTop > 0) setPagingReady(true);
     pauseFollowing();
-    if (!up && !contact?.invalid) {
-      if (!navigationContact.current && viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4) {
-        resumeVisibleFollowing();
-      } else downwardNavigation.current = { view, viewport, top: from, until: performance.now() + 500, contact };
-    }
+    if (contact?.invalid) return true;
+    const { top, maximum } = sampleScroll(viewport);
+    const observation = { view, viewport, top: from, until: performance.now() + 500, contact };
+    if (up) {
+      scrollNavigation.current = { ...observation, top: lastScroll.current.maximum === maximum ? Math.max(top, from) : top,
+        direction: "up", maximum, wheel };
+      // A non-passive listener can still cancel the wheel after capture.
+      if (!wheel?.cancelable) observeUpwardScroll(viewport, view);
+    } else if (!navigationContact.current && maximum - top <= 4) {
+      resumeVisibleFollowing();
+    } else scrollNavigation.current = { ...observation, direction: "down" };
     return true;
-  }, [pauseFollowing, currentViewportView, resumeVisibleFollowing]);
+  }, [pauseFollowing, currentViewportView, observeUpwardScroll, resumeVisibleFollowing]);
   const invalidateNavigationContact = useCallback((contact: NavigationContact) => {
     contact.invalid = true;
-    if (downwardNavigation.current?.contact === contact) downwardNavigation.current = null;
+    if (scrollNavigation.current?.contact === contact) scrollNavigation.current = null;
   }, []);
   const startNavigationContact = useCallback((source: NavigationContact["source"], id: number, y: number, pointerType?: string) => {
     const viewport = scroller.current;
@@ -555,12 +619,21 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const operation = position.current;
     if (operation?.frame !== null && operation?.frame !== undefined) cancelAnimationFrame(operation.frame);
     if (operation) operation.frame = null;
-    downwardNavigation.current = null;
+    scrollNavigation.current = null;
     // Contact suspends writes. The current reading decision remains with the
     // opening, including any input that arrives during this contact.
-    navigationContact.current = { source, id, y, top: viewport.scrollTop,
+    const contact: NavigationContact = { source, id, y, top: viewport.scrollTop,
       invalid: false, pointers: new Map(pointerType === undefined ? [] : [[id, pointerType]]),
       touch: null, sessionId: view.sessionId, account: view.account };
+    navigationContact.current = contact;
+    if (source === "scrollbar") {
+      contentObserver.current?.disconnect();
+      contentObserver.current?.observe(viewport, { subtree: true, childList: true, characterData: true,
+        attributes: true, attributeFilter: ["style", "class", "hidden", "open"] });
+      // Both a thumb drag and a track click can move up through native scrolling.
+      scrollNavigation.current = { view, viewport, direction: "up", ...sampleScroll(viewport),
+        until: performance.now() + 500, contact };
+    }
     preparationBudget();
   }, [cancelFollow, currentViewportView, preparationBudget]);
   // Automatic paging needs a genuine departure from the physical top.
@@ -756,6 +829,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       return;
     }
     const view = currentView.current;
+    if (view) observeUpwardScroll(viewport, view, sampleScroll(viewport), "measure");
     if (!following.current && view && initialPresentation.current.phase !== "incomplete" &&
       pendingReadingHandoff(readingHandoff.current, view, viewport)) {
       restoreReading(view, viewport);
@@ -763,9 +837,12 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     positionMeasuredOutput();
     consumeTimeoutRecovery();
     followMeasuredOutput();
-  }, [cancelFollow, consumeTimeoutRecovery, positionMeasuredOutput, followMeasuredOutput, preparationBudget, restoreReading]);
+  }, [cancelFollow, consumeTimeoutRecovery, positionMeasuredOutput, followMeasuredOutput, observeUpwardScroll, preparationBudget, restoreReading]);
   const releaseNavigationContact = useCallback((contact: NavigationContact, y: number) => {
     if (navigationContact.current !== contact) return;
+    const until = performance.now() + 500;
+    const heldNavigation = scrollNavigation.current;
+    if (heldNavigation?.contact === contact) heldNavigation.until = until;
     navigationContact.current = null;
     const viewport = scroller.current;
     const view = currentView.current;
@@ -784,25 +861,27 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     // A primary scrollbar release can show movement without pointermove.
     // A handoff invalidates the old geometry for returning down, but the
     // mouse can still withdraw permission to move the reader's position.
-    if (scrollbar && y !== contact.y) pauseFollowing();
+    if (scrollbar && y !== contact.y) pauseForScrollbar(contact);
     else if (scrollbar && !following.current && position.current?.kind === "history") retirePosition();
     if (following.current) readingHandoff.current = null;
     if (!canMeasure) return;
-    const navigation = downwardNavigation.current;
+    observeUpwardScroll(viewport, view);
+    const navigation = scrollNavigation.current;
     const directed = navigation?.viewport === viewport && navigation.view === view;
+    const downward = directed && navigation.direction === "down";
     // Native thumb drags may omit pointermove. Touch release instead requires
     // direction established by this contact, so inner scrolling or a tap cannot
     // turn an unrelated main-list displacement into a return to following.
-    const returned = (!contact.invalid && scrollbar && y > contact.y && viewport.scrollTop > contact.top || directed && viewport.scrollTop >= navigation.top) &&
+    const returned = (!contact.invalid && scrollbar && y > contact.y && viewport.scrollTop > contact.top || downward && viewport.scrollTop >= navigation.top) &&
       viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4;
     if (returned) resumeVisibleFollowing();
     else if (directed) {
-      navigation.contact = undefined;
-      navigation.until = performance.now() + 500;
+      if (navigation.contact?.source !== "scrollbar") navigation.contact = undefined;
+      navigation.until = until;
     }
-    if (directed) readingHandoff.current = null;
+    if (downward) readingHandoff.current = null;
     measuredOutput();
-  }, [currentViewportView, measuredOutput, pauseFollowing, resumeVisibleFollowing, retirePosition]);
+  }, [currentViewportView, measuredOutput, observeUpwardScroll, pauseFollowing, pauseForScrollbar, resumeVisibleFollowing, retirePosition]);
   useEffect(() => {
     // The opening owns a held contact, even if its original viewport is
     // replaced or the release lands outside the list. Geometry stays scoped.
@@ -811,7 +890,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       if (!contact || contact.touch && event.pointerType === "touch" || contact.pointers.has(event.pointerId)) return;
       contact.pointers.set(event.pointerId, event.pointerType);
       contact.invalid = true;
-      downwardNavigation.current = null;
+      scrollNavigation.current = null;
     };
     const pointerEnd = (event: PointerEvent) => {
       const contact = navigationContact.current;
@@ -869,7 +948,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   }, [cancelFollow, measuredOutput]);
   const startInitialPosition = useCallback((viewport: HTMLElement) => {
     retirePosition();
-    downwardNavigation.current = null;
+    scrollNavigation.current = null;
     if (navigationContact.current?.source !== "scrollbar") readingHandoff.current = null;
     const owner = initialPresentation.current;
     // Timeout retires initial for the entire opening, including later window
@@ -929,9 +1008,11 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     }
     cancelFollow();
     retirePosition();
-    downwardNavigation.current = null;
+    scrollNavigation.current = null;
     viewportObserver.current?.disconnect();
     viewportObserver.current = null;
+    contentObserver.current?.disconnect();
+    contentObserver.current = null;
     if (navigationContact.current) navigationContact.current.invalid = true;
     scroller.current = next;
     const handoff = readingHandoff.current;
@@ -942,7 +1023,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       else readingHandoff.current = { view: handoff.view, anchor: null, physical: scrollbarPosition, scrollbarPosition };
     }
     const viewport = scroller.current;
-    lastScrollTop.current = viewport?.scrollTop ?? 0;
+    lastScroll.current = viewport ? sampleScroll(viewport) : { top: 0, maximum: 0 };
     if (next) {
       // Virtuoso publishes this ref after layout effects. Attach to the
       // actual node, even when a replacement commits while chat is hidden.
@@ -952,8 +1033,10 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       }
       viewportObserver.current = new ResizeObserver(measuredOutput);
       viewportObserver.current.observe(next);
+      contentObserver.current = new MutationObserver(() => rebaseScrollbarAfterLayout(next));
     }
-  }, [cancelFollow, retirePosition, startInitialPosition, measuredOutput, currentViewportView, saveReadingHandoff, restoreReading]);
+  }, [cancelFollow, retirePosition, startInitialPosition, measuredOutput, currentViewportView, rebaseScrollbarAfterLayout,
+    saveReadingHandoff, restoreReading]);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderRead = useRef<ReturnType<typeof observeOlderMessages> | null>(null);
   const hasOlder = useSessionStore((s) =>
@@ -1011,6 +1094,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       readingHandoff.current = null;
       following.current = true;
       setReadingBoundary(false);
+      setScrolledIntoHistory(false);
       initialPresentation.current = newPresentation();
       publishPresentation(initialPresentation.current, "preparing");
       navigationContact.current = null;
@@ -1024,7 +1108,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     }
     currentView.current = null;
     cancelFollow(); retirePosition();
-    downwardNavigation.current = null;
+    scrollNavigation.current = null;
     if (navigationContact.current) navigationContact.current.invalid = true;
     olderRead.current?.cancel(); olderRead.current = null;
     setViewportView({ sessionId: sid, account: state.accountGeneration, window: messageWindow });
@@ -1049,7 +1133,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         pausePreparation(initialPresentation.current);
         currentView.current = null;
         readingHandoff.current = null;
-        downwardNavigation.current = null; navigationContact.current = null;
+        scrollNavigation.current = null; navigationContact.current = null;
         olderRead.current?.cancel(); olderRead.current = null;
       }
     };
@@ -1065,11 +1149,12 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const read = observeOlderMessages(sid, () => {
       if (!currentViewportView(view)) return;
       setAtTop(false);
+      if (following.current) return;
       const element = scroller.current;
       if (!element?.clientHeight) return;
       const anchor = captureReadingAnchor(element);
       retirePosition();
-      downwardNavigation.current = null;
+      scrollNavigation.current = null;
       const top = element.scrollTop;
       mergedPosition = anchor ? { kind: "history", view, viewport: element, ...anchor, frame: null, physicalTop: top,
         expectedTop: navigationContact.current?.source === "scrollbar" ? top : undefined } : null;
@@ -1295,9 +1380,11 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   }), [activeSessionId, isRunning, activeAgent?.name, activeAgent?.avatar, measuredOutput]);
 
   const showReadingNotice = readingBoundary || presentation.owner.timedOut && !following.current;
+  const showJumpToLatest = showReadingNotice || scrolledIntoHistory && transcriptBaseline && !transcriptDamaged;
   return <div className="contents">
-      <div className={showReadingNotice ? "shrink-0 px-4 py-2 text-sm text-muted-foreground" : "sr-only"}>
-        <p role="status" aria-atomic="true" data-chat-timeout={presentation.owner.timeoutHint || undefined}>
+      <div className={showReadingNotice ? "shrink-0 px-4 py-2 text-sm text-muted-foreground" : "relative h-0 shrink-0"}>
+        <p role="status" aria-atomic="true" className={showReadingNotice ? undefined : "sr-only"}
+          data-chat-timeout={presentation.owner.timeoutHint || undefined}>
           {presentation.owner.timeoutHint && "Automatic positioning did not finish. Loaded content is available."}
         </p>
         {presentation.owner.timeoutHint && <>
@@ -1308,7 +1395,12 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
           }}>Dismiss</Button>
         </>}
         {readingBoundary && <p role="status">The previous reading position is unavailable. Showing loaded content.</p>}
-        {showReadingNotice && <Button size="sm" variant="ghost" onClick={() => resumeVisibleFollowing()}>Jump to latest</Button>}
+        {showJumpToLatest && <Button size="sm" variant={showReadingNotice ? "ghost" : "outline"}
+          className={showReadingNotice ? undefined : "absolute left-4 top-2 z-10"}
+          onClick={() => {
+            scroller.current?.focus({ preventScroll: true });
+            resumeVisibleFollowing();
+          }}>Jump to latest</Button>}
       </div>
       {transcriptDamaged && activeSessionId && <TranscriptIntegrityNotice key={activeSessionId} sessionId={activeSessionId} />}
 
@@ -1316,13 +1408,13 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         onClickCapture={pauseForReading}
         onWheelCapture={(event) => {
           const viewport = scroller.current;
-          if (!viewport || !event.deltaY || event.ctrlKey) return;
+          if (!viewport || event.defaultPrevented || !event.deltaY || event.ctrlKey) return;
           // Composited wheel scrolling may move the DOM before React receives
           // its passive capture event. Keep the pre-scroll bound as evidence.
           const up = event.deltaY < 0;
-          const from = up ? Math.max(viewport.scrollTop, lastScrollTop.current) : Math.min(viewport.scrollTop, lastScrollTop.current);
+          const from = up ? Math.max(viewport.scrollTop, lastScroll.current.top) : Math.min(viewport.scrollTop, lastScroll.current.top);
           if (!canScrollChat(viewport, event.target, up, from)) return;
-          navigate(up, from);
+          navigate(up, from, undefined, event.nativeEvent);
         }}
         onKeyDown={(event) => {
           if (event.defaultPrevented || event.altKey || event.metaKey || event.ctrlKey && !["Home", "End"].includes(event.key)) return;
@@ -1332,12 +1424,15 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
           const target = event.target instanceof HTMLElement ? event.target : null;
           if (target?.isContentEditable || target?.closest("input, textarea, select, [role=textbox]")) return;
           if (event.key === " " && target?.closest("button, a[href], summary, [role=button]")) return;
-          if (!navigate(up, scroller.current!.scrollTop)) return;
+          const viewport = scroller.current!;
+          const view = currentView.current;
+          if (!navigate(up, viewport.scrollTop)) return;
           if (event.key === "Home" && virtuoso.current) {
             // Native Home animates across estimated rows and can be interrupted
             // when Virtuoso measures them. Open the loaded start directly.
             event.preventDefault();
             virtuoso.current.scrollTo({ top: 0, behavior: "instant" });
+            if (view && viewport === scroller.current) observeUpwardScroll(viewport, view, sampleScroll(viewport), "home");
           }
         }}
         onPointerDownCapture={(event) => {
@@ -1371,7 +1466,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
             }
             return;
           }
-          downwardNavigation.current = null;
+          scrollNavigation.current = null;
           if (event.isPrimary && (touchOrPen || scrollbar)) {
             startNavigationContact(scrollbar ? "scrollbar" : "pointer", event.pointerId, event.clientY, event.pointerType);
           }
@@ -1380,16 +1475,18 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
           const pointer = navigationContact.current;
           if (!pointer || pointer.source === "touch" || pointer.id !== event.pointerId) return;
           if (pointer.source === "scrollbar") {
-            if (event.clientY !== pointer.y) pauseFollowing();
+            if (event.clientY !== pointer.y) pauseForScrollbar(pointer);
             return;
           }
           if (event.clientY === pointer.y) return;
           const up = event.clientY > pointer.y;
           pointer.y = event.clientY;
-          if (canScrollChat(scroller.current, event.target, up)) navigate(up, pointer.top, pointer);
+          const viewport = scroller.current;
+          const from = up ? Math.max(viewport?.scrollTop ?? 0, lastScroll.current.top, pointer.top) : pointer.top;
+          if (canScrollChat(viewport, event.target, up, from)) navigate(up, from, pointer);
         }}
         onTouchStartCapture={(event) => {
-          downwardNavigation.current = null;
+          scrollNavigation.current = null;
           const viewport = scroller.current;
           if (!viewport || !event.touches.length) return;
           const touch = event.touches[0];
@@ -1430,8 +1527,8 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
           if (!up && contact.source !== "touch") return;
           const viewport = scroller.current;
           if (!viewport) return;
-          const from = up ? Math.max(viewport.scrollTop, lastScrollTop.current) : Math.min(viewport.scrollTop, lastScrollTop.current);
-          if (canScrollChat(viewport, event.target, up, from)) navigate(up, contact.top, contact);
+          const from = up ? Math.max(viewport.scrollTop, lastScroll.current.top) : Math.min(viewport.scrollTop, lastScroll.current.top);
+          if (canScrollChat(viewport, event.target, up, from)) navigate(up, up ? Math.max(from, contact.top) : contact.top, contact);
         }}
       >
       <Virtuoso
@@ -1447,13 +1544,18 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         itemContent={renderMessage}
         computeItemKey={(_index, message) => chatMessageKey(message)}
         itemsRendered={positionMeasuredOutput}
-        onScrollEnd={() => { if (!navigationContact.current) downwardNavigation.current = null; }}
+        onScrollEnd={() => {
+          if (navigationContact.current) return;
+          scrollNavigation.current = null;
+          contentObserver.current?.disconnect();
+        }}
         onScroll={(event) => {
           const viewport = event.currentTarget;
           const view = currentView.current;
           if (viewport !== scroller.current || !viewport.clientHeight || !view || !currentViewportView(view)) return;
-          const top = viewport.scrollTop;
-          const bottom = viewport.scrollHeight - viewport.clientHeight - top <= 4;
+          const sample = sampleScroll(viewport);
+          const { top } = sample;
+          const bottom = sample.maximum - top <= 4;
           const correction = position.current;
           if (!navigationContact.current && correction && currentPosition(correction) &&
             (correction.kind === "history" && correction.expectedTop !== undefined && correction.expectedTop !== top ||
@@ -1465,12 +1567,13 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
             retirePosition(correction);
           }
           if (navigationContact.current && navigationContact.current.source !== "scrollbar") navigationContact.current.top = Math.min(navigationContact.current.top, top);
-          if (!position.current && !navigationContact.current) {
-            const navigation = downwardNavigation.current;
-            if (navigation && (navigation.viewport !== viewport || performance.now() > navigation.until ||
-              !currentViewportView(navigation.view) || top < lastScrollTop.current)) {
-              downwardNavigation.current = null;
-            } else if (navigation && top > lastScrollTop.current) {
+          observeUpwardScroll(viewport, view, sample);
+          const navigation = scrollNavigation.current;
+          if (!position.current && !navigationContact.current && navigation?.direction === "down") {
+            if (navigation.viewport !== viewport || performance.now() > navigation.until ||
+              !currentViewportView(navigation.view) || top < lastScroll.current.top) {
+              scrollNavigation.current = null;
+            } else if (top > lastScroll.current.top) {
               navigation.until = performance.now() + 500;
               if (bottom && top > navigation.top) {
                 resumeVisibleFollowing();
@@ -1486,7 +1589,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
               readingHandoff.current = { view, anchor };
             }
           }
-          lastScrollTop.current = top;
+          lastScroll.current = sample;
         }}
         totalListHeightChanged={measuredOutput}
         followOutput={false}
