@@ -33,7 +33,7 @@ echo "Hooks installed. From now on, commits will run:"
 echo "  - eslint + typecheck (tsc -b --force) + vitest   (when web TS changes)"
 echo "  - ruff + mypy + full hermetic pytest + architecture advice   (when Python changes)"
 echo "  - test support import check (when Python changes, including scripts/)"
-echo "  - contracts.ts drift check   (when routes or pydantic models change)"
+echo "  - OpenAPI drift check        (when server Python, generator inputs, or contracts.ts change)"
 echo "  - docs index check         (when contracts, plans or their index change)"
 echo
 echo "During implementation, run focused checks; code commits require full checks (AGENTS.md)."

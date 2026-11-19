@@ -71,6 +71,7 @@ from .service_installation import InstallationOwner, read_service_profile
 from .session_manager import session_manager
 from .sessions.owner import SessionOwnerUnavailable
 from .submission_models import InputAdmissionNotReady
+from .transport_logging import protect_request_logs
 from .tunnel import CloudflareTunnel
 from .users import UserManager
 from .wiki import WikiError
@@ -81,6 +82,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+protect_request_logs()
 logger = logging.getLogger(__name__)
 
 

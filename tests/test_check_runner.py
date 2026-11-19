@@ -64,21 +64,38 @@ def test_cli_records_focused_pytest_as_a_separate_selection(monkeypatch, tmp_pat
     assert output == destination
 
 
-def test_focused_evidence_rejects_changes_to_an_ignored_test_file(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("edited", "symlink"), [
+    ("test_local.py", False), ("conftest.py", False), ("helper.py", False),
+    pytest.param("conftest.py", True, id="linked-conftest-content"),
+    pytest.param("helper.py", True, id="helper-retarget"),
+])
+def test_focused_evidence_rejects_changes_to_an_ignored_pytest_input(tmp_path, monkeypatch, edited, symlink):
     root = tmp_path / "repo"
-    target = root / "tests/.agents/test_local.py"
-    target.parent.mkdir(parents=True)
-    target.write_text('''from pathlib import Path
+    folder = root / "tests/.agents"
+    folder.mkdir(parents=True)
+    target = folder / "test_local.py"
+    (folder / "helper.py").write_text("VALUE = 1\n")
+    (folder / "conftest.py").write_text("import pytest\nfrom helper import VALUE\n\n@pytest.fixture\ndef value():\n    return VALUE\n")
+    dependency = folder / edited
+    change = 'with dependency.open("a") as source:\n        source.write("\\n# changed while pytest was running\\n")'
+    if symlink:
+        original = dependency.rename(folder / f"original-{edited}")
+        dependency.symlink_to(original.name)
+        if edited == "helper.py":
+            (folder / "alternate-helper.py").write_bytes(original.read_bytes())
+            change = 'dependency.unlink()\n    dependency.symlink_to("alternate-helper.py")'
+    target.write_text(f'''from pathlib import Path
 
-def test_edit():
-    with Path(__file__).open("a") as source:
-        source.write("\\n# changed while pytest was running\\n")
+def test_edit(value):
+    assert value == 1
+    dependency = Path(__file__).with_name({edited!r})
+    {change}
 ''')
     (root / ".gitignore").write_text(".venv/\n.agents/\n.pytest_cache/\n__pycache__/\n")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                     "commit", "--allow-empty", "-qm", "baseline"], cwd=root, check=True)
-    subprocess.run(["git", "check-ignore", "-q", str(target)], cwd=root, check=True)
+    subprocess.run(["git", "check-ignore", "-q", str(folder / edited)], cwd=root, check=True)
     pytest_bin = root / ".venv/bin/pytest"
     pytest_bin.parent.mkdir(parents=True)
     pytest_bin.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m pytest "$@"\n')
@@ -88,19 +105,23 @@ def test_edit():
     monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     output = tmp_path / "evidence"
-    monkeypatch.setattr(sys, "argv", ["check.sh", "--pytest-target", "tests/.agents/test_local.py::test_edit",
+    extra = ["--pytest-input", "tests/.agents/helper.py"] if edited == "helper.py" else []
+    monkeypatch.setattr(sys, "argv", ["check.sh", "--pytest-target", "tests/.agents/test_local.py::test_edit", *extra,
                                      "--output", str(output)])
 
     assert runner.main() == 1
     report = json.loads((output / "results.json").read_text())
     [focused] = report["gates"]
     assert focused["returncode"] == 0 and focused["counts"]["passed"] == 1
+    assert f"tests/.agents/{edited}" in focused["source_files"]
     assert report["inputs_changed"] and not report["success"]
 
 
 @pytest.mark.parametrize("arguments", [
     ("--pytest-target", "tests/"),
     ("--gate", "pytest", "--pytest-target", "tests/test_check_runner.py"),
+    ("--pytest-input", "tests/test_check_runner.py"),
+    ("--pytest-target", "tests/test_check_runner.py", "--pytest-input", "tests/"),
     ("--e2e", "--gate", "ruff"),
 ])
 def test_cli_rejects_invalid_selections_before_running_checks(monkeypatch, arguments):
@@ -251,13 +272,12 @@ def test_selection_environment_changes_verification_identity(tmp_path, monkeypat
     assert after["variables"]["PYTEST_ADDOPTS"] == "-k selected"
 
 
-@pytest.mark.parametrize("gate_id", ["pytest", "pytest-focused"])
-def test_environment_filtered_pytest_is_recorded_and_cannot_certify_requested_scope(tmp_path, fixed_inputs, monkeypatch, gate_id):
+def test_environment_filtered_focused_pytest_retains_the_actual_execution(tmp_path, fixed_inputs, monkeypatch):
     monkeypatch.setenv("PYTEST_ADDOPTS", "-k selected")
     source = tmp_path / "test_scope.py"
     source.write_text("def test_selected(): pass\ndef test_other(): pass\n")
     output = tmp_path / "evidence"
-    selection = runner.Gate(gate_id, "pytest", (sys.executable, "-m", "pytest", str(source), "-q"), tmp_path, "test scope", "pytest")
+    selection = runner.Gate("pytest-focused", "pytest", (sys.executable, "-m", "pytest", str(source), "-q"), tmp_path, "test scope", "pytest")
     assert runner.run_checks(tmp_path, [selection], output) == 1
     report = json.loads((output / "results.json").read_text())
     row = report["gates"][0]

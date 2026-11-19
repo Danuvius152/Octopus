@@ -34,8 +34,10 @@ _NATIVE_STEER_NOTICE = (
     ")"
 )
 
-INDEPENDENT_HUMAN_INPUT = ("json_extract(i.payload,'$.source')='human' "
-                           "AND json_extract(i.receipt,'$.disposition') IS NOT 'steered'")
+# Legacy message submissions stored the body without an operation object.
+HUMAN_MESSAGE = ("json_extract(i.payload,'$.source')='human' AND "
+                 "(json_type(i.payload,'$.operation') IS NULL OR json_extract(i.payload,'$.operation.kind')='message')")
+INDEPENDENT_HUMAN_INPUT = f"{HUMAN_MESSAGE} AND json_extract(i.receipt,'$.disposition') IS NOT 'steered'"
 
 
 def _submission(row) -> dict[str, Any]:
@@ -52,8 +54,8 @@ class ClientSubmissionsMixin(DatabaseBase):
     async def register_ticket_batch(self, session_id: str, origin_id: str) -> bool:
         async with self.transaction(write=True) as tx:
             updated = await tx.execute(
-                "UPDATE client_submissions SET payload=json_set(payload,'$.ticket_batch','registered') "
-                "WHERE session_id=? AND request_id=? AND json_extract(payload,'$.source')='human' "
+                "UPDATE client_submissions AS i SET payload=json_set(payload,'$.ticket_batch','registered') "
+                f"WHERE session_id=? AND request_id=? AND {INDEPENDENT_HUMAN_INPUT} "
                 "AND COALESCE(json_extract(payload,'$.ticket_batch'),'registered')='registered'",
                 (session_id, origin_id),
             )
@@ -62,8 +64,8 @@ class ClientSubmissionsMixin(DatabaseBase):
     async def ticket_batch_state(self, session_id: str, origin_id: str) -> str | None:
         async with self.transaction(write=False) as tx:
             row = await tx.fetch_one(
-                "SELECT json_extract(payload,'$.ticket_batch') FROM client_submissions "
-                "WHERE session_id=? AND request_id=? AND json_extract(payload,'$.source')='human'",
+                "SELECT json_extract(payload,'$.ticket_batch') FROM client_submissions i "
+                f"WHERE session_id=? AND request_id=? AND {INDEPENDENT_HUMAN_INPUT}",
                 (session_id, origin_id),
             )
             return row[0] if row else None
@@ -80,28 +82,48 @@ class ClientSubmissionsMixin(DatabaseBase):
                 (session_id, origin_id),
             )
 
-    async def conflicting_handoff(self, session_id: str, parent_request_id: str, native_id: str | None) -> str | None:
+    async def conflicting_handoff(self, session_id: str, batch_request_id: str,
+                                  parent_request_id: str, native_id: str | None) -> str | None:
+        """Block replay within the batch or native history after the Owner checks writer retirement."""
         async with self.transaction(write=False) as tx:
             row = await tx.fetch_one(
-                "SELECT json_extract(payload,'$.delivery_id') FROM client_submissions "
-                "WHERE session_id=? AND json_extract(payload,'$.source')='handoff' AND ("
-                "json_extract(payload,'$.handoff_from')=? OR delivery_state='unknown' OR "
-                "(execution_state IN ('pending','running','unknown') AND json_extract(payload,'$.fresh_native_id') IS NULL) OR "
-                "(json_extract(payload,'$.previous_native_id')=? AND json_extract(payload,'$.fresh_native_id') IS NOT NULL)) "
-                "ORDER BY rowid DESC LIMIT 1", (session_id, parent_request_id, native_id),
+                """
+                SELECT json_extract(i.payload,'$.delivery_id') FROM client_submissions i
+                LEFT JOIN client_submissions origin ON origin.session_id=i.session_id AND origin.request_id=:batch_id
+                    AND json_extract(origin.payload,'$.ticket_batch')='registered'
+                WHERE i.session_id=:session_id AND json_extract(i.payload,'$.source')='handoff'
+                    AND NOT (i.execution_state='withdrawn' AND i.delivery_state='none'
+                        AND json_extract(i.payload,'$.fresh_native_id') IS NULL
+                        AND NOT EXISTS (SELECT 1 FROM json_each(i.native_inputs)
+                            WHERE json_extract(value,'$.state') IN ('unknown','accepted')))
+                    AND (json_extract(i.payload,'$.handoff_from')=:parent_id
+                        OR (i.execution_state IN ('pending','running') AND json_extract(i.payload,'$.fresh_native_id') IS NULL)
+                        OR ((i.delivery_state='unknown' OR (i.execution_state='unknown'
+                            AND json_extract(i.payload,'$.fresh_native_id') IS NULL))
+                            AND NOT (origin.rowid IS NOT NULL AND i.rowid<origin.rowid AND :native_id IS NOT NULL
+                                AND json_extract(i.payload,'$.previous_native_id') IS NOT :native_id
+                                AND json_extract(i.payload,'$.fresh_native_id') IS NOT :native_id
+                                AND NOT EXISTS (SELECT 1 FROM json_each(i.native_inputs)
+                                    WHERE json_extract(value,'$.thread_id')=:native_id)
+                                AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id=i.session_id
+                                    AND m.terminal_request_id=i.request_id)))
+                        OR (json_extract(i.payload,'$.previous_native_id')=:native_id
+                            AND json_extract(i.payload,'$.fresh_native_id') IS NOT NULL))
+                ORDER BY i.rowid DESC LIMIT 1
+                """, {"batch_id": batch_request_id, "session_id": session_id, "parent_id": parent_request_id, "native_id": native_id},
             )
             return row[0] if row else None
 
     async def handoff_human_executions(self, session_id: str, origin_id: str) -> list[str] | None:
         """Locate every confirmed human update since the original request."""
         async with self.transaction(write=False) as tx:
-            origin = await tx.fetch_one("SELECT rowid FROM client_submissions WHERE session_id=? AND request_id=? "
-                                       "AND json_extract(payload,'$.source')='human'", (session_id, origin_id))
+            origin = await tx.fetch_one("SELECT rowid FROM client_submissions i WHERE session_id=? AND request_id=? "
+                                       f"AND {INDEPENDENT_HUMAN_INPUT}", (session_id, origin_id))
             if origin is None:
                 return None
             later = await tx.fetch_all(
                 "SELECT request_id,json_extract(receipt,'$.disposition'),execution_owner,delivery_state,execution_state "
-                "FROM client_submissions WHERE session_id=? AND rowid>? AND json_extract(payload,'$.source')='human' "
+                f"FROM client_submissions i WHERE session_id=? AND rowid>? AND {HUMAN_MESSAGE} "
                 "ORDER BY rowid", (session_id, origin[0]))
             carriers = {origin_id: None}
             for request_id, disposition, owner, delivery, state in later:
@@ -114,6 +136,21 @@ class ClientSubmissionsMixin(DatabaseBase):
                     return None
                 carriers[owner] = None
             return list(carriers)
+
+    async def answered_handoff_progress_ids(self, session_id: str, origin_id: str) -> set[str]:
+        """Read the nominations whose handoff received a fresh native input."""
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(
+                "SELECT i.payload FROM client_submissions i "
+                "WHERE i.session_id=? AND json_extract(i.payload,'$.source')='handoff' "
+                "AND i.rowid>(SELECT o.rowid FROM client_submissions o WHERE o.session_id=i.session_id AND o.request_id=?) "
+                "AND json_extract(i.payload,'$.fresh_native_id') IS NOT NULL "
+                "AND json_type(i.payload,'$.answered_progress_request_ids') IS NOT NULL",
+                (session_id, origin_id))
+            answered: set[str] = set()
+            for (payload,) in rows:
+                answered.update(decode_payload(json.loads(payload))["answered_progress_request_ids"])
+            return answered
 
     async def record_input_history(self, session_id: str, request_id: str, attempt_id: str,
                                    generation: str, backend: str, native_id: str | None,

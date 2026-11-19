@@ -186,3 +186,20 @@ async def test_publication_checks_native_input_correlations_without_backfilling(
     with pytest.raises(RuntimeError, match='invalid current native input evidence'):
         verify_storage(installation)
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize('progress_ids', [None, 'input', {'id': 'input'}, [''], ['input', 1], ['input', 'input']])
+async def test_publication_rejects_malformed_handoff_progress_ids(installation, progress_ids):
+    path = Path(installation.db_path)
+    payload = {
+        'source': 'handoff', 'operation': {'kind': 'message', 'content': 'Next ticket', 'attachment_ids': []},
+        'handoff_backend': 'codex', 'delivery_id': 'handoff-id', 'handoff_from': 'parent',
+        'previous_native_id': 'native-parent', 'knowledge': '{}', 'trusted_request': 'Original batch',
+        'answered_progress_request_ids': progress_ids,
+    }
+    with sqlite3.connect(path) as db:
+        db.execute('UPDATE client_submissions SET payload=?', (json.dumps(payload),))
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match='invalid current native input evidence'):
+        verify_storage(installation)
+    assert path.read_bytes() == before

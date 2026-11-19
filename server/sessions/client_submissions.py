@@ -60,12 +60,13 @@ async def execution_context(database: Database, session_id: str, original_row: d
     return execution.effective if execution else None
 
 
-async def confirmed_execution(database: Database, session_id: str, request_id: str) -> ConfirmedExecution | None:
-    """Recover the closed execution's confirmed contract, including human steer.
+async def confirmed_execution(database: Database, session_id: str, request_id: str,
+                              *, require_terminal: bool = True) -> ConfirmedExecution | None:
+    """Recover an execution's confirmed human inputs and effective contract.
 
-    Call after the original Wiki task has retired. A frame's persisted delivery
-    acknowledgment and original execution owner distinguish accepted additions
-    from queued, unsent or unconfirmed text. No latest-message inference applies.
+    Continuations require the original terminal. Handoff registration can inspect
+    the live carrier to resolve message identity. Both read the same persisted
+    delivery acknowledgments and verify the execution owner and message order.
     """
     from ..knowledge import AdmittedRequest, RequestRef, decode_context, revise
 
@@ -77,7 +78,7 @@ async def confirmed_execution(database: Database, session_id: str, request_id: s
         if not isinstance(original["payload"], dict):
             return None
         context = saved_context(session_id, original)
-        if (context is None or context.origin.user_id != owner or original["terminal"] is None
+        if (context is None or context.origin.user_id != owner or (require_terminal and original["terminal"] is None)
                 or original["delivery_state"] == "unknown"
                 or original["execution_owner"] != original["request_id"]):
             return None

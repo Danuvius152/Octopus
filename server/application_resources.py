@@ -19,6 +19,10 @@ def runtime_dir_for(app_dir: str) -> str:
     return app_dir.rstrip("/") + ".runtime"
 
 
+def application_addresses(app_dir: str) -> tuple[tuple[ResourceRole, str], ...]:
+    return ("code", app_dir), ("data", data_dir_for(app_dir)), ("runtime", runtime_dir_for(app_dir))
+
+
 @dataclass(frozen=True)
 class ApplicationResource:
     role: ResourceRole
@@ -29,7 +33,8 @@ class ApplicationResource:
     links: frozenset[Path]
 
 
-def _required_links(stored: Path) -> frozenset[Path]:
+def application_access_links(stored: Path) -> frozenset[Path]:
+    """Locate the link entries used by an application address at their physical parents."""
     links: set[Path] = set()
     pending, visited = [stored], set()
     while pending:
@@ -53,10 +58,7 @@ def application_resources(app_dir: str) -> tuple[ApplicationResource, ...]:
     Only missing paths permit non-strict resolution; other I/O errors propagate.
     """
     resources = []
-    family: tuple[tuple[ResourceRole, str], ...] = (
-        ("code", app_dir), ("data", data_dir_for(app_dir)), ("runtime", runtime_dir_for(app_dir)),
-    )
-    for role, address in family:
+    for role, address in application_addresses(app_dir):
         # Keep '..' until symlinks have been resolved. Lexical abspath/normpath
         # would change the target of an existing 'link/../resource' address.
         stored = Path(address).expanduser()
@@ -68,7 +70,8 @@ def application_resources(app_dir: str) -> tuple[ApplicationResource, ...]:
         except FileNotFoundError:
             content = Path(os.path.realpath(stored))
             present = False
-        resources.append(ApplicationResource(role, stored, stored.parent.resolve() / stored.name, content, present, _required_links(stored)))
+        resources.append(ApplicationResource(role, stored, stored.parent.resolve() / stored.name, content, present,
+                                             application_access_links(stored)))
     return tuple(resources)
 
 
@@ -99,7 +102,7 @@ def removal_order(resources: tuple[ApplicationResource, ...], links: set[Path]) 
         assert node is not None
         target = Path(os.readlink(link))
         target = target if target.is_absolute() else link.parent / target
-        for required in _required_links(target):
+        for required in application_access_links(target):
             dependency = effect(required)
             if dependency is not None and dependency != node:
                 dependencies[node].add(dependency)

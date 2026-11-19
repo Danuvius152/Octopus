@@ -1,49 +1,49 @@
 #!/bin/bash
-# Fail if web/src/api/contracts.ts has drifted from the FastAPI OpenAPI schema.
-#
-# contracts.ts is generated (`cd web && bun run generate:contracts`), but
-# nothing enforces regeneration — so a route or pydantic change can silently
-# leave the frontend compiling against stale types. Shared by
-# scripts/check.sh and the lefthook pre-commit hook.
-#
-# Generates into a temp dir and diffs. `bun run generate:contracts` writes
-# src/api/contracts.ts in place, so invoking it here would mean a *check*
-# mutated a tracked file.
-
-set -uo pipefail
+# Compare generated types in the checkout or in the exact staged source snapshot.
+set -euo pipefail
 
 cd "$(dirname "$0")/.."
-ROOT="$PWD"
-
-if [ -d "$HOME/.nvm/versions/node" ]; then
-  export PATH="$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | sort -V | tail -1)/bin:$PATH"
-fi
+root="$PWD"
+. ./scripts/toolchain-env.sh
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+tmp="$(cd "$tmp" && pwd -P)"
+trap 'rm -rf -- "$tmp"' EXIT
 
-if ! "$ROOT/.venv/bin/python" "$ROOT/scripts/dump-openapi.py" > "$tmp/openapi.json"; then
-  echo "could not dump the OpenAPI schema (does server.main import cleanly?)" >&2
+source_root="$tmp/source"
+tree=""
+if [[ "${1:-}" == --staged ]]; then
+  cp -- "$(git rev-parse --git-path index)" "$tmp/index"
+  tree="$(GIT_INDEX_FILE="$tmp/index" git write-tree)"
+fi
+.venv/bin/python scripts/snapshot-contract-source.py "$source_root" "$tree"
+
+contract="web/src/api/contracts.ts"
+if [[ ! -f "$source_root/$contract" || -L "$source_root/$contract" ]]; then
+  echo "$contract is missing or is not a regular file. Regenerate it and include it with the schema changes." >&2
+  exit 1
+fi
+expected="$tmp/expected.ts"
+cp -- "$source_root/$contract" "$expected"
+
+generated="$tmp/contracts.ts"
+(
+  cd "$source_root/web"
+  TMPDIR="$tmp" OCTOPUS_CONTRACTS_TOOLCHAIN="$root" OCTOPUS_CONTRACTS_OUTPUT="$generated" bun run generate:contracts
+)
+if [[ ! -f "$generated" ]]; then
+  echo "generate:contracts did not produce the requested temporary output." >&2
   exit 1
 fi
 
-if ! (cd "$ROOT/web" && ./node_modules/.bin/openapi-typescript "$tmp/openapi.json" -o "$tmp/contracts.ts" >/dev/null 2>&1); then
-  echo "openapi-typescript failed — is web/node_modules installed?" >&2
-  exit 1
-fi
-
-if diff -q "$ROOT/web/src/api/contracts.ts" "$tmp/contracts.ts" >/dev/null 2>&1; then
+if cmp -s "$expected" "$generated"; then
   echo "contracts.ts is in sync with the OpenAPI schema"
   exit 0
 fi
 
-cat >&2 <<MSG
-contracts.ts is STALE — the OpenAPI schema and the committed types disagree.
-
-Regenerate with:
-    cd web && bun run generate:contracts
-
-Diff (committed vs freshly generated), first 40 lines:
+cat >&2 <<'MSG'
+contracts.ts is STALE. Regenerate it with 'cd web && bun run generate:contracts'.
+When committing, stage the generated types along with the schema inputs.
 MSG
-diff "$ROOT/web/src/api/contracts.ts" "$tmp/contracts.ts" | head -40 >&2
+diff -u --label "$contract" --label "freshly generated $contract" "$expected" "$generated" | head -n 40 >&2 || true
 exit 1

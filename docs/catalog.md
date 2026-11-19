@@ -81,6 +81,7 @@
 | [跨会话工作视图与外部输入](plans/agent-router-and-channels.md) | proposed | 统一工作查询和外部渠道分派尚未定义。 |
 | [通用资源 CLI 缺口](plans/octo-cli.md) | proposed | 当前 octopus CLI 尚不是通用 octo 资源管理接口。 |
 | [原生运行时的能力边界](plans/runtime-execution-scope.md) | paused | 任意 post-final 递归和额外实机核验未纳入当前承诺。 |
+| [聊天文件链接与预览](plans/chat-file-preview.md) | paused | 聊天文件链接与 `/showme` 共用预览和行号定位。 |
 
 <!-- END plans-index -->
 

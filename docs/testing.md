@@ -117,6 +117,13 @@ Use `--pytest-target <file-or-node-id>` for serial hermetic pytest on explicit
 Python test files or node IDs under `tests/`. Repeat the option for multiple
 targets and add `--gate` options for any other checks needed. The runner records
 this pytest scope under `pytest-focused` with its own JUnit report.
+Use `--pytest-input <file>` for each ignored helper or data file the selected
+tests depend on. The path must name a file within the checkout. The runner
+includes these files and the targets' ancestor `conftest.py` paths in the
+fingerprint and lists those paths under `source_files` for the focused gate.
+Each snapshot follows links for these paths inside the checkout and records the
+resolved path and contents. A link to a path outside the checkout invalidates
+the evidence.
 
 Use a new output directory outside the worktree, preferably in the task's
 account-workspace directory, or use a Git-ignored path inside the worktree.
@@ -156,16 +163,19 @@ and make otherwise successful execution fail evidence generation. Gate exit
 codes and failed reports remain available without being rewritten as passed.
 
 Input records include HEAD, tracked and non-ignored untracked source contents,
-explicit pytest target files, file modes and symlink targets, configuration
+the focused pytest inputs above, file modes and symlink targets, configuration
 hashes, Python's actual installed packages, the installed frontend dependency
-tree and tool versions. Only named non-secret environment selectors are
+tree and tool versions. Treat focused runs with undeclared ignored dependencies
+as observations of that run. Only named non-secret environment selectors are
 included. Changed before/after inputs make the run unusable as passing evidence.
 Keep inputs fixed throughout execution. Matching endpoint hashes cannot detect
 an intermediate edit that was later reverted, and package versions establish
 the inventory, with relevance and reuse determined by the policy above.
-Inherited `PYTEST_ADDOPTS` is recorded with the effective scope and input identity.
-Unset it for full or focused pytest acceptance evidence. The runner retains the
-actual execution and exit code when inherited options invalidate that evidence.
+The full pytest gate refuses to start pytest when `PYTEST_ADDOPTS`,
+`PYTEST_PLUGINS` or `PYTEST_DISABLE_PLUGIN_AUTOLOAD` is set to a nonempty value.
+Unset the variable named in the refusal to certify the full selection. Focused
+pytest runs with inherited `PYTEST_ADDOPTS` retain the actual execution and exit
+code, and the runner marks their requested scope uncertified.
 
 Reuse installed tools, browser binaries and caches. Provision a missing required
 version once; isolate mutable state rather than reinstalling dependencies.
@@ -261,9 +271,13 @@ tools: run the verifier from the verification environment with `--python`
 pointing to the actual service interpreter. Rebuilding dependencies belongs to
 [environment recovery](local-wsl.md#环境重建), not routine validation.
 
-The full backend gate uses four pytest-xdist workers grouped by file, with worker
-restart disabled. Focused development checks and live-provider checks stay serial;
-parallelism is selected by the full-gate commands, not global pytest `addopts`.
+The pre-commit pytest hook runs `./scripts/check.sh --gate pytest`. The shared
+gate reads its pytest configuration from `pyproject.toml` and uses four
+pytest-xdist workers grouped by file, with worker restart disabled.
+Focused development checks and live-provider checks stay serial. To save
+structured evidence from the hook, set `OCTOPUS_PYTEST_OUTPUT` to a new evidence
+directory. When pytest runs, the summary displays its nonzero exit code and the
+evidence directory retains the native report and execution log when available.
 
 **All required correctness checks must pass before committing**, applying the
 evidence-reuse rules above. Release adds the installation-specific checks below.
@@ -292,7 +306,7 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 
 | Suite | Command | Scope and execution boundary |
 |-------|---------|------------------------------|
-| Backend hermetic | `.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -q` | Full correctness for **Claude Code and Codex**, including simulated CLI processes, Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
+| Backend hermetic | `./scripts/check.sh --gate pytest` | Full correctness for **Claude Code and Codex**, including simulated CLI processes, Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
 | Wiki performance (opt-in) | `.venv/bin/pytest tests/ --run-wiki-perf -m wiki_perf -v -s` | Large-dataset projection and grant-lookup cost measurements. Outside default full checks and release gates; small correctness and query-boundary checks remain in the hermetic tier. |
 | Live Codex pytest | `.venv/bin/python scripts/codex_live.py --suite pytest --output "$CODEX_EVIDENCE_DIR"` | Full live Codex selection through the explicitly selected existing login; excludes device authentication and optional evaluation/performance tiers. Set `CODEX_HOME` and a new evidence directory using [the common acceptance entry](local-wsl.md#live-凭据与网络). |
 | Supervisor integration | `.venv/bin/pytest tests/ --run-real -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |

@@ -15,11 +15,17 @@ from mcp.client.streamable_http import streamable_http_client
 from server.bg_tasks import BgTaskManager
 from server.database import Database
 from server.deps import get_session_manager
+from server.fork_helpers import render_replay_history, select_lost_history
 from server.knowledge import capture, derive
 from server.mcp_identity import McpScope, mint
+from server.models import MessageContent
 from server.routers.sessions import get_submission_status
 from server.sessions import SessionManager
-from server.sessions.client_submissions import submission_status, submit_client_message
+from server.sessions.client_submissions import (
+    input_digest,
+    submission_status,
+    submit_client_message,
+)
 from server.sessions.handoff import HandoffPointers, begin_ticket_batch, ticket_handoff
 from server.sessions.submission import (
     ReturnBody,
@@ -27,6 +33,8 @@ from server.sessions.submission import (
     ReturnTarget,
     SubmissionReceipt,
 )
+from server.storage_verification import verify_main
+from server.submission_models import SubmissionConflict
 from server.wiki import job_events, job_notifications
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs
@@ -40,6 +48,7 @@ from tests.native_app_server import (
     ROOT,
     active_root,
     inject,
+    item,
     until,
     wait_until,
     wire_frames,
@@ -113,6 +122,7 @@ async def test_accepted_ticket_starts_next_in_new_thread_with_original_scope(nat
     assert starts[-1]["threadId"] != starts[-2]["threadId"]
     prompts = str(starts[-1]["input"])
     assert trusted in prompts and "issues/B.md" in prompts and sentinel not in prompts
+    assert "Read the accepted ticket for its checks and review" not in prompts
     assert manager.get_session(chat.id) is chat and Path(chat.working_dir) == tmp_path
     assert sentinel in [m["content"] for m in await database.load_messages(chat.id)]
     next_boundary = HandoffPointers(spec="spec.md", accepted_ticket="issues/B.md", candidate="fixed-B", next_work="final acceptance")
@@ -125,6 +135,129 @@ async def test_accepted_ticket_starts_next_in_new_thread_with_original_scope(nat
     final = [f["params"] for f in wire_frames(tmp_path, finished=True) if f.get("method") == "turn/start"][-1]
     assert final["threadId"] != starts[-1]["threadId"]
     assert "final acceptance" in str(final["input"]) and trusted in str(final["input"]) and "fixed-A" not in str(final["input"])
+
+
+async def test_answered_progress_stays_at_its_ticket_across_handoffs_and_returns(native_runtime, tmp_path):
+    manager, database, chat, mode, _, _ = native_runtime
+    mode[0] = "control_output"
+    root = "Complete the authorized batch."
+    migration = "Resolve paths from the development checkout."
+    progress = "现在进展怎么样？卡在哪儿了？"
+    mixed = "How is it going? Keep the release paused."
+    original = await manager.start_message(chat.id, root)
+    await until(lambda: chat._steer_open)
+    scope = live_scope(chat)
+    await begin_ticket_batch(manager, scope)
+
+    def starts():
+        return [frame["params"] for frame in wire_frames(tmp_path) if frame.get("method") == "turn/start"]
+
+    def finish(turn_number):
+        inject(tmp_path, {"method": "turn/completed", "params": {
+            "threadId": starts()[-1]["threadId"], "turn": {"id": f"turn-{turn_number}", "status": "completed"},
+        }})
+
+    async def admit_review(target):
+        async def material():
+            return ReturnBody(f"Completed review {target.delivery_id}")
+
+        returned = await manager.admit_return(target, prepare=material)
+        assert isinstance(returned, SubmissionReceipt)
+        await until(lambda: chat._steer_open)
+        return returned
+
+    async def steer(client_id, text):
+        incoming = await submit_client_message(manager, chat.id, text, [], client_id, wiki_mode=None)
+        assert incoming["disposition"] == "steered"
+
+        async def confirmed():
+            observed = await submission_status(manager, chat.id, client_id)
+            return observed["execution"]["delivery_state"] == "confirmed"
+
+        await wait_until(confirmed)
+
+    review_a = ReturnTarget(chat.id, "delegation", "review-a", scope.work_id,
+                           derive(capture(chat, scope, prompt="Review A"), "Review A"))
+    await steer("migration", migration)
+    await steer("progress", progress)
+    await steer("mixed", mixed)
+    inject(tmp_path, item(ROOT, "turn-1", "progress-answer", "The review found a gap which is now fixed."))
+    first = HandoffPointers(**(POINTERS.model_dump() | {"answered_progress_questions": (progress,)}))
+    withdrawn = await ticket_handoff(manager, scope, "withdrawn", first)
+    assert await manager.cancel_request(chat.id, withdrawn["request_id"])
+    finish(1)
+    assert (await original.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, chat.id)
+    review_a_return = await admit_review(review_a)
+    assert progress in str(starts()[-1]["input"])
+    scope = live_scope(chat)
+    with pytest.raises(ValueError, match="exactly match one confirmed human steer"):
+        await ticket_handoff(manager, scope, "batch-A", POINTERS.model_copy(update={"answered_progress_questions": (root,)}))
+    registered = await ticket_handoff(manager, scope, "batch-A", first)
+    assert registered == await ticket_handoff(manager, scope, "batch-A", first)
+    with pytest.raises(SubmissionConflict):
+        await ticket_handoff(manager, scope, "batch-A", POINTERS)
+    finish(2)
+    assert (await review_a_return.wait()).outcome.status == "success"
+    await until(lambda: chat._steer_open)
+    assert "batch-A: started" in (await handoff_state(manager, chat))["message"]
+    assert "issues/B.md" in str(starts()[-1]["input"])
+
+    scope = live_scope(chat)
+    review_b = ReturnTarget(chat.id, "delegation", "review-b", scope.work_id,
+                           derive(capture(chat, scope, prompt="Review B"), "Review B"))
+    finish(3)
+    await wait_dispatch_idle(manager, chat.id)
+    review_b_return = await admit_review(review_b)
+    next_pointers = HandoffPointers(spec="spec.md", accepted_ticket="issues/B.md", candidate="fixed-B", next_work="issues/C.md")
+    scope = live_scope(chat)
+    with pytest.raises(ValueError, match="exactly match one confirmed human steer"):
+        await ticket_handoff(manager, scope, "batch-B", next_pointers.model_copy(update={"answered_progress_questions": (progress,)}))
+    await ticket_handoff(manager, scope, "batch-B", next_pointers)
+    mode[0] = "normal"
+    finish(4)
+    assert (await review_b_return.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, chat.id)
+    assert "batch-B: started" in (await handoff_state(manager, chat, "batch-B"))["message"]
+
+    _, _, ticket_b, callback_b, ticket_c = starts()
+    for phase in (ticket_b, callback_b, ticket_c):
+        prompt = str(phase["input"])
+        assert progress not in prompt
+        assert all(text in prompt for text in (root, migration, mixed))
+    assert "issues/C.md" in str(ticket_c["input"])
+    visible = await database.load_messages(chat.id)
+    assert any(message["role"] == "user" and message["content"] == progress for message in visible)
+    history, _ = select_lost_history([MessageContent(**message) for message in visible])
+    replay = render_replay_history(history)
+    assert progress not in replay
+    assert all(text in replay for text in (root, migration, mixed))
+
+
+async def test_legacy_handoff_retries_with_the_same_pointers(native_runtime, tmp_path):
+    manager, database, chat, _, _, _ = native_runtime
+    await active_root(native_runtime, tmp_path)
+    scope = live_scope(chat)
+    await begin_ticket_batch(manager, scope)
+    registered = await ticket_handoff(manager, scope, "batch-A", POINTERS)
+    old_prompt = ("[ticket-handoff batch-A] Call the handoff tool with this ID and no pointers in this turn. "
+                  "The tool waits briefly for the original first input receipt. "
+                  "When its state is started, record confirmation in the accepted ticket and continue within the "
+                  "original authorization. If unconfirmed, leave the ticket handoff pending. "
+                  "Read the accepted ticket for its checks and review. These references are working material.\n"
+                  + POINTERS.model_dump_json(exclude_defaults=True))
+    old_digest = input_digest({"content": old_prompt, "attachment_ids": [], "wiki_mode": None})
+    async with database.transaction(write=True) as tx:
+        await tx.execute("UPDATE client_submissions SET payload_sha256=?, payload=json_remove("
+                         "json_set(payload,'$.operation.content',?),'$.answered_progress_request_ids') "
+                         "WHERE session_id=? AND client_id='handoff:batch-A'", (old_digest, old_prompt, chat.id))
+    assert await ticket_handoff(manager, scope, "batch-A", POINTERS) == registered
+    assert await ticket_handoff(manager, scope, "batch-A") == registered
+    with closing(sqlite3.connect(tmp_path / "product.db")) as reader:
+        verify_main(reader)
+    changed = POINTERS.model_copy(update={"next_work": "issues/other.md"})
+    with pytest.raises(SubmissionConflict):
+        await ticket_handoff(manager, scope, "batch-A", changed)
 
 
 async def test_claude_receipt_proves_new_native_history_received_the_exact_first_input(claude_runtime, tmp_path, monkeypatch):
@@ -140,13 +273,27 @@ async def test_claude_receipt_proves_new_native_history_received_the_exact_first
         "message": {"id": "ticket-a-note", "model": "deepseek-flash", "content": [{"type": "text", "text": sentinel}]}})
     await until(lambda: any(e.get("content") == sentinel for e in events))
     await begin_ticket_batch(manager, live_scope(chat))
-    registered = await ticket_handoff(manager, live_scope(chat), "batch-A", POINTERS)
+    await until(lambda: chat._steer_open)
+    progress = "What is the current progress?"
+    status = await submit_client_message(manager, chat.id, progress, [], "progress-a", wiki_mode=None)
+    assert status["disposition"] == "steered"
+
+    async def progress_confirmed():
+        observed = await submission_status(manager, chat.id, "progress-a")
+        return observed["execution"]["delivery_state"] == "confirmed"
+
+    await wait_until(progress_confirmed)
+    claude_inject(tmp_path, {"type": "assistant", "session_id": SID, "user_message_uuid": first["input"]["uuid"],
+        "message": {"id": "progress-a-answer", "model": "deepseek-flash",
+                    "content": [{"type": "text", "text": "Ticket A passed its checks."}]}})
+    pointers = POINTERS.model_copy(update={"answered_progress_questions": (progress,)})
+    registered = await ticket_handoff(manager, live_scope(chat), "batch-A", pointers)
     assert registered["state"] == "registered"
     plan.write_text(json.dumps({"save_input_history": True, "hold_before_history": True, "hold_after_history": True}))
     claude_inject(tmp_path, {"type": "result", "session_id": SID, "subtype": "success", "is_error": False,
                              "user_message_uuid": first["input"]["uuid"]})
     assert (await active.wait()).outcome.status == "success"
-    first, second = await claude_inputs(tmp_path, 2)
+    first, _, second = await claude_inputs(tmp_path, 3)
     backend = chat._run.backend
     record_input = backend.record_installed_input
     checked = asyncio.Event()
@@ -174,7 +321,7 @@ async def test_claude_receipt_proves_new_native_history_received_the_exact_first
     finally:
         (tmp_path / "claude-save-input").touch()
         await api.stop()
-    assert len(await claude_inputs(tmp_path, 2)) == 2
+    assert len(await claude_inputs(tmp_path, 3)) == 3
     plan.write_text(json.dumps({"save_input_history": True}))
     # An untagged result can carry a contradictory provider ID. It cannot
     # supersede the ID matched to the opening input in the saved history.
@@ -182,7 +329,7 @@ async def test_claude_receipt_proves_new_native_history_received_the_exact_first
     await wait_dispatch_idle(manager, chat.id)
     assert second["pid"] != first["pid"] and "--resume" not in second["argv"]
     prompt = second["input"]["message"]["content"]
-    assert "issues/B.md" in prompt and "stop before release" in prompt and sentinel not in prompt
+    assert "issues/B.md" in prompt and "stop before release" in prompt and sentinel not in prompt and progress not in prompt
     assert chat.claude_session_id == "fresh-claude-B"
     assert "batch-A: started" in (await handoff_state(manager, chat))["message"]
     assert sentinel in [m["content"] for m in await database.load_messages(chat.id)]
@@ -198,17 +345,18 @@ async def test_claude_receipt_proves_new_native_history_received_the_exact_first
     continued = await manager.start_message(chat.id, "Continue on B after history loss")
     assert (await continued.wait()).outcome.recovery["stale_session"] == 1
     await wait_dispatch_idle(manager, chat.id)
-    recovered = (await claude_inputs(tmp_path, 3))[-1]["input"]["message"]["content"]
+    recovered = (await claude_inputs(tmp_path, 4))[-1]["input"]["message"]["content"]
     assert "<session-history" in recovered and "issues/B.md" in recovered and sentinel not in recovered
-    assert "stop before release" in recovered
+    assert "stop before release" in recovered and progress not in recovered
     visible = await database.load_messages(chat.id)
+    assert any(m["content"] == progress for m in visible)
     point = next(m["seq"] for m in visible if m.get("content") == "Continue on B after history loss")
     child = await manager.fork_session(chat.id, point, user_id=chat.user_id)
     assert sentinel in [m["content"] for m in await database.load_messages(child.id)]
     assert (await (await manager.start_message(child.id, "Continue the fork")).wait()).outcome.status == "success"
-    forked = (await claude_inputs(tmp_path, 4))[-1]["input"]["message"]["content"]
+    forked = (await claude_inputs(tmp_path, 5))[-1]["input"]["message"]["content"]
     assert "<fork-history" in forked and "issues/B.md" in forked and sentinel not in forked
-    assert "stop before release" in forked
+    assert "stop before release" in forked and progress not in forked
 
 
 @pytest.mark.parametrize("control", ["stop", "human"])
@@ -275,6 +423,146 @@ async def test_claude_success_without_saved_first_input_leaves_original_handoff_
     receipt = await handoff_state(manager, chat)
     assert observed["request_id"] == receipt["request_id"] and "batch-A: unknown" in receipt["message"]
     assert not receipt["execution"]["recoverable_input"] and len(await claude_inputs(tmp_path, 2)) == 2
+
+
+async def test_retired_unknown_handoff_does_not_block_a_new_batch(claude_runtime, tmp_path, monkeypatch):
+    manager, database, chat, _, _ = claude_runtime
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "isolated-claude"))
+    (tmp_path / "claude-fresh-ids.json").write_text(json.dumps([SID, "unconfirmed-B", "new-C", "fresh-D"]))
+    plan = tmp_path / "claude-plan.json"
+    plan.write_text(json.dumps({"hold": True}))
+    original = await manager.start_message(chat.id, "Implement A and B")
+    first, = await claude_inputs(tmp_path, 1)
+    await until(lambda: chat.claude_session_id == SID)
+    await begin_ticket_batch(manager, live_scope(chat))
+    old = await ticket_handoff(manager, live_scope(chat), "batch-A", POINTERS)
+    plan.write_text(json.dumps({"failure": True}))
+    claude_inject(tmp_path, {"type": "result", "session_id": SID, "subtype": "success", "is_error": False,
+                             "user_message_uuid": first["input"]["uuid"]})
+    assert (await original.wait()).outcome.status == "success"
+    await claude_inputs(tmp_path, 2)
+    await wait_dispatch_idle(manager, chat.id)
+    assert chat._run.backend is None and chat.claude_session_id is None
+    assert (await handoff_state(manager, chat))["execution"]["state"] == "unknown"
+    assert await database.ticket_batch_state(chat.id, original.request_id) == "registered"
+
+    plan.write_text(json.dumps({"hold": True}))
+    new = await manager.start_message(chat.id, "I reviewed the failed A/B batch. Start a separate batch for C and D.")
+    _, _, third = await claude_inputs(tmp_path, 3)
+    await until(lambda: chat.claude_session_id == "new-C")
+    scope = live_scope(chat)
+    assert (await begin_ticket_batch(manager, scope))["original_request_id"] == new.request_id
+    assert await database.conflicting_handoff(chat.id, new.request_id, new.request_id, SID) == "batch-A"
+    pointers = HandoffPointers(spec="new-spec.md", accepted_ticket="issues/C.md", candidate="fixed-C", next_work="issues/D.md")
+    assert (await ticket_handoff(manager, scope, "batch-C", pointers))["state"] == "registered"
+    assert (await ticket_handoff(manager, scope, "batch-A"))["state"] == "unknown"
+    plan.write_text(json.dumps({"save_input_history": True}))
+    claude_inject(tmp_path, {"type": "result", "session_id": "new-C", "subtype": "success", "is_error": False,
+                             "user_message_uuid": third["input"]["uuid"]})
+    assert (await new.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, chat.id)
+    past = await handoff_state(manager, chat)
+    assert past["request_id"] == old["request_id"] and past["execution"]["state"] == "unknown"
+    assert "batch-C: started" in (await handoff_state(manager, chat, "batch-C"))["message"]
+    inputs = await claude_inputs(tmp_path, 4)
+    assert len(inputs) == 4 and "issues/D.md" in inputs[-1]["input"]["message"]["content"]
+
+
+async def test_new_codex_batch_cannot_handoff_from_the_old_unknown_target_thread(native_runtime, tmp_path):
+    manager, database, chat, mode, _, _ = native_runtime
+    mode[0] = "control_output"
+    original = await manager.start_message(chat.id, "Implement A and B")
+    await until(lambda: chat._steer_open)
+    await begin_ticket_batch(manager, live_scope(chat))
+    old = await ticket_handoff(manager, live_scope(chat), "batch-A", POINTERS)
+    mode[0] = "start_internal_error"
+    inject(tmp_path, {"method": "turn/completed", "params": {"threadId": ROOT, "turn": {"id": "turn-1", "status": "completed"}}})
+    assert (await original.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, chat.id)
+    stored = await database.get_submission_for_request(chat.id, old["request_id"])
+    assert stored["terminal"] is not None and stored["delivery_state"] == "unknown"
+    assert not stored["payload"].get("fresh_native_id")
+    thread = stored["native_inputs"][-1]["thread_id"]
+    assert thread != ROOT and thread == chat.claude_session_id and chat._run.backend is None
+
+    mode[0] = "control_output"
+    new = await manager.start_message(chat.id, "Start a separate batch for C and D")
+    await until(lambda: chat._steer_open)
+    assert [f for f in wire_frames(tmp_path) if f.get("method") == "thread/resume"][-1]["params"]["threadId"] == thread
+    scope = live_scope(chat)
+    assert (await begin_ticket_batch(manager, scope))["original_request_id"] == new.request_id
+    with pytest.raises(ValueError, match="Existing handoff batch-A blocks this decision"):
+        await ticket_handoff(manager, scope, "batch-C", POINTERS)
+    observed = await ticket_handoff(manager, scope, "batch-A")
+    assert observed["request_id"] == old["request_id"] and observed["state"] == "unknown"
+
+
+@pytest.mark.parametrize("handoff_order", ["before-compact", "after-compact", "no-handoff"])
+async def test_manual_compact_preserves_the_batch_and_waits_for_its_active_return(native_runtime, tmp_path, handoff_order):
+    manager, database, chat, mode, _, _ = native_runtime
+    mode[0] = "control_output"
+    original = await manager.start_message(chat.id, "Complete the A/B batch")
+    await until(lambda: chat._steer_open)
+    scope = live_scope(chat)
+    await begin_ticket_batch(manager, scope)
+    owned = derive(capture(chat, scope, prompt="Review A"), "Review A")
+    review = ReturnTarget(chat.id, "delegation", "review-before-compact", scope.work_id, owned)
+
+    async def material():
+        return ReturnBody("Finished review of A")
+
+    inject(tmp_path, {"method": "turn/completed", "params": {"threadId": ROOT, "turn": {"id": "turn-1", "status": "completed"}}})
+    assert (await original.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, chat.id)
+    callback = await manager.admit_return(review, prepare=material)
+    assert isinstance(callback, SubmissionReceipt)
+    await until(lambda: chat._steer_open)
+    scope = live_scope(chat)
+    if handoff_order == "before-compact":
+        assert (await ticket_handoff(manager, scope, "batch-A", POINTERS))["state"] == "registered"
+    compact = await manager.start_compact(chat.id, client_request_id="keep-batch-compact")
+    current = manager._session_owner(chat).runtime.current
+    assert current is not None and current.request.request_id == callback.request_id and not current.interrupted
+    assert chat._ticket_batch_request_id == original.request_id
+    assert await database.handoff_human_executions(chat.id, original.request_id) == [original.request_id]
+    assert not (tmp_path / "native-compacts.jsonl").exists()
+    if handoff_order == "after-compact":
+        assert (await ticket_handoff(manager, scope, "batch-A", POINTERS))["state"] == "registered"
+
+    mode[0] = "compact_ack_first"
+    inject(tmp_path, {"method": "turn/completed", "params": {"threadId": ROOT, "turn": {"id": "turn-2", "status": "completed"}}})
+    assert (await callback.wait()).outcome.status == "success"
+    assert (await compact.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, chat.id)
+    assert chat._ticket_batch_request_id == original.request_id
+    assert await database.handoff_human_executions(chat.id, original.request_id) == [original.request_id]
+    if handoff_order != "no-handoff":
+        assert "batch-A: started" in (await handoff_state(manager, chat))["message"]
+        methods = [frame["method"] for frame in wire_frames(tmp_path)
+                   if frame.get("method") in {"turn/start", "thread/compact/start"}]
+        assert methods == ["turn/start", "turn/start", "thread/compact/start", "turn/start"]
+        return
+
+    mode[0] = "normal"
+    late = ReturnTarget(chat.id, "delegation", "review-after-compact", review.work_id, owned)
+    returned = await manager.admit_return(late, prepare=material)
+    assert isinstance(returned, SubmissionReceipt)
+    assert (await returned.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, chat.id)
+    stored = Database(str(copy_product_database(tmp_path, "batch-after-compact")))
+    await stored.initialize()
+    restored = SessionManager()
+    try:
+        await restored.initialize(stored, previous_writers_retired=True)
+        restored_chat = restored.get_session(chat.id)
+        assert restored_chat._ticket_batch_request_id == original.request_id
+        await restored.archive_session(chat.id, replace=False)
+        await restored.unarchive_session(chat.id, chat.user_id)
+        await restored.interrupt(chat.id)
+        assert await stored.ticket_batch_state(chat.id, original.request_id) == "stopped"
+    finally:
+        await restored.close_session_owners()
+        await stored.close()
 
 
 async def test_return_can_retry_if_a_registered_handoff_is_withdrawn(native_runtime, tmp_path):
@@ -425,8 +713,17 @@ async def test_claude_handoff_restart_distinguishes_claim_before_write_from_poss
             assert f"batch-A: {expected}" in status["message"] and not status["execution"]["recoverable_input"]
             assert restored.dispatch_snapshot(chat.id)["items"] == []
             if expected != "started":
-                conflict = await stored.conflicting_handoff(chat.id, "a-new-human-request", "a-new-native-history")
+                conflict = await stored.conflicting_handoff(chat.id, active.request_id, "different-return", "different-history")
                 assert conflict == ("batch-A" if expected == "unknown" else None)
+            if expected == "unknown":
+                original = await stored.get_submission_for_request(chat.id, registered["request_id"])
+                assert original["terminal"] is None
+                new_origin = "later-independent-origin"
+                await stored.admit_client_submission(chat.id, new_origin, "digest", new_origin, payload={
+                    "source": "human", "operation": {"kind": "message", "content": "C and D", "attachment_ids": []},
+                }, receipt={"accepted": True, "disposition": "accepted"})
+                assert await stored.register_ticket_batch(chat.id, new_origin)
+                assert await stored.conflicting_handoff(chat.id, new_origin, new_origin, "different-history") == "batch-A"
         finally:
             await restored.close_session_owners()
             await stored.close()
@@ -451,6 +748,8 @@ async def test_confirmed_steer_survives_handoff_and_late_background_output_stays
         material = "A-background-material"
         job = await background.start_task(session_id=chat.id, working_dir=str(tmp_path), command=f"echo {material}",
             scope=scope, owned_context=derive(capture(chat, scope, prompt="Read earlier evidence"), "Read evidence"))
+        registered = await ticket_handoff(manager, scope, "before-steer", POINTERS)
+        assert registered["state"] == "registered"
         correction = "Only handle ticket B. Leave deployment paused."
         accepted = await submit_client_message(manager, chat.id, correction, [], "narrow", wiki_mode=None)
         assert accepted["disposition"] == "steered"
@@ -458,11 +757,15 @@ async def test_confirmed_steer_survives_handoff_and_late_background_output_stays
             observed = await submission_status(manager, chat.id, "narrow")
             return observed["execution"]["delivery_state"] == "confirmed"
         await wait_until(confirmed)
+        withdrawn = await ticket_handoff(manager, live_scope(chat), "before-steer")
+        assert withdrawn["request_id"] == registered["request_id"] and withdrawn["state"] == "withdrawn"
+        assert await ticket_handoff(manager, live_scope(chat), "before-steer", POINTERS) == withdrawn
         assert (await ticket_handoff(manager, live_scope(chat), "batch-A", POINTERS))["state"] == "registered"
         mode[0] = "normal"
         (tmp_path / "native-finish").touch()
         await wait_dispatch_idle(manager, chat.id)
         assert "batch-A: started" in (await handoff_state(manager, chat))["message"]
+        assert "before-steer: withdrawn" in (await handoff_state(manager, chat, "before-steer"))["message"]
         release.set()
         async def retained():
             record = await background.get_task(job.id)

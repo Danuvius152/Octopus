@@ -1,6 +1,11 @@
 """Complete account transfer preserves unfinished application cleanup safely."""
 
+import hashlib
+import json
 import shutil
+import sqlite3
+import zipfile
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -21,11 +26,6 @@ from tests.test_service_runtime import installation_settings
 
 
 async def test_current_github_account_archive_preserves_installation_grant_and_agent_links(tmp_path, monkeypatch):
-    import hashlib
-    import json
-    import sqlite3
-    import zipfile
-
     from server.connector_manager import ConnectorManager
     from server.crypto import encrypt
     from server.users import UserManager
@@ -168,6 +168,17 @@ async def test_export_import_preserves_remaining_application_files_and_explicit_
 
     archive = tmp_path / "account.zip"
     export_account(config, owner["id"], archive, home=home)
+    if phase == "files" and identity_path is False:
+        with zipfile.ZipFile(archive) as package:
+            members = {name: package.read(name) for name in package.namelist()}
+        manifest = json.loads(members["manifest.json"])
+        _remove_archive_resource(manifest, members, data.relative_to(home).as_posix())
+        incomplete = tmp_path / "lost-remaining-data.zip"
+        _write_modified_archive(incomplete, manifest, members)
+        refused = tmp_path / "refused"
+        with pytest.raises(ValueError, match="missing declared data"):
+            import_account(incomplete, home=refused)
+        assert not (refused / Path(config.db_path).relative_to(home)).exists()
     target_home = tmp_path / "restored"
     restored = import_account(archive, home=target_home)
     restored_code = target_home / code.relative_to(home)
@@ -323,6 +334,267 @@ async def test_account_transfer_preserves_app_directory_alias_and_its_actual_sib
         applications.shutdown()
         await manager.close_session_owners()
         await copied.close()
+
+
+async def _export_parent_link_account(tmp_path, monkeypatch, *, external=True, include_data=True,
+                                      runtime_link=False, key_in_traversal=False):
+    source_home = tmp_path / "old user"
+    source_home.mkdir()
+    config, _ = installation_settings(source_home)
+    if key_in_traversal:
+        config = config.model_copy(update={"master_key_file": str(source_home / "project files" / "nested" / "master.key")})
+    for name, value in config.model_dump().items():
+        monkeypatch.setattr(settings, name, value)
+    database = Database(config.db_path)
+    await database.initialize()
+    try:
+        owner, _ = await create_account(database)
+        actual = (source_home / "project files" if external else
+                  Path(config.users_root) / owner["id"] / "applications" / "actual")
+        traversal = actual / ("other.runtime" if runtime_link else "nested")
+        traversal.mkdir(parents=True, exist_ok=True)
+        (traversal / "unrelated.txt").write_text("not application content")
+        access = source_home / "entry points"
+        access.mkdir()
+        (access / "jump").symlink_to(traversal, target_is_directory=True)
+        stored = access / "jump" / ".." / "demo"
+        for suffix, content in (("", "declared code"), (".data", "durable state"), (".runtime", "excluded runtime")):
+            if suffix == ".data" and not include_data:
+                continue
+            directory = actual / ("demo" + suffix)
+            directory.mkdir()
+            (directory / "marker.txt").write_text(content)
+        await database.save_application(app_id="demo", name="Demo", app_dir=str(stored), status="ready",
+                                        created_at="time", updated_at="time", user_id=owner["id"])
+        if runtime_link:
+            other = actual / "other"
+            other.mkdir()
+            await database.save_application(app_id="other", name="Other", app_dir=str(other), status="ready",
+                                            created_at="time", updated_at="time", user_id=owner["id"])
+    finally:
+        await database.close()
+
+    archive = tmp_path / "account.zip"
+    export_account(config, owner["id"], archive, home=source_home)
+    return archive, Path(config.db_path).relative_to(source_home)
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_account_transfer_resolves_parent_link_before_parent_step(tmp_path, monkeypatch, external):
+    archive, _ = await _export_parent_link_account(tmp_path, monkeypatch, external=external)
+    target_home = tmp_path / "new host" / "new user"
+    decoy = target_home / "entry points" / "demo"
+    decoy.mkdir(parents=True)
+    (decoy / "marker.txt").write_text("unrelated target directory")
+    restored = import_account(archive, home=target_home)
+
+    copied = Database(restored.db_path)
+    await copied.initialize()
+    try:
+        row = await copied.get_application("demo")
+        assert row is not None
+        restored_address = Path(row["app_dir"])
+        assert restored_address == target_home / "entry points" / "jump" / ".." / "demo"
+        assert (restored_address / "marker.txt").read_text() == "declared code"
+        assert (Path(data_dir_for(str(restored_address))) / "marker.txt").read_text() == "durable state"
+        assert not Path(runtime_dir_for(str(restored_address))).exists()
+        assert (decoy / "marker.txt").read_text() == "unrelated target directory"
+        if external:
+            jump = target_home / "entry points" / "jump"
+            assert jump.is_symlink() and jump.resolve() == target_home / "project files" / "nested"
+            assert list(jump.iterdir()) == []
+    finally:
+        await copied.close()
+
+
+def _remove_archive_resource(manifest, members, resource):
+    manifest["roots"] = [name for name in manifest["roots"] if name != resource]
+    for name in tuple(manifest["entries"]):
+        if Path(name).is_relative_to(resource):
+            del manifest["entries"][name]
+            members.pop("files/" + name, None)
+
+
+def _write_modified_archive(archive, manifest, members):
+    members["manifest.json"] = json.dumps(manifest).encode()
+    with zipfile.ZipFile(archive, "w") as package:
+        for name, content in members.items():
+            package.writestr(name, content)
+
+
+def _set_archived_application_address(manifest, members, db_relative, address):
+    db_name = "files/" + db_relative.as_posix()
+    with closing(sqlite3.connect(":memory:")) as database:
+        database.deserialize(members[db_name])
+        with database:
+            database.execute("UPDATE applications SET app_dir=? WHERE id='demo'", (address,))
+        db_bytes = database.serialize()
+    members[db_name] = db_bytes
+    manifest["entries"][db_relative.as_posix()].update(size=len(db_bytes), sha256=hashlib.sha256(db_bytes).hexdigest())
+
+
+@pytest.mark.parametrize(("problem", "message"), [
+    ("link", "missing declared code"),
+    ("data", "missing declared data"),
+    ("code-scaffold", "missing declared code"),
+    ("removed-code", "missing required code"),
+    ("escape", "steps outside the selected home"),
+])
+async def test_account_import_refuses_unverified_application_paths(tmp_path, monkeypatch, problem, message):
+    archive, db_relative = await _export_parent_link_account(tmp_path, monkeypatch)
+    with zipfile.ZipFile(archive) as package:
+        members = {name: package.read(name) for name in package.namelist()}
+    manifest = json.loads(members["manifest.json"])
+    if problem == "link":
+        _remove_archive_resource(manifest, members, "entry points/jump")
+        del manifest["entries"]["entry points"]
+    elif problem == "data":
+        _remove_archive_resource(manifest, members, "project files/demo.data")
+    elif problem == "code-scaffold":
+        root = manifest["roots"].index("project files/demo")
+        manifest["roots"][root] = "project files/demo/marker.txt"
+    elif problem == "removed-code":
+        _remove_archive_resource(manifest, members, "project files/demo")
+        manifest["applications"]["demo"]["code"] = None
+    else:
+        source_home = Path(manifest["source_home"])
+        escaped = source_home / "entry points" / ".." / ".." / source_home.name / "entry points" / "jump" / ".." / "demo"
+        _set_archived_application_address(manifest, members, db_relative, str(escaped))
+    modified = tmp_path / "incomplete.zip"
+    _write_modified_archive(modified, manifest, members)
+
+    target_home = tmp_path / "unrelated host"
+    decoy = target_home / "project files" / "demo.data" if problem == "data" else target_home / "entry points" / "demo"
+    decoy.mkdir(parents=True)
+    (decoy / "keep.txt").write_text("unrelated")
+    if problem == "link":
+        (decoy.parent / "jump").mkdir()
+    with pytest.raises(ValueError, match=message):
+        import_account(modified, home=target_home)
+    assert (decoy / "keep.txt").read_text() == "unrelated"
+    assert not (target_home / db_relative).exists()
+    assert not (target_home / db_relative.parent / (db_relative.name + ".import.env")).exists()
+
+
+@pytest.mark.parametrize("stored_suffix", ["", "/."])
+async def test_account_import_refuses_existing_data_at_an_absent_application_resource(tmp_path, monkeypatch, stored_suffix):
+    archive, db_relative = await _export_parent_link_account(tmp_path, monkeypatch, include_data=False)
+    if stored_suffix:
+        with zipfile.ZipFile(archive) as package:
+            members = {name: package.read(name) for name in package.namelist()}
+        manifest = json.loads(members["manifest.json"])
+        stored = Path(manifest["source_home"]) / "entry points" / "jump" / ".." / "demo"
+        _set_archived_application_address(manifest, members, db_relative, str(stored) + stored_suffix)
+        archive = tmp_path / "stored-suffix.zip"
+        _write_modified_archive(archive, manifest, members)
+    empty_home = tmp_path / "empty user"
+    import_account(archive, home=empty_home)
+    assert (empty_home / "project files" / "demo").is_dir()
+    assert not (empty_home / "project files" / "demo.data").exists()
+
+    target_home = tmp_path / "existing user"
+    existing_data = target_home / "project files" / "demo.data"
+    existing_data.mkdir(parents=True)
+    (existing_data / "keep.txt").write_text("unrelated")
+    with pytest.raises(ValueError, match="Undeclared application path already exists"):
+        import_account(archive, home=target_home)
+    assert (existing_data / "keep.txt").read_text() == "unrelated"
+    assert not (target_home / db_relative).exists()
+
+
+async def test_account_import_reuses_shared_parent_of_key_and_application_link(tmp_path, monkeypatch):
+    archive, _ = await _export_parent_link_account(tmp_path, monkeypatch, key_in_traversal=True)
+    target_home = tmp_path / "new user"
+    shared = target_home / "project files" / "nested"
+    shared.mkdir(parents=True)
+    (shared / "keep.txt").write_text("unrelated target file")
+    copied = import_account(archive, home=target_home)
+
+    jump = target_home / "entry points" / "jump"
+    assert jump.resolve() == shared
+    assert Path(copied.master_key_file) == shared / "master.key"
+    assert {child.name for child in shared.iterdir()} == {"master.key", "keep.txt"}
+    assert (shared / "keep.txt").read_text() == "unrelated target file"
+    assert (jump / ".." / "demo" / "marker.txt").read_text() == "declared code"
+
+
+@pytest.mark.parametrize("layout", [
+    "retained-link", "generated-environment", "shared-parent", "undeclared-parent-link", "occupied-data",
+])
+async def test_account_transfer_checks_paths_after_application_files_were_removed(tmp_path, monkeypatch, layout):
+    source_home = tmp_path / "old user"
+    config, _ = installation_settings(source_home)
+    for name, value in config.model_dump().items():
+        monkeypatch.setattr(settings, name, value)
+    if layout == "retained-link":
+        directory = source_home / "project files" / "parent" / "nested"
+        directory.mkdir(parents=True)
+        (source_home / "jump").symlink_to(directory, target_is_directory=True)
+        stored = source_home / "jump" / ".." / ".." / "demo"
+    elif layout == "generated-environment":
+        stored = Path(config.db_path + ".import.env")
+    else:
+        stored = source_home / "projects" / "demo"
+        stored.parent.mkdir()
+    deletion = {"phase": "files", "keep_files": False, "error": "unfinished cleanup"}
+    database = Database(config.db_path)
+    await database.initialize()
+    try:
+        owner, _ = await create_account(database)
+        await database.save_application(app_id="removed", name="Removed", app_dir=str(stored), status="ready",
+                                        created_at="time", updated_at="time", user_id=owner["id"])
+        await database.set_application_deletion("removed", deletion)
+    finally:
+        await database.close()
+    archive = tmp_path / "removed.zip"
+    export_account(config, owner["id"], archive, home=source_home)
+
+    target_home = tmp_path / "new user"
+    restored_address = target_home / stored.relative_to(source_home)
+    if layout in {"shared-parent", "undeclared-parent-link", "occupied-data"}:
+        target_home.mkdir()
+        projects = target_home / "projects"
+        if layout == "undeclared-parent-link":
+            other = target_home / "other"
+            other.mkdir()
+            projects.symlink_to(other, target_is_directory=True)
+        else:
+            projects.mkdir()
+        (projects / "keep.txt").write_text("unrelated target file")
+        if layout == "occupied-data":
+            Path(data_dir_for(str(restored_address))).mkdir()
+    if layout in {"generated-environment", "undeclared-parent-link", "occupied-data"}:
+        with pytest.raises(ValueError, match="Undeclared application path already exists"):
+            import_account(archive, home=target_home)
+        if layout != "generated-environment":
+            assert (target_home / "projects" / "keep.txt").read_text() == "unrelated target file"
+        assert not restored_address.exists()
+        assert not (target_home / Path(config.db_path).relative_to(source_home)).exists()
+        return
+
+    restored = import_account(archive, home=target_home)
+    copied = Database(restored.db_path)
+    await copied.initialize()
+    try:
+        row = await copied.get_application("removed")
+        assert row is not None and row["deletion"] == deletion
+        assert row["app_dir"] == str(restored_address)
+        if layout == "retained-link":
+            assert (target_home / "jump").resolve(strict=True) == target_home / "project files" / "parent" / "nested"
+        else:
+            assert list(restored_address.parent.iterdir()) == [restored_address.parent / "keep.txt"]
+            assert (restored_address.parent / "keep.txt").read_text() == "unrelated target file"
+        assert not restored_address.exists()
+        assert not Path(data_dir_for(str(restored_address))).exists()
+        assert not Path(runtime_dir_for(str(restored_address))).exists()
+    finally:
+        await copied.close()
+
+
+async def test_account_export_refuses_runtime_used_as_a_traversal_directory(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="runtime exclusion .* traversal directory"):
+        await _export_parent_link_account(tmp_path, monkeypatch, runtime_link=True)
+    assert not (tmp_path / "account.zip").exists()
 
 
 @pytest.mark.parametrize("outcome", ["delete", "retry", "keep"])

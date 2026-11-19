@@ -77,11 +77,13 @@ def snapshot_account(source: sqlite3.Connection, target: Path, user_id: str, *, 
     return rows["applications"]
 
 
-def rebind_account(db_path: Path, map_path) -> None:
+def rebind_account(db_path: Path, map_path, application_paths: dict[str, str]) -> None:
     """Rewrite defined system fields, never arbitrary user content or secrets."""
     with closing(sqlite3.connect(db_path)) as db, db:
         for identifier, roots in db.execute("SELECT id,extra_roots FROM users").fetchall():
             if roots:
                 db.execute("UPDATE users SET extra_roots=? WHERE id=?", (json.dumps([map_path(p) for p in json.loads(roots)]), identifier))
-        for identifier, path in db.execute("SELECT id,app_dir FROM applications").fetchall():
-            db.execute("UPDATE applications SET app_dir=? WHERE id=?", (map_path(path), identifier))
+        if {row[0] for row in db.execute("SELECT id FROM applications")} != application_paths.keys():
+            raise ValueError("Archive contains applications outside the selected account")
+        db.executemany("UPDATE applications SET app_dir=? WHERE id=?",
+                       ((path, identifier) for identifier, path in application_paths.items()))

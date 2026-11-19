@@ -118,7 +118,7 @@ leases, waiters, threads, writers or permission to replay an operation.
 | Native child messages and result references | Exclude with chats. | Retain original request/attempt/thread/turn/item/question and seq associations, `native_subagent`, `native_status` and `final_answer` references. Invalid references cannot borrow another session's text. Restore does not revive reply eligibility or the card cache. |
 | Native tool/image metadata | Exclude message metadata with chats; ordinary files follow included-root rules. | Retain `tool_input.native_item` status/failure/hook/image metadata and actual referenced image files. Inline image bytes are not stored; ID/hash/size cannot reconstruct an image. `savedPath` has no historical snapshot guarantee. See [native images](implemented/codex-backend.md#native-generated-images). |
 | App Server input evidence | Exclude `client_submissions` with chats. | Preserve original input/attempt/RPC/thread/turn associations and matching provider history. Unknown acceptance and preparation changes stay unknown; saved terminals do not establish consumption. Missing native history remains a resume failure. |
-| Ticket handoff | Exclude with chats and task history. | Preserve the batch registration and marked returns with the human input, and the original receipt, replay boundary, human scope, source task position and native history with the handoff. Check pending or uncertain work under the [original ID](implemented/input-reliability.md#ticket-handoffs). |
+| Ticket handoff | Exclude with chats and task history. | Preserve the batch registration and marked returns with the human input, and the original receipt, replay boundary, human scope, source task position and native history with the handoff. Preserve the answered progress input IDs with their original steer records. Later tickets inherit the selection once the handoff has a confirmed native first input. Check pending or uncertain work under the [original ID](implemented/input-reliability.md#ticket-handoffs). |
 | Fork creation and copied history | Exclude fork message/session records and work trees collected solely for excluded conversations. | Preserve `copied_input`, copied terminal keys, native creation checkpoints, selected native home and copied cwd while recovery depends on them. Unknown creation stays unknown. Cleanup requires saved actual artifact identity and confirmed non-executing retirement; an ACK, preallocated hint or current transport cannot substitute. |
 | Fork-owned copy directory | Same session-JSON exclusion. | Keep the initializing row, `fork_metadata.owned_copy_dir` receipt and referenced independent directory while recovery depends on them. Missing/mismatched proof preserves the directory; relocation does not grant cleanup rights. Restore does not recreate the copy thread. See [fork recovery](implemented/session-fork.md#crash-safety--limits). |
 
@@ -143,12 +143,12 @@ files elsewhere in the target home are permitted.
 
 Each retained application's stored `app_dir` determines its actual code and
 `.data` siblings. Collection preserves their content and the required leaf or
-parent symlink entries, then restores the stored access path under the target
-home prefix. It does not relocate legacy applications or derive data from the
-code alias's final target. Runtime entries and their resolved targets are
-excluded. If a runtime exclusion overlaps any application's required code/data
-or removes a required alias entry, export reports the application identities
-and paths and refuses to publish a partial archive.
+parent symlink entries. Directories needed only to reach a resource are included
+without collecting unrelated descendants. The manifest declares which code and
+data are present and where each resolves. Runtime entries and their resolved
+targets are excluded. If a runtime exclusion overlaps required code or data, or
+removes a required link or traversal directory, export reports the conflicting
+applications and paths and refuses to publish a partial archive.
 
 Collection, resource exclusion checks and deletion share the application
 resource interpretation. Stored paths retain `..` until real symlink traversal;
@@ -160,8 +160,9 @@ inside the managed root, preserving other applications' access paths.
 An unfinished deletion retains its phase and original `keep_files` choice on
 transfer and does not restart execution or cleanup at import. If contents have
 already been removed but a final unlink failed, their dangling owned chain is
-excluded from the archive; remaining durable resources and deletion responsibility
-are preserved. Explicit retry on the imported account continues remaining effects.
+excluded from the archive. Live traversal links, remaining durable resources
+and deletion responsibility are preserved. Explicit retry on the imported
+account continues remaining effects.
 
 Locate the active source configuration using [local configuration](local-wsl.md#配置和数据).
 Do not infer its database or provider paths from the development checkout, and
@@ -216,6 +217,15 @@ writing. It restores privately, rebinds defined account paths and current Wiki
 registration/file identities, then publishes under the installation lock. It
 changes known system fields, not arbitrary path strings in prompts, knowledge
 or application code, and does not automatically expand authorization roots.
+
+Application addresses keep their original traversal order under the new home
+prefix. Before publication, import validates each link, directory and `..` step
+against the private archive inventory and requires every declared code or data
+target to be among the resources that will be published. Import derives `.data`
+and `.runtime` from the address it writes to SQLite. After all staging writes,
+import checks that intentionally absent application resources will remain absent.
+Ordinary target directories may supply parents, while any undeclared link or
+content at the resource's destination blocks publication.
 
 `<db_path>.import.env` contains the resulting configuration with mode 0600. Start
 a standalone target with `OCTOPUS_ENV_FILE` pointing at that file, or use the

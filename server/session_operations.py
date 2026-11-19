@@ -74,5 +74,10 @@ def decode_payload(value: dict[str, Any]) -> dict[str, Any]:
         fresh = value.get("fresh_native_id")
         if fresh is not None and (not isinstance(fresh, str) or not fresh or fresh == value["previous_native_id"]):
             raise ValueError("Ticket handoff has no distinct fresh native history")
+        progress = value.get("answered_progress_request_ids", [])
+        if (not isinstance(progress, list)
+                or any(not isinstance(request_id, str) or not request_id.strip() for request_id in progress)
+                or len(set(progress)) != len(progress)):
+            raise ValueError("Ticket handoff contains invalid answered progress input IDs")
     return {**{key: item for key, item in value.items() if key not in {"content", "attachment_ids", "wiki_mode"}},
             "operation": operation.model_dump()}

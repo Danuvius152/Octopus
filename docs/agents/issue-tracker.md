@@ -120,15 +120,22 @@ tracker, integration and final delivery.
    [ticket handoff tool](../implemented/input-reliability.md#ticket-handoffs).
    If the installation lacks automatic clearing, leave the handoff pending.
    When available, the runtime starts the named
-   phase automatically in a fresh model context in the same Octo chat. Keep
-   the transcript visible to the user. Carry forward the user's scope and
-   constraints, the spec, the accepted candidate and pointers to the next work
-   and its evidence. Record confirmation against the same handoff ID once the
-   fresh context receives its first input. After an interruption or lost
-   receipt, reconcile that ID before advancing. An unknown result stays pending.
-   Honor Stop and new human instructions before continuing the batch. A
-   separate human request supersedes the automatic batch. To resume an
-   authorized batch after a pause, register under the new human request.
+   phase automatically in a fresh model context in the same Octo chat. When
+   registering, list the exact text of any standalone progress questions you
+   already answered in this ticket in `pointers.answered_progress_questions`.
+   Keep messages with scope, constraints or other instructions, and keep any
+   question whose intent or answer is unclear. The transcript remains available.
+   Query the handoff by its original ID and locate that ID in the accepted ticket
+   to record `started`. Work from the next ticket, its relevant spec and the
+   accepted candidate. Open previous acceptance evidence for a dependency,
+   check reuse, recovery or final acceptance. Reconcile an interruption or lost
+   receipt by the same ID before advancing. An unknown result stays pending.
+   Honor Stop and new human instructions before continuing the batch. If a
+   confirmed inline steer withdraws the pending handoff, process the update,
+   revisit acceptance and record a new handoff ID. Keep the original receipt.
+   Manual compact waits in the current batch. A separate human message
+   supersedes the automatic batch. To resume after Stop or an unconfirmed
+   handoff, reconcile the old receipt and register under new human authorization.
 6. **Deliver the batch.** After the last ticket, Octo checks the integrated
    behavior across tickets and runs the [full gate](../testing.md#full-checks-before-code-commits)
    once on the final candidate. Complete the applicable [release checks](../testing.md#release-and-documentation-checks)

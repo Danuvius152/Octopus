@@ -190,6 +190,8 @@ class SessionOwner:
                 if isinstance(command, Submit) else
                 len(json.dumps((command.data, command.source.details()), ensure_ascii=True).encode("ascii")) + 128
                 if isinstance(command, CorrelatedControl) else 128)
+        if isinstance(command, Submit) and command.handoff:
+            size += sum(len(text.encode("utf-8")) for text in command.handoff[1].answered_progress_questions)
         ordinary = isinstance(command, Submit)
         if ordinary:
             if len(self._commands) >= 256 or (self._commands and self._command_bytes + size > 1024 * 1024):

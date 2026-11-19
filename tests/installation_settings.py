@@ -2,6 +2,14 @@
 
 import json
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def provider_homes(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "default-codex-home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "default-claude-home"))
+
 
 def installation_settings(tmp_path):
     from server.config import Settings

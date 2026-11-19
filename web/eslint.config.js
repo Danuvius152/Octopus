@@ -8,6 +8,13 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   globalIgnores(['dist']),
   {
+    files: ['release-entry-assets.mjs'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+  {
     files: ['src/**/*.{ts,tsx}'],
     ignores: ['src/lib/submission.ts', 'src/**/*.test.{ts,tsx}',
       'src/**/*.fixture.ts', 'src/test-support/**', 'src/test-setup.ts'],

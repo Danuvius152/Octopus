@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     from ..knowledge import AdmittedRequest
     from ..mcp_identity import McpScope
     from ..wiki.tasks import WikiTask
+    from .handoff import HandoffPointers
     from .owner import SessionOwner
 
 
@@ -102,7 +103,7 @@ class Submit:
     attachments: tuple[dict[str, Any], ...] = ()
     recovery_of: str | None = None
     schedule: dict[str, Any] | None = None
-    handoff_scope: McpScope | None = None
+    handoff: tuple[McpScope, HandoffPointers] | None = None
     return_parent: AdmittedRequest | None = None
 
 
@@ -367,7 +368,7 @@ class Execution:
     activity_token: int | None = None
     deadline: RuntimeDeadline | None = None
     interrupted: bool = False
-    human_input_claimed: bool = False
+    human_message_claimed: bool = False
     stream_ended: bool = False
     start_ended: bool = False
     frames: deque[dict[str, Any]] = field(default_factory=deque)
@@ -497,7 +498,7 @@ class OwnerRuntime:
     def _clear_replaced_ticket_batch(self) -> None:
         session, execution = self.owner.session, self.current
         batch = session._ticket_batch_request_id
-        if (batch is not None and execution is not None and execution.human_input_claimed
+        if (batch is not None and execution is not None and execution.human_message_claimed
                 and batch != execution.request.request_id):
             session._ticket_batch_request_id = None
 
@@ -756,13 +757,15 @@ class OwnerRuntime:
 
         session, manager, request = self.owner.session, self.owner.manager, command.request
         database = manager.input_database()
+        human_message = request.source == "human" and request.operation == "message"
         submitted: dict[str, Any] = ({"content": request.prompt, "attachment_ids": request.attachment_ids,
                                      "wiki_mode": request.wiki_mode} if request.operation == "message" else {"kind": "compact"})
         operation = (MessageOperation.model_validate({"kind": request.operation, **submitted})
                      if request.operation == "message" else CompactOperation(kind="compact"))
         if command.recovery_of:
             submitted["recovery_of_client_id"] = command.recovery_of
-        digest = input_digest(submitted)
+        pointers = command.handoff[1] if command.handoff else None
+        digest = pointers.digest() if pointers is not None else input_digest(submitted)
         payload: dict[str, Any] = {"operation": operation.model_dump()}
         if request.operation == "message":
             payload["attachments"] = list(command.attachments)
@@ -775,7 +778,7 @@ class OwnerRuntime:
         if existing is not None:
             if request.source == "handoff" and (existing["payload"] or {}).get("source") != "handoff":
                 raise ValueError("This identifier belongs to a different input")
-            return self._existing_input(existing, digest)
+            return self._existing_input(existing, digest, pointers)
         new_session = command.schedule is not None and session.origin == "schedule" and session.id not in manager.sessions
         if not new_session and manager.sessions.get(session.id) is not session:
             raise SessionAdmissionClosed(f"Session {session.id} not found")
@@ -792,25 +795,34 @@ class OwnerRuntime:
             raise SessionAdmissionBusy(f"Session {session.id} is busy (forking or archiving)")
         if request.source == "handoff":
             from ..knowledge import capture
+            from .handoff import resolve_answered_progress
 
-            if command.handoff_scope is None or request.operation != "message":
+            if command.handoff is None or request.operation != "message":
                 raise ValueError("A handoff needs its original execution scope")
-            parent = capture(session, command.handoff_scope, prompt="")
+            scope, pointers = command.handoff
+            parent = capture(session, scope, prompt="")
             if self.current is None or self.current.request.request_id != parent.reference.request_id:
                 raise ValueError("The original ticket execution has ended")
             origin = parent.context.origin
             if origin.session_id != session.id or await database.ticket_batch_state(session.id, origin.request_id) != "registered":
                 raise ValueError("Register the authorized ticket batch before requesting handoff")
-            previous = await database.conflicting_handoff(session.id, parent.reference.request_id, session.claude_session_id)
+            previous = await database.conflicting_handoff(
+                session.id, origin.request_id, parent.reference.request_id, session.claude_session_id,
+            )
             if previous is not None:
-                raise ValueError(f"This ticket already has handoff {previous}")
-            if (session._dispatch_paused or session._pending_queue or session._steer_queue or self.steer is not None
+                raise ValueError(f"Existing handoff {previous} blocks this decision")
+            if (session._dispatch_paused or any(item.operation != "compact" for item in session._pending_queue)
+                    or session._steer_queue or self.steer is not None
                     or not session.claude_session_id or session.fork_needs_replay or self.current.interrupted):
                 raise ValueError("Handle existing inputs and confirm the original native history before handoff")
+            carriers = await database.handoff_human_executions(session.id, origin.request_id)
+            if carriers is None:
+                raise ValueError("The ticket batch's human authorization has changed or is unconfirmed")
             request.knowledge_context = parent.context
             request.work_id = parent.work_id
+            answered = await resolve_answered_progress(manager, session, parent, carriers, pointers.answered_progress_questions)
             payload.update(handoff_from=parent.reference.request_id, previous_native_id=session.claude_session_id,
-                           handoff_backend=session.backend)
+                           handoff_backend=session.backend, answered_progress_request_ids=answered)
         if command.return_parent is not None:
             assert request.operation == "message"
             parent_binding = command.return_parent
@@ -836,6 +848,11 @@ class OwnerRuntime:
                 request.knowledge_context = context
                 request.batch_return = True
                 payload["batch_return"] = True
+        unconfirmed_handoff = False
+        if ((human_message or request.operation == "compact") and self.current is not None
+                and self.current.request.source == "handoff"):
+            boundary = await database.get_submission_for_request(session.id, self.current.request.request_id)
+            unconfirmed_handoff = not (boundary and boundary["payload"].get("fresh_native_id"))
         if request.operation == "compact":
             from ..submission_models import CompactInProgress, CompactUnavailable
 
@@ -851,6 +868,8 @@ class OwnerRuntime:
             held = session._run.backend
             if held is not None and not held.can_compact:
                 raise CompactUnavailable("This native environment does not advertise compaction.")
+            if unconfirmed_handoff:
+                raise CompactUnavailable("Wait for the ticket handoff's new native history before compacting.")
             if not session.claude_session_id or session.fork_needs_replay:
                 raise CompactUnavailable("No resumable native history is available to compact.")
             request.native_session_id = session.claude_session_id
@@ -886,10 +905,7 @@ class OwnerRuntime:
         request.priority = session._dispatch_paused and request.source == "human"
         if request.source == "human":
             manager._check_turn_quota(session)
-        supersedes_handoff = False
-        if request.source == "human" and self.current is not None and self.current.request.source == "handoff":
-            active = await database.get_submission_for_request(session.id, self.current.request.request_id)
-            supersedes_handoff = not (active and active["payload"].get("fresh_native_id"))
+        supersedes_handoff = human_message and unconfirmed_handoff
         steering = (command.steerable and request.operation == "message" and request.source == "human" and self.current is not None
                 and not supersedes_handoff
                 and self.current.request.operation == "message"
@@ -945,7 +961,7 @@ class OwnerRuntime:
             )} if new_session else None,
         )
         if not created:
-            return self._existing_input(row, digest)
+            return self._existing_input(row, digest, pointers)
         if new_session:
             manager.sessions[session.id] = session
         if queued:
@@ -956,7 +972,7 @@ class OwnerRuntime:
         else:
             session._pending_queue.append(self._pending_input(request))
         receipt = manager._new_receipt(session, request, disposition)
-        if request.source == "human":
+        if human_message:
             if not steering:
                 session._ticket_batch_request_id = None
             await self._withdraw_batch_work(withdraw_returns=not steering)
@@ -992,9 +1008,9 @@ class OwnerRuntime:
         config = self.owner.manager._run_config(session, agent, connectors)
         return prepared.backend.matches_configuration(config, session.working_dir, prepared.credential)
 
-    def _existing_input(self, row: dict[str, Any], digest: str) -> SubmissionReceipt:
+    def _existing_input(self, row: dict[str, Any], digest: str, pointers: HandoffPointers | None) -> SubmissionReceipt:
         """A duplicate observes the original input; it never queues it again."""
-        if row["payload_sha256"] != digest:
+        if row["payload_sha256"] != digest and not (pointers and pointers.matches_legacy(row["payload"])):
             from ..submission_models import SubmissionConflict
 
             raise SubmissionConflict("This submission identity already belongs to different input.")
@@ -1637,9 +1653,9 @@ class OwnerRuntime:
         manager = self.owner.manager
         if not await claim_input(manager, configured.id, request.request_id):
             return None
-        if request.source == "human":
+        if request.source == "human" and request.operation == "message":
             # Publish the claim observation before attachment or Git work.
-            execution.human_input_claimed = True
+            execution.human_message_claimed = True
             self.owner.wake()
         await validate_claimed_attachments(manager, configured.id, request.request_id)
         await require_retired_writers(manager, configured.id)

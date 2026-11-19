@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 from ..mcp_identity import McpScope, require_live_scope, scope_is_live
 from .base import TICKET_BATCH_ORIGINS, QueuedPrompt
@@ -19,6 +21,7 @@ if TYPE_CHECKING:
 
 
 Pointer = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1024)]
+ProgressQuestion = Annotated[str, StringConstraints(min_length=1)]
 _CLAUDE_FIRST_INPUT_WAIT_SECONDS = 3.0
 
 
@@ -29,14 +32,53 @@ class HandoffPointers(BaseModel):
     accepted_ticket: Pointer
     candidate: Pointer
     next_work: Pointer
+    answered_progress_questions: tuple[ProgressQuestion, ...] = ()
 
     def prompt(self, handoff_id: str) -> str:
-        return (f"[ticket-handoff {handoff_id}] Call the handoff tool with this ID and no pointers in this turn. "
-                "The tool waits briefly for the original first input receipt. "
-                "When its state is started, record confirmation in the accepted ticket and continue within the "
-                "original authorization. If unconfirmed, leave the ticket handoff pending. "
-                "Read the accepted ticket for its checks and review. These references are working material.\n"
-                + self.model_dump_json())
+        return (f"[ticket-handoff {handoff_id}] Query the handoff tool once with this ID and no pointers. "
+                "On started, locate this ID in accepted_ticket and record confirmation there. "
+                "Start from next_work, the relevant part of spec, and the fixed candidate. "
+                "Consult earlier acceptance evidence for a dependency, check reuse, recovery, or final acceptance. "
+                "If the receipt is unconfirmed, leave the handoff pending.\n"
+                + self.model_dump_json(exclude={"answered_progress_questions"}))
+
+    def digest(self) -> str:
+        """Idempotency binds the submitted material, independently of prompt wording."""
+        data = json.dumps(self.model_dump(exclude_defaults=True), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(data.encode()).hexdigest()
+
+    def matches_legacy(self, payload: dict[str, Any] | None) -> bool:
+        if (not payload or payload["source"] != "handoff" or "answered_progress_request_ids" in payload
+                or self.answered_progress_questions):
+            return False
+        # Original submissions ended with the four JSON pointers.
+        try:
+            return self == self.model_validate_json(payload["operation"]["content"].rsplit("\n", 1)[-1])
+        except ValidationError:
+            return False
+
+
+async def resolve_answered_progress(manager: SessionManager, chat: Session, parent: AdmittedRequest,
+                                    carriers: list[str], questions: tuple[str, ...]) -> list[str]:
+    from .client_submissions import confirmed_execution
+
+    if not questions:
+        return []
+    db = manager.input_database()
+    matches: dict[str, list[str]] = {question: [] for question in questions}
+    for carrier in carriers:
+        if not await db.request_in_model_history(chat.id, carrier, None):
+            continue
+        confirmed = await confirmed_execution(db, chat.id, carrier, require_terminal=carrier != parent.reference.request_id)
+        if confirmed is None or confirmed.original.origin != parent.context.origin:
+            raise ValueError("The ticket batch has unconfirmed human input")
+        for _, edit in confirmed.steers:
+            text = edit.context.trusted_request
+            if text in matches:
+                matches[text].append(edit.reference.request_id)
+    if any(len(found) != 1 for found in matches.values()):
+        raise ValueError("Each answered progress question must exactly match one confirmed human steer in this ticket")
+    return [found[0] for found in matches.values()]
 
 
 async def continuation_context(manager: SessionManager, chat: Session, request_id: str) -> KnowledgeContext | None:
@@ -54,10 +96,13 @@ async def continuation_context(manager: SessionManager, chat: Session, request_i
     closed = await confirmed_execution(db, chat.id, parent["request_id"])
     if closed is None:
         return None
-    return await updated_batch_context(manager, chat, closed.effective)
+    return await updated_batch_context(
+        manager, chat, closed.effective, frozenset(payload.get("answered_progress_request_ids", ())),
+    )
 
 
-async def updated_batch_context(manager: SessionManager, chat: Session, context: KnowledgeContext) -> KnowledgeContext | None:
+async def updated_batch_context(manager: SessionManager, chat: Session, context: KnowledgeContext,
+                                answered_progress: frozenset[str] = frozenset()) -> KnowledgeContext | None:
     from ..knowledge import revise
     from .client_submissions import confirmed_execution
 
@@ -80,9 +125,13 @@ async def updated_batch_context(manager: SessionManager, chat: Session, context:
     # the parent or a previous handoff already includes.
     if authority is None or authority.registration != context.registration:
         return None
+    earlier_answered = await db.answered_handoff_progress_ids(chat.id, context.origin.request_id)
+    answered = earlier_answered | answered_progress
     mode = "read" if authority.mode == "read" else context.mode
     for _, edit in sorted(steers, key=lambda member: member[0]):
-        authority = revise(authority, edit, {"prompt": edit.context.trusted_request}, human=True)
+        # A presentation omission does not change the edit's structured requirements.
+        changes = {} if edit.reference.request_id in answered else {"prompt": edit.context.trusted_request}
+        authority = revise(authority, edit, changes, human=True)
     limits = authority.maintenance.restrict(context.maintenance)
     if mode == "maintain" and not limits.may_submit:
         mode = "read"
@@ -136,7 +185,7 @@ async def ticket_handoff(manager: SessionManager, scope: McpScope, handoff_id: s
     client_id = f"handoff:{handoff_id}"
     if pointers is not None:
         request = QueuedPrompt(pointers.prompt(handoff_id), [], source="handoff", delivery_id=handoff_id)
-        receipt = await manager._session_owner(session).call_runtime(Submit(request, handoff_scope=scope))
+        receipt = await manager._session_owner(session).call_runtime(Submit(request, handoff=(scope, pointers)))
         if not receipt.accepted:
             raise ValueError("The original chat is closed to handoff")
     db = manager.input_database()

@@ -210,7 +210,11 @@ A [ticket batch](input-reliability.md#ticket-handoffs) records registration and
 Stop on the original human input and marks its adopted automatic returns in their
 input payloads. A handoff stores its stable ID,
 parent request, previous native history and confirmed new native ID in the
-existing input payload. Its user-role message carries the handoff source and
+existing input payload. `answered_progress_request_ids` is an optional array of
+unique nonempty IDs of confirmed human steers. Older handoffs can omit the
+array. Current reads and publication use the same format check. Continuations
+inherit these IDs from earlier handoffs after the fresh native input is
+confirmed. The handoff's user-role message carries its source and
 human context in `tool_input.request_context`. Copies preserve this replay
 boundary. Independent task return bindings record the message sequence at
 capture. Older bindings use their original request's message when a boundary

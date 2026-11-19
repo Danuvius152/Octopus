@@ -192,6 +192,28 @@ async def transferable_wiki(tmp_path, monkeypatch):
     return home, config, owner, vault, state, receipt
 
 
+async def test_import_refuses_wiki_rebind_at_an_absent_application_address(transferable_wiki, tmp_path):
+    home, config, owner, vault, _, _ = transferable_wiki
+    marker = vault / ".octopus-vault"
+    marker.unlink()
+    database = Database(config.db_path)
+    await database.initialize()
+    try:
+        await database.save_application(app_id="removed", name="Removed", app_dir=str(marker), status="ready",
+                                        created_at="time", updated_at="time", user_id=owner["id"])
+        await database.set_application_deletion("removed", {"phase": "files", "keep_files": False, "error": "cleanup failed"})
+    finally:
+        await database.close()
+    archive = tmp_path / "account.zip"
+    export_account(config, owner["id"], archive, home=home)
+
+    target = tmp_path / "target"
+    with pytest.raises(ValueError, match="Undeclared application path already exists"):
+        import_account(archive, home=target)
+    assert not (target / marker.relative_to(home)).exists()
+    assert not (target / Path(config.db_path).relative_to(home)).exists()
+
+
 @pytest.mark.parametrize("change", ["mtime", "size", "missing"])
 async def test_export_refuses_pdf_source_drift_without_rewriting_originals(transferable_wiki, tmp_path, change):
     home, config, owner, vault, state, _ = transferable_wiki

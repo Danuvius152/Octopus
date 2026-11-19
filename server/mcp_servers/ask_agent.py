@@ -111,9 +111,15 @@ async def handoff(handoff_id: str, ctx: Context, pointers: HandoffPointers | Non
 
     After the ticket's checks and its own independent review pass, record a stable
     handoff_id, then supply the spec, accepted_ticket, candidate and next_work pointers.
+    In pointers.answered_progress_questions include the exact, complete text of
+    standalone progress questions from this ticket that you have already answered.
+    Carry forward messages containing task changes, constraints, authorization or
+    stop instructions. Keep messages whose purpose or answer is uncertain.
     End the current turn after registration. To check progress or reconcile a lost
     receipt, pass only the same ID. In the new Claude execution this waits briefly
     for the matching native record. Only started confirms the new history received input.
+    If a confirmed inline update withdraws the handoff, revisit acceptance and
+    register the updated decision under a new ID. The old ID retains its receipt.
     """
     manager, scope = _ticket_runtime(ctx)
     return await ticket_handoff(manager, scope, handoff_id, pointers)

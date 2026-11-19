@@ -195,8 +195,6 @@
   "tests/test_service_startup.py:tests.test_api:*",
   "tests/test_service_startup.py:tests.test_service_shutdown:service",
   "tests/test_service_startup.py:tests.test_service_shutdown:synthetic_cli",
-  "tests/test_service_supervisor.py:tests.test_service_runtime:installation_settings",
-  "tests/test_service_supervisor.py:tests.test_service_runtime:provider_homes",
   "tests/test_session_capability_projection.py:tests.test_agent_credential_bindings:bindings",
   "tests/test_session_diagnostic_privacy.py:tests.test_auth_routes:*",
   "tests/test_session_diagnostic_privacy.py:tests.test_service_shutdown:synthetic_cli",

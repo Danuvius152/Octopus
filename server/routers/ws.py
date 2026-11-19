@@ -30,7 +30,13 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
     # sat on an empty main view with no way to reach sign-in. Accepting first
     # lets a real 4001 close frame through, which the client turns into the
     # sign-in screen.
-    principal = await deps.resolve_principal(token)
+    try:
+        principal = await deps.resolve_principal(token)
+    except Exception:
+        # Uvicorn logs the traceback without the path when no handshake
+        # response was sent. Record the path here and let it handle the failure.
+        logger.error("WebSocket %s handshake failed during authentication", ws.scope["path"])
+        raise
     await ws.accept()
     if principal is None or principal.credential_kind not in {"account", "legacy"}:
         await ws.close(code=4001, reason="Unauthorized")

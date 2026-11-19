@@ -16,6 +16,7 @@ import stat
 import tempfile
 import zipfile
 from contextlib import AbstractContextManager, closing, nullcontext
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .config import Settings
@@ -143,33 +144,78 @@ def _copy_tree(source: Path, destination: Path, home: Path, excluded: set[Path])
     return links
 
 
-def _application_resources(applications: list[dict]) -> tuple[list[Path], set[Path]]:
-    from .application_resources import application_resources
+def _application_address(value: str, home: Path) -> Path:
+    try:
+        address = Path(value).relative_to(home)
+    except ValueError as error:
+        raise ValueError(f"Application address is outside the selected home: {value}") from error
+    if not address.parts or "\\" in value or "\0" in value:
+        raise ValueError(f"Invalid application address: {value}")
+    return address
+
+
+def _allows_removed_code(application: dict) -> bool:
+    deletion = json.loads(application["deletion"]) if application.get("deletion") else None
+    return bool(deletion and deletion["phase"] == "files" and not deletion["keep_files"])
+
+
+@dataclass(frozen=True)
+class _ApplicationFiles:
+    roots: list[Path]
+    directories: set[Path]
+    excluded: set[Path]
+    targets: dict[str, dict[str, str | None]]
+
+
+def _application_resources(applications: list[dict], home: Path) -> _ApplicationFiles:
+    from .application_resources import application_access_links, application_resources
 
     required_trees: list[tuple[str, Path]] = []
     required_links: list[tuple[str, Path]] = []
+    required_directories: set[tuple[str, Path]] = set()
     runtimes: list[tuple[str, Path]] = []
     excluded: set[Path] = set()
+    app_targets: dict[str, dict[str, str | None]] = {}
     for application in applications:
         app_id = application["id"]
-        resources = application_resources(application["app_dir"])
-        deletion = json.loads(application["deletion"]) if application.get("deletion") else None
+        app_dir = application["app_dir"]
+        _application_address(app_dir, home)
+        resources = application_resources(app_dir)
+        targets: dict[str, str | None] = {"code": None, "data": None}
+        app_targets[app_id] = targets
+        removed_code_allowed = _allows_removed_code(application)
         for resource in resources:
             if resource.role == "runtime":
                 # Exclude the runtime's own chain, not shared ancestor links.
                 addresses = {resource.stored, resource.entry, resource.content,
                              *(link for link in resource.links if link.resolve() == resource.content)}
                 runtimes.extend((app_id, path) for path in addresses)
-            elif not resource.present and deletion and deletion["phase"] == "files" and not deletion["keep_files"]:
-                # Content already removed is complete. A failed final unlink
-                # may leave its dangling access chain; it is not durable data
-                # to restore. Keep the deletion phase and remaining resources.
-                excluded.update(link for link in resource.links if link.resolve() == resource.content)
-            elif resource.content.is_dir() or resource.role == "data" and resource.present:
-                required_trees.append((app_id, resource.content))
-                required_links.extend((app_id, link) for link in resource.links)
-            elif resource.role == "code":
+                continue
+            if resource.role == "code" and (
+                (resource.present and not resource.stored.is_dir()) or (not resource.present and not removed_code_allowed)
+            ):
                 raise ValueError(f"Application code is missing: {resource.content}")
+            if resource.present:
+                targets[resource.role] = _relative(resource.content, home)
+                required_trees.append((app_id, resource.content))
+                address, links = resource.stored, resource.links
+            else:
+                if removed_code_allowed:
+                    # A failed final unlink can leave links to removed content.
+                    excluded.update(link for link in resource.links if link.resolve() == resource.content)
+                # Keep access through the deepest reachable directory even if
+                # no resource remains at the end of the address.
+                address = next(parent for parent in resource.stored.parents if parent.is_dir())
+                links = application_access_links(address)
+            required_links.extend((app_id, link) for link in links)
+            # A link target or a directory traversed before '..' can be
+            # required without contributing a subtree to the archive.
+            required_directories.update((app_id, link.resolve(strict=True)) for link in links if link.is_dir())
+            for index, part in enumerate(address.parts):
+                if part == "..":
+                    directory = Path(*address.parts[:index]).resolve(strict=True)
+                    _relative(directory, home)
+                    required_directories.add((app_id, directory))
     for app_id, runtime in runtimes:
         for owner_id, required in required_trees:
             if runtime.is_relative_to(required) or required.is_relative_to(runtime):
@@ -179,8 +225,17 @@ def _application_resources(applications: list[dict]) -> tuple[list[Path], set[Pa
             if link.is_relative_to(runtime):
                 raise ValueError(f"Application {app_id} runtime exclusion {runtime} contains "
                                  f"application {owner_id} required link {link}")
+        for owner_id, directory in required_directories:
+            if directory.is_relative_to(runtime):
+                raise ValueError(f"Application {app_id} runtime exclusion {runtime} contains "
+                                 f"application {owner_id} traversal directory {directory}")
         excluded.add(runtime)
-    return [path for _app_id, path in (*required_trees, *required_links)], excluded
+    return _ApplicationFiles(
+        roots=[path for _app_id, path in (*required_trees, *required_links)],
+        directories={path for _app_id, path in required_directories},
+        excluded=excluded,
+        targets=app_targets,
+    )
 
 
 def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> dict:
@@ -217,11 +272,9 @@ def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> d
     for app in applications:
         if app["status"] == "building" and app.get("deletion") is None:
             raise ValueError("Application build must settle on the source before exporting")
-        app_dir = Path(app["app_dir"]).resolve()
-        _relative(app_dir, home)
-    app_roots, app_exclusions = _application_resources(applications)
-    roots.extend(app_roots)
-    excluded.update(app_exclusions)
+    app_files = _application_resources(applications, home)
+    roots.extend(app_files.roots)
+    excluded.update(app_files.excluded)
     wiki = None
     state = account / "wiki"
     if (state / "config.json").exists() or (state / "config.json").is_symlink():
@@ -243,6 +296,13 @@ def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> d
     key.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     key.write_text(source_key)
     key.chmod(0o600)
+    for directory in sorted(app_files.directories, key=lambda path: (-len(path.parts), path)):
+        if ".octopus-installation" in directory.parts or any(directory.is_relative_to(path) for path in excluded):
+            raise ValueError(f"Application traversal directory is excluded: {directory}")
+        staged_directory = staging / _relative(directory, home)
+        if not staged_directory.is_dir():
+            staged_directory.mkdir(parents=True, mode=0o700)
+            roots.append(directory)
     entries = {}
     for path in sorted(staging.rglob("*")):
         relative = path.relative_to(staging).as_posix()
@@ -258,8 +318,11 @@ def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> d
     values.update({name: str(path) for name, path in paths.items()})
     values.update(master_key="", auth_token="", debug=False)
     resource_roots = [*roots, paths["db_path"], paths["master_key_file"]]
+    published_roots = _minimal_roots(resource_roots)
+    root_names = [_relative(path, home) for path in published_roots]
+    _verify_application_archive(applications, app_files.targets, entries, root_names, home)
     return {"format": FORMAT, "software": software_version(), "source_home": str(home), "user_id": user_id,
-            "config": values, "entries": entries, "roots": [_relative(p, home) for p in _minimal_roots(resource_roots)], "wiki": wiki}
+            "config": values, "entries": entries, "roots": root_names, "wiki": wiki, "applications": app_files.targets}
 
 
 def _preflight_source(config: Settings, user_id: str, home: Path, archive: Path) -> None:
@@ -273,9 +336,11 @@ def _preflight_source(config: Settings, user_id: str, home: Path, archive: Path)
     roots = [paths["users_root"] / user_id]
     for value in json.loads(rows["users"][0]["extra_roots"] or "[]"):
         _relative(Path(value), home)
-    app_roots, _excluded = _application_resources(rows["applications"])
-    roots.extend(app_roots)
     state = roots[0] / "wiki"
+    app_files = _application_resources(rows["applications"], home)
+    roots.extend(app_files.roots)
+    for directory in app_files.directories:
+        _relative(directory, home)
     if (state / "config.json").exists():
         from .wiki.protocols import read_registration
 
@@ -326,12 +391,90 @@ def export_account(config: Settings, user_id: str, archive: Path, *, home: Path 
     return {"archive": str(archive), "user_id": user_id, "entries": len(manifest["entries"])}
 
 
+def _existing_application_directory(address: Path, roots: tuple[Path, ...]) -> bool:
+    found = False
+    for root in roots:
+        path = root / address
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(mode):
+            raise ValueError(f"Undeclared application path already exists: {path}")
+        found = True
+    return found
+
+
+def _resolve_application_address(address: Path, entries: dict, *,
+                                 existing_roots: tuple[Path, ...] = ()) -> tuple[Path, bool]:
+    """Walk declared links in filesystem order, optionally observing ordinary directories."""
+    current = Path()
+    present = True
+    directory = True
+    for part in address.parts:
+        if not directory:
+            raise ValueError(f"Application address traverses a non-directory: {address}")
+        if part == "..":
+            if not current.parts:
+                raise ValueError(f"Application address steps outside the selected home: {address}")
+            current = current.parent
+            continue
+        current /= part
+        if not present:
+            continue
+        entry = entries.get(current.as_posix())
+        if entry is None:
+            present = _existing_application_directory(current, existing_roots)
+            continue
+        if entry["kind"] == "symlink":
+            current = Path(entry["target"])
+            entry = entries[current.as_posix()]
+        directory = entry["kind"] == "directory"
+    return current, present
+
+
+def _verify_application_archive(applications: list[dict], targets: object, entries: dict,
+                                roots: list[str], source_home: Path) -> tuple[dict[str, Path], set[Path]]:
+    from .application_resources import application_addresses
+
+    if not isinstance(targets, dict) or targets.keys() != {app["id"] for app in applications}:
+        raise ValueError("Archive application declarations do not match the account")
+    published = tuple(Path(root) for root in roots)
+    addresses = {}
+    absent_paths = set()
+    for app in applications:
+        app_id, stored = app["id"], app["app_dir"]
+        declaration = targets[app_id]
+        if not isinstance(declaration, dict) or declaration.keys() != {"code", "data"}:
+            raise ValueError(f"Archive is missing resource declarations for application {app_id}")
+        if declaration["code"] is None and not _allows_removed_code(app):
+            raise ValueError(f"Archive is missing required code for application {app_id}")
+        relative = _application_address(stored, source_home)
+        addresses[app_id] = relative
+        # Derive siblings from the same spelling that will be written to SQLite.
+        for role, value in application_addresses(relative.as_posix()):
+            address = Path(value)
+            content, present = _resolve_application_address(address, entries)
+            expected = declaration.get(role)
+            if expected is None:
+                if present:
+                    raise ValueError(f"Archive contains undeclared {role} for application {app_id}")
+                absent_paths.add(address)
+            elif (not present or expected != content.as_posix()
+                  or not any(content.is_relative_to(root) for root in published)
+                  or (role == "code" and entries[content.as_posix()]["kind"] != "directory")):
+                raise ValueError(f"Archive is missing declared {role} or its access path for application {app_id}")
+    return addresses, absent_paths
+
+
 def _read_manifest(package: zipfile.ZipFile) -> dict:
     manifest = json.loads(package.read("manifest.json"))
     if manifest["format"] != FORMAT or manifest["software"] != software_version():
         raise ValueError("Archive requires its matching Octopus version")
     expected = {"manifest.json"}
     roots = [PurePosixPath(str(_safe_relative(root))) for root in manifest["roots"]]
+    if any(root.as_posix() not in manifest["entries"] for root in roots):
+        raise ValueError("Archive is missing a declared resource root")
     for name, entry in manifest["entries"].items():
         path = PurePosixPath(str(_safe_relative(name)))
         if not any(path == root or path.is_relative_to(root) or root.is_relative_to(path) for root in roots):
@@ -385,10 +528,10 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
         with closing(sqlite3.connect(":memory:")) as reader:
             reader.row_factory = sqlite3.Row
             reader.deserialize(package.read("files/" + db_relative))
-            read_account(reader, manifest["user_id"], key=key)
+            applications = read_account(reader, manifest["user_id"], key=key)["applications"]
         roots = manifest["roots"]
-        env_path = Path(config.db_path).with_name(Path(config.db_path).name + ".import.env")
-        _empty_targets(home, [*roots, _relative(env_path, home)])
+        env_relative = db_relative + ".import.env"
+        _empty_targets(home, [*roots, env_relative])
         existing = home
         while not existing.exists():
             existing = existing.parent
@@ -426,12 +569,14 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
                 if user is None:
                     raise ValueError("Archive is missing its declared account")
                 decrypt(user[0], key)
-            rebind_account(staging / db_relative, map_path)
+            app_addresses, absent_app_paths = _verify_application_archive(
+                applications, manifest.get("applications"), entries, roots, source_home,
+            )
+            rebind_account(staging / db_relative, map_path, {app_id: str(home / path) for app_id, path in app_addresses.items()})
             if manifest["wiki"]:
                 from .wiki.portability import rebind_wiki
 
                 rebind_wiki(staging, home, source_home, manifest["wiki"], Path(config.users_root) / manifest["user_id"] / "wiki")
-            env_relative = _relative(env_path, home)
             staged_env = staging / env_relative
             staged_env.parent.mkdir(parents=True, exist_ok=True)
             staged_env.write_text(_service_environment(config))
@@ -444,6 +589,13 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
             complete = False
             try:
                 _empty_targets(home, [*roots, env_relative])
+                # Check the completed staging tree and the ordinary target
+                # directories it will join. Required content was verified
+                # solely against the archive declarations above.
+                for address in sorted(absent_app_paths):
+                    path, present = _resolve_application_address(address, entries, existing_roots=(staging, home))
+                    if present:
+                        raise ValueError(f"Undeclared application path already exists: {home / path}")
                 _ensure_directory(marker.parent, home)
                 with marker.open("x") as stream:
                     json.dump({"archive": str(Path(archive).absolute()), "roots": roots, "environment": env_relative}, stream)

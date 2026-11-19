@@ -12,12 +12,7 @@ from pathlib import Path
 import pytest
 
 from tests.installation_settings import installation_settings
-
-
-@pytest.fixture(autouse=True)
-def provider_homes(tmp_path, monkeypatch):
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "default-codex-home"))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "default-claude-home"))
+from tests.installation_settings import provider_homes as provider_homes
 
 
 @pytest.mark.parametrize("origin", ["task", "thread"])
