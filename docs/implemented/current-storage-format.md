@@ -206,6 +206,16 @@ evidence, not invocation authority, and missing native/call identities remain
 unknown. `needs_input` uses the existing question-closure reason and resolution;
 Wiki reads that original request's saved closure without a new domain status.
 
+A [ticket batch](input-reliability.md#ticket-handoffs) records registration and
+Stop on the original human input and marks its adopted automatic returns in their
+input payloads. A handoff stores its stable ID,
+parent request, previous native history and confirmed new native ID in the
+existing input payload. Its user-role message carries the handoff source and
+human context in `tool_input.request_context`. Copies preserve this replay
+boundary. Independent task return bindings record the message sequence at
+capture. Older bindings use their original request's message when a boundary
+exists. These fields use the existing input, message and task backup scope.
+
 These additions change no tables, format markers or collection roots. Complete
 JSON preservation retains them; text-only projections cannot reconstruct them.
 The original MCP call record, accepted command Future, runner, waiter-release

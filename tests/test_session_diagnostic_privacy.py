@@ -269,7 +269,7 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
     async def failed_history_recording(run):
         raise failure from cause
 
-    monkeypatch.setattr(HarnessRun, "_record_input_history", failed_history_recording)
+    monkeypatch.setattr(HarnessRun, "record_installed_input", failed_history_recording)
     credentials_api.set_db(db)
     async with AsyncClient(transport=ASGITransport(app=application), base_url="http://test",
                            headers={"Authorization": f"Bearer {bearer}"}) as http:

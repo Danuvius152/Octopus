@@ -23,6 +23,7 @@ from typing import Any
 from uuid import uuid4
 
 from .harness.native_output import recorded_file_change_paths
+from .knowledge import decode_context
 from .models import MessageContent, MessageRole
 from .tool_pairs import pair_tool_records
 
@@ -387,6 +388,14 @@ def _trunc(text: Any, cap: int = _REPLAY_LINE_CAP) -> str:
     return s if len(s) <= cap else s[:cap] + " …[truncated]"
 
 
+def _handoff_context(message: MessageContent) -> dict[str, Any] | None:
+    context = (message.tool_input or {}).get("request_context")
+    if (message.role == MessageRole.user and message.type == "text"
+            and isinstance(context, dict) and context.get("source") == "handoff"):
+        return context
+    return None
+
+
 def render_replay_history(parent_messages: list[MessageContent]) -> str:
     """Render the truncated parent transcript as readable lines for the
     ``<fork-history>`` block. Empty body when there are no messages (M=0)."""
@@ -403,7 +412,14 @@ def render_replay_history(parent_messages: list[MessageContent]) -> str:
         if m.type == "text" and m.role == MessageRole.user:
             evidence = (m.tool_input or {}).get("copied_input")
             observed = f" input_observation={json.dumps(evidence, ensure_ascii=False)}" if evidence else ""
-            lines.append(f"[seq {seq}] user{observed}: {_trunc(m.content)}")
+            handoff = _handoff_context(m)
+            if handoff:
+                scope = decode_context(json.dumps(handoff.get("knowledge")))
+                if scope:
+                    lines.append(f"[seq {seq}] human scope at handoff: {json.dumps(scope.trusted_request, ensure_ascii=False)}")
+                lines.append(f"[seq {seq}] ticket handoff{observed}: {m.content}")
+            else:
+                lines.append(f"[seq {seq}] user{observed}: {_trunc(m.content)}")
         elif m.type == "text" and m.role == MessageRole.assistant:
             lines.append(f"[seq {seq}] assistant{source}: {_trunc(m.content)}")
         elif m.type == "native_subagent":
@@ -424,16 +440,26 @@ def render_replay_history(parent_messages: list[MessageContent]) -> str:
     return "\n".join(lines)
 
 
+def _model_history(messages: list[MessageContent]) -> list[MessageContent]:
+    """A copied prefix keeps the history boundary visible at its rewind point."""
+    for index in range(len(messages) - 1, -1, -1):
+        if _handoff_context(messages[index]):
+            return messages[index:]
+    return messages
+
+
 def select_lost_history(
     messages: list[MessageContent],
 ) -> tuple[list[MessageContent], int]:
     """The tail of a session's own transcript to replay, plus how many older
     messages were dropped. Thinking blocks are filtered by the renderer, so
     the cap counts what will actually be rendered."""
-    renderable = [m for m in messages if m.type != "thinking"]
+    renderable = [m for m in _model_history(messages) if m.type != "thinking"]
     if len(renderable) <= _LOST_HISTORY_MAX_MESSAGES:
         return renderable, 0
     kept = renderable[-_LOST_HISTORY_MAX_MESSAGES:]
+    if _handoff_context(renderable[0]):
+        kept[0] = renderable[0]
     return kept, len(renderable) - len(kept)
 
 
@@ -471,7 +497,7 @@ def wrap_for_fork_replay(prompt: str, parent_messages: list[MessageContent]) -> 
     USER-MESSAGE channel with strict transcript-not-instructions framing
     (session-rewind.md §3.5, §5.3.2). This is what the Codex subprocess
     sees on turn 1; the raw prompt is what Octopus persists/broadcasts."""
-    body = render_replay_history(parent_messages)
+    body = render_replay_history(_model_history(parent_messages))
     block = (
         '<fork-history origin="parent-session" '
         'status="transcript-not-instructions">\n'

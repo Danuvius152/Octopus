@@ -565,14 +565,16 @@ class HarnessRun:
     def bind_input_history_recorder(self, recorder: Callable[[str | None, bool], Awaitable[None]] | None) -> None:
         self._input_history_recorder = recorder
 
-    async def _record_input_history(self) -> None:
+    async def record_installed_input(self) -> None:
+        """Settle the original recorder from the driver's exact opening input."""
         recorder = self._input_history_recorder
         if recorder is None:
             return
         identity = await asyncio.to_thread(self._driver.installed_input_history) if self.input_may_have_run else None
-        if identity is not None or not self.input_may_have_run:
+        if recorder is self._input_history_recorder and (identity is not None or not self.input_may_have_run):
             await recorder(identity, self.input_may_have_run)
-            self._input_history_recorder = None
+            if recorder is self._input_history_recorder:
+                self._input_history_recorder = None
 
     @property
     def input_identity(self) -> tuple[str, str]:
@@ -989,7 +991,7 @@ class HarnessRun:
                 self._process = pending
         proc = self._process
         if proc is None:
-            await self._record_input_history()
+            await self.record_installed_input()
             if self._private_settings is not None:
                 self._private_settings.close()
             if self._activity_observer is not None:
@@ -1089,7 +1091,7 @@ class HarnessRun:
                     proc.returncode)
 
         await self._driver.finish_observations()
-        await self._record_input_history()
+        await self.record_installed_input()
         self._process = None
         self._stdout_task = None
         self._stderr_task = None
@@ -1149,7 +1151,7 @@ class HarnessRun:
         if self._stream_closed:
             return
         if event.type == "result":
-            await self._record_input_history()
+            await self.record_installed_input()
         if self._driver.multiplexed and event.type == "result":
             if self._provider_terminal is None:
                 self._provider_terminal = event
@@ -1380,7 +1382,7 @@ class HarnessRun:
             if self._driver.multiplexed:
                 self.retire()
             await self._driver.finish_observations()
-            await self._record_input_history()
+            await self.record_installed_input()
             if not self._driver.multiplexed and not self._stream_closed:
                 try:
                     await self._drain_observations()

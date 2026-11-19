@@ -206,6 +206,13 @@ function MessageBody({
     case "text":
       if (message.role === "user") {
         const source = requestSource(message);
+        if (source === "handoff" && typeof message.content === "string") {
+          const id = message.tool_input?.handoff_id;
+          return <details className="msg msg-system py-1 text-sm text-muted-foreground">
+            <summary>Ticket handoff{typeof id === "string" ? ` · ${id}` : ""}</summary>
+            <div className="mt-2 whitespace-pre-wrap break-words">{message.content}</div>
+          </details>;
+        }
         const isBgResult = source === "bg" || (source === undefined &&
           typeof message.content === "string" &&
           message.content.startsWith(BG_TASK_RESULT_PREFIX));

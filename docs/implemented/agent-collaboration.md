@@ -23,6 +23,8 @@ These facts do not prove the model understood or used every returned detail.
 `delegation_id` (new round in the retained child). It returns immediately; results,
 questions and errors return to the caller in later inputs. `answer`, `cancel`
 and `list` operate through the parent-scoped delegation API.
+An Octo batch opens a fresh Vera delegation for each ticket and uses
+[ticket handoff](input-reliability.md#ticket-handoffs) to continue in the original Octo chat.
 
 The target is a non-archived agent in the same account. Missing/ambiguous names,
 self-delegation, an ancestor-agent cycle or depth beyond three are refused.

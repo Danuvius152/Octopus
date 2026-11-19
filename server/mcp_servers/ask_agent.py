@@ -1,6 +1,6 @@
 """MCP namespace: agent-to-agent delegation (agent-collaboration.md).
 
-The `ask_agent` server exposes four tools to the model. Their full
+The `ask_agent` server exposes collaboration tools to the model. Their full
 MCP names are `mcp__ask_agent__<tool>` (the prefix is the config key
 under which the harness mounts this server, not the FastMCP server
 name); inside this module the underlying Python functions are
@@ -54,7 +54,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Keep the import-path mirror from bg.py — the harness spawns us with
 # arbitrary cwd, so import-style "server.foo" needs the repo root on
@@ -64,9 +64,14 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import httpx  # noqa: E402
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
+from ..sessions.handoff import HandoffPointers, begin_ticket_batch, ticket_handoff
 from . import _host  # noqa: E402
+
+if TYPE_CHECKING:
+    from ..mcp_identity import McpScope
+    from ..sessions import SessionManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,6 +82,41 @@ logger = logging.getLogger(__name__)
 
 
 mcp = FastMCP("octopus-ask-agent")
+
+
+def _ticket_runtime(ctx: Context) -> tuple[SessionManager, McpScope]:
+    scope = _host.scope()
+    request = ctx.request_context.request
+    manager = request.scope.get("octopus.session_manager") if request is not None else None
+    if scope is None or manager is None:
+        raise ValueError("Ticket batches require the verified chat runtime")
+    return manager, scope
+
+
+@mcp.tool(name="begin_ticket_batch")
+async def begin_batch(ctx: Context) -> dict[str, str]:
+    """Register a user-authorized implement batch before working on its first ticket.
+
+    The verified human request defines the scope. Registering protects automatic
+    callbacks from continuing this batch after a new, separate human request.
+    Registration is idempotent for the same original human request.
+    """
+    manager, scope = _ticket_runtime(ctx)
+    return await begin_ticket_batch(manager, scope)
+
+
+@mcp.tool(name="handoff")
+async def handoff(handoff_id: str, ctx: Context, pointers: HandoffPointers | None = None) -> dict[str, Any]:
+    """Continue an authorized ticket batch in fresh model history in this same chat.
+
+    After the ticket's checks and its own independent review pass, record a stable
+    handoff_id, then supply the spec, accepted_ticket, candidate and next_work pointers.
+    End the current turn after registration. To check progress or reconcile a lost
+    receipt, pass only the same ID. In the new Claude execution this waits briefly
+    for the matching native record. Only started confirms the new history received input.
+    """
+    manager, scope = _ticket_runtime(ctx)
+    return await ticket_handoff(manager, scope, handoff_id, pointers)
 
 
 def _required_env(name: str) -> str | None:

@@ -86,7 +86,7 @@ from .submission import (
 
 if TYPE_CHECKING:
     from ..bg_tasks import BgTaskRecord
-    from ..knowledge import KnowledgeContext
+    from ..knowledge import AdmittedRequest, KnowledgeContext
 
 
 
@@ -396,7 +396,7 @@ class TurnsMixin(SessionManagerBase):
         request_id: str | None = None, trusted_request: str | None = None,
         knowledge_context: KnowledgeContext | None = None,
         client_request_id: str | None = None, recovery_of_client_id: str | None = None,
-        schedule: dict[str, Any] | None = None,
+        schedule: dict[str, Any] | None = None, return_parent: AdmittedRequest | None = None,
     ) -> SubmissionReceipt:
         database = self.input_database()
         session = self.sessions.get(session_id)
@@ -433,7 +433,8 @@ class TurnsMixin(SessionManagerBase):
             request_id=request_id or uuid.uuid4().hex,
         )
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
-        return await owner.call_runtime(Submit(queued, steerable, client_request_id, tuple(files), recovery_of_client_id, schedule))
+        return await owner.call_runtime(Submit(queued, steerable, client_request_id, tuple(files), recovery_of_client_id,
+                                              schedule, return_parent=return_parent))
 
     async def start_compact(self, session_id: str, *, client_request_id: str) -> SubmissionReceipt:
         session = self.sessions.get(session_id)
@@ -522,6 +523,7 @@ class TurnsMixin(SessionManagerBase):
                 target.session_id, body.prompt, source=target.source, delivery_id=target.delivery_id,
                 work_id=target.work_id, knowledge_context=context,
                 question_session_id=body.question_session_id, question_id=body.question_id,
+                return_parent=target.owned.return_binding if target.owned else None,
             )
             if receipt.accepted:
                 return receipt
@@ -766,6 +768,9 @@ class TurnsMixin(SessionManagerBase):
 
     async def _remember_resume_id(self, session: Session, resume_id: str | None) -> None:
         """Persist the engine-side conversation id this session resumes from."""
+        if resume_id is not None and session._run.request and session._run.request.source == "handoff":
+            # An opening handoff records its native binding with input evidence.
+            return
         if session.claude_session_id == resume_id:
             return
         owner = self._require_session_writer(session)
@@ -1139,11 +1144,8 @@ class TurnsMixin(SessionManagerBase):
             session.id,
         )
         await self._remember_resume_id(session, None)
-        # Don't restart cold: Octopus still has the whole conversation (the
-        # engine's transcript is a cache of ours, not the record), so replay
-        # its tail into this turn through the same channel a fork uses when its
-        # backend can't resume natively. The model continues the conversation
-        # instead of appearing to forget it.
+        # The product retains the transcript. Both lost-history recovery and
+        # fork replay use only the segment following its last ticket handoff.
         replayed = 0
         omitted = 0
         recovery_prompt = attempt.prompt

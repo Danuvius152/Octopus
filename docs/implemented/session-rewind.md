@@ -102,8 +102,11 @@ root/child source semantics are unchanged; see
 [command retention](codex-backend.md#saved-command-output).
 
 Before wrapping an input, the Owner reads the committed continuation identity,
-replay flag and metadata together. The first input includes the copied transcript
-and its input observations, new instruction, Wiki and attachment augmentation.
+replay flag and metadata together. The first input includes the copied model
+history and its input observations, new instruction, Wiki and attachment
+augmentation. The last [ticket handoff](input-reliability.md#ticket-handoffs)
+in the copied prefix determines its earliest model message. The product copy
+preserves the whole selected prefix.
 The original user text stays in product history. Codex measures the actual
 `turn/start` UTF-8 JSON frame with its real identities and effective controls;
 controller and instruction-injection RPCs have separate budgets. Earlier checks

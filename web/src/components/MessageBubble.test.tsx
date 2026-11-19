@@ -546,6 +546,16 @@ it("shows the Wiki return as an automatic notice beside its task cards", () => {
   expect(queryByTestId("fork-from-here")).toBeNull();
 });
 
+it("shows an automatic ticket handoff and its references in the original chat", () => {
+  const { container, getByText } = render(<MessageBubble sessionId="source-test" message={{
+    role: "user", type: "text", content: "issues/B.md", seq: 5,
+    tool_input: { request_context: { source: "handoff" }, handoff_id: "batch-A" },
+  }} />);
+  expect(getByText("Ticket handoff · batch-A").tagName).toBe("SUMMARY");
+  expect(getByText("issues/B.md").closest("details")).toBeTruthy();
+  expect(container.querySelector(".msg-user")).toBeNull();
+});
+
 it("does not offer a human rewind target for a structured automatic result", () => {
   const { queryByTestId } = render(<MessageBubble sessionId="source-test" onFork={() => {}} message={{
     role: "user", type: "text", content: "Research completed", seq: 4,

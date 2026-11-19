@@ -11,6 +11,7 @@ import pytest
 from server.agent_manager import AgentManager
 from server.harness import get_harness
 from server.mcp_identity import scope_is_live, verify
+from server.sessions.handoff import begin_ticket_batch
 from server.wiki import registry
 from tests.harness_profiles import process_profile, session_turn_argv
 from tests.test_delegation_work import work_runtime as work_runtime
@@ -79,14 +80,17 @@ async def test_child_execution_retains_the_trusted_source_contract(controlled_ru
     assert context["mode"] == "auto" and context["maintenance"]["may_submit"] is True
 
 
-async def test_terminal_return_restores_its_direct_parent_contract_after_retirement_and_a_new_root(
-    controlled_runtime, tmp_path,
+@pytest.mark.parametrize("ticket_batch", [False, True])
+async def test_terminal_return_uses_its_direct_contract_until_a_registered_batch_is_superseded(
+    controlled_runtime, tmp_path, ticket_batch,
 ):
     manager, delegations, parent, starts = controlled_runtime
     parent = await new_parent(manager, parent)
     original = "/wiki maintain Library/x.md Library/y.md\nGATE:root"
     first = await manager.start_message(parent.id, original)
     caller = await live_scope(await asyncio.wait_for(starts.get(), 5))
+    if ticket_batch:
+        await begin_ticket_batch(manager, caller)
     child = await delegations.start_delegation(
         parent_session_id=parent.id, agent_name="Worker",
         request="/wiki maintain Library/x.md\nGATE:child", scope=caller,
@@ -105,6 +109,25 @@ async def test_terminal_return_restores_its_direct_parent_contract_after_retirem
     newer = await manager.start_message(parent.id, "/wiki GATE:newer unrelated read question")
     await asyncio.wait_for(starts.get(), 5)
     (tmp_path / "child").touch()
+    if ticket_batch:
+        (tmp_path / "newer").touch()
+        assert (await newer.wait()).outcome.status == "success"
+        async def delivery():
+            state = await manager.db.load_delegation_state(
+                child.delegation_id, parent_session_id=parent.id, user_id=parent.user_id,
+            )
+            return json.loads(state)["terminal_disposition"]
+
+        async with asyncio.timeout(5):
+            while await delivery() != "closed":
+                await asyncio.sleep(.01)
+        await delegations.confirm_recording()
+        assert child.state == "completed"
+        assert any(row["content"] == "reply" for row in await manager.db.load_messages(child.delegation_id))
+        assert not manager.dispatch_snapshot(parent.id)["items"] and starts.empty()
+        ordinary = await request_context(manager.db, parent.id)
+        assert ordinary["request_id"] == newer.request_id and ordinary["source"] == "human"
+        return
     async with asyncio.timeout(5):
         while not manager.dispatch_snapshot(parent.id)["items"]:
             await asyncio.sleep(.01)
@@ -118,6 +141,56 @@ async def test_terminal_return_restores_its_direct_parent_contract_after_retirem
     assert context["maintenance"]["required_selections"] == [original]
     assert context["mode"] == "maintain"
     assert returned["request_id"] != context["origin"]["request_id"]
+
+
+@pytest.mark.parametrize("control", ["ordinary", "stopped", "superseded"])
+async def test_archived_batch_return_never_wakes_a_closed_parent(controlled_runtime, tmp_path, control):
+    manager, delegations, parent, starts = controlled_runtime
+    parent = await new_parent(manager, parent)
+    original = await manager.start_message(parent.id, "Implement an authorized batch GATE:root")
+    caller = await live_scope(await asyncio.wait_for(starts.get(), 5))
+    if control != "ordinary":
+        await begin_ticket_batch(manager, caller)
+    child = await delegations.start_delegation(
+        parent_session_id=parent.id, agent_name="Worker", request="Review the ticket GATE:review", scope=caller,
+    )
+    await asyncio.wait_for(starts.get(), 5)
+    (tmp_path / "root").touch()
+    assert (await original.wait()).outcome.status == "success"
+    if control == "stopped":
+        await manager.interrupt(parent.id)
+    if control == "superseded":
+        replacement = await manager.start_message(parent.id, "Pause the batch and discuss its scope")
+        assert (await replacement.wait()).outcome.status == "success"
+        await asyncio.wait_for(starts.get(), 5)
+    await manager.archive_session(parent.id, replace=False)
+    assert manager.get_session(parent.id) is None
+
+    reopened = []
+
+    async def observe(event):
+        if event["type"] == "session_unarchived" and event["session_id"] == parent.id:
+            reopened.append(event["session_id"])
+
+    manager.on_broadcast("archived-ticket-return", observe)
+    try:
+        (tmp_path / "review").touch()
+        async with asyncio.timeout(5):
+            while child.to_public_dict()["terminal_disposition"] is None:
+                await asyncio.sleep(.01)
+        await delegations.confirm_recording()
+        assert child.state == "completed"
+        assert any(row["content"] == "reply" for row in await manager.db.load_messages(child.delegation_id))
+        binding = await manager.db.get_session_binding(parent.id)
+        if control == "ordinary":
+            assert not binding["archived"] and reopened == [parent.id]
+            assert "[agent-reply:Worker" in (await asyncio.wait_for(starts.get(), 5)).prompt
+            await manager.await_session_execution(parent.id, timeout=5)
+        else:
+            assert binding["archived"] and manager.get_session(parent.id) is None and not reopened
+            assert starts.empty()
+    finally:
+        manager.remove_broadcast("archived-ticket-return")
 
 
 async def test_question_return_keeps_the_parents_full_scope(controlled_runtime, tmp_path):

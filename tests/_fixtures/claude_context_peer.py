@@ -10,11 +10,20 @@ import re
 import runpy
 import select
 import sys
+import time
 from pathlib import Path
 
 read_frames = runpy.run_path(str(Path(__file__).with_name("jsonl_frames.py")))["read_frames"]
 root = Path(sys.argv[1])
 sid = "exact-claude-session"
+fresh_ids = root / "claude-fresh-ids.json"
+if fresh_ids.exists():
+    if "--resume" in sys.argv[2:]:
+        sid = sys.argv[sys.argv.index("--resume") + 1]
+    else:
+        remaining = json.loads(fresh_ids.read_text())
+        sid = remaining.pop(0)
+        fresh_ids.write_text(json.dumps(remaining))
 model = "deepseek-flash"
 offset_path = root / "claude-offset"
 offset = int(offset_path.read_text()) if offset_path.exists() else 0
@@ -64,6 +73,9 @@ while True:
         identity = {"session_id": sid, "parent_tool_use_id": None,
                     "user_message_uuid": current["uuid"], "user_message_uuids": [current["uuid"]]}
         if plan.get("save_input_history"):
+            if plan.get("hold_before_history"):
+                while not (root / "claude-save-input").exists():
+                    time.sleep(.01)
             directory = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
             directory.mkdir(parents=True, exist_ok=True)
             with (directory / f"{sid}.jsonl").open("a") as handle:

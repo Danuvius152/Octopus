@@ -32,12 +32,16 @@ from .applications import (
     retain_application_session_owner,
 )
 from .base import DatabaseBase
+from .client_submissions import INDEPENDENT_HUMAN_INPUT
 from .transaction import Transaction
 
 
 class MessageExportError(ValueError):
     """A scoped export cannot provide a usable fixed-member page."""
 
+
+_HANDOFF_INPUT = ("role='user' AND type='text' AND CASE WHEN json_valid(tool_input) "
+                  "THEN json_extract(tool_input,'$.request_context.source')='handoff' ELSE 0 END")
 
 _MESSAGE_COLUMNS = (
     "seq, role, type, content, tool_name, tool_input, tool_use_id, "
@@ -51,9 +55,15 @@ _SESSION_COLUMNS = (
     "fork_revert_record fork_status app_id model user_id reasoning_effort service_tier context_state"
 ).split()
 
+_SESSION_PROJECTION = ",".join(f"s.{column}" for column in _SESSION_COLUMNS) + (
+    ", (SELECT CASE WHEN json_extract(i.payload,'$.ticket_batch')='registered' THEN i.request_id END "
+    f"FROM client_submissions i WHERE i.session_id=s.id AND {INDEPENDENT_HUMAN_INPUT} "
+    "ORDER BY i.rowid DESC LIMIT 1)"
+)
+
 
 def _decode_session(row: Any) -> dict[str, Any]:
-    result = dict(zip(_SESSION_COLUMNS, row, strict=True))
+    result = dict(zip((*_SESSION_COLUMNS, "ticket_batch_request_id"), row, strict=True))
     result["archived"] = bool(result["archived"])
     result["fork_needs_replay"] = bool(result["fork_needs_replay"])
     result["origin"] = result["origin"] or "user"
@@ -500,7 +510,7 @@ class SessionsMixin(DatabaseBase):
         reads use load_archived_sessions; live ownership is filtered in memory.
         """
         async with self.transaction(write=False) as tx:
-            query = f"SELECT {','.join(_SESSION_COLUMNS)} FROM sessions"
+            query = f"SELECT {_SESSION_PROJECTION} FROM sessions s"
             clauses = [] if include_archived else ["archived = 0"]
             params: list[Any] = []
             if user_id is not None:
@@ -528,10 +538,9 @@ class SessionsMixin(DatabaseBase):
         if session_id is not None:
             clauses.append("s.id = ?")
             params.append(session_id)
-        columns = ",".join(f"s.{column}" for column in _SESSION_COLUMNS)
         async with self.transaction(write=False) as tx:
             rows = await tx.fetch_all(
-                f"SELECT {columns}, COUNT(m.id), COALESCE(MAX(m.seq) + 1, 0), "
+                f"SELECT {_SESSION_PROJECTION}, COUNT(m.id), COALESCE(MAX(m.seq) + 1, 0), "
                 "COUNT(m.id) - COUNT(DISTINCT m.seq) FROM sessions s "
                 "LEFT JOIN messages m ON m.session_id = s.id WHERE " + " AND ".join(clauses) +
                 " GROUP BY s.rowid ORDER BY s.rowid", params,
@@ -564,6 +573,13 @@ class SessionsMixin(DatabaseBase):
                 (session_id, delivery_id),
             )
             return await cursor.fetchone() is not None
+
+    async def next_message_sequence(self, session_id: str) -> int:
+        """Capture the history position of independent work without loading the conversation."""
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one("SELECT COALESCE(MAX(seq)+1,0) FROM messages WHERE session_id=?", (session_id,))
+            assert row is not None
+            return row[0]
 
     async def message_sequence_state(self, session_id: str) -> tuple[int, int, int]:
         """Row count, allocation floor and duplicate count are different facts."""
@@ -762,7 +778,50 @@ class SessionsMixin(DatabaseBase):
                 if not matches(rows[0]):
                     raise ValueError("request record conflict")
             else:
+                if context.get("source") == "handoff":
+                    await self._begin_handoff_history(tx, message["session_id"], request_id, context)
                 await self._append_message(tx, **message)
+
+    @staticmethod
+    async def _begin_handoff_history(tx: Transaction, session_id: str, request_id: str, context: dict) -> None:
+        """The first input and its replay boundary become visible with the native detach."""
+        row = await tx.fetch_one(
+            "SELECT json_extract(payload,'$.previous_native_id'),json_extract(payload,'$.handoff_backend') "
+            "FROM client_submissions WHERE session_id=? AND request_id=? AND execution_state='running' "
+            "AND execution_owner=request_id AND json_extract(payload,'$.source')='handoff'", (session_id, request_id))
+        if row is None or not row[0]:
+            raise ValueError("The handoff has no original native binding")
+        updated = await tx.execute("UPDATE sessions SET claude_session_id=NULL,context_state=NULL "
+                                   "WHERE id=? AND claude_session_id=? AND backend=? AND fork_needs_replay=0",
+                                   (session_id, row[0], row[1]))
+        if updated.rowcount != 1:
+            raise ValueError("The original native history changed before handoff")
+        from ..knowledge import decode_context
+
+        encoded = json.dumps(context["knowledge"], ensure_ascii=False)
+        knowledge = decode_context(encoded)
+        if knowledge is None:
+            raise ValueError("The handoff has no verified execution context")
+        await tx.execute(
+            "UPDATE client_submissions SET payload=json_set(payload,'$.knowledge',?,'$.trusted_request',?) "
+            "WHERE session_id=? AND request_id=?",
+            (encoded, knowledge.trusted_request, session_id, request_id))
+
+    async def request_in_model_history(self, session_id: str, request_id: str, captured_after_seq: int | None) -> bool:
+        """A detached task retains its source record across its caller's history boundary."""
+        async with self.transaction(write=False) as tx:
+            if captured_after_seq is not None:
+                later = await tx.fetch_one(f"SELECT 1 FROM messages WHERE session_id=? AND seq>? AND {_HANDOFF_INPUT} LIMIT 1",
+                                           (session_id, captured_after_seq))
+                return later is None
+            boundary = await tx.fetch_one(f"SELECT MAX(seq) FROM messages WHERE session_id=? AND {_HANDOFF_INPUT}", (session_id,))
+            if boundary is None or boundary[0] is None:
+                return True
+            original = await tx.fetch_one(
+                "SELECT seq FROM messages WHERE session_id=? AND role='user' AND type='text' AND "
+                "CASE WHEN json_valid(tool_input) THEN json_extract(tool_input,'$.request_context.request_id')=? ELSE 0 END",
+                (session_id, request_id))
+            return original is not None and original[0] >= boundary[0]
 
     async def record_terminal(self, *, request_id: str, **message: Any) -> None:
         """Record one chosen outcome under its unique request identity."""

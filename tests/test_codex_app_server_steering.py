@@ -6,7 +6,9 @@ import json
 import pytest
 
 from server.harness import HarnessRun
+from server.mcp_identity import McpScope
 from server.sessions.client_submissions import submission_status, submit_client_message
+from server.sessions.handoff import begin_ticket_batch
 from tests import native_app_server as native_tests
 from tests.native_app_server import active_root, wait_until
 from tests.session_runtime import wait_dispatch_idle
@@ -176,27 +178,171 @@ async def test_lost_ack_only_accepts_correlated_native_evidence(native_runtime, 
     assert len((tmp_path / "native-steers.jsonl").read_text().splitlines()) == 1
 
 
-@pytest.mark.parametrize("proof", ["accepted", "rejected"])
-async def test_stop_late_ack_updates_original_without_replaying(native_runtime, tmp_path, proof):
+@pytest.mark.parametrize(("proof", "replace_batch"), [("accepted", False), ("rejected", False), ("rejected", True)])
+async def test_stop_late_ack_updates_original_without_replaying(native_runtime, tmp_path, monkeypatch, proof, replace_batch):
+    from server.sessions.owner_runtime import OwnerRuntime
+
     manager, database, session, mode, starts, events = native_runtime
+    if replace_batch:
+        mode[0] = "control_output"
+        enrolled = await manager.start_message(session.id, "Implement the approved tickets")
+        await native_tests.until(lambda: any(frame.get("method") == "turn/start" for frame in native_tests.wire_frames(tmp_path)))
+        run = session._run
+        scope = McpScope(session.id, user_id=session.user_id, wiki_task_id=run.wiki_task_id,
+                         run_lease_id=run.backend.run_lease_id, work_id=run.work_id)
+        await begin_ticket_batch(manager, scope)
+        native_tests.inject(tmp_path, native_tests.terminal())
+        assert (await enrolled.wait()).outcome.status == "success"
+        await wait_dispatch_idle(manager, session.id)
+        await manager.stop_all_held_processes()
+        events.clear()
+
+    batch_stops = []
+    stop_batch = database.stop_ticket_batch
+
+    async def record_batch_stop(session_id, request_id):
+        batch_stops.append((session_id, request_id))
+        await stop_batch(session_id, request_id)
+
+    monkeypatch.setattr(database, "stop_ticket_batch", record_batch_stop)
     mode[0] = "steer_late_" + proof
     root = await active_root(native_runtime, tmp_path)
+    owner_before_steer, release_owner = asyncio.Event(), asyncio.Event()
+    consume = OwnerRuntime._consume_runtime
+
+    async def hold_before_steer(runtime, execution, **kwargs):
+        await consume(runtime, execution, **kwargs)
+        if (proof == "rejected" and runtime.steer is not None and runtime.steer.write is not None
+                and (tmp_path / "native-steers.jsonl").exists() and not owner_before_steer.is_set()):
+            owner_before_steer.set()
+            await release_owner.wait()
+
+    monkeypatch.setattr(OwnerRuntime, "_consume_runtime", hold_before_steer)
     reply = await submit_client_message(manager, session.id, "Late acknowledgment", [], "late", wiki_mode=None)
 
     async def written():
         return (tmp_path / "native-steers.jsonl").exists()
 
     await wait_until(written)
-    await manager.interrupt(session.id)
+    if proof == "rejected":
+        await asyncio.wait_for(owner_before_steer.wait(), 3)
+        stop = asyncio.create_task(manager.interrupt(session.id))
+        try:
+            async def refused_before_control_settles():
+                saved = await submission_status(manager, session.id, "late")
+                return saved["execution"]["native_inputs"][0]["state"] == "rejected"
+
+            await wait_until(refused_before_control_settles)
+        finally:
+            release_owner.set()
+        assert await stop
+    else:
+        await manager.interrupt(session.id)
     await wait_until(lambda: _is_inactive(manager, session.id))
     saved = await submission_status(manager, session.id, "late")
     assert saved["request_id"] == reply["request_id"]
     evidence = saved["execution"]["native_inputs"][0]
-    assert evidence["state"] == proof and evidence["target_turn_id"] == "turn-1"
+    assert evidence["state"] == proof and evidence["target_turn_id"] == ("turn-2" if replace_batch else "turn-1")
     assert saved.get("outcome", {}).get("status", "interrupted") == "interrupted"
     assert (await database.get_committed_terminal(session.id, root["request_id"]))["status"] == "interrupted"
     assert not manager.dispatch_snapshot(session.id)["items"] and manager.dispatch_snapshot(session.id)["paused"]
-    assert len(starts) == 1
+    assert not batch_stops
+    if replace_batch:
+        assert await database.ticket_batch_state(session.id, enrolled.request_id) == "registered"
+    assert len(starts) == (2 if replace_batch else 1)
+
+
+@pytest.mark.parametrize("stop_at", ["before_claim", "claim_receipt_pending", "preparing", "native"])
+async def test_stop_uses_the_latest_independent_human_request(native_runtime, tmp_path, monkeypatch, stop_at):
+    from server import fork_helpers
+    from server.sessions.owner_runtime import OwnerRuntime
+
+    manager, database, session, _, _, _ = native_runtime
+    original = await native_tests.start_output(native_runtime)
+    await native_tests.until(lambda: session._steer_open)
+    run = session._run
+    backend = run.backend
+    scope = McpScope(session.id, user_id=session.user_id, wiki_task_id=run.wiki_task_id,
+                     run_lease_id=backend.run_lease_id, work_id=run.work_id)
+    await begin_ticket_batch(manager, scope)
+
+    prepared, release_steer = asyncio.Event(), asyncio.Event()
+    stopping, release_input = asyncio.Event(), asyncio.Event()
+    prepare_steer = OwnerRuntime._prepare_steer
+    claim = database.claim_client_submission
+    capture_anchor = fork_helpers.capture_git_anchor
+    stop_batch = database.stop_ticket_batch
+    stopped_batches = []
+
+    async def hold_steer(runtime, *args):
+        result = await prepare_steer(runtime, *args)
+        prepared.set()
+        await release_steer.wait()
+        return result
+
+    async def hold_claim(*args, **kwargs):
+        if stop_at == "before_claim":
+            stopping.set()
+            await release_input.wait()
+        result = await claim(*args, **kwargs)
+        if stop_at == "claim_receipt_pending":
+            stopping.set()
+            await release_input.wait()
+        return result
+
+    async def hold_preparation(*args, **kwargs):
+        stopping.set()
+        await release_input.wait()
+        return await capture_anchor(*args, **kwargs)
+
+    async def record_batch_stop(session_id, request_id):
+        stopped_batches.append(request_id)
+        await stop_batch(session_id, request_id)
+
+    monkeypatch.setattr(OwnerRuntime, "_prepare_steer", hold_steer)
+    monkeypatch.setattr(database, "stop_ticket_batch", record_batch_stop)
+    successor = await submit_client_message(manager, session.id, "Take over as a new request", [], "successor", wiki_mode=None)
+    assert successor["disposition"] == "steered"
+    try:
+        await asyncio.wait_for(prepared.wait(), 3)
+        if stop_at in {"before_claim", "claim_receipt_pending"}:
+            monkeypatch.setattr(database, "claim_client_submission", hold_claim)
+        elif stop_at == "preparing":
+            monkeypatch.setattr(fork_helpers, "capture_git_anchor", hold_preparation)
+        native_tests.inject(tmp_path, native_tests.terminal())
+        await native_tests.until(lambda: not session._steer_open)
+        release_steer.set()
+
+        async def successor_started():
+            saved = await submission_status(manager, session.id, "successor")
+            return any(item["kind"] == "start" and item["state"] == "accepted" for item in saved["execution"]["native_inputs"])
+
+        if stop_at == "native":
+            await wait_until(successor_started)
+        else:
+            await asyncio.wait_for(stopping.wait(), 3)
+        assert (await database.get_committed_terminal(session.id, original["request_id"]))["status"] == "success"
+        row = await database.get_submission_for_request(session.id, successor["request_id"])
+        expected_owner = original if stop_at == "before_claim" else successor
+        assert row["execution_owner"] == expected_owner["request_id"]
+        assert await manager.interrupt(session.id)
+    finally:
+        release_steer.set()
+        release_input.set()
+    await wait_until(lambda: _is_inactive(manager, session.id))
+
+    starts = [f for f in native_tests.wire_frames(tmp_path, finished=True) if f.get("method") == "turn/start"]
+    assert len(starts) == (2 if stop_at == "native" else 1)
+    assert not (tmp_path / "native-steers.jsonl").exists()
+    assert (await database.get_committed_terminal(session.id, successor["request_id"]))["status"] == "interrupted"
+    state = await database.ticket_batch_state(session.id, original["request_id"])
+    assert state == ("stopped" if stop_at == "before_claim" else "registered")
+    if stop_at in {"preparing", "native"}:
+        assert not stopped_batches
+    if stop_at != "before_claim":
+        assert await database.handoff_human_executions(session.id, original["request_id"]) is None
+        stored = next(row for row in await database.load_sessions(user_id=session.user_id) if row["id"] == session.id)
+        assert stored["ticket_batch_request_id"] is None
 
 
 @pytest.mark.parametrize("boundary", ["process_record", "initial_record", "native_record"])

@@ -381,6 +381,7 @@ class BgTaskManager:
                 raise BgTaskError("Background task session no longer exists")
             parent = capture(SimpleNamespace(
                 id=session_id, user_id=binding["user_id"], agent_id=binding["agent_id"],
+                _next_message_seq=await self._db.next_message_sequence(session_id),
             ), None, prompt=command)
             owned_context = derive(parent, command)
         if owned_context.return_binding.reference.session_id != session_id:

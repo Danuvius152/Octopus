@@ -180,8 +180,9 @@ and their derived specs/tickets stay in `.scratch/<task>/`. All other temporary
 artifacts, including grill logs and scripts, use the account workspace. Read
 [local task conventions](docs/agents/issue-tracker.md) before publishing or
 fetching specs, tickets or maps. Routine work does not require tickets.
-Before starting or resuming implementation from tickets, follow the
-[ticket implementation procedure](docs/agents/issue-tracker.md#implement-tickets).
+For ticketed `implement` work, follow the
+[ticket implementation procedure](docs/agents/issue-tracker.md#implement-tickets)
+when claiming or resolving a ticket, moving to the next one or resuming a batch.
 
 ### Triage labels
 

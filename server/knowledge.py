@@ -50,6 +50,7 @@ class AdmittedRequest:
     reference: RequestRef
     context: KnowledgeContext
     work_id: str | None = None
+    captured_after_seq: int | None = None
 
 
 @dataclass(frozen=True)
@@ -132,7 +133,8 @@ def capture(session, scope: McpScope | None, *, prompt: str, selected: str | Non
     """
     if scope is None:
         context = for_entry(session, prompt, request_id=uuid.uuid4().hex, selected=selected)
-        return AdmittedRequest(context.origin, context)
+        next_seq = getattr(session, "_next_message_seq", None)
+        return AdmittedRequest(context.origin, context, captured_after_seq=next_seq - 1 if next_seq is not None else None)
     require_live_scope(scope, session.id)
     context = session._run.knowledge_context
     settlement = session._run.settlement
@@ -141,7 +143,8 @@ def capture(session, scope: McpScope | None, *, prompt: str, selected: str | Non
             or getattr(session._run.backend, "run_lease_id", None) != scope.run_lease_id
             or tasks.token_for_scope(scope) != session._run.wiki_task_id or session._run.work_id != scope.work_id):
         raise ValueError("The original requesting run is no longer active")
-    return AdmittedRequest(RequestRef(session.id, settlement.request_id, session.user_id), context, scope.work_id)
+    return AdmittedRequest(RequestRef(session.id, settlement.request_id, session.user_id), context,
+                           scope.work_id, session._next_message_seq - 1)
 
 
 def derive(parent: AdmittedRequest, prompt: str, *, selected: str | None = None,

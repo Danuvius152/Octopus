@@ -10,6 +10,7 @@
 | 问题回答、到期或无人值守等待 | [问题结算](#问题结算)、[交互策略](#原工作交互策略与等待) | MCP 清理归[Harness](harness-layer.md#mcp-question-retirement)，原生写帧归[Codex](codex-backend.md#native-question-control) |
 | BG/Research/委派返回 | [公共返回接管](#公共返回接管) | 改来源材料、重试或恢复才读对应领域合同 |
 | compact | [原生维护输入](#native-compaction-requests) | 协议及效果证据归[Codex](codex-backend.md#native-compaction)或[Claude](harness-layer.md#claude-native-compaction) |
+| 逐票清理模型历史、核对交接 | [票间交接](#ticket-handoffs) | 结票、独立 Vera 和批次验收归[逐票规程](../agents/issue-tracker.md#implement-tickets) |
 | 聊天或应用修改框刷新恢复 | [浏览器文本草稿](#browser-text-drafts) | App 回执及弹层寿命归[列表与视图合同](frontend-interaction-state.md#应用修改草稿与视图寿命)，聊天归[共享聊天稿](frontend-interaction-state.md#共享聊天文字与操作寿命) |
 
 The database owns the complete accepted input and its execution status.
@@ -102,6 +103,16 @@ terminal remain review-only. Historical refusal receipts stay read-only.
 Managed startup retirement and current-generation retirement keep their
 existing authority; hiding a saved input proves neither execution exit nor
 permission to dispatch.
+
+## Ticket handoffs
+
+Octo 开始批次前调用 `mcp__ask_agent__begin_ticket_batch`。SessionOwner 把登记存在当前已授权的人类输入中，重复登记返回同一个原请求 ID。按逐票规程结票后，在同一聊天调用 `mcp__ask_agent__handoff`。首次传入票据中已记录的 `handoff_id`，以及含 `spec`、`accepted_ticket`、`candidate` 和 `next_work` 的 `pointers`。接到 `registered` 后结束原轮。新一轮只传原 ID 核对回执，收到 `started` 才在票中确认并开始下一项授权工作。相同 ID 和材料对应同一输入，同一边界使用不同 ID 会返回包含原 ID 的冲突。浏览器的提交状态接口也可用 `handoff:<id>` 查询。
+
+SessionOwner 等原轮成功、旧 Harness 和读写资源退出，复核原人类请求及已确认的修改，再保存续办输入和清理边界。原聊天、工作目录和可见记录保留。Codex 新建原生线程，以该首输入的接纳凭证确认。Claude 新开进程，以新历史中匹配的消息 UUID 和正文确认。该执行查自己的原 ID 时，会短暂等待首输入证据落盘，超时保持 `unknown`。回放和历史失联恢复从所选范围内最后一次交接开始，其中保留当时的人类约束。
+
+边界前的 BG、Research、委派和 Wiki 结果留在原任务中供查阅。已登记批次的自动回执等当前输入结算，Owner 接纳时复核原人类请求和所有已确认的修改。交接登记期间的暂时忙碌沿用各来源的重试规则，边界提交后关闭旧票的自动返回。Stop 和另发人工请求可中止待交接工作及旧批次的自动回执。Owner 在启动和解除归档时根据最新独立人工请求恢复有效登记。未发送的 steer 成为独立请求时，领取事务同时更新原回执与执行归属。Owner 收到提交确认便撤下旧批次引用，附件和 Git 准备继续异步执行。处理 Stop 时先对当前执行发起停止并关闭写入，再于返回回执前更新有效登记。SQLite 只允许更新仍属最新独立请求的登记，覆盖领取已提交但回执未到的情形。旧批次回执解除归档前也复核原授权，已停止或被替代的批次结果仍可在原任务查阅。普通独立委派沿用原请求返回合同。
+
+重启时尚未领取的登记，以及 Claude 已领取但尚未越过首输入写前记录的交接，查为 `withdrawn`。后端准备失败且明确未发送时，回执为 `failed` 或 `withdrawn`，保留原失败，新的人工授权仍可继续。可能已发出而缺少确证的输入保留 `unknown`。重启后沿原 ID 查询已提交的证据。若 Claude 在写前记录之后、首输入证据提交之前退出，原进程的消息 UUID 与正文绑定已失去，回执保持未知。聊天中单列交接消息，便于回查编号与材料。双后端的首输入、停止、重启、重放和迟到返回由 [ticket handoff 回归测试](../../tests/test_ticket_handoff.py)覆盖。
 
 <a id="browser-application-text-drafts"></a>
 

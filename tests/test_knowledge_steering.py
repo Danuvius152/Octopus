@@ -52,6 +52,7 @@ async def steering(tmp_path, monkeypatch):
             can_steer = True
 
             def __init__(self):
+                self.native_end_reason = "process_ended"
                 self.run_lease_id = uuid.uuid4().hex
                 self.session_id, self.user_id = config.session_id, config.user_id
                 self.work_id = config.work_id

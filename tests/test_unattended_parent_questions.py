@@ -151,11 +151,11 @@ async def test_stopping_parent_ends_an_already_accepted_unattended_question_oppo
         else:
             runtime = manager._session_owners[id(parent)].runtime
             prepare = runtime._prepare_input
-            async def hold_solver(configured, request):
+            async def hold_solver(configured, request, execution):
                 if request.question_id == qid:
                     entered.set()
                     await release.wait()
-                return await prepare(configured, request)
+                return await prepare(configured, request, execution)
             monkeypatch.setattr(runtime, "_prepare_input", hold_solver)
         (tmp_path / "release").touch()
         await asyncio.wait_for(entered.wait(), 3)

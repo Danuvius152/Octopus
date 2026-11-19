@@ -65,5 +65,14 @@ def decode_payload(value: dict[str, Any]) -> dict[str, Any]:
         operation = MessageOperation(
             kind="message", content=value["content"], attachment_ids=value["attachment_ids"], wiki_mode=value.get("wiki_mode"),
         )
+    if value.get("source") == "handoff":
+        if (operation.kind != "message" or operation.attachment_ids or value.get("recovery_of_client_id")
+                or value.get("handoff_backend") not in {"codex", "claude-code"}
+                or not all(isinstance(value.get(key), str) and value[key] for key in (
+                    "delivery_id", "handoff_from", "previous_native_id", "knowledge", "trusted_request"))):
+            raise ValueError("Ticket handoff has no complete original binding")
+        fresh = value.get("fresh_native_id")
+        if fresh is not None and (not isinstance(fresh, str) or not fresh or fresh == value["previous_native_id"]):
+            raise ValueError("Ticket handoff has no distinct fresh native history")
     return {**{key: item for key, item in value.items() if key not in {"content", "attachment_ids", "wiki_mode"}},
             "operation": operation.model_dump()}

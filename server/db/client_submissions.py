@@ -34,6 +34,9 @@ _NATIVE_STEER_NOTICE = (
     ")"
 )
 
+INDEPENDENT_HUMAN_INPUT = ("json_extract(i.payload,'$.source')='human' "
+                           "AND json_extract(i.receipt,'$.disposition') IS NOT 'steered'")
+
 
 def _submission(row) -> dict[str, Any]:
     result = dict(zip((*_COLUMNS, "recovered_by", "terminal"), row, strict=True))
@@ -46,6 +49,72 @@ def _submission(row) -> dict[str, Any]:
 
 
 class ClientSubmissionsMixin(DatabaseBase):
+    async def register_ticket_batch(self, session_id: str, origin_id: str) -> bool:
+        async with self.transaction(write=True) as tx:
+            updated = await tx.execute(
+                "UPDATE client_submissions SET payload=json_set(payload,'$.ticket_batch','registered') "
+                "WHERE session_id=? AND request_id=? AND json_extract(payload,'$.source')='human' "
+                "AND COALESCE(json_extract(payload,'$.ticket_batch'),'registered')='registered'",
+                (session_id, origin_id),
+            )
+            return updated.rowcount == 1
+
+    async def ticket_batch_state(self, session_id: str, origin_id: str) -> str | None:
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                "SELECT json_extract(payload,'$.ticket_batch') FROM client_submissions "
+                "WHERE session_id=? AND request_id=? AND json_extract(payload,'$.source')='human'",
+                (session_id, origin_id),
+            )
+            return row[0] if row else None
+
+    async def stop_ticket_batch(self, session_id: str, origin_id: str) -> None:
+        """Check the original batch is still current in the same write transaction."""
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE client_submissions SET payload=json_set(payload,'$.ticket_batch','stopped') "
+                "WHERE session_id=? AND request_id=? AND json_extract(payload,'$.ticket_batch')='registered' "
+                "AND NOT EXISTS (SELECT 1 FROM client_submissions i "
+                "WHERE i.session_id=client_submissions.session_id AND i.rowid>client_submissions.rowid "
+                f"AND {INDEPENDENT_HUMAN_INPUT})",
+                (session_id, origin_id),
+            )
+
+    async def conflicting_handoff(self, session_id: str, parent_request_id: str, native_id: str | None) -> str | None:
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                "SELECT json_extract(payload,'$.delivery_id') FROM client_submissions "
+                "WHERE session_id=? AND json_extract(payload,'$.source')='handoff' AND ("
+                "json_extract(payload,'$.handoff_from')=? OR delivery_state='unknown' OR "
+                "(execution_state IN ('pending','running','unknown') AND json_extract(payload,'$.fresh_native_id') IS NULL) OR "
+                "(json_extract(payload,'$.previous_native_id')=? AND json_extract(payload,'$.fresh_native_id') IS NOT NULL)) "
+                "ORDER BY rowid DESC LIMIT 1", (session_id, parent_request_id, native_id),
+            )
+            return row[0] if row else None
+
+    async def handoff_human_executions(self, session_id: str, origin_id: str) -> list[str] | None:
+        """Locate every confirmed human update since the original request."""
+        async with self.transaction(write=False) as tx:
+            origin = await tx.fetch_one("SELECT rowid FROM client_submissions WHERE session_id=? AND request_id=? "
+                                       "AND json_extract(payload,'$.source')='human'", (session_id, origin_id))
+            if origin is None:
+                return None
+            later = await tx.fetch_all(
+                "SELECT request_id,json_extract(receipt,'$.disposition'),execution_owner,delivery_state,execution_state "
+                "FROM client_submissions WHERE session_id=? AND rowid>? AND json_extract(payload,'$.source')='human' "
+                "ORDER BY rowid", (session_id, origin[0]))
+            carriers = {origin_id: None}
+            for request_id, disposition, owner, delivery, state in later:
+                if disposition != "steered":
+                    return None
+                if state == "withdrawn" and delivery == "none":
+                    continue
+                # An unaccepted steer can requeue and run as its own human input.
+                if delivery != "confirmed" or not owner or owner == request_id:
+                    return None
+                carriers[owner] = None
+            return list(carriers)
+
     async def record_input_history(self, session_id: str, request_id: str, attempt_id: str,
                                    generation: str, backend: str, native_id: str | None,
                                    may_have_run: bool) -> None:
@@ -54,22 +123,31 @@ class ClientSubmissionsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             row = await tx.fetch_one(
                 "SELECT i.execution_generation,i.execution_owner,i.native_inputs,"
-                "s.backend,s.claude_session_id,s.fork_needs_replay,s.fork_metadata "
+                "s.backend,s.claude_session_id,s.fork_needs_replay,s.fork_metadata,"
+                "json_extract(i.payload,'$.previous_native_id'),json_extract(i.payload,'$.fresh_native_id') "
                 "FROM client_submissions i JOIN sessions s ON s.id=i.session_id WHERE i.session_id=? AND i.request_id=?",
                 (session_id, request_id))
             if row is None or row[0] != generation or row[1] != request_id or row[3] != backend:
                 raise ValueError("Input history lost its original execution binding")
-            if not row[5]:
+            handoff = row[7] is not None
+            if (not row[5] and not handoff) or (handoff and row[8] is not None):
                 return
             if native_id is not None:
+                if handoff and native_id == row[7]:
+                    raise ValueError("Ticket handoff reused its original native history")
                 if not may_have_run or row[4] is not None and row[4] != native_id:
                     raise ValueError("Input history identity changed")
                 entries = [NativeInputEvidence.model_validate(item) for item in json.loads(row[2])]
                 if backend == "codex" and not any(item.attempt_id == attempt_id and item.thread_id == native_id
                         and item.kind == "start" and item.state == "accepted" for item in entries):
                     raise ValueError("Installed input has no matching native start")
-                await tx.execute("UPDATE sessions SET claude_session_id=?,fork_needs_replay=0,fork_metadata=? WHERE id=?",
-                    (native_id, consumed_fork_metadata(row[6]), session_id))
+                if handoff:
+                    await tx.execute("UPDATE sessions SET claude_session_id=? WHERE id=?", (native_id, session_id))
+                    await tx.execute("UPDATE client_submissions SET payload=json_set(payload,'$.fresh_native_id',?) "
+                                     "WHERE session_id=? AND request_id=?", (native_id, session_id, request_id))
+                else:
+                    await tx.execute("UPDATE sessions SET claude_session_id=?,fork_needs_replay=0,fork_metadata=? WHERE id=?",
+                        (native_id, consumed_fork_metadata(row[6]), session_id))
             delivery = "confirmed" if native_id else "unknown" if may_have_run else "none"
             await tx.execute(
                 "UPDATE client_submissions SET delivery_state=?,reason_code=?,state_version=state_version+1,updated_at=? "
@@ -95,7 +173,8 @@ class ClientSubmissionsMixin(DatabaseBase):
                 raise ValueError("Native input has no original submission")
             if evidence.input_id != request_id:
                 raise ValueError("Native input identity does not match its submission")
-            operation = decode_payload(json.loads(row[3]))["operation"]
+            payload = decode_payload(json.loads(row[3]))
+            operation = payload["operation"]
             if (operation["kind"] == "compact") != (evidence.kind == "compact"):
                 raise ValueError("Native evidence kind does not match its original operation")
             entries = [NativeInputEvidence.model_validate(item) for item in json.loads(row[0])]
@@ -108,6 +187,8 @@ class ClientSubmissionsMixin(DatabaseBase):
                     or evidence.state not in {"accepted", "rejected"}):
                 raise ValueError("A closed submission only accepts proof of its existing native input")
             if evidence.thread_id is not None:
+                if evidence.thread_id == payload.get("previous_native_id"):
+                    raise ValueError("Ticket handoff reused its original native thread")
                 # Persist history association with input evidence, before a
                 # business frame can outrun the Owner's session_started event.
                 updated = await tx.execute(
@@ -135,6 +216,10 @@ class ClientSubmissionsMixin(DatabaseBase):
                 entries = [evidence if item.attempt_id == evidence.attempt_id else item for item in entries]
             else:
                 entries.append(evidence)
+            if payload.get("source") == "handoff" and evidence.kind == "start" and evidence.state == "accepted":
+                await tx.execute("UPDATE client_submissions SET payload=json_set(payload,'$.fresh_native_id',?) "
+                                 "WHERE session_id=? AND request_id=? AND json_extract(payload,'$.fresh_native_id') IS NULL",
+                                 (evidence.thread_id, session_id, request_id))
             uncertain = any(item.state == "unknown" for item in entries)
             delivery = "unknown" if uncertain else "confirmed" if any(item.state == "accepted" for item in entries) else "none"
             # Observation can settle input uncertainty after Stop. It cannot
@@ -268,6 +353,7 @@ class ClientSubmissionsMixin(DatabaseBase):
             if recovery_of:
                 original = await self._get_client_submission(tx, session_id, recovery_of)
                 if (original is None or original["payload"] is None
+                        or original["payload"].get("source") == "handoff"
                         or original["payload"]["operation"]["kind"] != "message" or decode_payload(payload)["operation"]["kind"] != "message"
                         or original["execution_state"] != "withdrawn" or original["dismissed"]
                         or original["terminal"] is not None and not (original["native_inputs"] and original["delivery_state"] == "none")):
@@ -312,8 +398,10 @@ class ClientSubmissionsMixin(DatabaseBase):
                 return False
             await tx.execute(
                 "UPDATE client_submissions SET execution_state='running',reason_code=NULL,execution_owner=?,execution_generation=?,execution_boot=?,"
+                "receipt=CASE WHEN request_id=? AND json_extract(receipt,'$.disposition')='steered' "
+                "THEN json_set(receipt,'$.disposition','accepted') ELSE receipt END,"
                 "state_version=state_version+1,updated_at=? WHERE session_id=? AND request_id=?",
-                (owner, generation, boot_identity(), datetime.now(UTC).isoformat(), session_id, request_id),
+                (owner, generation, boot_identity(), owner, datetime.now(UTC).isoformat(), session_id, request_id),
             )
             return True
 
@@ -369,14 +457,14 @@ class ClientSubmissionsMixin(DatabaseBase):
                 "SELECT DISTINCT execution_generation FROM client_submissions WHERE payload IS NOT NULL "
                 "AND execution_state IN ('running','unknown') AND execution_generation IS NOT NULL",
             )
-            # Only new, explicit native evidence can distinguish preparation
-            # from possible business delivery. Historical running rows retain
-            # their conservative classification; no fact is backfilled.
+            # Claude handoff writes have a durable marker before stdin I/O.
+            # Ordinary historical rows still need explicit native evidence.
             await tx.execute(
                 "UPDATE client_submissions SET execution_state='withdrawn',reason_code='service_restart_before_start',"
-                "state_version=state_version+1,updated_at=? WHERE execution_state='running' "
-                "AND json_array_length(native_inputs)>0 AND NOT EXISTS ("
-                "SELECT 1 FROM json_each(native_inputs) WHERE json_extract(value,'$.state') NOT IN ('not_sent','rejected'))",
+                "state_version=state_version+1,updated_at=? WHERE execution_state='running' AND delivery_state='none' AND ("
+                "(json_extract(payload,'$.source')='handoff' AND json_extract(payload,'$.handoff_backend')='claude-code') OR "
+                "(json_array_length(native_inputs)>0 AND NOT EXISTS ("
+                "SELECT 1 FROM json_each(native_inputs) WHERE json_extract(value,'$.state') NOT IN ('not_sent','rejected'))))",
                 (datetime.now(UTC).isoformat(),),
             )
             # Classify each newly interrupted writer once, before changing it

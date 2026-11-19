@@ -46,6 +46,7 @@ from ..session_operations import CompactResult
 from ..submission_models import NativeInputEvidence
 from .base import (
     _MAX_PENDING_STEERS,
+    TICKET_BATCH_ORIGINS,
     ActiveRun,
     BackendRetirement,
     ForkError,
@@ -61,6 +62,7 @@ from .client_submissions import (
     load_pending_input,
     require_retired_writers,
     saved_context,
+    validate_claimed_attachments,
 )
 from .commands import CorrelatedControl, _process_owned_command, current_interrupt
 from .observation import AttemptResource
@@ -86,6 +88,8 @@ from .submission import RequestCompletion, SubmissionReceipt
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from ..knowledge import AdmittedRequest
+    from ..mcp_identity import McpScope
     from ..wiki.tasks import WikiTask
     from .owner import SessionOwner
 
@@ -98,6 +102,13 @@ class Submit:
     attachments: tuple[dict[str, Any], ...] = ()
     recovery_of: str | None = None
     schedule: dict[str, Any] | None = None
+    handoff_scope: McpScope | None = None
+    return_parent: AdmittedRequest | None = None
+
+
+@dataclass(frozen=True)
+class RegisterTicketBatch:
+    scope: McpScope
 
 
 @dataclass(frozen=True)
@@ -235,7 +246,7 @@ class IdlePublication:
 
 RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | ReadContext | CaptureConfiguration | UpdateConfiguration | CloseWork | RetireProcess | RetireHeldProcess
                   | CloseExecution | ReleaseApplication | ReserveFork | OwnForkProcess | ReleaseArchive | AutoArchive | FinishAutoArchive
-                  | IdleEvent | CorrelatedControl | RecoveryDismissed)
+                  | IdleEvent | CorrelatedControl | RecoveryDismissed | RegisterTicketBatch)
 
 
 @dataclass(frozen=True)
@@ -356,6 +367,7 @@ class Execution:
     activity_token: int | None = None
     deadline: RuntimeDeadline | None = None
     interrupted: bool = False
+    human_input_claimed: bool = False
     stream_ended: bool = False
     start_ended: bool = False
     frames: deque[dict[str, Any]] = field(default_factory=deque)
@@ -482,6 +494,13 @@ class OwnerRuntime:
         self.status_notice = {"type": "status", "session_id": session.id, "status": value.value,
                               "operation": self.current.request.operation if self.current is not None else None}
 
+    def _clear_replaced_ticket_batch(self) -> None:
+        session, execution = self.owner.session, self.current
+        batch = session._ticket_batch_request_id
+        if (batch is not None and execution is not None and execution.human_input_claimed
+                and batch != execution.request.request_id):
+            session._ticket_batch_request_id = None
+
     def can_handle(self, command: RuntimeCommand) -> bool:
         if isinstance(command, IdleEvent):
             return self._idle_publication is None
@@ -498,6 +517,21 @@ class OwnerRuntime:
                 return await manager._save_session_configuration(session.id, command.fields, command.user_id)
         if isinstance(command, Submit):
             return await self._submit(command)
+        if isinstance(command, RegisterTicketBatch):
+            from ..knowledge import capture
+
+            parent = capture(session, command.scope, prompt="")
+            origin = parent.context.origin
+            database = manager.input_database()
+            if (session.origin not in TICKET_BATCH_ORIGINS or self.current is None
+                    or self.current.interrupted or session._dispatch_paused
+                    or origin.session_id != session.id or origin.user_id != session.user_id
+                    or await database.handoff_human_executions(session.id, origin.request_id) is None):
+                raise ValueError("Register the batch from its current human authorization in the main chat")
+            if not await database.register_ticket_batch(session.id, origin.request_id):
+                raise ValueError("Resume the stopped ticket batch with a new human request")
+            session._ticket_batch_request_id = origin.request_id
+            return {"state": "registered", "original_request_id": origin.request_id}
         if isinstance(command, RecoveryDismissed):
             self.changed()
             return True
@@ -512,7 +546,12 @@ class OwnerRuntime:
             session._dispatch_paused = True
             for request in (*session._pending_queue, *session._steer_queue):
                 request.priority = False
-            interrupted = await self._interrupt(command.cause, retain_unstarted=True)
+            retain = not (self.current is not None
+                          and (self.current.request.source == "handoff" or self.current.request.batch_return))
+            self._clear_replaced_ticket_batch()
+            batch_request_id = session._ticket_batch_request_id if command.cause == "user" else None
+            interrupted = await self._interrupt(command.cause, retain_unstarted=retain, batch_request_id=batch_request_id)
+            await self._withdraw_batch_work(withdraw_returns=True)
             for compact_pending in tuple(session._pending_queue):
                 if compact_pending.operation == "compact":
                     session._pending_queue.remove(compact_pending)
@@ -734,6 +773,8 @@ class OwnerRuntime:
         )
         existing = await database.get_client_submission(session.id, client_id)
         if existing is not None:
+            if request.source == "handoff" and (existing["payload"] or {}).get("source") != "handoff":
+                raise ValueError("This identifier belongs to a different input")
             return self._existing_input(existing, digest)
         new_session = command.schedule is not None and session.origin == "schedule" and session.id not in manager.sessions
         if not new_session and manager.sessions.get(session.id) is not session:
@@ -749,6 +790,52 @@ class OwnerRuntime:
         if session._forking or (session._archive_reservation is not None
                 and not (session._dispatch_paused and self._auto_archive_operation is not None)):
             raise SessionAdmissionBusy(f"Session {session.id} is busy (forking or archiving)")
+        if request.source == "handoff":
+            from ..knowledge import capture
+
+            if command.handoff_scope is None or request.operation != "message":
+                raise ValueError("A handoff needs its original execution scope")
+            parent = capture(session, command.handoff_scope, prompt="")
+            if self.current is None or self.current.request.request_id != parent.reference.request_id:
+                raise ValueError("The original ticket execution has ended")
+            origin = parent.context.origin
+            if origin.session_id != session.id or await database.ticket_batch_state(session.id, origin.request_id) != "registered":
+                raise ValueError("Register the authorized ticket batch before requesting handoff")
+            previous = await database.conflicting_handoff(session.id, parent.reference.request_id, session.claude_session_id)
+            if previous is not None:
+                raise ValueError(f"This ticket already has handoff {previous}")
+            if (session._dispatch_paused or session._pending_queue or session._steer_queue or self.steer is not None
+                    or not session.claude_session_id or session.fork_needs_replay or self.current.interrupted):
+                raise ValueError("Handle existing inputs and confirm the original native history before handoff")
+            request.knowledge_context = parent.context
+            request.work_id = parent.work_id
+            payload.update(handoff_from=parent.reference.request_id, previous_native_id=session.claude_session_id,
+                           handoff_backend=session.backend)
+        if command.return_parent is not None:
+            assert request.operation == "message"
+            parent_binding = command.return_parent
+            if not await database.request_in_model_history(session.id, parent_binding.reference.request_id,
+                                                           parent_binding.captured_after_seq):
+                raise SessionAdmissionClosed("The calling ticket has handed off its model context")
+            switching = (self.current is not None and self.current.request.source == "handoff"
+                         and self.current.phase in {"claim", "input"})
+            if switching or any(item.source == "handoff" for item in session._pending_queue):
+                raise SessionAdmissionBusy("The calling ticket has a pending model context handoff")
+            origin = parent_binding.context.origin
+            batch = await database.ticket_batch_state(session.id, origin.request_id) if origin.session_id == session.id else None
+            if batch is not None:
+                from .handoff import updated_batch_context
+
+                if batch != "registered" or session._dispatch_paused:
+                    raise SessionAdmissionClosed("The calling ticket batch is paused")
+                if self.current is not None or session._pending_queue:
+                    raise SessionAdmissionBusy("Wait for the calling ticket batch's current inputs to settle")
+                context = await updated_batch_context(manager, session, parent_binding.context)
+                if context is None:
+                    raise SessionAdmissionClosed("The calling ticket batch's human authorization has changed or is unconfirmed")
+                request.knowledge_context = context
+                request.batch_return = True
+                payload["batch_return"] = True
         if request.operation == "compact":
             from ..submission_models import CompactInProgress, CompactUnavailable
 
@@ -799,7 +886,12 @@ class OwnerRuntime:
         request.priority = session._dispatch_paused and request.source == "human"
         if request.source == "human":
             manager._check_turn_quota(session)
+        supersedes_handoff = False
+        if request.source == "human" and self.current is not None and self.current.request.source == "handoff":
+            active = await database.get_submission_for_request(session.id, self.current.request.request_id)
+            supersedes_handoff = not (active and active["payload"].get("fresh_native_id"))
         steering = (command.steerable and request.operation == "message" and request.source == "human" and self.current is not None
+                and not supersedes_handoff
                 and self.current.request.operation == "message"
                 and session._steer_open and not request.attachment_ids
                 and self.current.attempt is not None
@@ -864,15 +956,30 @@ class OwnerRuntime:
         else:
             session._pending_queue.append(self._pending_input(request))
         receipt = manager._new_receipt(session, request, disposition)
+        if request.source == "human":
+            if not steering:
+                session._ticket_batch_request_id = None
+            await self._withdraw_batch_work(withdraw_returns=not steering)
+            if supersedes_handoff or (
+                    not steering and self.current is not None and self.current.request.batch_return):
+                await self._interrupt("user")
         if request.delivery_id:
             session._delivery_receipts[request.delivery_id] = receipt
         self.changed()
         return receipt
 
+    async def _withdraw_batch_work(self, *, withdraw_returns: bool) -> None:
+        session = self.owner.session
+        for pending in tuple(session._pending_queue):
+            if pending.source == "handoff" or (withdraw_returns and pending.batch_return):
+                session._pending_queue.remove(pending)
+                await self.complete(pending, reason="withdrawn")
+
     @staticmethod
     def _pending_input(request: SessionRequest) -> PendingInput:
         return PendingInput(request.request_id, request.source, request.summary, request.work_id,
-                            request.priority, request.order, request.queued_event, operation=request.operation)
+                            request.priority, request.order, request.queued_event, operation=request.operation,
+                            batch_return=request.batch_return)
 
     async def _steer_configuration_matches(self, session: Session, agent: dict[str, Any] | None) -> bool:
         execution = self.current
@@ -1023,6 +1130,7 @@ class OwnerRuntime:
     async def _interrupt(
         self, cause: Literal["user", "shutdown"], *, retain_unstarted: bool = False,
         code: str | None = None, message: str | None = None,
+        batch_request_id: str | None = None,
     ) -> bool:
         session, execution = self.owner.session, self.current
         session._steer_open = False
@@ -1033,27 +1141,32 @@ class OwnerRuntime:
             session._pending_queue.extend(session._steer_queue)
             session._pending_queue.sort(key=lambda request: request.order)
             session._steer_queue.clear()
+        was_interrupted = execution is not None and execution.interrupted
+        if execution is not None and not was_interrupted:
+            execution.interrupted = True
+            if execution.deadline is not None:
+                execution.deadline.cancel()
+            execution.settlement.request_interruption(cause)
+            if execution.attempt is not None:
+                # Seal the captured writer before the Owner waits for storage.
+                backend = execution.attempt.backend
+                backend.close_admission()
+                if getattr(backend, "captures_retirement_output", False):
+                    if backend.native_end_reason == "process_ended":
+                        backend.native_end_reason = "service_shutdown" if cause == "shutdown" else "user_stop"
+                    backend.retire()
+        if batch_request_id is not None:
+            await self.owner.manager.input_database().stop_ticket_batch(session.id, batch_request_id)
+            session._ticket_batch_request_id = None
         if execution is None:
             if session._run.backend is not None:
                 self.retire(session._run.backend, "service_shutdown" if cause == "shutdown" else "user_stop")
             await self.owner.questions.handle(CloseSessionQuestions("interrupted", tuple(session._questions.values())))
             self.changed()
             return False
-        if execution.interrupted:
+        if was_interrupted:
             self.changed()
             return True
-        execution.interrupted = True
-        if execution.deadline is not None:
-            execution.deadline.cancel()
-        execution.settlement.request_interruption(cause)
-        if execution.attempt is not None:
-            # Stop closes tool admission before durable settlement can wait.
-            # The original HarnessRun still owns and confirms OS retirement.
-            execution.attempt.backend.close_admission()
-            if getattr(execution.attempt.backend, "captures_retirement_output", False):
-                if execution.attempt.backend.native_end_reason == "process_ended":
-                    execution.attempt.backend.native_end_reason = "service_shutdown" if cause == "shutdown" else "user_stop"
-                execution.attempt.backend.retire()
         if not execution.request.started and retain_unstarted and execution.request.operation == "message":
             execution.request.priority = False
             session._pending_queue.append(self._pending_input(execution.request))
@@ -1307,6 +1420,7 @@ class OwnerRuntime:
     async def advance(self) -> None:
         """Consume a bounded amount of ready evidence before the next command."""
         session, manager = self.owner.session, self.owner.manager
+        self._clear_replaced_ticket_batch()
         execution = self.current
         if execution is not None and execution.input_changed.is_set():
             execution.input_changed.clear()
@@ -1359,7 +1473,21 @@ class OwnerRuntime:
                     or self._idle_action is not None):
                 return
             pending = session._pending_queue[eligible]
+            if pending.source == "handoff" and session._run.backend is not None:
+                self.retire(session._run.backend, "ticket_handoff")
+                return
             request = await load_pending_input(manager, session.id, pending)
+            if request.source == "handoff" and isinstance(request, QueuedPrompt):
+                from .handoff import continuation_context
+
+                context = await continuation_context(manager, session, request.request_id)
+                if context is None:
+                    session._pending_queue.pop(eligible)
+                    await self.complete(request, reason="handoff_parent_unconfirmed")
+                    return
+                request.knowledge_context = context
+                request.trusted_request = context.trusted_request
+                request.wiki_mode = context.mode
             # Retain the projection while loading. An awaited database read
             # must not make admitted work disappear or leave a stale quota
             # decision in force before this Owner reserves its active slot.
@@ -1432,7 +1560,8 @@ class OwnerRuntime:
                 await manager.input_database().record_native_input(session.id, request.request_id, native_input)
                 execution.settlement.attempt_id = native_input.attempt_id
             execution.request.started = True
-            execution.operation = self.task(self._prepare_input(configured, request), f"request-input-{request.request_id}")
+            execution.operation = self.task(self._prepare_input(configured, request, execution),
+                                            f"request-input-{request.request_id}")
             execution.phase = "input"
             return
         if execution.phase == "input":
@@ -1504,10 +1633,15 @@ class OwnerRuntime:
             if execution.terminal is not None and (execution.terminal.delivered or execution.terminal.error is not None):
                 await self._finish(execution)
 
-    async def _prepare_input(self, configured: Session, request: SessionRequest) -> _PreparedInput | None:
+    async def _prepare_input(self, configured: Session, request: SessionRequest, execution: Execution) -> _PreparedInput | None:
         manager = self.owner.manager
         if not await claim_input(manager, configured.id, request.request_id):
             return None
+        if request.source == "human":
+            # Publish the claim observation before attachment or Git work.
+            execution.human_input_claimed = True
+            self.owner.wake()
+        await validate_claimed_attachments(manager, configured.id, request.request_id)
         await require_retired_writers(manager, configured.id)
         if request.operation == "compact":
             if not request.native_session_id or configured.claude_session_id != request.native_session_id:
@@ -1548,8 +1682,14 @@ class OwnerRuntime:
                                      "request_id": request.request_id, "source": request.source,
                                      "work_id": request.work_id, "knowledge": json.loads(encode(knowledge)),
                                  }})
+        if request.source == "handoff" and message.tool_input is not None:
+            message.tool_input["handoff_id"] = request.delivery_id
         seq = await manager._persist_message(session, message, git_head=prepared.git_head,
             git_status_clean=prepared.git_clean, git_ignored_baseline=prepared.git_ignored_baseline)
+        if request.source == "handoff":
+            session.claude_session_id = None
+            session.context_state = None
+            self.context_changed()
         session._run.knowledge_context, session._run.wiki_mode = knowledge, mode
         session._run.wiki_task_id = tasks.open(session, mode, knowledge.trusted_request,
                                               request_id=request.request_id, knowledge=knowledge) if mode in {"auto", "read", "maintain"} else None
@@ -1700,7 +1840,9 @@ class OwnerRuntime:
                 input_changed.set()
                 wake()
 
-            backend.bind_input_history_recorder(record_history if session.fork_needs_replay else None)
+            backend.bind_input_history_recorder(
+                record_history if session.fork_needs_replay or (
+                    execution.request.source == "handoff" and backend_name == "claude-code") else None)
             backend.bind_questions(self.owner.wake)
         observation = session._request_observations.get(execution.request.request_id)
         if observation is not None:
@@ -1931,7 +2073,9 @@ class OwnerRuntime:
         if self.owner.questions.mcp_calls:
             return
         settlement = execution.settlement
-        if attempt.conversation_id is not None:
+        if execution.request.source == "handoff":
+            turn.continuation_id = session.claude_session_id
+        elif attempt.conversation_id is not None:
             turn.continuation_id = attempt.conversation_id
         if attempt.result is not None and attempt.result.cost is not None:
             settlement.cost = (settlement.cost or 0) + attempt.result.cost
@@ -1940,7 +2084,16 @@ class OwnerRuntime:
             # continuation cannot stand in for the original replay input.
             session.claude_session_id, session.fork_needs_replay, session.fork_metadata = await manager.db.session_input_history(
                 session.id, execution.request.request_id)
-        decision = await manager._after_attempt(session, turn, attempt)
+        handoff_unconfirmed = False
+        if execution.request.source == "handoff" and getattr(attempt.backend, "input_may_have_run", True):
+            original = await manager.input_database().get_submission_for_request(session.id, execution.request.request_id)
+            handoff_unconfirmed = not (original and original["payload"].get("fresh_native_id"))
+        if handoff_unconfirmed:
+            from .runtime_types import _Decision
+            decision = _Decision.stop({"code": "handoff_input_unconfirmed", "message":
+                "The fresh native history has not confirmed this handoff input. Check the original handoff ID before continuing."})
+        else:
+            decision = await manager._after_attempt(session, turn, attempt)
         if decision.retry:
             self._capture_recording(execution)
             if attempt.failed and attempt.error_text:
@@ -1964,7 +2117,7 @@ class OwnerRuntime:
                             if getattr(getattr(attempt.backend, "profile", None), "native_input_evidence", False)
                             else bool(issues.get("fatal_protocol_error")))
         effect_unknown = execution.request.operation == "compact" and attempt.backend.compact_result.effect == "unknown"
-        failed = attempt.failed or attempt.timeout is not None or recording_failed or effect_unknown
+        failed = attempt.failed or attempt.timeout is not None or recording_failed or effect_unknown or handoff_unconfirmed
         reason = detail.get("message")
         if effect_unknown and not reason:
             reason = "Native compaction effects could not be confirmed; this operation will not run again automatically."
@@ -2200,6 +2353,7 @@ class OwnerRuntime:
                         or session._run.backend is not steer.backend
                         or not any(request.request_id == steer.request.request_id for request in session._steer_queue)):
                     self.steer = None
+                    self.owner.wake()
                     return
                 steer.merged = merged
                 request = steer.request
@@ -2248,6 +2402,7 @@ class OwnerRuntime:
                                  type(error).__name__, attempt.backend.format_exception(error))
                 self.steer = None
                 session._steer_open = False
+                self.owner.wake()
             return
         if not steer.write.done():
             return
@@ -2259,10 +2414,13 @@ class OwnerRuntime:
             # The committed send marker is authoritative even if cancellation
             # happened before the driver coroutine ever began. No marker (or
             # explicit rejection) proves this native input can safely requeue.
-            if (steer.target is not None and (not execution.interrupted or not steer.write_entered
+            # Stop can seal this host while the Owner is finishing a read.
+            stopping = execution.interrupted or steer.backend.native_end_reason in {"user_stop", "service_shutdown"}
+            if (steer.target is not None and (not stopping or not steer.write_entered
                                              or isinstance(error, SteerNotAccepted) and not error.submitted)
                     and await manager.input_database().requeue_unaccepted_input(session.id, request.request_id)):
                 request.started = False
+                session._ticket_batch_request_id = None
                 if execution.interrupted:
                     request.priority = False
                 session._inline_requests[execution.request.request_id].remove(request)
@@ -2324,6 +2482,7 @@ class OwnerRuntime:
         from ..knowledge import AdmittedRequest, RequestRef, revise
         if not await claim_input(self.owner.manager, configured.id, request.request_id, owner=owner):
             raise ValueError("Steer input could not be claimed")
+        await validate_claimed_attachments(self.owner.manager, configured.id, request.request_id)
         assert request.knowledge_context is not None
         merged = revise(previous, AdmittedRequest(RequestRef(configured.id, request.request_id, configured.user_id),
                                                  request.knowledge_context, request.work_id),

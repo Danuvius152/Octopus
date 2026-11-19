@@ -52,6 +52,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+TICKET_BATCH_ORIGINS = frozenset({"user", "fork"})
+
 # How often streamed token deltas are flushed to the client as one WS frame
 # (inline-steering.md §4 S1). 50ms is ~20 updates/second: below the rate at
 # which a reader perceives stepping, and ~10x fewer frames and renders than
@@ -152,6 +154,7 @@ def _session_from_row(row: dict[str, Any]) -> Session:
         parent_session_id=row.get("parent_session_id"),
         delegation_request=row.get("delegation_request"),
         app_id=row.get("app_id"),
+        _ticket_batch_request_id=row.get("ticket_batch_request_id"),
         **_session_fork_kwargs(row),
     )
 
@@ -211,6 +214,7 @@ class RequestIdentity:
     order: int = 0
     question_session_id: str | None = None
     question_id: str | None = None
+    batch_return: bool = False
     queued_event: dict[str, Any] | None = field(default=None, repr=False)
 
 
@@ -261,6 +265,7 @@ class PendingInput:
     order: int
     queued_event: dict[str, Any] | None = field(default=None, repr=False)
     operation: OperationKind = "message"
+    batch_return: bool = False
 
     @property
     def started(self) -> bool:
@@ -436,6 +441,7 @@ class Session:
     _questions: dict[str, PendingQuestion] = field(default_factory=dict, repr=False)
     _pending_queue: list[PendingInput] = field(default_factory=list, repr=False)
     _dispatch_paused: bool = field(default=False, repr=False)
+    _ticket_batch_request_id: str | None = field(default=None, repr=False)
     _admission_closed: bool = field(default=False, repr=False)
     _archive_reservation: object | None = field(default=None, repr=False)
     _dispatch_revision: int = field(default=0, repr=False)

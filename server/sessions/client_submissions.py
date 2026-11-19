@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..attachments import AttachmentUnavailable, validate_message_attachments
@@ -13,7 +14,7 @@ from .runtime_types import QuotaExceeded
 
 if TYPE_CHECKING:
     from ..database import Database
-    from ..knowledge import KnowledgeContext
+    from ..knowledge import AdmittedRequest, KnowledgeContext
     from . import SessionManager
     from .base import PendingInput, SessionRequest
 
@@ -47,7 +48,19 @@ def saved_context(session_id: str, row: dict[str, Any]) -> KnowledgeContext | No
     return context
 
 
+@dataclass(frozen=True)
+class ConfirmedExecution:
+    original: KnowledgeContext
+    effective: KnowledgeContext
+    steers: list[tuple[int, AdmittedRequest]]
+
+
 async def execution_context(database: Database, session_id: str, original_row: dict[str, Any]) -> KnowledgeContext | None:
+    execution = await confirmed_execution(database, session_id, original_row["request_id"])
+    return execution.effective if execution else None
+
+
+async def confirmed_execution(database: Database, session_id: str, request_id: str) -> ConfirmedExecution | None:
     """Recover the closed execution's confirmed contract, including human steer.
 
     Call after the original Wiki task has retired. A frame's persisted delivery
@@ -57,7 +70,7 @@ async def execution_context(database: Database, session_id: str, original_row: d
     from ..knowledge import AdmittedRequest, RequestRef, decode_context, revise
 
     try:
-        snapshot = await database.execution_context_inputs(session_id, original_row["request_id"])
+        snapshot = await database.execution_context_inputs(session_id, request_id)
         if snapshot is None:
             return None
         original, owner = snapshot["original"], snapshot["owner"]
@@ -68,7 +81,9 @@ async def execution_context(database: Database, session_id: str, original_row: d
                 or original["delivery_state"] == "unknown"
                 or original["execution_owner"] != original["request_id"]):
             return None
+        base = context
         seen = set()
+        steers: list[tuple[int, AdmittedRequest]] = []
         for inline in snapshot["inputs"]:
             payload, receipt = inline["payload"], inline["receipt"]
             if (not isinstance(payload, dict) or payload.get("source") != "human"
@@ -90,13 +105,15 @@ async def execution_context(database: Database, session_id: str, original_row: d
                     or inline["content"] != payload["operation"]["content"] or not isinstance(inline["seq"], int)):
                 return None
             merged = decode_context(json.dumps(request.get("knowledge")))
-            expected = revise(context, AdmittedRequest(
+            admitted = AdmittedRequest(
                 RequestRef(session_id, inline["request_id"], owner), edit, payload.get("work_id"),
-            ), {"prompt": payload["trusted_request"]}, human=True)
+            )
+            expected = revise(context, admitted, {"prompt": edit.trusted_request}, human=True)
             if merged is None or merged != expected:
                 return None
             context = merged
-        return context
+            steers.append((inline["seq"], admitted))
+        return ConfirmedExecution(base, context, steers)
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -138,6 +155,7 @@ async def load_pending_input(manager: SessionManager, session_id: str, pending: 
         source=payload["source"], priority=pending.priority, request_id=row["request_id"],
         delivery_id=payload["delivery_id"], work_id=payload["work_id"], order=payload["order"],
         question_session_id=payload["question_session_id"], question_id=payload["question_id"],
+        batch_return=payload.get("batch_return", False),
     )
 
 
@@ -185,6 +203,12 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
                              "This input was withdrawn before execution. You can restore it and send it again.")
     if any(item.get("kind") == "steer" and item["state"] == "accepted" for item in row["native_inputs"]):
         result["message"] = "The native runtime accepted this input. Model processing is unconfirmed; the root result does not prove this instruction was consumed."
+    if row["payload"] and row["payload"].get("source") == "handoff":
+        from .handoff import handoff_receipt
+
+        handoff = handoff_receipt(row, row["payload"]["delivery_id"])
+        result["execution"]["recoverable_input"] = False
+        result["message"] = f"Ticket handoff {handoff['handoff_id']}: {handoff['state']}. Check this original handoff ID to resume."
     if include_input and row["payload"] is not None:
         payload = row["payload"]
         result["input"] = (payload["operation"] if payload["operation"]["kind"] == "compact" else
@@ -262,10 +286,12 @@ async def submit_client_message(manager: SessionManager, session_id: str, conten
 
 
 async def claim_input(manager: SessionManager, session_id: str, request_id: str, *, owner: str | None = None) -> bool:
-    database = manager.input_database()
-    if not await database.claim_client_submission(session_id, request_id, owner or request_id, manager._dispatch_generation):
-        return False
-    stored = await database.get_submission_for_request(session_id, request_id)
+    return await manager.input_database().claim_client_submission(
+        session_id, request_id, owner or request_id, manager._dispatch_generation)
+
+
+async def validate_claimed_attachments(manager: SessionManager, session_id: str, request_id: str) -> None:
+    stored = await manager.input_database().get_submission_for_request(session_id, request_id)
     if stored is not None:
         payload = stored["payload"]
         if payload is not None and payload["operation"]["kind"] == "message":
@@ -275,7 +301,6 @@ async def claim_input(manager: SessionManager, session_id: str, request_id: str,
             observed = await asyncio.to_thread(_files, session_id, payload["operation"]["attachment_ids"], user_id=session.user_id)
             if observed != payload.get("attachments", []):
                 raise AttachmentUnavailable("Required attachments changed after this input was accepted. Restore the input and re-upload the complete files.")
-    return True
 
 
 async def require_retired_writers(manager: SessionManager, session_id: str) -> None:

@@ -85,30 +85,54 @@ application/research output and private publication resources keep their owners.
 
 ### Implement tickets
 
-1. Keep the design context through `to-tickets` when preparing a spec and its
-   tickets. For implementation, select an eligible ticket and confirm its
-   baseline includes its resolved blockers. On resume, check the current
-   candidate, recorded evidence and running checks before claiming work.
-2. Use `implement` for a single ticket. For an authorized multi-ticket batch,
-   one coordinating session starts one eligible ticket at a time, each in a
-   fresh implementer context. Give the implementer the ticket, spec and current
-   integration candidate. The coordinator owns integration and tracker updates.
-3. Use `tdd` where possible at the agreed test seams. Run the ticket's
-   [affected checks](../testing.md#fast-checks-during-development)
-   and review its fixed diff against the acceptance criteria and repo standards.
-   Return a recoverable candidate and links to checks and review results. The
-   coordinator accepts and integrates the ticket, records the integrated
-   revision or snapshot and evidence under `## Answer`, and sets `Status: resolved`.
-4. After the current ticket resolves, the coordinator automatically starts the
-   next eligible ticket in the authorized batch from that integrated candidate.
-   If acceptance fails, address it on the current ticket. On interruption,
-   leave pointers to the spec, candidate and current or next eligible ticket
-   so a coordinator can resume from the recorded state.
+Keep the design context through `to-tickets`. One Octo main session implements
+an authorized batch in dependency order, one ticket at a time. Octo owns the
+tracker, integration and final delivery.
 
-For a multi-ticket delivery batch, hand off the accepted changes as a recoverable
-candidate and commit at the agreed delivery boundary. Follow the
-[verification policy](../testing.md#fast-checks-during-development) for the
-combined regression and full gate schedule.
+1. **Claim.** Register the authorized batch in the main chat with
+   `mcp__ask_agent__begin_ticket_batch` before working on its first ticket.
+   Read the spec and ticket, confirm its blockers are resolved in the
+   current candidate, and state the ticket title. On resumption, check the
+   existing claim, worktree, checks and delegations. Before claiming another
+   ticket or starting final acceptance, use the previous ticket's handoff ID
+   to check whether its continuation started and where to resume it.
+2. **Implement and test.** Use `implement` and, where possible, `tdd` at the
+   agreed seams. Octo must pass the ticket's [affected checks](../testing.md#fast-checks-during-development),
+   including applicable type checks. Pin the baseline and a recoverable
+   candidate that includes new files. Save the commands, results and evidence
+   for that candidate.
+3. **Review.** Open a [named delegation](../implemented/agent-collaboration.md#invocation-and-identity)
+   with `name="Vera"` for each ticket, starting at design time when a decision
+   needs early review. For final review, provide the ticket, baseline, fixed
+   diff, check results and open questions. Vera assesses the candidate against
+   the acceptance criteria and repository standards. Octo reads her verdict,
+   fixes substantiated findings, reruns the affected checks and returns the
+   revised candidate to the same `delegation_id` for verification. The next
+   ticket gets a new Vera conversation.
+4. **Accept.** Keep the ticket `claimed` until its criteria are met, its checks
+   pass and Vera's independent review is complete for the accepted version.
+   In one ticket update, set `Status: resolved` and record the integrated
+   revision or snapshot, passing checks, Vera's delegation ID and conclusion
+   under `## Answer`. If the user authorized further work, include the next
+   eligible ticket within that scope or the agreed final acceptance and a
+   stable handoff ID marked pending. Otherwise stop at this ticket.
+5. **Start the next phase.** Use the recorded ID with the
+   [ticket handoff tool](../implemented/input-reliability.md#ticket-handoffs).
+   If the installation lacks automatic clearing, leave the handoff pending.
+   When available, the runtime starts the named
+   phase automatically in a fresh model context in the same Octo chat. Keep
+   the transcript visible to the user. Carry forward the user's scope and
+   constraints, the spec, the accepted candidate and pointers to the next work
+   and its evidence. Record confirmation against the same handoff ID once the
+   fresh context receives its first input. After an interruption or lost
+   receipt, reconcile that ID before advancing. An unknown result stays pending.
+   Honor Stop and new human instructions before continuing the batch. A
+   separate human request supersedes the automatic batch. To resume an
+   authorized batch after a pause, register under the new human request.
+6. **Deliver the batch.** After the last ticket, Octo checks the integrated
+   behavior across tickets and runs the [full gate](../testing.md#full-checks-before-code-commits)
+   once on the final candidate. Complete the applicable [release checks](../testing.md#release-and-documentation-checks)
+   before the authorized commit, push and deployment.
 
 ## Lifecycle
 
