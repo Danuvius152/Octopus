@@ -2,11 +2,13 @@
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -15,11 +17,99 @@ from scripts import check_runner as runner
 
 @pytest.fixture
 def fixed_inputs(monkeypatch):
-    monkeypatch.setattr(runner, "capture_inputs", lambda root: {"source": "fixed", "environment": "fixed"})
+    monkeypatch.setattr(runner, "capture_inputs", lambda *_: {"source": "fixed", "environment": "fixed"})
 
 
 def gate(root, identifier, program, *, report=None):
     return runner.Gate(identifier, identifier, (sys.executable, "-c", program), root, "isolated regression", report)
+
+
+@pytest.mark.parametrize(("arguments", "include_e2e"), [((), False), (("--e2e",), True)])
+def test_cli_default_runs_the_commit_gate_set(monkeypatch, arguments, include_e2e):
+    execute = Mock(return_value=0)
+    monkeypatch.setattr(runner, "run_checks", execute)
+    monkeypatch.setattr(sys, "argv", ["check.sh", *arguments])
+    assert runner.main() == 0
+    root, gates, output = execute.call_args.args
+    assert gates == runner.commit_gates(root, e2e=include_e2e)
+    assert any(gate.id == "e2e" for gate in gates) == include_e2e
+    assert output is None
+
+
+def test_cli_runs_only_the_named_gates(monkeypatch):
+    execute = Mock(return_value=1)
+    monkeypatch.setattr(runner, "run_checks", execute)
+    monkeypatch.setattr(sys, "argv", ["check.sh", "--gate", "ruff", "--gate", "docs-index"])
+    assert runner.main() == 1
+    assert [gate.id for gate in execute.call_args.args[1]] == ["ruff", "docs-index"]
+
+
+@pytest.mark.parametrize("include_ruff", [False, True])
+def test_cli_records_focused_pytest_as_a_separate_selection(monkeypatch, tmp_path, include_ruff):
+    execute = Mock(return_value=0)
+    monkeypatch.setattr(runner, "run_checks", execute)
+    node = "tests/test_check_hooks.py::test_unrelated_document_does_not_run_product_checks"
+    module = "tests/test_check_runner.py"
+    destination = tmp_path / "evidence"
+    selected_gates = ["--gate", "ruff"] if include_ruff else []
+    monkeypatch.setattr(sys, "argv", ["check.sh", *selected_gates, "--pytest-target", node,
+                                      "--pytest-target", module, "--output", str(destination)])
+    assert runner.main() == 0
+    _, gates, output = execute.call_args.args
+    assert [gate.id for gate in gates[:-1]] == (["ruff"] if include_ruff else [])
+    focused = gates[-1]
+    assert focused.id == "pytest-focused" and focused.report == "pytest"
+    assert focused.argv[1:] == (node, module, "-m", "not real and not knowledge_eval and not wiki_perf", "-q")
+    assert node in focused.scope and module in focused.scope
+    assert output == destination
+
+
+def test_focused_evidence_rejects_changes_to_an_ignored_test_file(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    target = root / "tests/.agents/test_local.py"
+    target.parent.mkdir(parents=True)
+    target.write_text('''from pathlib import Path
+
+def test_edit():
+    with Path(__file__).open("a") as source:
+        source.write("\\n# changed while pytest was running\\n")
+''')
+    (root / ".gitignore").write_text(".venv/\n.agents/\n.pytest_cache/\n__pycache__/\n")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "commit", "--allow-empty", "-qm", "baseline"], cwd=root, check=True)
+    subprocess.run(["git", "check-ignore", "-q", str(target)], cwd=root, check=True)
+    pytest_bin = root / ".venv/bin/pytest"
+    pytest_bin.parent.mkdir(parents=True)
+    pytest_bin.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m pytest "$@"\n')
+    pytest_bin.chmod(0o700)
+    monkeypatch.setattr(runner, "__file__", str(root / "scripts/check_runner.py"))
+    monkeypatch.setattr(runner, "environment_identity", lambda root: {})
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    output = tmp_path / "evidence"
+    monkeypatch.setattr(sys, "argv", ["check.sh", "--pytest-target", "tests/.agents/test_local.py::test_edit",
+                                     "--output", str(output)])
+
+    assert runner.main() == 1
+    report = json.loads((output / "results.json").read_text())
+    [focused] = report["gates"]
+    assert focused["returncode"] == 0 and focused["counts"]["passed"] == 1
+    assert report["inputs_changed"] and not report["success"]
+
+
+@pytest.mark.parametrize("arguments", [
+    ("--pytest-target", "tests/"),
+    ("--gate", "pytest", "--pytest-target", "tests/test_check_runner.py"),
+    ("--e2e", "--gate", "ruff"),
+])
+def test_cli_rejects_invalid_selections_before_running_checks(monkeypatch, arguments):
+    execute = Mock()
+    monkeypatch.setattr(runner, "run_checks", execute)
+    monkeypatch.setattr(sys, "argv", ["check.sh", *arguments])
+    with pytest.raises(SystemExit, match="2"):
+        runner.main()
+    execute.assert_not_called()
 
 
 def test_failure_is_preserved_and_later_gate_runs_with_its_own_cwd(tmp_path, fixed_inputs):
@@ -161,12 +251,13 @@ def test_selection_environment_changes_verification_identity(tmp_path, monkeypat
     assert after["variables"]["PYTEST_ADDOPTS"] == "-k selected"
 
 
-def test_environment_filtered_pytest_is_recorded_and_cannot_certify_full_gate(tmp_path, fixed_inputs, monkeypatch):
+@pytest.mark.parametrize("gate_id", ["pytest", "pytest-focused"])
+def test_environment_filtered_pytest_is_recorded_and_cannot_certify_requested_scope(tmp_path, fixed_inputs, monkeypatch, gate_id):
     monkeypatch.setenv("PYTEST_ADDOPTS", "-k selected")
     source = tmp_path / "test_scope.py"
     source.write_text("def test_selected(): pass\ndef test_other(): pass\n")
     output = tmp_path / "evidence"
-    selection = runner.Gate("pytest", "full pytest", (sys.executable, "-m", "pytest", str(source), "-q"), tmp_path, "complete suite", "pytest")
+    selection = runner.Gate(gate_id, "pytest", (sys.executable, "-m", "pytest", str(source), "-q"), tmp_path, "test scope", "pytest")
     assert runner.run_checks(tmp_path, [selection], output) == 1
     report = json.loads((output / "results.json").read_text())
     row = report["gates"][0]
@@ -206,7 +297,7 @@ def test_source_identity_includes_untracked_content_modes_links_and_deletions(tm
 
 def test_changed_inputs_make_otherwise_passing_evidence_unusable(tmp_path, monkeypatch):
     identities = iter([{"source": "before"}, {"source": "after"}])
-    monkeypatch.setattr(runner, "capture_inputs", lambda root: next(identities))
+    monkeypatch.setattr(runner, "capture_inputs", lambda *_: next(identities))
     output = tmp_path / "evidence"
     assert runner.run_checks(tmp_path, [gate(tmp_path, "good", "print('pass')")], output) == 1
     report = json.loads((output / "results.json").read_text())
@@ -226,7 +317,7 @@ def test_cancellation_stops_descendants_and_does_not_start_remaining_gate(tmp_pa
              + ("" if parent_exits else "time.sleep(60)"))
     program = (
         "from pathlib import Path; import sys; from scripts import check_runner as r; "
-        "r.capture_inputs=lambda root: {}; "
+        "r.capture_inputs=lambda *_: {}; "
         f"g=[r.Gate('waiting','waiting',(sys.executable,'-c',{child!r}),Path({str(tmp_path)!r}),'test'),"
         f"r.Gate('later','later',(sys.executable,'-c',\"open({str(later)!r}, 'w').close()\"),Path({str(tmp_path)!r}),'test')]; "
         f"sys.exit(r.run_checks(Path({str(tmp_path)!r}),g,Path({str(output)!r})))"
@@ -270,7 +361,7 @@ def test_parent_exit_retires_session_descendant_and_restores_subreaper(tmp_path,
     output = f"Path({str(tmp_path / 'evidence')!r})" if save_evidence else "None"
     program = (
         "import json,sys; from pathlib import Path; from scripts import check_runner as r; "
-        f"r.subreaper({original}); r.capture_inputs=lambda root: {{}}; "
+        f"r.subreaper({original}); r.capture_inputs=lambda *_: {{}}; "
         f"g=r.Gate('child','child',(sys.executable,'-c',{child!r}),Path({str(tmp_path)!r}),'test'); "
         f"code=r.run_checks(Path({str(tmp_path)!r}),[g],{output}); "
         f"assert code==1; assert r.subreaper()=={original}; assert not r.children()"
@@ -327,7 +418,7 @@ def test_repeated_cancel_retires_generation_spawned_during_term(tmp_path):
              "time.sleep(60)")
     program = (
         "import sys; from pathlib import Path; from scripts import check_runner as r; "
-        "r.capture_inputs=lambda root: {}; "
+        "r.capture_inputs=lambda *_: {}; "
         f"g=[r.Gate('child','child',(sys.executable,'-c',{child!r}),Path({str(tmp_path)!r}),'test'),"
         f"r.Gate('later','later',(sys.executable,'-c',\"open({str(later)!r},'w').close()\"),Path({str(tmp_path)!r}),'test')]; "
         f"sys.exit(r.run_checks(Path({str(tmp_path)!r}),g,Path({str(output)!r})))"

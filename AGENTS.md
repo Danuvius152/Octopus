@@ -102,11 +102,11 @@ Start with the target regression and affected checks. Run the
 Before release, apply the [release matrix](docs/testing.md#release-and-documentation-checks).
 Documentation-only changes need links, index and diff checks.
 
-Give each check one executor and reuse valid results. The
-[verification policy](docs/testing.md#fast-checks-during-development) owns evidence
-reuse, failure follow-up and installation reuse; the
-[commit procedure](docs/testing.md#full-checks-before-code-commits) explains how
-existing evidence avoids duplicate hook execution. Inspect actual summaries.
+Before launching a rerun, apply the
+[verification policy](docs/testing.md#fast-checks-during-development) to the
+existing evidence and remaining coverage. Use the
+[commit procedure](docs/testing.md#full-checks-before-code-commits) to reuse
+passing checks at the hook boundary. Give each check one executor.
 
 ### Test Coverage
 

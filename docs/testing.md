@@ -98,24 +98,44 @@ reads. Use the named `short_process_shutdown` fixture only where the default
 process-exit grace period is outside the tested contract; signals and joins stay real.
 
 Before starting a check, inspect existing results and running checks. Use one
-executor per check. Keep command, scope, source version, result and log location
-in the task's existing acceptance record; reviewers and delivery reuse it.
-Successful evidence remains valid while its code, configuration, dependencies
-and environment are unchanged. State which change or concrete failure hypothesis
-requires a rerun. Read the actual test summary or build artifacts.
+executor per check. Reuse passing scopes while their relevant code,
+configuration, dependencies and environment still apply. Keep the command,
+scope, source version, result and log location in the task's existing acceptance
+record for reviewers and delivery. Read the actual summaries or build artifacts.
 
-For combined commit gates, use `./scripts/check.sh --output <new-directory>`
-to retain evidence in the current task's account-workspace directory. The
-directory must be new and outside the checkout, or Git-ignored. `--e2e` can
-be combined with it; omitting `--output` keeps terminal-only execution.
-The [runner](../scripts/check_runner.py) owns one command table in both modes.
-It records actual argv, cwd, selection scope, exit code, duration and a combined
-stdout/stderr log per gate. Ordinary failures do not suppress later checks.
+Before scheduling a rerun, record the evidence that carries forward, the changed
+inputs or concrete failure hypothesis, and the checks needed to close the
+remaining coverage gap. Start by reproducing failures at their nodes, then cover
+the affected modules and consumers of any changed shared path. Expand to a full
+suite only when targeted checks cannot close a required coverage gap. Record that
+gap before launching the suite.
+
+Use `./scripts/check.sh --output <new-directory>` for the full commit check set.
+Add `--e2e` to include Playwright. For scoped reruns, repeat `--gate <id>` to
+run only the named checks. `--gate pytest` runs the full hermetic backend suite.
+Use `--pytest-target <file-or-node-id>` for serial hermetic pytest on explicit
+Python test files or node IDs under `tests/`. Repeat the option for multiple
+targets and add `--gate` options for any other checks needed. The runner records
+this pytest scope under `pytest-focused` with its own JUnit report.
+
+Use a new output directory outside the worktree, preferably in the task's
+account-workspace directory, or use a Git-ignored path inside the worktree.
+Omitting `--output` keeps terminal-only execution. The
+[runner](../scripts/check_runner.py) owns the command table and records actual
+argv, cwd, selection scope, exit code, duration and a combined stdout/stderr log
+per gate. Ordinary failures do not suppress later selected checks.
 
 `results.json` starts as `incomplete`, updates atomically after each gate and
-becomes `complete` only after execution and final input capture. Consume it as
-passing evidence only when `state=complete`, `success=true` and the runner
-exited zero. Each sequential gate requires Linux subreaper support, default
+becomes `complete` only after execution and final input capture. A complete,
+fixed-input run with `success=true` and a zero runner exit establishes that
+every listed gate passed. For delivery, account for each required gate ID and
+scope using the recorded evidence. In a complete run with
+`inputs_changed=false` and no run-level evidence errors, reuse a gate with
+`status=passed`, `returncode=0` and `evidence_error=null` whose inputs still
+apply and whose artifacts are intact. Use the follow-up rules below for a
+failed test gate and preserve its original outcome.
+
+Each sequential gate requires Linux subreaper support, default
 `SIGCHLD` handling and no preexisting children of the runner. Ignoring/reaping
 child signals externally can lose the true exit status and is rejected before
 spawn. On success, failure or cancellation, the
@@ -135,31 +155,34 @@ other gates have no count. Missing or invalid test reports leave counts unknown
 and make otherwise successful execution fail evidence generation. Gate exit
 codes and failed reports remain available without being rewritten as passed.
 
-Input records include HEAD, tracked and untracked source contents, file modes
-and symlink targets, configuration hashes, Python's actual installed packages,
-the installed frontend dependency tree and tool versions. Only named non-secret
-environment selectors are included. Changed before/after inputs make the run
-unusable as passing evidence. Continue to keep inputs fixed: matching endpoint
-hashes cannot detect an intermediate edit that was later reverted, and package
-versions do not certify every installed dependency byte. Reviewers still apply
-the relevance and reuse policy above; the record is not a cache decision.
+Input records include HEAD, tracked and non-ignored untracked source contents,
+explicit pytest target files, file modes and symlink targets, configuration
+hashes, Python's actual installed packages, the installed frontend dependency
+tree and tool versions. Only named non-secret environment selectors are
+included. Changed before/after inputs make the run unusable as passing evidence.
+Keep inputs fixed throughout execution. Matching endpoint hashes cannot detect
+an intermediate edit that was later reverted, and package versions establish
+the inventory, with relevance and reuse determined by the policy above.
 Inherited `PYTEST_ADDOPTS` is recorded with the effective scope and input identity.
-The complete pytest gate cannot certify a full run with this variable set;
-unset it for full-gate evidence. Its real execution and exit code are retained.
+Unset it for full or focused pytest acceptance evidence. The runner retains the
+actual execution and exit code when inherited options invalidate that evidence.
 
 Reuse installed tools, browser binaries and caches. Provision a missing required
 version once; isolate mutable state rather than reinstalling dependencies.
 During final validation keep the source fixed, especially while Vite watches it:
 an edit can reload the browser and discard its in-memory selection.
 
-When a full run fails only in obsolete test-specific fixtures and product code
-and shared fixtures are unchanged, update those fixtures and run the complete
-affected modules. Combine that evidence with the unchanged passing results;
-preserve the original failure rather than reporting that run as passed.
+When a full run fails only in obsolete test-specific fixtures, fix the fixtures
+and identify every consuming module. If product code and wider-reaching test
+inputs are unchanged, run those modules in full. Check the original failures
+are covered, combine the still-valid passes and follow-up by passing test
+identity in their native reports, and link the original failed report in the
+acceptance record.
 
-For a suite stopped by a time limit, resume uncompleted nodes only when the
-collection and completion records establish the exact remaining set. Retain
-the original log, remaining-node list and segmented results.
+After an interrupted suite, run the uncompleted nodes when the collection and
+completion records establish the exact remaining set. Retain the original log,
+remaining-node list and segmented results. Run the incomplete suite in full if
+the required coverage cannot be established from those records.
 
 Update or remove tests with the behavior they cover. Preserve independent
 current-behavior assertions and check shared fixture consumers before retiring

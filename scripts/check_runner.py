@@ -1,4 +1,4 @@
-"""Run the commit gates, optionally retaining evidence from this execution."""
+"""Run full or scoped verification and optionally retain execution evidence."""
 
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ from typing import Any
 
 from scripts.python_environment import inspect_environment
 
+HERMETIC_PYTEST_SELECTION = "not real and not knowledge_eval and not wiki_perf"
+
 
 @dataclass(frozen=True)
 class Gate:
@@ -35,6 +37,7 @@ class Gate:
     scope: str
     report: str | None = None
     quiet: bool = False
+    source_files: tuple[str, ...] = ()
 
 
 class Interrupted(Exception):
@@ -66,12 +69,13 @@ def atomic_json(path: Path, value: Any) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def source_identity(root: Path) -> dict[str, Any]:
+def source_identity(root: Path, extra_files: tuple[str, ...] = ()) -> dict[str, Any]:
     def git(*args: str) -> bytes:
         return subprocess.check_output(["git", *args], cwd=root)
 
     digest = hashlib.sha256()
-    files = sorted(set(git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")) - {b""})
+    git_files = set(git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")) - {b""}
+    files = sorted(git_files.union(map(os.fsencode, extra_files)))
     for name in files:
         path = root / os.fsdecode(name)
         try:
@@ -122,8 +126,8 @@ def environment_identity(root: Path) -> dict[str, Any]:
                 "PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "NODE_OPTIONS")}}
 
 
-def capture_inputs(root: Path) -> dict[str, Any]:
-    return {"source": source_identity(root), "environment": environment_identity(root)}
+def capture_inputs(root: Path, extra_files: tuple[str, ...] = ()) -> dict[str, Any]:
+    return {"source": source_identity(root, extra_files), "environment": environment_identity(root)}
 
 
 def native_counts(path: Path, kind: str) -> dict[str, int]:
@@ -357,8 +361,8 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
                 row["counts"] = native_counts(report, gate.report)
             except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as error:
                 row["evidence_error"] = f"Native report unavailable: {error}"
-        if gate.id == "pytest" and additional:
-            error = "Inherited PYTEST_ADDOPTS prevents certifying the full gate; rerun with it unset"
+        if gate.id in {"pytest", "pytest-focused"} and additional:
+            error = "Unset PYTEST_ADDOPTS to certify the requested pytest selection"
             row["evidence_error"] = "; ".join(filter(None, (row["evidence_error"], error)))
     except Interrupted:
         row["status"] = "interrupted"
@@ -374,6 +378,7 @@ def run_checks(root: Path, gates: list[Gate], output: Path | None = None) -> int
         raise ValueError("Gate identifiers must be unique safe filenames")
     if any(gate.report not in (None, "pytest", "vitest") for gate in gates):
         raise ValueError("Unknown native report format")
+    source_files = tuple(file for gate in gates for file in gate.source_files)
     if output is not None:
         output = output.resolve()
         if output.is_relative_to(root.resolve()) and (root / ".git").exists():
@@ -396,7 +401,7 @@ def run_checks(root: Path, gates: list[Gate], output: Path | None = None) -> int
     try:
         save()
         if output is not None:
-            report["inputs_before"] = capture_inputs(root)
+            report["inputs_before"] = capture_inputs(root, source_files)
             save()
         for gate in gates:
             print(f"\n── {gate.name}", flush=True)
@@ -410,7 +415,7 @@ def run_checks(root: Path, gates: list[Gate], output: Path | None = None) -> int
                 raise
             save()
         if output is not None:
-            report["inputs_after"] = capture_inputs(root)
+            report["inputs_after"] = capture_inputs(root, source_files)
             report["inputs_changed"] = report["inputs_before"] != report["inputs_after"]
             if report["inputs_changed"]:
                 report["evidence_errors"].append("Verification inputs changed during execution")
@@ -446,14 +451,14 @@ def run_checks(root: Path, gates: list[Gate], output: Path | None = None) -> int
 
 def commit_gates(root: Path, e2e: bool) -> list[Gate]:
     python = str(root / ".venv/bin/python")
-    backend = "tests/; not real and not knowledge_eval and not wiki_perf"
+    backend = f"tests/; {HERMETIC_PYTEST_SELECTION}"
     gates = [
         Gate("python-pins", "Python dependency pins", (python, "scripts/python_environment.py", "check", "--extra", "test", "--extra", "dev"), root, "runtime + test + dev", quiet=True),
         Gate("hook", "commit hook installed", (str(root / "scripts/setup-hooks.sh"), "--check"), root, "pre-commit installation"),
         Gate("ruff", "backend lint (ruff)", (str(root / ".venv/bin/ruff"), "check", "."), root, "repository Python"),
         Gate("test-imports", "test support imports", (python, "scripts/check_test_imports.py"), root, "test import baseline"),
         Gate("mypy", "backend types (mypy)", (str(root / ".venv/bin/mypy"),), root, "configured mypy selection"),
-        Gate("pytest", "backend unit (hermetic release selection)", (str(root / ".venv/bin/pytest"), "tests/", "-m", "not real and not knowledge_eval and not wiki_perf", "-n", "4", "--dist=loadfile", "--max-worker-restart=0", "-q"), root, backend, "pytest"),
+        Gate("pytest", "backend unit (hermetic release selection)", (str(root / ".venv/bin/pytest"), "tests/", "-m", HERMETIC_PYTEST_SELECTION, "-n", "4", "--dist=loadfile", "--max-worker-restart=0", "-q"), root, backend, "pytest"),
         Gate("eslint", "frontend lint (eslint)", ("bun", "run", "lint"), root / "web", "ESLint configuration"),
         Gate("vitest", "frontend unit (vitest)", ("bun", "run", "test"), root / "web", "Vitest configuration", "vitest"),
         Gate("tsc", "typecheck (tsc -b)", ("bun", "run", "typecheck"), root / "web", "app, node and E2E TypeScript projects"),
@@ -465,16 +470,46 @@ def commit_gates(root: Path, e2e: bool) -> list[Gate]:
     return gates
 
 
+def pytest_target(root: Path, target: str) -> str:
+    filename, separator, node = target.partition("::")
+    path = (root / filename).resolve()
+    if path.suffix != ".py" or not path.is_relative_to(root / "tests") or not path.is_file():
+        raise argparse.ArgumentTypeError(f"expected a Python test file or node ID under tests/, got {target!r}")
+    return f"{path.relative_to(root)}{separator}{node}"
+
+
 def main() -> int:
+    root = Path(__file__).resolve().parents[1]
+    available = commit_gates(root, e2e=True)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--e2e", action="store_true")
+    parser.add_argument("--e2e", action="store_true", help="add Playwright to the full commit checks")
+    parser.add_argument("--gate", action="append", choices=[gate.id for gate in available],
+                        help="run only named gates (repeat to select additional gates)")
+    parser.add_argument("--pytest-target", action="append", metavar="FILE_OR_NODE_ID",
+                        type=lambda target: pytest_target(root, target),
+                        help="run focused hermetic pytest (repeat for additional files or node IDs)")
     parser.add_argument("--output", type=Path, help="new evidence directory outside the checkout or Git-ignored")
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[1]
-    if not args.e2e:
-        print("skipped: e2e — run ./scripts/check.sh --e2e (needs signed-in CLIs)", flush=True)
+    if args.gate or args.pytest_target:
+        if args.e2e:
+            parser.error("--e2e adds Playwright to the full suite. Use --gate e2e for a selected run")
+        gates = [gate for gate in available if gate.id in (args.gate or ())]
+        if args.pytest_target:
+            if "pytest" in (args.gate or ()):
+                parser.error("Choose full --gate pytest or focused --pytest-target")
+            targets = tuple(dict.fromkeys(args.pytest_target))
+            gates.append(Gate(
+                "pytest-focused", "backend unit (focused hermetic selection)",
+                (str(root / ".venv/bin/pytest"), *targets, "-m", HERMETIC_PYTEST_SELECTION, "-q"),
+                root, f"{', '.join(targets)} ({HERMETIC_PYTEST_SELECTION})", "pytest",
+                source_files=tuple(target.partition("::")[0] for target in targets),
+            ))
+    else:
+        gates = commit_gates(root, e2e=args.e2e)
+        if not args.e2e:
+            print("skipped: e2e — run ./scripts/check.sh --e2e (needs signed-in CLIs)", flush=True)
     try:
-        return run_checks(root, commit_gates(root, args.e2e), args.output)
+        return run_checks(root, gates, args.output)
     except (OSError, ValueError) as error:
         print(error, file=sys.stderr)
         return 1

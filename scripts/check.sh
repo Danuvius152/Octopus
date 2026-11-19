@@ -1,14 +1,15 @@
 #!/bin/bash
-# Run the full commit/integration checks documented in AGENTS.md.
+# Run the commit or scoped verification checks documented in docs/testing.md.
 #
 # Usage:
 #   ./scripts/check.sh          # includes the full hermetic backend suite
 #   ./scripts/check.sh --e2e    # also run Playwright (needs signed-in CLIs)
+#   ./scripts/check.sh --gate ruff --gate docs-index
+#   ./scripts/check.sh --pytest-target tests/test_check_runner.py
 #   ./scripts/check.sh --output <new-directory>  # logs and machine-readable evidence
 #
-# Runs every gate even after one fails, so you get the full picture in one
-# pass instead of discovering problems one commit at a time. Exit status is
-# non-zero if any gate failed.
+# Runs every selected check even after one fails. Exit status is nonzero if
+# any selected check failed.
 #
 # `ruff format` is deliberately NOT a gate. It would rewrite 124 of 177
 # files; on a codebase with hand-wrapped prose comments that is an
