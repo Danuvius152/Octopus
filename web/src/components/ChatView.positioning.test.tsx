@@ -313,7 +313,7 @@ it("accepts late geometry while hidden without revealing or writing until resume
 });
 
 it("does not let a pre-pause frame consume the resumed position's frame", () => {
-  const browser = layout(); browser.clamp(true); browser.settle();
+  const browser = layout(); browser.clamp(true); browser.tick();
   const callbacks = browser.takeFrames();
   expect(callbacks.length).toBeGreaterThan(0);
   browser.visibility(true); browser.visibility(false);
@@ -330,6 +330,10 @@ it.each(["before commit", "after commit"])("retires old measurement frames on Aâ
   browser.clamp(true); browser.height(180);
   act(() => install(5));
   for (let i = 0; i < 3; i++) browser.tick();
+  // Queue the opening's own position check through its viewport observer.
+  // Virtuoso can finish its measurements within the resize callback.
+  browser.reportExtent();
+  expect(browser.viewport).not.toBeVisible();
   const callbacks = browser.takeFrames();
   expect(callbacks.length).toBeGreaterThan(0);
   browser.writes.length = 0;
@@ -339,7 +343,7 @@ it.each(["before commit", "after commit"])("retires old measurement frames on Aâ
     if (delivery === "before commit") for (const callback of callbacks) callback(performance.now());
   });
   if (delivery === "after commit") act(() => { for (const callback of callbacks) callback(performance.now()); });
-  expect(browser.writes.filter((write) => !write.hidden)).toEqual([]);
+  expect(browser.writes).toEqual([]);
   browser.clamp(false);
   browser.settle();
   const viewport = browser.view.container.querySelector<HTMLElement>(".chat-messages")!;

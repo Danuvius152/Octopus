@@ -87,9 +87,26 @@ const renderedFooters = new WeakMap<HTMLElement, {
   items: Record<string, StreamingItem>;
 }>();
 
-function latestContentInView(viewport: HTMLElement, last: Message | undefined, sessionId: string): boolean {
-  const bounds = viewport.getBoundingClientRect();
+const INITIAL_TAIL_TOLERANCE = 1;
+
+function measureInitialTail(viewport: HTMLElement, last: Message | undefined, sessionId: string) {
+  // Virtuoso sizes this box to the scrollport, including when a native
+  // horizontal scrollbar takes space. Its height survives scrolling.
+  const layout = viewport.querySelector(':scope > [data-viewport-type="element"]');
+  if (!layout) return "waiting";
+  const zoom = viewport.currentCSSZoom ?? 1;
+  const top = viewport.getBoundingClientRect().top + viewport.clientTop * zoom;
+  const bottom = top + layout.getBoundingClientRect().height;
   const footer = viewport.querySelector<HTMLElement>("[data-chat-footer]");
+  const footerBox = footer?.parentElement?.getBoundingClientRect();
+  const row = last && [...viewport.querySelectorAll<HTMLElement>("[data-message-key]")].at(-1);
+  const rowBox = row && renderedMessages.get(row) === last ? row.parentElement?.getBoundingClientRect() : undefined;
+  const tail = footerBox?.height ? footerBox : rowBox;
+  // The wrapper includes tail spacing and, for the Footer, every live item.
+  // Use the rounded scroll range only while the actual tail lacks geometry.
+  const gap = tail?.height ? tail.bottom - bottom : (viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop) * zoom;
+  if (gap > INITIAL_TAIL_TOLERANCE) return "position";
+
   const state = useSessionStore.getState();
   const session = state.sessions.find((row) => row.id === sessionId) ??
     state.archivedSessions.find((row) => row.id === sessionId);
@@ -97,28 +114,27 @@ function latestContentInView(viewport: HTMLElement, last: Message | undefined, s
   if (session?.status === "running") {
     if (!live?.running || live.sessionId !== sessionId ||
       live.text !== (state.streamingText[sessionId]?.content ?? "") ||
-      live.items !== (state.streamingItems[sessionId] ?? EMPTY_STREAMING_ITEMS)) return false;
-  } else if (live?.running) return false;
-  const footerBox = footer?.parentElement?.getBoundingClientRect();
-  if (viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop > 1) return false;
-  const inView = (box: DOMRect) => box.height > 0 && box.bottom > bounds.top && box.bottom <= bounds.top + viewport.clientHeight + 1;
+      live.items !== (state.streamingItems[sessionId] ?? EMPTY_STREAMING_ITEMS)) return "waiting";
+  } else if (live?.running) return "waiting";
+  const inView = (box: DOMRect) => box.height > 0 && box.bottom > top && box.bottom <= bottom + INITIAL_TAIL_TOLERANCE;
   if (footerBox?.height) {
-    if (!inView(footerBox)) return false;
-    if (!last) return true;
+    if (!inView(footerBox)) return "waiting";
+    if (!last) return "readable";
     // A full-screen Footer can be readable with every saved row virtualized.
     // The list still needs to have committed its space before we expose it.
-    if (footerBox.top <= bounds.top) return !!viewport.querySelector("[data-chat-rows]")?.getBoundingClientRect().height;
-  } else if (footer?.childElementCount) return false;
-  if (!last) return true; // authoritative empty window
-  const row = [...viewport.querySelectorAll<HTMLElement>("[data-message-key]")].at(-1);
-  return !!row?.parentElement && renderedMessages.get(row) === last && inView(row.parentElement.getBoundingClientRect());
+    if (footerBox.top <= top) {
+      return viewport.querySelector("[data-chat-rows]")?.getBoundingClientRect().height ? "readable" : "waiting";
+    }
+  } else if (footer?.childElementCount) return "waiting";
+  return !last || rowBox && inView(rowBox) ? "readable" : "waiting";
 }
 
-function positionAtPhysicalTail(viewport: HTMLElement, list: VirtuosoHandle | null): boolean {
-  const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-  if (bottom - viewport.scrollTop <= 1) return true;
-  list?.scrollTo({ top: bottom, behavior: "auto" });
-  return false;
+function scrollToTail(viewport: HTMLElement): boolean {
+  // The browser clamps this request to the actual range, including scrollbars
+  // and zoom. Virtuoso observes the resulting native scroll event.
+  const before = viewport.scrollTop;
+  viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
+  return viewport.scrollTop > before;
 }
 
 function ChatRows(props: ListProps) {
@@ -247,6 +263,16 @@ interface InitialPresentation {
 function newPresentation(phase: "preparing" | "ready" = "preparing"): InitialPresentation {
   return { phase, remaining: 2000, since: null, deadline: null };
 }
+function presentationSnapshot(owner: InitialPresentation, following: boolean) {
+  return {
+    owner,
+    phase: owner.phase,
+    error: owner.error,
+    showTimeoutNotice: !!owner.timedOut && !following,
+    timeoutHint: !!owner.timeoutHint,
+    offerTimeoutRecovery: !!owner.timeoutHint && !!owner.recovery,
+  };
+}
 function pausePreparation(owner: InitialPresentation) {
   if (owner.deadline !== null) window.clearTimeout(owner.deadline);
   owner.deadline = null;
@@ -319,19 +345,28 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   const readingHandoff = useRef<ReadingHandoff | null>(null);
   const [readingBoundary, setReadingBoundary] = useState(false);
   const [scrolledIntoHistory, setScrolledIntoHistory] = useState(false);
+  // Input retires follow intent before queued layout work can overwrite it.
+  // Position alone cannot distinguish native navigation from virtual layout.
+  const following = useRef(true);
   const initialPresentation = useRef<InitialPresentation>(newPresentation(!preparation && empty ? "ready" : "preparing"));
-  const [presentation, setPresentation] = useState(() => ({ owner: initialPresentation.current, phase: initialPresentation.current.phase }));
+  const [presentation, setPresentation] = useState(() => presentationSnapshot(initialPresentation.current, following.current));
+  const publishedPresentation = useRef(presentation);
   const publishPresentation = useCallback((owner: InitialPresentation, phase: InitialPresentation["phase"]) => {
     if (owner !== initialPresentation.current) return;
     owner.phase = phase;
-    setPresentation({ owner, phase });
+    const next = presentationSnapshot(owner, following.current);
+    // Compare against the last publication even when React batches input
+    // and layout callbacks before committing the next view.
+    const previous = publishedPresentation.current;
+    if (previous.owner === next.owner && previous.phase === next.phase && previous.error === next.error &&
+      previous.showTimeoutNotice === next.showTimeoutNotice && previous.timeoutHint === next.timeoutHint &&
+      previous.offerTimeoutRecovery === next.offerTimeoutRecovery) return;
+    publishedPresentation.current = next;
+    setPresentation(next);
   }, []);
   const position = useRef<ViewportPosition | null>(null);
   const [transferOverscan, setTransferOverscan] = useState(0);
   const projectedMessages = useRef(chatMessages);
-  // Input retires follow intent before queued layout work can overwrite it.
-  // Position alone cannot distinguish native navigation from virtual layout.
-  const following = useRef(true);
   const followFrame = useRef<(ViewportScope & { frame: number; time: number }) | null>(null);
   const reducedMotion = useRef<MediaQueryList | null>(null);
   const viewportObserver = useRef<ResizeObserver | null>(null);
@@ -402,23 +437,29 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       // The target belongs to the measured DOM, including the live Footer.
       // Keep this owner throughout the write: another height notification
       // updates its next sample instead of starting a parallel movement.
-      const top = viewport.scrollTop;
-      const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-      const gap = bottom - top;
+      const before = sampleScroll(viewport);
+      const gap = before.maximum - before.top;
       if (gap > 0 && dt > 0 && current()) {
-        const next = reducedMotion.current?.matches ? bottom
-          : top + Math.min(gap, Math.max(1, gap * (1 - Math.exp(-dt / 60))));
-        virtuoso.current?.scrollTo({ top: bottom - next <= 2 ? bottom : next, behavior: "auto" });
+        const scale = window.devicePixelRatio * (viewport.currentCSSZoom ?? 1);
+        const step = Math.max(1, 1 / scale, gap * (1 - Math.exp(-dt / 60)));
+        if (reducedMotion.current?.matches || gap - step <= 2) scrollToTail(viewport);
+        else {
+          viewport.scrollTo({ top: Math.ceil(before.top + step), behavior: "instant" });
+          // A rounded intermediate step can leave a reachable tail. Test the
+          // physical limit once if this view still owns the same range.
+          if (current() && viewport.scrollTop === before.top &&
+            viewport.scrollHeight - viewport.clientHeight === before.maximum) scrollToTail(viewport);
+        }
       }
       if (!current()) { stop(); return; }
-      lastScroll.current = sampleScroll(viewport);
+      const after = sampleScroll(viewport);
+      lastScroll.current = after;
       // Equal/coarse readings cannot retire an unfinished target. Keep its
       // time origin until a positive interval permits the next actual write.
       if (dt > 0) work.time = time;
-      // A write can synchronously expose a newer extent or be clamped by the
-      // browser. Rounded size properties can leave a fractional bottom gap;
-      // settle within tolerance using current geometry, not the old target.
-      if (viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop > 2 && current()) {
+      // Continue while making progress or when the write exposes a larger
+      // extent. A clamped write against the same range cannot move next frame.
+      if (after.maximum - after.top > 2 && (dt <= 0 || after.top > before.top || after.maximum > before.maximum)) {
         work.frame = requestAnimationFrame(advance);
       } else {
         initialPresentation.current.automaticReturn = false;
@@ -459,13 +500,17 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   }, [resumeVisibleFollowing]);
   useLayoutEffect(() => () => retireRecovery(), [retireRecovery]);
   const failPreparation = useCallback((owner: InitialPresentation, error: string) => {
-    if (owner !== initialPresentation.current || owner.phase !== "preparing" && owner.phase !== "revealing") return;
-    pausePreparation(owner);
-    retirePosition(); cancelFollow();
-    following.current = false;
+    if (owner !== initialPresentation.current ||
+      owner.phase !== "preparing" && owner.phase !== "revealing" && owner.phase !== "incomplete") return;
+    const entering = owner.phase !== "incomplete";
+    if (entering) {
+      pausePreparation(owner);
+      retirePosition(); cancelFollow();
+      following.current = false;
+    }
     owner.error = error;
     publishPresentation(owner, "incomplete");
-    staging.current?.fail(error);
+    if (entering) staging.current?.fail(error);
   }, [cancelFollow, retirePosition, publishPresentation]);
   const expirePreparation = useCallback((owner: InitialPresentation) => {
     const view = currentView.current;
@@ -664,8 +709,10 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     if (!operation || !currentPosition(operation) || !operation.viewport.clientHeight || document.hidden || navigationContact.current) return;
     // A live Footer can grow between the reveal commit and the first paint.
     // The initial operation still owns that layout and lands without animation.
-    if (operation.kind === "initial" && initialPresentation.current.phase === "ready") {
-      positionAtPhysicalTail(operation.viewport, virtuoso.current);
+    const sessionId = operation.view.sessionId;
+    if (operation.kind === "initial" && sessionId && initialPresentation.current.phase === "ready" &&
+      measureInitialTail(operation.viewport, projectedMessages.current.at(-1), sessionId) === "position") {
+      scrollToTail(operation.viewport);
     }
     if (operation.frame !== null) return;
     const frame = requestAnimationFrame(() => {
@@ -706,13 +753,14 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       };
       if (operation.kind === "initial") {
         if (!operation.view.sessionId || !hasTranscriptBaseline(useSessionStore.getState(), operation.view.sessionId)) return;
-        if (!positionAtPhysicalTail(viewport, virtuoso.current)) {
+        const tail = measureInitialTail(viewport, rows.at(-1), operation.view.sessionId);
+        const owner = initialPresentation.current;
+        if (tail === "position" && scrollToTail(viewport)) {
           // The extent can change while Virtuoso installs the new range.
           schedulePosition();
-        } else if (initialPresentation.current.phase === "ready") {
+        } else if (owner.phase === "ready") {
           finish();
-        } else if (latestContentInView(viewport, rows.at(-1), operation.view.sessionId)) {
-          const owner = initialPresentation.current;
+        } else if (tail === "readable") {
           if (owner.phase === "preparing") publishPresentation(owner, "revealing");
           else if (owner.phase === "revealing" && staging.current?.current()) {
             const state = useSessionStore.getState();
@@ -1221,7 +1269,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const viewport = operation.viewport;
     const sessionId = operation.view.sessionId;
     const positioned = !!sessionId && !document.hidden && viewport.clientHeight > 0 &&
-      latestContentInView(viewport, projectedMessages.current.at(-1), sessionId);
+      measureInitialTail(viewport, projectedMessages.current.at(-1), sessionId) === "readable";
     if (!positioned) {
       publishPresentation(owner, "preparing");
       positionMeasuredOutput();
@@ -1379,16 +1427,16 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     agentAvatar: activeAgent?.avatar, onLayout: measuredOutput,
   }), [activeSessionId, isRunning, activeAgent?.name, activeAgent?.avatar, measuredOutput]);
 
-  const showReadingNotice = readingBoundary || presentation.owner.timedOut && !following.current;
+  const showReadingNotice = readingBoundary || presentation.showTimeoutNotice;
   const showJumpToLatest = showReadingNotice || scrolledIntoHistory && transcriptBaseline && !transcriptDamaged;
   return <div className="contents">
       <div className={showReadingNotice ? "shrink-0 px-4 py-2 text-sm text-muted-foreground" : "relative h-0 shrink-0"}>
         <p role="status" aria-atomic="true" className={showReadingNotice ? undefined : "sr-only"}
-          data-chat-timeout={presentation.owner.timeoutHint || undefined}>
-          {presentation.owner.timeoutHint && "Automatic positioning did not finish. Loaded content is available."}
+          data-chat-timeout={presentation.timeoutHint || undefined}>
+          {presentation.timeoutHint && "Automatic positioning did not finish. Loaded content is available."}
         </p>
-        {presentation.owner.timeoutHint && <>
-          {presentation.owner.recovery && <p>New output will return to the latest content unless you choose to read here.</p>}
+        {presentation.timeoutHint && <>
+          {presentation.offerTimeoutRecovery && <p>New output will return to the latest content unless you choose to read here.</p>}
           <Button size="sm" variant="ghost" aria-label="Dismiss positioning notice" onClick={() => {
             presentation.owner.timeoutHint = false;
             publishPresentation(presentation.owner, presentation.owner.phase);
@@ -1532,6 +1580,9 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         }}
       >
       <Virtuoso
+        // Apply the first row measurements within their layout cycle. A
+        // deferred range update can otherwise move the tail after reveal.
+        skipAnimationFrameInResizeObserver={presentation.phase === "preparing" || presentation.phase === "revealing"}
         style={{ visibility: presentation.phase === "preparing" || presentation.phase === "incomplete" ? "hidden" : undefined }}
         inert={presentation.phase === "preparing" || presentation.phase === "incomplete" ? true : undefined}
         aria-hidden={presentation.phase === "preparing" || presentation.phase === "incomplete" ? true : undefined}
@@ -1605,7 +1656,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         {(presentation.phase === "incomplete" || !transcriptBaseline) && <p role="status">
           {presentation.phase === "incomplete" ? "Conversation unavailable" : "Loading conversation…"}
         </p>}
-        {presentation.owner.error && <p>{presentation.owner.error}</p>}
+        {presentation.error && <p>{presentation.error}</p>}
         <Button size="sm" variant="outline" className={transcriptBaseline && presentation.phase !== "incomplete" ? "sr-only focus:not-sr-only" : undefined}
           onClick={() => pauseFollowing()}>Browse loaded content</Button>
         {presentation.phase === "incomplete" && <Button size="sm" variant="outline" onClick={retryHistoryRead}>Retry loading</Button>}

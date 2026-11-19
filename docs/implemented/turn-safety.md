@@ -22,9 +22,24 @@
 <a id="3-per-turn-watchdog-idle--overall"></a>
 ## Per-turn watchdog (idle + overall)
 
-OwnerRuntime tracks validated activity and the logical turn's start. Each
-attempt's captured deadline wakes its original Owner; managed reader/start
-operations and retirement retain their original identities.
+The SessionOwner captures the logical turn's start and overall deadline when a
+request leaves the queue and starts processing. The same deadline wakes the
+Owner during preparation, backend startup, active attempts and retry backoff.
+The Owner checks it before starting the backend. The Harness checks it again
+after authorization at the point of spawning or submitting input. A preparation
+timeout records one outcome while the original preparation is still tracked.
+Execution retires after the preparation exits and any returned backend retires.
+The preparation task reads the request's saved history and fork replay input.
+A replacement backend reads the committed resume ID after the preceding writer
+retires.
+The Owner can apply the turn deadline while waiting to acquire the configuration
+lock. Native history refresh runs in tracked tasks, with the Owner applying
+results that still match the original execution and its committed history.
+For an overall timeout before input submission, confirmed backend retirement
+allows the Owner to persist the outcome while a history read is still pending.
+When a timed-out chat input has yet to be recorded in the transcript, the
+original input can be restored manually using its saved text and attachment
+references.
 
 For native Codex, a valid `willRetry:true` notification from this connection and
 attempt counts as activity only for its bound active root or associated running
@@ -37,6 +52,9 @@ notice does not disable the watchdog, and no activity resets the overall start.
   `turn_idle_timeout_seconds`; the overall deadline compares the logical turn
   start with `turn_max_seconds`. The Owner records the cause, closes steering
   and retires the original backend and in-flight I/O.
+- For a native run, the actual admission closure time determines whether
+  execution ended within the deadline. Collecting and persisting its output
+  can continue under the existing retirement limits.
 - After an idle stop, recover automatically up to `turn_idle_max_retries`
   times only when the [recovery evidence](harness-transient-retry.md#recovery-evidence-in-the-original-owner)
   permits preparation or native continuation. Missing output never authorizes

@@ -71,6 +71,85 @@ async def test_resource_decode_failure_is_the_only_sample(provider_transport, me
     assert await (await metrics.conn.execute("SELECT ok, error_code FROM events")).fetchall() == [(0, "resource_decode")]
 
 
+async def test_gmail_external_body_decode_failure_belongs_to_its_resource(provider_transport, metrics):
+    def resource(request):
+        if request.url.path.endswith("/attachments/body"):
+            return httpx.Response(200, json={"size": 1, "data": "_w"})
+        return httpx.Response(200, json={"id": "m1", "payload": {
+            "mimeType": "text/plain", "body": {"attachmentId": "body", "size": 1},
+        }})
+
+    provider_transport(resource)
+    assert "could not decode message body" in await gmail.get("m1")
+    await metrics.drain()
+    assert await (await metrics.conn.execute("SELECT ok, error_code FROM events ORDER BY ok")).fetchall() == [
+        (0, "resource_decode"), (1, None),
+    ]
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_gmail_unrepresentable_body_fails_in_its_resource(provider_transport, metrics, external):
+    inline = {"size": 5, "data": "KzJBQS0"}  # UTF-7 +2AA- decodes to an isolated surrogate.
+
+    def resource(request):
+        if request.url.path.endswith("/attachments/body"):
+            return httpx.Response(200, json=inline)
+        return httpx.Response(200, json={"id": "m1", "payload": {
+            "mimeType": "text/plain",
+            "headers": [{"name": "Content-Type", "value": "text/plain; charset=utf-7"}],
+            "body": {"attachmentId": "body", "size": 5} if external else inline,
+        }})
+
+    provider_transport(resource)
+    assert "could not decode message body" in await gmail.get("m1")
+    await metrics.drain()
+    rows = await (await metrics.conn.execute("SELECT ok, error_code FROM events ORDER BY ok")).fetchall()
+    assert rows == [(0, "resource_decode")] + ([(1, None)] if external else [])
+
+
+@pytest.mark.parametrize("outcome", ["success", "cancelled", "inline_decode"])
+async def test_gmail_message_and_external_body_account_for_their_own_work(provider_transport, metrics, clock, outcome):
+    entered = asyncio.Event()
+
+    class SlowBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            entered.set()
+            await asyncio.Future()
+            yield b"unreachable"
+
+    def resource(request):
+        if request.url.path.endswith("/attachments/body"):
+            clock.now += 8
+            if outcome == "cancelled":
+                return httpx.Response(200, stream=SlowBody())
+            return httpx.Response(200, json={"size": 0} if outcome == "inline_decode" else {"size": 1, "data": "YQ"})
+        clock.now += .01
+        part = {"mimeType": "text/plain", "body": {"attachmentId": "body"}}
+        if outcome == "inline_decode":
+            part = {"mimeType": "multipart/alternative", "parts": [
+                part, {"mimeType": "text/html", "body": {"data": "_w"}},
+            ]}
+        return httpx.Response(200, json={"id": "m1", "payload": part})
+
+    provider_transport(resource)
+    if outcome == "cancelled":
+        task = asyncio.create_task(gmail.get("m1"))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        result = await gmail.get("m1")
+        assert ("Error:" in result) == (outcome == "inline_decode")
+    await metrics.drain()
+    rows = await (await metrics.conn.execute("SELECT ok, error_code, duration_ms FROM events ORDER BY duration_ms")).fetchall()
+    assert [row[:2] for row in rows] == [
+        (0, "resource_decode") if outcome == "inline_decode" else (1, None),
+        (0, "cancelled") if outcome == "cancelled" else (1, None),
+    ]
+    assert [row[2] for row in rows] == pytest.approx([10, 8_000])
+
+
 async def test_custom_text_that_looks_like_an_error_is_success(provider_transport, metrics):
     provider_transport(lambda request: httpx.Response(200, text="Error: legitimate resource text"))
     assert await custom.request("GET", "/items") == "Error: legitimate resource text"

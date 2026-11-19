@@ -54,11 +54,30 @@ async function expectFooterMarkerInViewport(scroller: Locator) {
   })).toBe(true);
 }
 
-async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [], beforeSelect?: () => Promise<void>) {
+function holdAnimationFrames(page: Page) {
+  return page.evaluateHandle(() => {
+    const request = window.requestAnimationFrame, cancel = window.cancelAnimationFrame;
+    let serial = 0;
+    const pending = new Map<number, FrameRequestCallback>();
+    window.requestAnimationFrame = (callback) => { const id = --serial; pending.set(id, callback); return id; };
+    window.cancelAnimationFrame = (id) => { if (id < 0) pending.delete(id); else cancel(id); };
+    return { count: () => pending.size, flush: () => {
+      const batch = [...pending.values()]; pending.clear();
+      for (const callback of batch) callback(performance.now());
+    }, release: () => {
+      window.requestAnimationFrame = request; window.cancelAnimationFrame = cancel;
+      for (const callback of pending.values()) request(callback);
+      pending.clear();
+    } };
+  });
+}
+
+async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [], beforeSelect?: () => Promise<void>,
+  content = (index: number) => `Saved row ${index + 1}`) {
   const session = { id: "follow-output", agent_id: "follow-agent", name: "Following output", backend: "codex",
     status: "running", archived: false, working_dir: "/tmp", created_at: "2026-11-12T00:00:00Z" };
   const messages: Message[] = Array.from({ length: count }, (_, index) => ({
-    role: "assistant", type: "text", seq: index + 1, content: `Saved row ${index + 1}`,
+    role: "assistant", type: "text", seq: index + 1, content: content(index),
   }));
   let snapshot = { messages, next_message_seq: count ? count + 1 : 0, oldest_loaded_seq: count ? 1 : null, has_more_messages: false };
   const pages: Route[] = [];
@@ -180,30 +199,33 @@ for (const native of [false, true]) {
 
 for (const count of [0, 40]) {
 test(`a static tall Footer completes first presentation with ${count ? "saved history" : "no displayed rows"}`, async ({ page }) => {
-  let gate!: Awaited<ReturnType<typeof page.evaluateHandle<{
-    count: () => number; flush: () => void; release: () => void;
-  }>>>;
+  let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
   const { scroller, gap, send, settle } = await openChat(page, count, [], async () => {
-    gate = await page.evaluateHandle(() => {
-      const request = window.requestAnimationFrame, cancel = window.cancelAnimationFrame;
-      let serial = 0;
-      const pending = new Map<number, FrameRequestCallback>();
-      window.requestAnimationFrame = (callback) => { const id = --serial; pending.set(id, callback); return id; };
-      window.cancelAnimationFrame = (id) => { if (id < 0) pending.delete(id); else cancel(id); };
-      return { count: () => pending.size, flush: () => {
-        const batch = [...pending.values()]; pending.clear();
-        for (const callback of batch) callback(performance.now());
-      }, release: () => {
-        window.requestAnimationFrame = request; window.cancelAnimationFrame = cancel;
-        for (const callback of pending.values()) request(callback);
-        pending.clear();
-      } };
-    });
+    gate = await holdAnimationFrames(page);
   });
   try {
     expect(await scroller.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
     send({ type: "assistant_delta", content: "Static output\n\n".repeat(80) + "### Static Footer final marker" });
     await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+    let beforeCorrection: number | undefined;
+    if (!count) {
+      const nearTail = await scroller.evaluate((viewport) => {
+        const footer = viewport.querySelector<HTMLElement>("[data-chat-footer]")!.parentElement!;
+        const text = footer.querySelector<HTMLElement>(".msg-streaming-text")!;
+        text.style.fontSize = "15.5px";
+        text.style.lineHeight = "23.375px";
+        const bottom = footer.getBoundingClientRect().bottom - viewport.getBoundingClientRect().top;
+        // Place the browser one rounded pixel short with a fractional Footer
+        // edge that still needs a real scroll correction.
+        footer.style.paddingBottom = `${(Math.ceil(bottom) - bottom + 0.25) % 1}px`;
+        viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight - 1;
+        return { top: viewport.scrollTop, gap: viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop,
+          footerOverhang: footer.getBoundingClientRect().bottom - viewport.getBoundingClientRect().bottom };
+      });
+      expect(nearTail.gap).toBe(1);
+      expect(nearTail.footerOverhang).toBeGreaterThan(1);
+      beforeCorrection = nearTail.top;
+    }
     let revealed = false;
     for (let frame = 0; frame < 24; frame++) {
       await gate.evaluate((queued) => queued.flush());
@@ -211,6 +233,10 @@ test(`a static tall Footer completes first presentation with ${count ? "saved hi
       if (revealed) break;
     }
     expect(revealed, "the last output does not require another token or an idle interval").toBe(true);
+    expect(await page.locator("[data-chat-timeout]").count()).toBe(0);
+    if (beforeCorrection !== undefined) {
+      expect(await scroller.evaluate((viewport) => viewport.scrollTop)).toBeGreaterThan(beforeCorrection);
+    }
     expect(await gap()).toBeLessThanOrEqual(1);
     await expectFooterMarkerInViewport(scroller);
     if (count) {
@@ -234,6 +260,122 @@ test(`a static tall Footer completes first presentation with ${count ? "saved hi
     }
   } finally { await gate.evaluate((queued) => queued.release()); await gate.dispose(); }
 });
+}
+
+test("first presentation follows a live reply that becomes a saved row before reveal", async ({ page }) => {
+  let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
+  const { scroller, send } = await openChat(page, 0, [], async () => {
+    gate = await holdAnimationFrames(page);
+    await page.addStyleTag({ content: ".chat-messages { zoom: 1.1; }" });
+  });
+  try {
+    const content = "A pending reply\n\n".repeat(60) + "### Saved before reveal";
+    send({ type: "assistant_delta", content });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Saved before reveal");
+    send({ type: "assistant_text", seq: 1, content });
+    await expect(scroller.getByTestId("streaming-text")).toHaveCount(0);
+    expect(await scroller.evaluate((viewport) => getComputedStyle(viewport).visibility)).toBe("hidden");
+    await expect.poll(async () => {
+      await gate.evaluate((queued) => queued.flush());
+      return scroller.evaluate((viewport) => getComputedStyle(viewport).visibility);
+    }, { intervals: [0, 25, 50], timeout: 1200 }).toBe("visible");
+    const marker = scroller.locator('[data-message-key="message:1"] h3');
+    const first = await marker.evaluate((heading) => {
+      const rect = heading.getBoundingClientRect();
+      const clip = heading.closest(".chat-messages")!.getBoundingClientRect();
+      return rect.top >= clip.top && rect.bottom <= clip.bottom + 1;
+    });
+    expect(first).toBe(true);
+    await expect(page.locator("[data-chat-timeout]")).toHaveCount(0);
+  } finally { await gate.evaluate((queued) => queued.release()); await gate.dispose(); }
+});
+
+test("initial positioning timeout leaves loaded history available and Jump to latest restores the tail", async ({ page }) => {
+  let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
+  const { scroller, gap } = await openChat(page, 40, [], async () => { gate = await holdAnimationFrames(page); });
+  try {
+    expect(await scroller.evaluate((viewport) => getComputedStyle(viewport).visibility)).toBe("hidden");
+    await expect(page.getByText("Automatic positioning did not finish. Loaded content is available.")).toBeVisible();
+    await expect(scroller).toBeVisible();
+    await gate.evaluate((queued) => queued.release());
+    await expect(scroller.getByText("Saved row 1", { exact: true })).toBeInViewport();
+    expect(await gap()).toBeGreaterThan(100);
+    await page.getByRole("button", { name: "Dismiss positioning notice" }).click();
+    await expect(page.locator("[data-chat-timeout]")).toHaveCount(0);
+    await page.getByRole("button", { name: "Jump to latest" }).click();
+    await expect(scroller.getByText("Saved row 40", { exact: true })).toBeInViewport();
+    await expect.poll(gap).toBeLessThanOrEqual(2);
+    await expect(page.locator("[data-chat-timeout]")).toHaveCount(0);
+  } finally { await gate.evaluate((queued) => queued.release()); await gate.dispose(); }
+});
+
+for (const short of [true, false]) {
+  test(`a zoomed transcript with a native horizontal scrollbar ${short ? "reveals without timing out" : "keeps its tail through the handoff to following"}`,
+    async ({ page }, info) => {
+      const count = short ? 2 : 80;
+      const marker = "Last paragraph under zoom";
+      let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
+      const { scroller, settle } = await openChat(page, count, [], async () => {
+        gate = await holdAnimationFrames(page);
+        await page.addStyleTag({ content: `
+          .chat-messages { zoom: 1.1; flex: none; height: ${short ? 101.5625 : 480.3125}px !important; }
+          .chat-messages .msg-content { overflow-wrap: normal; }
+        ` });
+      }, (index) => index === count - 1 ? `${"wide".repeat(300)}\n\n${marker}`
+        : `History ${index}\n\n${"A saved paragraph.\n\n".repeat(index % 4)}`);
+      try {
+        const reading = () => scroller.evaluate((viewport, marker) => {
+          const box = viewport.getBoundingClientRect();
+          const clipHeight = viewport.querySelector('[data-viewport-type="element"]')!.getBoundingClientRect().height;
+          const clipBottom = box.top + clipHeight;
+          const content = [...viewport.querySelectorAll(".msg-content p")].find((node) => node.textContent === marker);
+          const text = content?.lastChild;
+          const range = document.createRange();
+          if (text instanceof Text && text.length) {
+            range.setStart(text, text.length - 1);
+            range.setEnd(text, text.length);
+          }
+          const rect = range.collapsed ? undefined : range.getBoundingClientRect();
+          return {
+            horizontalScrollbar: viewport.scrollWidth > viewport.clientWidth && box.bottom > clipBottom + 1,
+            tailInView: !!rect && rect.top >= box.top && rect.bottom <= clipBottom + 1,
+            top: viewport.scrollTop, clipHeight,
+            footerOverhang: viewport.querySelector("[data-chat-footer]")!.parentElement!.getBoundingClientRect().bottom - clipBottom,
+            markerTop: rect ? rect.top - box.top : null, markerOverhang: rect ? rect.bottom - clipBottom : null,
+          };
+        }, marker);
+        await expect.poll(async () => {
+          await gate.evaluate((queued) => queued.flush());
+          return scroller.evaluate((viewport) => getComputedStyle(viewport).visibility);
+        }, { intervals: [0, 25, 50], timeout: 1400 }).toBe("visible");
+        const reveal = await reading();
+        await info.attach("scrollbar-reveal", { body: JSON.stringify(reveal), contentType: "application/json" });
+        expect(reveal, JSON.stringify(reveal)).toMatchObject({ horizontalScrollbar: true, tailInView: true });
+        await expect(page.locator("[data-chat-timeout]")).toHaveCount(0);
+
+        const writes = await scroller.evaluateHandle((viewport) => {
+          const scrollTo = viewport.scrollTo;
+          const native = scrollTo.bind(viewport);
+          let count = 0;
+          viewport.scrollTo = (options?: ScrollToOptions | number, y?: number) => {
+            count++;
+            if (typeof options === "number") native(options, y ?? 0);
+            else native(options);
+          };
+          return { count: () => count, restore: () => { viewport.scrollTo = scrollTo; } };
+        });
+        try {
+          await gate.evaluate((queued) => queued.release());
+          await settle();
+          const following = await reading();
+          await info.attach("scrollbar-following", { body: JSON.stringify(following), contentType: "application/json" });
+          expect(following).toMatchObject({ horizontalScrollbar: true, tailInView: true });
+          const settledWrites = await writes.evaluate((scroll) => scroll.count());
+          await settle();
+          expect(await writes.evaluate((scroll) => scroll.count())).toBe(settledWrites);
+        } finally { await writes.evaluate((scroll) => scroll.restore()); await writes.dispose(); }
+      } finally { await gate.evaluate((queued) => queued.release()); await gate.dispose(); }
+    });
 }
 
 test("return to latest consumes an unchanged tail measurement after detail refresh under a static tall Footer", async ({ page }) => {

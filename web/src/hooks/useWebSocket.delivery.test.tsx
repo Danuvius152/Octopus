@@ -1,8 +1,12 @@
 import { Socket } from "../test-support/socket";
-import { act, renderHook } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { useSessionStore } from "../stores/sessionStore";
+import { BgTaskChip } from "../components/BgTaskChip";
+import { SessionAuxiliaryNotice } from "../components/SessionAuxiliaryNotice";
+import { loadBgTaskSnapshot } from "../lib/hydrateSession";
+import { deferred } from "../test-support/deferred";
 import { useWebSocket } from "./useWebSocket";
 
 
@@ -79,5 +83,80 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
     expect(useSessionStore.getState().messages[sid].filter((m) => m.type === "result")).toHaveLength(1);
   } finally {
     hook.unmount();
+  }
+});
+
+it.each([["mounted", false], ["remounted", false], ["mounted", true]] as const)(
+  "rechecks an omitted running task after reconnect with the collapsed card %s (detail fails=%s)", async (mount, fails) => {
+  vi.useFakeTimers();
+  Socket.reset(0);
+  vi.stubGlobal("WebSocket", Socket);
+  const sid = "reconnect-background-session";
+  const taskId = "background-before-reconnect";
+  const dispatch = { generation: "same-service", revision: 0, paused: false, items: [], active_request_id: null, active_operation: null };
+  const running = { id: taskId, session_id: sid, status: "running", command: "collect output", stdout: "", stderr: "",
+    started_at: "2026-11-19T10:00:00Z", completed_at: null, exit_code: null };
+  const recent = Array.from({ length: 200 }, (_, i) => ({ ...running, id: `recent-${i}`, status: "completed", started_at: "2026-11-19T11:00:00Z" }));
+  const detail = deferred<Response>();
+  const retry = deferred<Response>();
+  const taskDetails = vi.fn(() => retry.promise).mockReturnValueOnce(detail.promise);
+  const taskList = vi.fn(() => Response.json(reconnected ? recent : [running]));
+  let reconnected = false;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith(`/bg-tasks/${taskId}`)) return taskDetails();
+    if (path.endsWith("/bg-tasks")) return taskList();
+    if (path === `/api/sessions/${sid}`) return Response.json({ id: sid, status: "idle", messages: [], dispatch_state: dispatch });
+    if (path === "/api/sessions") return Response.json([{ id: sid, status: "idle", archived: false }]);
+    return Response.json([]);
+  }));
+  useSessionStore.getState().setToken("reconnect-background-account");
+  useSessionStore.setState({ activeSessionId: sid, dispatchGeneration: dispatch.generation, dispatchStates: {}, bgTasks: {} });
+
+  const hook = renderHook(useWebSocket);
+  const card = () => render(<><SessionAuxiliaryNotice sessionId={sid} /><BgTaskChip sessionId={sid} taskId={taskId} /></>);
+  try {
+    const first = Socket.instances[0];
+    await act(async () => { first.readyState = 1; first.onopen?.(); });
+    const original = card();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeVisible();
+    expect(taskDetails).not.toHaveBeenCalled();
+    if (mount === "remounted") original.unmount();
+    act(() => {
+      first.readyState = 3;
+      first.onclose?.({ code: 1006 });
+      vi.advanceTimersByTime(3000);
+    });
+    reconnected = true;
+    const second = Socket.instances[1];
+    await act(async () => { second.readyState = 1; second.onopen?.(); });
+    if (mount === "remounted") card();
+    expect(taskDetails).toHaveBeenCalledTimes(1);
+    await act(async () => { await loadBgTaskSnapshot(sid); });
+    expect(taskDetails).toHaveBeenCalledTimes(1);
+
+    if (fails) {
+      await act(async () => detail.resolve(new Response("Unavailable", { status: 503 })));
+      expect(screen.getByRole("alert")).toHaveTextContent("Could not refresh background task details.");
+      expect(screen.getByText("bg · running")).toBeVisible();
+      const listCalls = taskList.mock.calls.length;
+      fireEvent.click(screen.getByRole("button", { name: "Retry background task details" }));
+      expect(taskList).toHaveBeenCalledTimes(listCalls);
+      expect(taskDetails).toHaveBeenCalledTimes(2);
+    }
+    await act(async () => (fails ? retry : detail).resolve(Response.json({ ...running, status: "completed", exit_code: 0,
+      completed_at: "2026-11-19T10:01:00Z", stdout: "Saved stdout", stderr: "Saved stderr" })));
+    expect(screen.getByRole("button", { name: "Expand bg task" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("bg · completed")).toBeVisible();
+    expect(screen.getByText("Saved stdout")).toBeVisible();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(useSessionStore.getState().bgTasks[sid].find(task => task.id === taskId)?.stderr).toBe("Saved stderr");
+    expect(taskDetails).toHaveBeenCalledTimes(fails ? 2 : 1);
+  } finally {
+    act(() => {
+      hook.unmount();
+      useSessionStore.getState().setToken("");
+    });
   }
 });

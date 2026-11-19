@@ -7,6 +7,7 @@ from contextlib import closing
 
 import pytest
 
+from server.db.schema import CURRENT_VERSION
 from server.routers.sessions import get_session, get_submission_status, submit_input
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submit_client_message
@@ -159,7 +160,7 @@ async def test_http_and_ws_share_typed_durable_compact_without_alias_or_recovery
             "recovery_of_client_id": "compact-ws"})).json()
         assert recovery["code"] == "recovery_unavailable" and not recovery["accepted"]
     with sqlite3.connect(tmp_path / "product.db") as reader:
-        assert verify_main(reader) == 11
+        assert verify_main(reader) == CURRENT_VERSION
 
 
 @pytest.mark.parametrize("point", ["admission", "claim", "possible_send"])
@@ -261,7 +262,7 @@ async def test_restart_keeps_original_compact_fact_without_replay(native_runtime
         assert not status["execution"]["recoverable_input"]
         assert restored.dispatch_snapshot(session.id)["items"] == []
         with sqlite3.connect(copy) as reader:
-            assert verify_main(reader) == 11
+            assert verify_main(reader) == CURRENT_VERSION
     finally:
         await restored.close_session_owners()
         await restored_db.close()
@@ -450,10 +451,11 @@ async def test_late_compact_terminal_keeps_expired_budget_and_applied_effect(nat
     await submit_client_message(manager, session.id, "Create native history", [], "before", wiki_mode=None)
     await wait_dispatch_idle(manager, session.id)
     mode[0] = "compact_control"
+    limit = 1 if deadline == "overall" else .3
+    monkeypatch.setattr(settings, "turn_max_seconds", limit if deadline == "overall" else 0)
     receipt = await manager.start_compact(session.id, client_request_id="late-compact")
     await until(lambda: any(event["type"] == "context_state" and event.get("context_state", {}).get("activity") == "compacting" for event in events))
-    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .3 if deadline == "idle" else 0)
-    monkeypatch.setattr(settings, "turn_max_seconds", .3 if deadline == "overall" else 0)
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", limit if deadline == "idle" else 0)
     monkeypatch.setattr(settings, "turn_idle_max_retries", 2)
     entered, release = asyncio.Event(), asyncio.Event()
     update = database.update_session_field
@@ -470,7 +472,7 @@ async def test_late_compact_terminal_keeps_expired_budget_and_applied_effect(nat
         inject(tmp_path, {"method": "item/completed", "params": {"threadId": ROOT, "turnId": "compact-turn",
             "item": {"id": "compact-item", "type": "contextCompaction"}}})
         await asyncio.wait_for(entered.wait(), 3)
-        await asyncio.sleep(.35)
+        await asyncio.sleep(limit + .05)
         inject(tmp_path, {"method": "turn/completed", "params": {"threadId": ROOT,
             "turn": {"id": "compact-turn", "status": native_status}}})
         run = session._run.backend

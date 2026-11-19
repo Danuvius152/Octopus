@@ -560,7 +560,9 @@ class LifecycleMixin(SessionManagerBase):
         # Subscriber I/O cannot hold a lifecycle lock: a result subscriber may
         # itself need to restore this same session.
         if archived:
-            return True, await self._finish_session_archive(session, replace=replace, successor=successor, dispatch_state=archived)
+            return True, await self._finish_session_archive(
+                session, replace=replace, successor=successor, dispatch_state=archived, automatic=automatic,
+            )
         return False, None
 
     async def _archive_reserved_session(
@@ -620,6 +622,7 @@ class LifecycleMixin(SessionManagerBase):
 
     async def _finish_session_archive(
         self, old: Session, *, replace: bool, dispatch_state: dict[str, Any], successor: Session | None = None,
+        automatic: bool,
     ) -> Session | None:
         """The archive effect is confirmed; publish or create its successor."""
 
@@ -631,7 +634,7 @@ class LifecycleMixin(SessionManagerBase):
                     "new_session_id": None,
                     "name": old.name,
                     "dispatch_state": dispatch_state,
-                }, user_id=old.user_id,
+                }, user_id=old.user_id, wrap_required_cancellation=automatic,
             )
             return None
 

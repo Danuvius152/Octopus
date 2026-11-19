@@ -779,7 +779,7 @@ class TurnsMixin(SessionManagerBase):
 
             from ..context_models import align_context, context_target
 
-            async with self.db.configuration_lock:
+            async with self._configuration_boundary(session):
                 agent = await self._load_agent(session)
                 state = align_context(session.context_state, context_target(replace(session, claude_session_id=resume_id), agent))
                 await self.db.update_session_field(session.id, claude_session_id=resume_id,
@@ -789,6 +789,9 @@ class TurnsMixin(SessionManagerBase):
                     if owner is not None:
                         owner.runtime.context_changed()
         session.claude_session_id = resume_id
+        if owner is not None and (execution := owner.runtime.current) is not None and execution.input_history is not None:
+            # An in-flight projection cannot overwrite this later Owner commit.
+            execution.input_history_dirty = True
 
     async def _note_question_request(
         self, session: Session, question_id: str, tool_input: dict[str, Any] | None, *, attempt_id: str,
@@ -1039,11 +1042,8 @@ class TurnsMixin(SessionManagerBase):
         if attempt.timeout is None:
             return None
         reason, limit = attempt.timeout
-        overall = settings.turn_max_seconds
-        ended_at = (attempt.backend.admission_closed_at
-                    if getattr(attempt.backend, "captures_retirement_output", False) else None)
-        if overall > 0 and self._remaining_turn_time(turn, at=ended_at) == 0:
-            reason, limit = "overall", overall
+        if attempt.overall_expired_at_end(turn.settlement, observed_at=time.monotonic()):
+            reason, limit = "overall", turn.settlement.overall_limit
         maximum = max(0, settings.turn_idle_max_retries)
         recovery = turn.settlement.recovery
         next_prompt = self._recovery_prompt(turn, attempt, idle=True)
@@ -1153,10 +1153,7 @@ class TurnsMixin(SessionManagerBase):
             history = [
                 MessageContent(**m) for m in await self.db.load_messages(session.id)
             ]
-            kept, omitted = fork_helpers.select_lost_history(history)
-            replayed = len(kept)
-            if kept:
-                recovery_prompt = fork_helpers.wrap_for_lost_history(attempt.prompt, kept, omitted=omitted)
+            recovery_prompt, replayed, omitted = fork_helpers.build_lost_history_replay(attempt.prompt, history)
         return _Decision.again(
             recovery_prompt,
             await self._surface_stale_session(
@@ -1274,10 +1271,9 @@ class TurnsMixin(SessionManagerBase):
                  if attempt.result is not None and not attempt.result.is_error else
                  "Backend protocol ownership could not be established; execution stopped.")
                 + (f" {detail}" if detail else "")})
-        ended_at = (attempt.backend.admission_closed_at
-                    if getattr(attempt.backend, "captures_retirement_output", False) else None)
-        if self._remaining_turn_time(turn, at=ended_at) == 0 and attempt.timeout is None:
-            attempt.watchdog["tripped"] = ("overall", settings.turn_max_seconds)
+        ended_at = attempt.admission_closed_at
+        if attempt.timeout is None and attempt.overall_expired_at_end(turn.settlement, observed_at=time.monotonic()):
+            attempt.watchdog["tripped"] = ("overall", turn.settlement.overall_limit)
             if session._run.backend is attempt.backend:
                 self._session_owners[id(session)].runtime.retire(attempt.backend, "parent_timeout")
         elif (ended_at is not None and attempt.timeout is None and settings.turn_idle_timeout_seconds > 0
@@ -1329,13 +1325,6 @@ class TurnsMixin(SessionManagerBase):
                 return decision
 
         return await self._premature_exit_decision(session, turn, attempt)
-
-    @staticmethod
-    def _remaining_turn_time(turn: _Turn, *, at: float | None = None) -> float | None:
-        limit = settings.turn_max_seconds
-        return max(0.0, limit - ((time.monotonic() if at is None else at) - turn.started_at)) if limit > 0 else None
-
-
 
     async def _load_agent(self, session: Session) -> dict[str, Any] | None:
         """Fetch the session's owning agent row (or None for legacy/no-DB)."""

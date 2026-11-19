@@ -195,9 +195,10 @@ it("keeps live card completions across delayed reconnect responses and accepts n
     });
     // Research publication waits for detail to establish its service identity.
     await act(async () => {
+      const research = { id: "research", session_id: "s", question: "q", status, phase: "search", verified: 0 };
       waiting.get("/api/sessions/s/research")!(Response.json(newJobs
-        ? [{ id: "research", question: "q", status: "completed", verified: 2 }, { id: "research-next", question: "Next question", status }]
-        : [{ id: "research", question: "q", status, verified: 0 }]));
+        ? [{ ...research, status: "completed", phase: "done", verified: 2 }, { ...research, id: "research-next", question: "Next question" }]
+        : [research]));
     });
   };
   await finish("running");

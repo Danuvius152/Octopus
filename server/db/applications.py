@@ -313,17 +313,20 @@ class ApplicationsMixin(DatabaseBase):
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Validate, reorder and capture changed rows in the same commit."""
         async with self.transaction(write=True) as tx:
-            scope = "archived=0" + (" AND user_id=?" if user_id is not None else "")
-            params = (user_id,) if user_id is not None else ()
-            rows = await tx.fetch_all(f"SELECT {self._APPLICATION_COLS} FROM applications WHERE {scope} ORDER BY created_at ASC", params)
-            before = {row["id"]: row for row in map(self._row_to_application, rows)}
-            stray = [identifier for identifier in ordered_ids if identifier not in before or not before[identifier]["pinned"]]
+            before = await self._ordered_pins(tx, "applications", user_id=user_id)
+            stray = [identifier for identifier in ordered_ids if identifier not in before]
             if stray:
                 raise ValueError(f"Not a pinned application: {', '.join(stray)}")
-            await self._reorder_pins(tx, "applications", ordered_ids)
-            rows = await tx.fetch_all(f"SELECT {self._APPLICATION_COLS} FROM applications WHERE {scope} ORDER BY created_at ASC", params)
+            await self._reorder_pins(tx, "applications", ordered_ids, before, user_id=user_id)
+
+            scope = "archived=0" + (" AND user_id=?" if user_id is not None else "")
+            params = (user_id,) if user_id is not None else ()
+            rows = await tx.fetch_all(
+                f"SELECT {self._APPLICATION_COLS} FROM applications WHERE {scope} ORDER BY created_at ASC",
+                params,
+            )
             after = [self._row_to_application(row) for row in rows]
-            changed = [row for row in after if row["pin_order"] != before[row["id"]]["pin_order"]]
+            changed = [row for row in after if row["id"] in before and row["pin_order"] != before[row["id"]]]
             return after, changed
 
     async def delete_application(self, app_id: str) -> bool:

@@ -115,7 +115,11 @@ App Server renders one card for each observed child work round. Only the display
 projection hides child text from main chat; raw transcript rows, original seq,
 global high water and tool audit remain intact. Cards rebuild their summary from
 the collected child text with matching request/attempt/thread/turn. Historical
-pagination and realtime output use the same association. If a window has child
+pagination and realtime output use the same association. Cards share a derived
+index of the current saved message window. It groups status rows by card ID
+and collected items by work identity. The chat projection looks up snapshots
+by that same work identity. Live text deltas compose the preview without
+rebuilding the saved index. If a window has child
 text or tools but lacks the older status row, its card remains unconfirmed. A typed live
 snapshot can supply a missing display anchor without inventing a stored seq;
 loading the original row deduplicates that anchor.
@@ -262,6 +266,9 @@ invariant, not live-provider reachability. The nested fixture
 Frontend source-adjacent tests and
 `web/e2e/native-output.spec.ts` cover partial interleaving, sparse windows,
 reconnect and refresh; the browser fixture does not establish native I/O semantics.
+[History pagination](../../web/e2e/history-pagination.spec.ts) covers the
+card order, collected body and saved detail reference when an older page adds
+the original status row, as well as opening a snapshot without a saved anchor.
 
 `tests/test_native_child_details.py` covers delayed spawn binding, distinct
 rounds, tools and paging, account/refusal/integrity boundaries, archived reads,

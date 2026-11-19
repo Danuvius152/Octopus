@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { handleWsMessage } from "../hooks/useWebSocket";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ResearchCard } from "./ResearchCard";
 import { BgTaskChip } from "./BgTaskChip";
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
 import { SessionAuxiliaryNotice } from "./SessionAuxiliaryNotice";
 import { useSessionStore, type BgTask, type Delegation, type Message, type ResearchJob } from "../stores/sessionStore";
+import { deferred } from "../test-support/deferred";
 
 const research: ResearchJob = { id: "task", session_id: "s1", question: "Original research", status: "running", phase: "search" };
 const background = { id: "task", session_id: "s1", status: "running", command: "original", stdout: "", stderr: "", exit_code: null } as BgTask;
@@ -16,7 +18,7 @@ const receipt = (work: string): Message => ({ role: "tool", type: "tool_result",
     receipt: { kind: "delegation", delegation_id: "child", work_id: work } } });
 const kinds = ["research", "background", "delegation"] as const;
 type Kind = typeof kinds[number];
-const card = (kind: Kind, identity = "task") => kind === "research" ? <ResearchCard sessionId="s1" />
+const card = (kind: Kind, identity = "task") => kind === "research" ? <ResearchCard sessionId="s1" foreground />
   : kind === "background" ? <BgTaskChip sessionId="s1" taskId={identity} />
   : <AgentDelegationRequestCard sessionId="s1" message={request} agentName="Vera" request="Original delegation" files={undefined} />;
 const cancelButton = (kind: Kind) => screen.getByTitle(kind === "research" ? "Cancel research" : kind === "background" ? "Cancel this background task" : "Cancel delegation");
@@ -37,7 +39,7 @@ it.each(kinds)("%s shows an unknown network result and confirms through a read w
   const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === "POST") throw new TypeError("Connection lost after the server may have cancelled");
     const path = String(url);
-    if (path.includes("/research")) return Response.json([{ ...research, status: completed ? "cancelled" : "running" }]);
+    if (path.endsWith(`/research/${research.id}`)) return Response.json({ ...research, status: completed ? "cancelled" : "running" });
     if (path.includes("/bg-tasks")) return Response.json({ ...background, status: completed ? "cancelled" : "running" });
     return Response.json([{ ...delegation, state: completed ? "cancelled" : "running" }]);
   });
@@ -63,7 +65,10 @@ it.each(kinds)("%s suppresses duplicate clicks and keeps a newer terminal after 
   expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   await act(async () => {
     const store = useSessionStore.getState();
-    if (kind === "research") store.upsertResearch("s1", { id: "task", status: "completed", injection_status: "failed", error: "Original delivery error" });
+    if (kind === "research") {
+      handleWsMessage({ type: "research_completed", session_id: "s1", research_id: "task" });
+      handleWsMessage({ type: "research_delivery", session_id: "s1", research_id: "task", injection_status: "failed", error: "Original delivery error" });
+    }
     else if (kind === "background") store.upsertBgTask("s1", { ...background, status: "completed", delivery_disposition: "unknown", delivery_error: "Original delivery error" });
     else store.upsertDelegation("s1", { ...delegation, state: "completed", terminal_disposition: "unknown", terminal_delivery_error: "Original delivery error" });
     reply(Response.json({ detail: "Control failed after completion" }, { status: 503 }));
@@ -72,6 +77,35 @@ it.each(kinds)("%s suppresses duplicate clicks and keeps a newer terminal after 
   expect(screen.getByRole("alert")).toHaveTextContent("Control failed after completion");
   expect(screen.getByText(/Original delivery error/)).toBeTruthy();
 });
+
+it.each([[200, false], [503, false], [200, true], [503, true]] as const)(
+  "retires a Research status read when chat is hidden (HTTP %s, returned before reply=%s)", async (status, returned) => {
+    const response = deferred<Response>();
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") throw new TypeError("Cancellation response lost");
+      return response.promise;
+    });
+    vi.stubGlobal("fetch", fetcher);
+    render(<>{card("research")}<SessionAuxiliaryNotice sessionId="s1" /></>);
+    fireEvent.click(cancelButton("research"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("result is unconfirmed");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh status" }));
+
+    // The App keeps chat mounted behind Schedules. Leaving and returning in
+    // one update still retires the original read.
+    act(() => {
+      const store = useSessionStore.getState();
+      store.openManage("schedules");
+      if (returned) store.showChat();
+    });
+    await act(async () => response.resolve(Response.json({ ...research, status: "cancelled" }, { status })));
+    expect(state("research")).toBe("running");
+    if (!returned) act(() => useSessionStore.getState().showChat());
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("Current status refreshed.")).toBeNull();
+    expect(fetcher.mock.calls[1][1]?.signal?.aborted).toBe(true);
+  },
+);
 
 for (const kind of kinds) {
   it.each([[200, "unmount"], [503, "unmount"], [200, "selection"], [503, "selection"]] as const)(
@@ -100,7 +134,7 @@ for (const kind of kinds) {
       // Unmount removes both demands and must abort the transport.
       const shared = kind === "delegation" && change === "selection";
       expect(signal?.aborted).toBe(!shared);
-      const data = kind === "research" ? [{ ...research, status: "completed" }]
+      const data = kind === "research" ? { ...research, status: "completed" }
         : kind === "background" ? { ...background, status: "completed" } : [{ ...delegation, state: "completed" }];
       await act(async () => reply(status === 200 ? Response.json(data) : new Response("Old read failed", { status })));
       expect(state(kind)).toBe(shared && status === 200 ? "completed" : "running");

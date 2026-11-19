@@ -31,8 +31,10 @@ async def db():
     await db.save_connector_installation(installation_id="connector", kind="service", label="Account", auth_type="oauth",
                                          external_account_id="external", scopes=["read"], enable_by_default=True,
                                          token_expires_at="expires", secret_encrypted="connector-secret", created_at="connector-time", user_id="owner")
-    await db.save_custom_connector(kind="custom", display_name="Custom", authorize_url="https://example.test/auth",
-                                   token_url="https://example.test/token", scopes=["write"], pkce=True, api_base="https://example.test", now="custom-time")
+    await db.create_custom_connector(kind="custom", display_name="Custom", authorize_url="https://example.test/auth",
+                                     token_url="https://example.test/token", scopes=["write"], pkce=True,
+                                     api_base="https://example.test", client_id="cid", client_secret_encrypted="ciphertext",
+                                     now="custom-time")
     yield db
     await db.close()
 

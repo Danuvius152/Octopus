@@ -173,6 +173,46 @@ async def test_archive_reads_preserve_duplicate_sequence_counts_and_refusals(arc
     assert (await client.get(f"/api/sessions/{session.id}/messages/7")).status_code == 409
 
 
+async def test_agent_active_session_count_uses_index_across_archive_and_restore(archives, tmp_path):
+    database, manager, client, owner, other = archives
+    agent = await database.get_system_agent(owner)
+    foreign_agent = await database.get_system_agent(other)
+    await manager.create_session(agent["id"], "First chat", str(tmp_path))
+    second = await manager.create_session(agent["id"], "Second chat", str(tmp_path))
+    async with database.transaction() as tx:
+        await tx.execute(
+            """WITH RECURSIVE history(n) AS (
+                VALUES(1) UNION ALL SELECT n + 1 FROM history WHERE n < 2400
+            ) INSERT INTO sessions(id,name,working_dir,created_at,archived,agent_id,user_id)
+            SELECT 'history-' || n, 'Retained chat', ?, 'created', n % 8 != 0,
+                   CASE WHEN n % 8 = 1 THEN ? ELSE ? END,
+                   CASE WHEN n % 8 = 1 THEN ? ELSE ? END FROM history""",
+            (str(tmp_path), agent["id"], foreign_agent["id"], owner, other),
+        )
+        await tx.execute("ANALYZE")
+
+    statements = []
+    await database.conn.set_trace_callback(statements.append)
+    try:
+        assert (await database.get_agent(agent["id"], owner))["active_session_count"] == 2
+    finally:
+        await database.conn.set_trace_callback(None)
+    query, = [sql for sql in statements if "FROM agents a" in sql]
+
+    await manager.archive_session(second.id, replace=False)
+    assert (await database.get_agent(agent["id"], owner))["active_session_count"] == 1
+    generation = (await client.get(f"/api/sessions/{second.id}/restoration")).json()["service_generation"]
+    restored = await client.post(f"/api/sessions/{second.id}/unarchive", json={
+        "operation_id": "restore-counted-chat", "service_generation": generation,
+    })
+    assert restored.status_code == 200 and restored.json()["status_code"] is None
+    assert (await database.get_agent(agent["id"], owner))["active_session_count"] == 2
+
+    async with database.transaction(write=False) as tx:
+        plan = [row[3] for row in await tx.fetch_all("EXPLAIN QUERY PLAN " + query)]
+    assert any("SEARCH s USING" in step and "idx_sessions_active_agent" in step for step in plan), plan
+
+
 @pytest.mark.parametrize("operation", ["info", "detail", "restore"])
 async def test_archive_single_target_reads_are_scoped_point_queries(archives, tmp_path, operation):
     database, manager, client, owner, other = archives

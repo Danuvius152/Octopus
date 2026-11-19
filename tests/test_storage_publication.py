@@ -11,6 +11,7 @@ from server.config import settings
 from server.crypto import master_key
 from server.database import Database
 from server.db.portability import snapshot_account
+from server.db.schema import CURRENT_VERSION
 from server.storage_verification import verify_main, verify_storage
 from tests.accounts import create_account
 from tests.test_service_runtime import installation_settings
@@ -32,13 +33,15 @@ async def installation(tmp_path, monkeypatch):
     return config
 
 
-@pytest.mark.parametrize('damage', ['missing-index', 'retained-index', 'extra-column', 'unknown-trigger',
+@pytest.mark.parametrize('damage', ['missing-index', 'missing-active-session-index', 'retained-index', 'extra-column', 'unknown-trigger',
                                    'quoted-primary', 'quoted-default', 'missing-unique', 'retired-input', 'nested-retired-input'])
 async def test_publication_rejects_incompatible_current_structure_or_facts_without_repair(installation, damage):
     path = Path(installation.db_path)
     with sqlite3.connect(path) as db:
         if damage == 'missing-index':
             db.execute('DROP INDEX messages_unique_sequence')
+        elif damage == 'missing-active-session-index':
+            db.execute('DROP INDEX idx_sessions_active_agent')
         elif damage == 'retained-index':
             db.execute('CREATE INDEX idx_messages_session ON messages(session_id, seq)')
         elif damage == 'extra-column':
@@ -77,7 +80,7 @@ async def test_publication_rejects_incompatible_current_structure_or_facts_witho
 async def test_publication_verification_leaves_current_messages_and_input_facts_unchanged(installation):
     path = Path(installation.db_path)
     before = path.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 11
+    assert verify_storage(installation)['main_format_version'] == CURRENT_VERSION
     assert path.read_bytes() == before
     database = Database(str(path))
     await database.initialize()
@@ -117,10 +120,10 @@ async def test_full_database_backup_preserves_ignored_proof_while_account_transf
         owner = source.execute('SELECT id FROM users').fetchone()[0]
         snapshot_account(source, transfer, owner, key=master_key())
     with closing(sqlite3.connect(backup)) as reader:
-        assert verify_main(reader) == 11
+        assert verify_main(reader) == CURRENT_VERSION
         assert reader.execute('SELECT git_ignored_baseline FROM messages').fetchall() == [(baseline,)]
     with closing(sqlite3.connect(transfer)) as reader:
-        assert verify_main(reader) == 11
+        assert verify_main(reader) == CURRENT_VERSION
         assert reader.execute('SELECT * FROM messages').fetchall() == []
         assert reader.execute('SELECT * FROM sessions').fetchall() == []
         assert reader.execute('SELECT id FROM users').fetchall() == [(owner,)]
@@ -132,7 +135,7 @@ async def test_publication_uses_the_same_main_database_alias_as_current_startup(
     alias.symlink_to(original)
     installation.db_path = str(alias)
     before = original.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 11
+    assert verify_storage(installation)['main_format_version'] == CURRENT_VERSION
     assert original.read_bytes() == before
 
 

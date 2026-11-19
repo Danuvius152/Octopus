@@ -1,7 +1,8 @@
 import { accountFetch } from "./accountFetch";
 import { sessions } from "./sessionList";
 import { observeSessionAuxiliary } from "./hydrateSession";
-import { useSessionStore, type ResearchJob } from "../stores/sessionStore";
+import { useSessionStore } from "../stores/sessionStore";
+import { isResearchJob } from "./researchProjection";
 
 /** Creation owns a receipt, not an event revision. The store keeps live facts. */
 export async function createResearch(sessionId: string, question: string, active: () => boolean, signal?: AbortSignal): Promise<void> {
@@ -28,8 +29,8 @@ export async function createResearch(sessionId: string, question: string, active
       if (current() || initialGenerationCurrent()) useSessionStore.getState().addMessage(sessionId, { role: "system", type: "notice", content: message, is_error: true });
       return;
     }
-    const job: ResearchJob = await response.json();
-    if (job.session_id !== sessionId || !job.id || !job.status || !job.question) throw new Error("Invalid research creation receipt");
+    const job: unknown = await response.json();
+    if (!isResearchJob(job, sessionId)) throw new Error("Invalid research creation receipt");
     if (current()) useSessionStore.getState().initializeResearch(sessionId, job);
     else if (initialGenerationCurrent()) {
       confirmation = observeSessionAuxiliary(sessionId, "research");

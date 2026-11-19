@@ -83,6 +83,12 @@ In production `octopus serve` serves everything from one port (default 8000):
   408 classification. Every 404 overrides `Cache-Control` to `no-store` so a
   missing asset cannot remain cached after publication. Other messages and
   application errors propagate unchanged.
+- The managed service and direct Uvicorn ASGI entry both install the same
+  request log filter when importing `server.main:app`. Uvicorn omits query
+  strings from HTTP access logs, WebSocket handshake logs and the request
+  targets and scope records shown at debug or trace level. Request paths,
+  HTTP status and handshake outcomes remain available. A proxy or tunnel
+  in front of Octopus owns its own request logs.
 
 In development, Vite serves the SPA on port 5173 with HMR and proxies `/api`,
 `/apps`, `/ws` and `/health` to the backend (`OCTOPUS_API_PORT`, default 8000).

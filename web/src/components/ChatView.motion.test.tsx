@@ -27,7 +27,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 // Only browser dimensions, delivery and time are controlled. The real ChatView,
 // store and real Virtuoso measurement path still own rendering and following.
-function motionViewport(bottomRemainder = 0, revealGrowth = 0, stopAtReveal = false) {
+function motionViewport(bottomRemainder = 0, revealGrowth = 0, stopAtReveal = false, scrollQuantum = 1) {
   mockChatItemLayout();
   let time = 1000;
   let height = 1200;
@@ -35,23 +35,27 @@ function motionViewport(bottomRemainder = 0, revealGrowth = 0, stopAtReveal = fa
   let hidden = false;
   let serial = 0;
   let afterScroll: (() => void) | undefined;
-  if (revealGrowth) {
-    const layout = vi.mocked(HTMLElement.prototype.getBoundingClientRect).getMockImplementation()!;
-    let footerHeight = 0;
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-      const viewport = this.closest<HTMLElement>(".chat-messages");
-      if (viewport && this.hasAttribute("data-chat-rows")) {
-        return new DOMRect(0, -viewport.scrollTop, 800, height - footerHeight);
+  const layout = vi.mocked(HTMLElement.prototype.getBoundingClientRect).getMockImplementation()!;
+  let footerHeight = 0;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    const viewport = this.closest<HTMLElement>(".chat-messages");
+    if (viewport && this.hasAttribute("data-chat-rows")) {
+      return new DOMRect(0, -viewport.scrollTop, 800, height - footerHeight);
+    }
+    if (viewport && this.dataset.index === "14") {
+      return new DOMRect(0, height - footerHeight - 80 - viewport.scrollTop, 800, 80);
+    }
+    if (viewport && this.firstElementChild?.hasAttribute("data-chat-footer")) {
+      // One real layout change at the reveal boundary, with no subsequent
+      // token or ResizeObserver delivery to rescue a missing write check.
+      if (revealGrowth && !footerHeight && viewport.style.visibility !== "hidden") {
+        footerHeight = revealGrowth;
+        height += revealGrowth;
       }
-      if (viewport && this.firstElementChild?.hasAttribute("data-chat-footer")) {
-        // One real layout change at the reveal boundary, with no subsequent
-        // token or ResizeObserver delivery to rescue a missing write check.
-        if (!footerHeight && viewport.style.visibility !== "hidden") { footerHeight = revealGrowth; height += revealGrowth; }
-        return new DOMRect(0, height - viewport.scrollTop - footerHeight, 800, footerHeight);
-      }
-      return layout.call(this);
-    });
-  }
+      return new DOMRect(0, height - viewport.scrollTop - footerHeight, 800, footerHeight);
+    }
+    return layout.call(this);
+  });
   const queued = new Map<number, FrameRequestCallback>();
   const observers = new Map<ResizeObserver, { callback: ResizeObserverCallback; elements: Set<Element> }>();
   vi.spyOn(performance, "now").mockImplementation(() => time);
@@ -78,7 +82,8 @@ function motionViewport(bottomRemainder = 0, revealGrowth = 0, stopAtReveal = fa
   const writes: { at: number; top: number }[] = [];
   viewport.scrollTo = (optionsOrX?: ScrollToOptions | number, y?: number) => {
     const top = typeof optionsOrX === "number" ? y ?? 0 : optionsOrX?.top ?? 0;
-    viewport.scrollTop = Math.max(0, Math.min(height - viewportHeight - bottomRemainder, Math.round(top)));
+    const rounded = Math.round(top / scrollQuantum) * scrollQuantum;
+    viewport.scrollTop = Math.max(0, Math.min(height - viewportHeight - bottomRemainder, rounded));
     writes.push({ at: time, top: viewport.scrollTop });
     fireEvent.scroll(viewport);
     afterScroll?.();
@@ -244,6 +249,28 @@ it("settles at a fractional physical bottom without repeating clamped scroll wri
   const settled = motion.writes.length;
   for (let index = 0; index < 12; index++) motion.tick(16);
   expect(motion.writes).toHaveLength(settled);
+});
+
+it.each([false, true])("handles a quantized step before the reachable tail (navigation=%s)", (navigate) => {
+  const motion = motionViewport(0, 0, false, 4);
+  motion.grow(4);
+  if (navigate) motion.afterScroll(() => fireEvent.keyDown(motion.viewport, { key: "PageUp" }));
+  motion.tick(16);
+  expect(motion.writes.map(({ top }) => top)).toEqual(navigate ? [600] : [600, 604]);
+  for (let frame = 0; frame < 8; frame++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(navigate ? 600 : 604);
+  expect(motion.pending()).toBe(0);
+});
+
+it("takes an intermediate step on a short frame under browser zoom", () => {
+  vi.stubGlobal("devicePixelRatio", 0.25);
+  const motion = motionViewport(0, 0, false, 4);
+  motion.grow(80);
+  motion.tick(1);
+  expect(motion.writes.map(({ top }) => top)).toEqual([604]);
+  for (let frame = 0; frame < 20; frame++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(680);
+  expect(motion.pending()).toBe(0);
 });
 
 it.each([0, 0.5])("keeps following after a downward wheel at a %spx bottom remainder", (remainder) => {
@@ -641,12 +668,14 @@ it("removes its visibility listener and rejects an already taken frame after unm
   const removed = vi.spyOn(document, "removeEventListener");
   const motion = motionViewport();
   const listeners = added.mock.calls.filter(([type]) => type === "visibilitychange");
-  expect(listeners).toHaveLength(1);
+  expect(listeners.length).toBeGreaterThan(0);
   motion.grow(300);
   const taken = motion.takeFrames();
   expect(taken.length).toBeGreaterThan(0);
   motion.unmount();
-  expect(removed.mock.calls.filter(([type, listener]) => type === "visibilitychange" && listener === listeners[0][1])).toHaveLength(1);
+  for (const [, registered] of listeners) {
+    expect(removed.mock.calls.filter(([type, listener]) => type === "visibilitychange" && listener === registered)).toHaveLength(1);
+  }
   act(() => { for (const callback of taken) callback(motion.now()); });
   motion.visibility(false); motion.grow(100); motion.tick(16);
   expect(motion.writes).toHaveLength(0);

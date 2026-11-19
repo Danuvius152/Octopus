@@ -1,5 +1,6 @@
 import type { components } from "../api/contracts";
-import type { Agent, Application, AttachmentMetadata, Delegation, QuestionItem, ResearchJob, SessionInfo } from "../stores/sessionStore";
+import type { Agent, Application, AttachmentMetadata, Delegation, QuestionItem, SessionInfo } from "../stores/sessionStore";
+import { isResearchReceipt } from "./researchProjection";
 import { readDispatchState, type DispatchState } from "./sessionDispatch";
 import { readRuntimeMetadata } from "./toolIdentity";
 import { readContextState, type ContextState } from "./sessionContext";
@@ -90,10 +91,6 @@ const execution: Guard<Dto["SubmissionExecution"]> = fields({
   reason_code: maybeText, state_version: integer, updated_at: maybeText, execution_owner_request_id: id,
   recoverable_input: boolean, native_inputs: optional(array(nativeInput)),
 });
-const researchReceipt: Guard<NonNullable<ResearchJob["delivery_receipt"]>> = fields({
-  request_id: id, version: positive, stage: oneOf("queued", "processing", "processed", "failed", "recording_unconfirmed", "unknown"),
-  error: maybeText, browser_confirmed_version: optional(integer), browser_confirmed_at: optional(text),
-});
 const finalAnswer: Guard<Dto["FinalAnswerRef"]> = fields({ thread_id: id, turn_id: id, message_seqs: optional(array(integer)) });
 const compactResult: Guard<Dto["CompactResult"]> = fields({
   effect: oneOf("applied", "not_applied", "unknown"), reason: maybeText,
@@ -175,7 +172,7 @@ const definitions = [
     verified: optional(integer), unverified: optional(integer), injection_status: optional(oneOf("pending", "delivered", "failed", "unknown")) }),
   event("research_failed", { ...inSession, research_id: id, status: optional(oneOf("failed", "cancelled", "interrupted")), error: maybeText }),
   event("research_delivery", { ...inSession, research_id: id, injection_status: oneOf("pending", "delivered", "failed", "unknown"),
-    error: maybeText, delivery_receipt: optional(nullable(researchReceipt)) }),
+    error: maybeText, delivery_receipt: optional(nullable(isResearchReceipt)) }),
   event("schedules_changed", {}),
   event("application_created", { application, application_id: optional(id) }),
   event("application_updated", { application, application_id: optional(id) }),

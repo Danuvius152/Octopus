@@ -5,6 +5,10 @@ import { expect, it, vi } from "vitest";
 const baseUrl = "http://localhost/apps/example/agent/";
 const receipt = { code: "response_wait_timeout", conversation_id: "conversation", request_id: "original-request",
   operation_terminal: false, state: "running", status_url: "/apps/example/agent/conversations/conversation/requests/original-request" };
+const identity = { conversation_id: receipt.conversation_id, request_id: receipt.request_id };
+const identityHeaders = { "X-Octopus-Conversation-Id": receipt.conversation_id, "X-Octopus-Request-Id": receipt.request_id };
+const firstFrame = { type: "conversation", ...identity };
+const frame = (event: object) => `data: ${JSON.stringify(event)}\n\n`;
 
 async function client(fetchImpl: typeof fetch, selectedBaseUrl = baseUrl) {
   const source = await readFile(resolve("../server/app_agent_client.js"), "utf8");
@@ -23,6 +27,27 @@ it("recovers a JSON response timeout with one GET of the original request and no
   expect(result.observation).toMatchObject({ state: "completed", request_id: "original-request", reply: "Original result" });
   expect(fetch.mock.calls.map(([url, options]) => [String(url), options?.method])).toEqual([
     [baseUrl + "ask", "POST"], ["http://localhost" + receipt.status_url, "GET"],
+  ]);
+});
+
+it.each([
+  ["chat", "/octopus+local", "/octopus%2Blocal"],
+  ["chat", "", "/octopus"],
+  ["ask", "", "/octopus"],
+  ["chat", "/octopus", ""],
+] as const)("queries the original %s base %s when the receipt advertises %s", async (operation, basePrefix, receiptPrefix) => {
+  const base = `http://localhost${basePrefix}/apps/example/agent/`;
+  const offered = { ...receipt, status_url: receiptPrefix + receipt.status_url };
+  const fetch = vi.fn<typeof globalThis.fetch>()
+    .mockResolvedValueOnce(operation === "ask" ? Response.json({ detail: offered }, { status: 504 }) :
+      new Response(frame(firstFrame) + frame({ type: "error", ...offered }), { headers: identityHeaders }))
+    .mockResolvedValueOnce(Response.json({ ...identity, state: "completed" }));
+  const sdk = await client(fetch, base);
+  await expect(sdk[operation]({ message: "Perform once" })).resolves.toMatchObject({
+    ...offered, observation: { ...identity, state: "completed" },
+  });
+  expect(fetch.mock.calls.map(([url, options]) => [String(url), options?.method])).toEqual([
+    [base + operation, "POST"], ["http://localhost" + basePrefix + receipt.status_url, "GET"],
   ]);
 });
 
@@ -68,9 +93,15 @@ it.each(["network", "unknown", "invalid-reference", "identity-mismatch"])(
     expect(fetch.mock.calls.map(([, options]) => options?.method)).toEqual(["POST", "GET"]);
   });
 
-it("rejects a recovery URL outside the original app before attaching credentials", async () => {
+it.each([
+  `https://another-origin.example${receipt.status_url}`,
+  `/octopus${receipt.status_url.replace("/example/", "/another-app/")}`,
+  `/octopus${receipt.status_url.replace("/conversations/conversation/", "/conversations/another-conversation/")}`,
+  `/octopus${receipt.status_url.replace("/original-request", "/another-request")}`,
+  `/octopus${receipt.status_url}?unexpected=1`,
+])("rejects a conflicting recovery URL before querying status (%s)", async (status_url) => {
   const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(Response.json({
-    detail: { ...receipt, status_url: "https://another-origin.example/steal" },
+    detail: { ...receipt, status_url },
   }, { status: 504 }));
   const result = await (await client(fetch)).ask({ message: "Perform once" });
   expect(result).toMatchObject({ code: "response_wait_timeout", request_id: "original-request", operation_terminal: false });
@@ -78,14 +109,86 @@ it("rejects a recovery URL outside the original app before attaching credentials
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 
-it("keeps an interrupted stream's original identity without replaying it", async () => {
-  const wire = `data: ${JSON.stringify({ type: "conversation", conversation_id: "conversation", request_id: "original-request" })}\n\n`;
-  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(new Response(wire));
+it.each(["identity headers and no first frame", "only a complete first frame", "both identity channels"])(
+  "can read the original status after disconnect with %s", async (channel) => {
+  const wire = channel === "identity headers and no first frame" ? null : frame(firstFrame);
+  const headers = channel === "only a complete first frame" ? {} : identityHeaders;
+  const fetch = vi.fn<typeof globalThis.fetch>()
+    .mockResolvedValueOnce(new Response(wire, { headers }))
+    .mockResolvedValueOnce(Response.json({ ...identity, state: "completed" }));
   const sdk = await client(fetch);
-  await expect(sdk.chat({ message: "Perform once" })).rejects.toMatchObject({ receipt: {
-    conversation_id: "conversation", request_id: "original-request", operation_terminal: false,
-  } });
-  expect(fetch).toHaveBeenCalledTimes(1);
+  const error = await sdk.chat({ message: "Perform once" }).catch((failure: unknown) => failure);
+  expect(error).toMatchObject({ receipt: { ...identity, operation_terminal: false } });
+  await expect(sdk.status((error as { receipt: object }).receipt)).resolves.toMatchObject({ state: "completed" });
+  expect(fetch.mock.calls.map(([url, options]) => [String(url), options?.method])).toEqual([
+    [baseUrl + "chat", "POST"], ["http://localhost" + receipt.status_url, "GET"],
+  ]);
+});
+
+it.each(["incomplete first frame", "incomplete response headers", "transport failed before headers"])(
+  "keeps the original operation unknown when identity is unavailable (%s)", async (channel) => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    if (channel === "transport failed before headers") fetch.mockRejectedValueOnce(new TypeError("Connection closed"));
+    else if (channel === "incomplete response headers") {
+      fetch.mockResolvedValueOnce(new Response(null, { headers: { "X-Octopus-Request-Id": identity.request_id } }));
+    } else fetch.mockResolvedValueOnce(new Response(frame(firstFrame).slice(0, -1)));
+    const sdk = await client(fetch);
+    const error = await sdk.chat({ message: "Perform once" }).catch((failure: unknown) => failure);
+    expect(error).toHaveProperty("receipt", { operation_terminal: false });
+    await expect(sdk.status((error as { receipt: object }).receipt)).rejects.toThrow(/identity is unavailable/);
+    expect(fetch.mock.calls.map(([, options]) => options?.method)).toEqual(["POST"]);
+  },
+);
+
+it.each([
+  ["conversation_id", { ...firstFrame, conversation_id: "another-conversation" }],
+  ["request_id", { ...firstFrame, request_id: "another-request" }],
+])("rejects conflicting response header and first-frame %s", async (_field, offered) => {
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(new Response(frame(offered), { headers: identityHeaders }));
+  const sdk = await client(fetch), onEvent = vi.fn();
+  const error = await sdk.chat({ message: "Perform once" }, { onEvent }).catch((failure: unknown) => failure);
+  expect(error).toMatchObject({ code: "sse_protocol_error", receipt: { operation_terminal: false } });
+  await expect(sdk.status((error as { receipt: object }).receipt)).rejects.toThrow(/identity is unavailable/);
+  expect(onEvent).not.toHaveBeenCalled();
+  expect(fetch.mock.calls.map(([, options]) => options?.method)).toEqual(["POST"]);
+});
+
+it.each([
+  ["malformed first frame", { ...identityHeaders }, { ...firstFrame, conversation_id: "another-conversation", request_id: "not/a/request" }],
+  ["incomplete response headers", { "X-Octopus-Conversation-Id": "another-conversation" }, firstFrame],
+] as const)("rejects a valid conflicting field from %s", async (_source, headers, offered) => {
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(new Response(frame(offered), { headers }));
+  const sdk = await client(fetch), onEvent = vi.fn();
+  const error = await sdk.chat({ message: "Perform once" }, { onEvent }).catch((failure: unknown) => failure);
+  expect(error).toHaveProperty("code", "sse_protocol_error");
+  expect(error).toHaveProperty("receipt", { operation_terminal: false });
+  await expect(sdk.status((error as { receipt: object }).receipt)).rejects.toThrow(/identity is unavailable/);
+  expect(onEvent).not.toHaveBeenCalled();
+  expect(fetch.mock.calls.map(([, options]) => options?.method)).toEqual(["POST"]);
+});
+
+it("keeps a complete response-header identity if the first frame is invalid but has no conflicting field", async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(new Response(
+    frame({ ...firstFrame, request_id: "not/a/request" }), { headers: identityHeaders },
+  ));
+  const sdk = await client(fetch);
+  await expect(sdk.chat({ message: "Perform once" })).rejects.toHaveProperty("receipt", {
+    ...identity, operation_terminal: false,
+  });
+  expect(fetch.mock.calls.map(([, options]) => options?.method)).toEqual(["POST"]);
+});
+
+it.each([
+  { ...receipt, conversation_id: "another-conversation" },
+  { ...receipt, status_url: "/apps/example/agent/conversations/conversation/requests/another-request" },
+])("rejects a timeout frame that changes the confirmed response identity or URL", async (offered) => {
+  const wire = frame(firstFrame) + frame({ type: "error", ...offered });
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(new Response(wire, { headers: identityHeaders }));
+  const sdk = await client(fetch);
+  const error = await sdk.chat({ message: "Perform once" }).catch((failure: unknown) => failure);
+  expect(error).toHaveProperty("code", "sse_protocol_error");
+  expect(error).toHaveProperty("receipt", { operation_terminal: false });
+  expect(fetch.mock.calls.map(([, options]) => options?.method)).toEqual(["POST"]);
 });
 
 it.each(["network-error", "abort", "frozen-abort"])("keeps the original request and exception after a stream %s", async (failure) => {

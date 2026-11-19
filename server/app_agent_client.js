@@ -8,14 +8,31 @@ export function createAgentClient({ baseUrl, fetchImpl = globalThis.fetch.bind(g
     return fetchImpl(url, { credentials: "same-origin", ...init, headers: selectedHeaders });
   };
 
+  function validId(id) {
+    return typeof id === "string" && /^[a-zA-Z0-9_-]+$/.test(id);
+  }
+
+  function identityOf({ conversation_id, request_id }) {
+    if (validId(conversation_id) && validId(request_id)) return { conversation_id, request_id };
+  }
+
+  function requestRoute(pathname) {
+    return pathname.match(/\/apps\/[^/]+\/agent\/conversations\/[^/]+\/requests\/[^/]+$/)?.[0] ?? pathname;
+  }
+
   function statusUrl(receipt) {
-    if (typeof receipt.conversation_id !== "string" || !receipt.conversation_id ||
-        typeof receipt.request_id !== "string" || !receipt.request_id) {
+    if (!identityOf(receipt)) {
       throw new Error("The original request identity is unavailable. Do not repeat the operation automatically.");
     }
     const expected = new URL(`conversations/${encodeURIComponent(receipt.conversation_id)}/requests/${encodeURIComponent(receipt.request_id)}`, base);
-    if (receipt.status_url && new URL(receipt.status_url, base).href !== expected.href) {
-      throw new Error("The recovery URL does not identify the original application request.");
+    if (receipt.status_url) {
+      const offered = new URL(receipt.status_url, base);
+      // The request route binds the identity. The POST base owns the mount
+      // prefix, which can differ between a browser and the backend loopback.
+      if (offered.origin !== expected.origin || offered.username || offered.password || offered.search || offered.hash ||
+          requestRoute(offered.pathname) !== requestRoute(expected.pathname)) {
+        throw new Error("The recovery URL does not identify the original application request.");
+      }
     }
     return expected;
   }
@@ -57,11 +74,24 @@ export function createAgentClient({ baseUrl, fetchImpl = globalThis.fetch.bind(g
     return body;
   }
 
+  function observationFailure(error, identity) {
+    // AbortSignal can reject with a caller-supplied immutable or non-Error reason.
+    const failure = error && (typeof error === "object" || typeof error === "function") && Object.isExtensible(error)
+      ? error : new Error("The response stream failed.", { cause: error });
+    return Object.assign(failure, { receipt: { ...identity, operation_terminal: false } });
+  }
+
   async function readChat(response, onEvent) {
-    if (!response.body) throw new Error("The response has no event stream.");
-    const reader = response.body.getReader(), decoder = new TextDecoder();
-    let buffer = "", data = [], identity = {}, terminal;
+    const headerFields = {
+      conversation_id: response.headers.get("X-Octopus-Conversation-Id"),
+      request_id: response.headers.get("X-Octopus-Request-Id"),
+    };
+    let identity = identityOf(headerFields);
+    const decoder = new TextDecoder();
+    let buffer = "", data = [], firstEvent = true, reader, terminal;
     try {
+      if (!response.body) throw new Error("The response has no event stream.");
+      reader = response.body.getReader();
       while (true) {
         const { value, done } = await reader.read();
         buffer += decoder.decode(value, { stream: !done });
@@ -77,13 +107,36 @@ export function createAgentClient({ baseUrl, fetchImpl = globalThis.fetch.bind(g
             if (!event || typeof event !== "object" || typeof event.type !== "string") {
               throw new Error("The event stream returned an invalid event.");
             }
-            if (event.type === "conversation") {
-              statusUrl(event); // Validate the original identity, without an HTTP request.
-              identity = { conversation_id: event.conversation_id, request_id: event.request_id };
-            } else if (identity.request_id && event.request_id && event.request_id !== identity.request_id) {
-              throw new Error("The event stream changed its original request identity.");
+            if (firstEvent && event.type === "conversation") {
+              for (const key of ["conversation_id", "request_id"]) {
+                if (validId(headerFields[key]) && validId(event[key]) && headerFields[key] !== event[key]) {
+                  identity = undefined;
+                  throw Object.assign(new Error("The event stream changed its original request identity."), {
+                    code: "sse_protocol_error",
+                  });
+                }
+              }
+              const firstIdentity = identityOf(event);
+              if (!firstIdentity) throw new Error("The first frame has no valid original request identity.");
+              identity ??= firstIdentity;
             }
-            if (event.type === "done" || event.type === "error") terminal = { ...identity, ...event };
+            firstEvent = false;
+            if (identity) {
+              try {
+                if ((event.request_id != null && event.request_id !== identity.request_id) ||
+                    (event.conversation_id != null && event.conversation_id !== identity.conversation_id)) {
+                  throw new Error("The event stream changed its original request identity.");
+                }
+                if (event.status_url != null) statusUrl({ ...identity, status_url: event.status_url });
+              } catch (error) {
+                identity = undefined;
+                throw Object.assign(error, { code: "sse_protocol_error" });
+              }
+            }
+            if (event.type === "done" || event.type === "error") {
+              if (!identity) throw new Error("The event stream has no valid original request identity.");
+              terminal = { ...event, ...identity };
+            }
             if (onEvent) await onEvent(event);
             if (terminal) return terminal;
           }
@@ -91,22 +144,23 @@ export function createAgentClient({ baseUrl, fetchImpl = globalThis.fetch.bind(g
         if (done) throw new Error("The response ended without a terminal event. Check the original request before sending again.");
       }
     } catch (error) {
-      // AbortSignal can reject with a caller-supplied immutable or non-Error
-      // reason. Keep that original cause when it cannot carry the receipt.
-      const failure = error && (typeof error === "object" || typeof error === "function") && Object.isExtensible(error)
-        ? error : new Error("The response stream failed.", { cause: error });
-      throw Object.assign(failure, { receipt: { ...identity, operation_terminal: false } });
+      throw observationFailure(error, identity);
     } finally {
-      try { await reader.cancel(); }
+      try { await reader?.cancel(); }
       catch (error) {
         if (terminal) terminal.reader_error = error instanceof Error ? error.message : String(error);
-      } finally { reader.releaseLock(); }
+      } finally { reader?.releaseLock(); }
     }
   }
 
   async function chat(input, options = {}) {
-    const response = await request(new URL("chat", base), { method: "POST", signal: options.signal,
-      headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+    let response;
+    try {
+      response = await request(new URL("chat", base), { method: "POST", signal: options.signal,
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+    } catch (error) {
+      throw observationFailure(error);
+    }
     if (!response.ok) throw responseError(response, await response.json());
     const terminal = await readChat(response, options.onEvent);
     return terminal.code === "response_wait_timeout" ? recover(terminal, options) : terminal;

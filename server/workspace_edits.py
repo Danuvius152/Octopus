@@ -13,8 +13,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .expiry import is_expired
 from .models import WorkspaceEditReceipt, WorkspaceInfo
-from .users import UserError, _expired
+from .users import UserError
 from .workspace import normalise_root, paths_for
 
 if TYPE_CHECKING:
@@ -62,7 +63,7 @@ class WorkspaceEdits:
             "JOIN auth_tokens t ON t.user_id=u.id WHERE u.id=? AND t.token_hash=?",
             (operator, token_hash),
         )
-        if row is None or row[1] or row[2] or _expired(row[3]):
+        if row is None or row[1] or row[2] or is_expired(row[3]):
             raise UserError("Invalid token", status_code=401)
         if not row[0]:
             raise UserError("Admins only", status_code=403)

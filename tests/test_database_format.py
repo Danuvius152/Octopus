@@ -15,6 +15,7 @@ import pytest
 
 from server.config import settings
 from server.database import Database
+from server.db.schema import CURRENT_VERSION
 from tests.accounts import create_account
 from tests.test_service_runtime import installation_settings
 
@@ -77,7 +78,7 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
                          "reason_code='steer_delivery_unknown',delivery_state='unknown'")
     await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (11,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (CURRENT_VERSION,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []
         original_rows = reader.execute("SELECT * FROM sessions").fetchall()
         original_messages = reader.execute("SELECT * FROM messages").fetchall()
@@ -107,7 +108,7 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
             ("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "PRAGMA USER_VERSION="),
         )]
         with closing(sqlite3.connect(path)) as reader:
-            assert reader.execute("PRAGMA user_version").fetchone() == (11,)
+            assert reader.execute("PRAGMA user_version").fetchone() == (CURRENT_VERSION,)
             assert reader.execute("SELECT * FROM sessions").fetchall() == original_rows
             assert reader.execute("SELECT * FROM messages").fetchall() == original_messages
             assert reader.execute("SELECT * FROM agents").fetchall() == original_agents
@@ -143,7 +144,7 @@ async def test_message_history_keeps_unique_sequences_and_both_range_directions(
         reads = [sql for sql in statements if sql.startswith("SELECT ") and "FROM messages WHERE session_id" in sql]
         assert len(reads) == 4
         async with database.transaction(write=False) as tx:
-            assert await tx.fetch_one("PRAGMA user_version") == (11,)
+            assert await tx.fetch_one("PRAGMA user_version") == (CURRENT_VERSION,)
             indexes = {row[1] for row in await tx.fetch_all("PRAGMA index_list(messages)")}
             assert "idx_messages_session" not in indexes
             assert "messages_unique_sequence" in indexes
@@ -192,13 +193,13 @@ os._exit(0)
         assert path.read_bytes() == main_bytes
     elif damage != "unmarked":
         with closing(sqlite3.connect(path)) as writer:
-            writer.execute(f"PRAGMA user_version={999 if damage == 'future_version' else 10}")
+            writer.execute(f"PRAGMA user_version={999 if damage == 'future_version' else 11}")
             writer.commit()
     original = path.read_bytes()
     wal = Path(str(path) + "-wal")
     original_wal = wal.read_bytes() if wal.exists() else None
     if damage == "future_version_wal":
-        assert int.from_bytes(original[60:64], "big") == 11
+        assert int.from_bytes(original[60:64], "big") == CURRENT_VERSION
         assert original_wal is not None and len(original_wal) > 32
     directories = {child.relative_to(tmp_path) for child in tmp_path.rglob("*") if child.is_dir()}
     refuse_start(configuration, entry, tmp_path, cause="UnsupportedMainStorage")
@@ -273,12 +274,12 @@ asyncio.run(main())
     assert proof.read_text() == failure
     with closing(sqlite3.connect(path)) as reader:
         committed = failure == "commit_ack"
-        assert reader.execute("PRAGMA user_version").fetchone() == (11 if committed else 0,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (CURRENT_VERSION if committed else 0,)
         tables = {row[0] for row in reader.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         assert bool(tables) == committed
     reopened = Database(str(path))
     await reopened.initialize()
     await reopened.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (11,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (CURRENT_VERSION,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []

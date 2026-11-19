@@ -1,8 +1,84 @@
 import { expect, test, type WebSocketRoute } from "./test";
-import { enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials } from "./current-account";
 import type { Message } from "../src/stores/sessionStore";
 import { capturePaint } from "./paint-capture";
 import { writeFile } from "node:fs/promises";
+
+test("cold presentation keeps the paused transcript tail still from first reveal", async ({ page, request }) => {
+  const api = "http://localhost:8765/api";
+  const headers = { Authorization: `Bearer ${accountToken()}` };
+  const importSession = async (name: string, count: number) => {
+    const messages = Array.from({ length: count }, (_, index) => ({
+      role: index % 6 === 0 ? "user" : "assistant",
+      type: "text",
+      content: `${name} row ${index + 1}: A saved paragraph for reading and scroll measurements. ` +
+        "The words and line breaks repeat at the same width in each revision.",
+    }));
+    const response = await request.post(`${api}/sessions/import`, { headers, data: { name, messages } });
+    expect(response.ok()).toBe(true);
+    return (await response.json()).id as string;
+  };
+  await importSession("Original chat", 1);
+  const target = await importSession("Paused chat", 240);
+  await page.route((url) => url.pathname === `/api/sessions/${target}`, async (route) => {
+    const response = await route.fetch();
+    const detail = await response.json();
+    await route.fulfill({ response, json: { ...detail, dispatch_state: { ...detail.dispatch_state, paused: true } } });
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  await enterAccountCredentials(page);
+  await expect(page.locator(".conn-status.on")).toBeVisible();
+  await page.locator(".agent-item", { hasText: "Octo" }).click();
+  await page.addStyleTag({ content: ".chat-messages { zoom: 1.1; } .msg-content { font: 14.5px/1.47 Arial, sans-serif; }" });
+  await page.locator(".session-item", { hasText: "Original chat" }).click();
+  await expect(page.locator(".chat-messages").getByText(/^Original chat row 1:/)).toBeVisible();
+  await page.evaluate(async () => {
+    await document.fonts.load("14.5px Arial");
+    await document.fonts.ready;
+  });
+
+  const recorder = await page.evaluateHandle((id) => {
+    let frame = 0;
+    const offsets: (number | null)[] = [];
+    const sample = () => {
+      const viewport = document.querySelector(`[data-chat-session="${id}"] .chat-messages`);
+      if (viewport && getComputedStyle(viewport).visibility === "visible") {
+        const top = viewport.getBoundingClientRect().top;
+        const height = viewport.querySelector('[data-viewport-type="element"]')?.getBoundingClientRect().height;
+        const tail = Array.from(viewport.querySelectorAll(".msg-content p"))
+          .find((row) => row.textContent?.startsWith("Paused chat row 240:"))?.getBoundingClientRect();
+        offsets.push(height && tail && tail.top >= top && tail.bottom <= top + height + 1 ? tail.top : null);
+      } else if (offsets.length) {
+        offsets.push(null);
+      }
+      frame = requestAnimationFrame(sample);
+    };
+    frame = requestAnimationFrame(sample);
+    return {
+      count: () => offsets.length,
+      stop: () => { cancelAnimationFrame(frame); return offsets; },
+    };
+  }, target);
+  const viewport = page.locator(`[data-chat-session="${target}"] .chat-messages`);
+  let offsets: (number | null)[];
+  try {
+    await page.locator(".session-item", { hasText: "Paused chat" }).click();
+    await expect.poll(() => recorder.evaluate((value) => value.count())).toBeGreaterThanOrEqual(8);
+  } finally {
+    offsets = await recorder.evaluate((value) => value.stop());
+    await recorder.dispose();
+  }
+  expect(offsets, "the same last paragraph is readable in every frame from reveal").not.toContain(null);
+  const measured = offsets.filter((offset): offset is number => offset !== null);
+  expect(Math.max(...measured) - Math.min(...measured)).toBeLessThanOrEqual(2);
+
+  const box = (await viewport.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -270);
+  await expect.poll(() => viewport.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeGreaterThan(100);
+  await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+});
 
 // The same fixture is run against the source revision before preparation is
 // implemented. Compositor frames are paint evidence; rAF describes geometry.

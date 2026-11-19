@@ -19,12 +19,13 @@ export function showSession(sessionId: string, agentId?: string | null): void {
  */
 export async function selectSession(
   sessionId: string,
-  agentId?: string | null
+  agentId?: string | null,
+  options?: { fresh?: boolean },
 ): Promise<void> {
   showSession(sessionId, agentId);
 
   try {
-    await loadSessionSnapshots(sessionId);
+    await loadSessionSnapshots(sessionId, options);
   } catch {
     // The queue exposes the failed read; reconnect can confirm it again.
   }

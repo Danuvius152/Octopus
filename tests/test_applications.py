@@ -23,6 +23,7 @@ import json
 import os
 import shutil
 import sys
+from collections import Counter
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
@@ -1971,6 +1972,37 @@ async def test_reorder_reports_its_committed_rows_when_membership_changes_after_
     assert (await db.get_application("late"))["pinned"]
 
 
+async def test_reorder_keeps_pins_added_by_the_writer_it_waits_for(db):
+    owner = (await db.get_system_agent())["user_id"]
+    for index, app_id in enumerate(("first", "second", "kept", "new-a", "new-z"), start=1):
+        timestamp = f"2026-01-{index:02d}"
+        await db.save_application(app_id=app_id, name=app_id, app_dir=f"/tmp/{app_id}",
+                                  created_at=timestamp, updated_at=timestamp, user_id=owner)
+    await db.set_application_pinned("new-a", False)
+    await db.set_application_pinned("new-z", False)
+
+    started = asyncio.Event()
+
+    async def reorder():
+        started.set()
+        return await db.reorder_application_pins(["second", "first"], user_id=owner)
+
+    async with asyncio.TaskGroup() as concurrent:
+        async with db.transaction(write=True) as tx:
+            pending = concurrent.create_task(reorder())
+            await asyncio.wait_for(started.wait(), 2)
+            assert not pending.done()
+            # Pin in the opposite order to creation to check the saved order.
+            await tx.execute_many("UPDATE applications SET pinned = 1, pin_order = ? WHERE id = ?", (
+                (6, "new-z"), (7, "new-a"),
+            ))
+
+    rows, _ = pending.result()
+    expected = {"second": 1, "first": 2, "kept": 3, "new-z": 4, "new-a": 5}
+    for snapshot in (rows, await db.load_applications(user_id=owner)):
+        assert {row["id"]: row["pin_order"] for row in snapshot if row["pinned"]} == expected
+
+
 # ---------------------------------------------------------------------------
 # REST routes
 # ---------------------------------------------------------------------------
@@ -3012,3 +3044,67 @@ async def test_api_pin_unpin_and_order(client):
     assert (
         await client.post("/api/applications/ghost/pin", headers=client.headers)
     ).status_code == 404
+
+
+async def test_api_reorders_only_the_current_accounts_live_pins(client, db):
+    owner = (await db.get_system_agent())["user_id"]
+    other, _ = await create_account(db, username="another-owner")
+    for index, (app_id, user_id) in enumerate((
+        ("a-first", owner), ("a-second", owner),
+        ("b-first", other["id"]), ("b-second", other["id"]),
+        ("a-unpinned", owner), ("a-archived", owner),
+    ), start=1):
+        timestamp = f"2026-01-{index:02d}"
+        await db.save_application(app_id=app_id, name=app_id, app_dir=f"/tmp/{app_id}",
+                                  created_at=timestamp, updated_at=timestamp, user_id=user_id)
+    await db.set_application_pinned("a-unpinned", False)
+    await db.update_application("a-archived", archived=1)
+
+    async with db.transaction(write=True) as tx:
+        await tx.execute("CREATE TEMP TABLE pin_writes (id TEXT, before INTEGER, after INTEGER)")
+        await tx.execute(
+            "CREATE TEMP TRIGGER audit_pin_order AFTER UPDATE OF pin_order ON applications "
+            "BEGIN INSERT INTO pin_writes VALUES (NEW.id, OLD.pin_order, NEW.pin_order); END"
+        )
+
+    reads = Counter()
+    app_ids = {"a-first", "a-second", "a-unpinned", "a-archived", "b-first", "b-second"}
+    writing = False
+
+    def observe_transaction(sql):
+        nonlocal writing
+        if sql == "BEGIN IMMEDIATE":
+            writing = True
+        elif sql in {"COMMIT", "ROLLBACK"}:
+            writing = False
+
+    def observe_application_rows(cursor, row):
+        if writing:
+            for index, column in enumerate(cursor.description):
+                if column[0] == "id" and row[index] in app_ids:
+                    reads[row[index]] += 1
+        return row
+
+    previous_factory = db.conn.row_factory
+    db.conn.row_factory = observe_application_rows
+    await db.conn.set_trace_callback(observe_transaction)
+    try:
+        response = await client.put("/api/applications/pin-order", json={"ids": ["a-second", "a-first"]})
+    finally:
+        await db.conn.set_trace_callback(None)
+        db.conn.row_factory = previous_factory
+
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert [row["id"] for row in rows] == ["a-first", "a-second", "a-unpinned"]
+    assert _pinned_ids(rows) == ["a-second", "a-first"]
+    assert rows[-1]["pinned"] is False
+    assert [(row["id"], row["pin_order"]) for row in await db.load_applications(user_id=other["id"])] == [
+        ("b-first", 3), ("b-second", 4),
+    ]
+    async with db.transaction(write=False) as tx:
+        writes = await tx.fetch_all("SELECT id, before, after FROM pin_writes")
+    # Each returned app is observed once more in the response snapshot.
+    assert (reads, {app_id for app_id, _, _ in writes}) == (
+        {"a-first": 2, "a-second": 2, "a-unpinned": 1}, {"a-first", "a-second"},
+    ), writes

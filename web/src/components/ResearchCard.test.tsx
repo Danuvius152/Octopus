@@ -42,7 +42,7 @@ describe("ResearchCard", () => {
     useSessionStore.getState().setResearch("s1", [job()]);
     handleWsMessage({ type: "research_completed", session_id: "s1", research_id: "r1",
       evidence_state: "available", evidence: evidenceSamples[sample], verified: 9, sources: ["stale source"] });
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     expect(screen.getByText(/delivery pending/)).toBeTruthy();
     expect(screen.queryByText(/9 verified findings/)).toBeNull();
     if (sample === "all_failed") {
@@ -60,7 +60,7 @@ describe("ResearchCard", () => {
   it.each([undefined, null, { version: 999 }, { version: 1, claims: "damaged" }])("clears cached evidence on an unavailable completion: %s", (evidence) => {
     useSessionStore.getState().setResearch("s1", [job({ status: "completed", evidence_state: "available",
       evidence: evidenceSamples.all_failed as ResearchJob["evidence"] })]);
-    const view = render(<ResearchCard sessionId="s1" />);
+    const view = render(<ResearchCard sessionId="s1" foreground />);
     expect(screen.getByText(/All searches failed/)).toBeTruthy();
     act(() => handleWsMessage({ type: "research_completed", session_id: "s1", research_id: "r1", evidence_state: "available", evidence }));
     expect(screen.getByText(/Evidence unknown or unavailable/)).toBeTruthy();
@@ -71,7 +71,7 @@ describe("ResearchCard", () => {
   it("clears unavailable snapshot evidence while retaining the completed job and delivery fact", () => {
     useSessionStore.getState().setResearch("s1", [job({ status: "completed", evidence_state: "available",
       evidence: evidenceSamples.refuted as ResearchJob["evidence"], injection_status: "delivered" })]);
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     act(() => useSessionStore.getState().setResearch("s1", [job({ status: "completed", evidence_state: "unavailable", evidence: null, injection_status: "delivered" })]));
     expect(screen.getByText(/Evidence unknown or unavailable/)).toBeTruthy();
     expect(screen.getByText(/Report accepted for follow-up; processing unconfirmed/)).toBeTruthy();
@@ -81,20 +81,20 @@ describe("ResearchCard", () => {
   it("shows a rejected cancellation without changing the research outcome", async () => {
     fetchMock.mockResolvedValue(Response.json({ detail: "Research control unavailable" }, { status: 503 }));
     useSessionStore.setState({ research: { s1: [job()] } });
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     fireEvent.click(screen.getByTitle("Cancel research"));
     expect(await screen.findByRole("alert")).toHaveTextContent("Research control unavailable");
     expect(useSessionStore.getState().research.s1[0].status).toBe("running");
   });
 
   it("renders nothing with no jobs", () => {
-    const { container } = render(<ResearchCard sessionId="s1" />);
+    const { container } = render(<ResearchCard sessionId="s1" foreground />);
     expect(container.firstChild).toBeNull();
   });
 
   it("shows the running phase + a cancel button", () => {
     useSessionStore.setState({ research: { s1: [job({ phase: "verify" })] } });
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     expect(screen.getByText("What is X?")).toBeTruthy();
     expect(screen.getByText(/Verifying claims/)).toBeTruthy();
     expect(screen.getByTitle("Cancel research")).toBeTruthy();
@@ -104,7 +104,7 @@ describe("ResearchCard", () => {
     useSessionStore.setState({
       research: { s1: [job({ status: "completed", phase: "done", injection_status: "delivered", verified: 3, sources: ["u"] })] },
     });
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     expect(screen.getByText(/Report accepted for follow-up; processing unconfirmed/)).toBeTruthy();
     expect(screen.queryByText(/3 verified findings/)).toBeNull();
     expect(screen.getByText(/Evidence unknown or unavailable/)).toBeTruthy();
@@ -113,7 +113,7 @@ describe("ResearchCard", () => {
 
   it("does not claim delivery while the report awaits admission", () => {
     useSessionStore.setState({ research: { s1: [job({ status: "completed", phase: "done" })] } });
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     expect(screen.queryByText(/Report delivered below/)).toBeNull();
     expect(screen.getByText(/delivery pending/)).toBeTruthy();
   });
@@ -124,7 +124,7 @@ describe("ResearchCard", () => {
       ...receipt, browser_confirmed_version: 3, browser_confirmed_at: "now",
     } })));
     useSessionStore.getState().setResearch("s1", [job({ status: "completed", delivery_receipt: receipt })]);
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     expect(screen.getByText(/Follow-up processed/)).toBeTruthy();
     await waitFor(() => expect(screen.getByText(/Browser received this status/)).toBeTruthy());
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/research/r1/seen"), expect.objectContaining({
@@ -132,11 +132,48 @@ describe("ResearchCard", () => {
     }));
   });
 
+  it.each([
+    { reply: "a v1 receipt", status: 200, version: 1 },
+    { reply: "a conflict", status: 409, version: 1 },
+    { reply: "a v2 receipt", status: 200, version: 2 },
+  ])("requires v2's own confirmation when the late v1 response returns $reply", async ({ status, version }) => {
+    const v1 = { request_id: "follow-up", version: 1, stage: "queued" as const };
+    const v2 = { ...v1, version: 2, stage: "processed" as const };
+    let finishV1!: (response: Response) => void;
+    let finishV2!: (response: Response) => void;
+    const first = new Promise<Response>((resolve) => { finishV1 = resolve; });
+    const second = new Promise<Response>((resolve) => { finishV2 = resolve; });
+    const statusAtWrite: (string | null | undefined)[] = [];
+    fetchMock.mockImplementationOnce(() => {
+      statusAtWrite.push(document.querySelector(".research-status")?.textContent);
+      return first;
+    }).mockImplementationOnce(() => {
+      statusAtWrite.push(document.querySelector(".research-status")?.textContent);
+      return second;
+    });
+    useSessionStore.getState().setResearch("s1", [job({ status: "completed", delivery_receipt: v1 })]);
+    render(<ResearchCard sessionId="s1" foreground />);
+    act(() => handleWsMessage({ type: "research_delivery", session_id: "s1", research_id: "r1",
+      injection_status: "delivered", delivery_receipt: v2 }));
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body))).toEqual([
+      { request_id: "follow-up", version: 1 }, { request_id: "follow-up", version: 2 },
+    ]);
+    expect(statusAtWrite).toEqual(["Report queued for follow-up", "Follow-up processed"]);
+
+    const lateReceipt = version === 1 ? v1 : v2;
+    await act(async () => finishV1(Response.json({ delivery_receipt: { ...lateReceipt, browser_confirmed_version: version } }, { status })));
+    expect(screen.getByText(/Follow-up processed/)).toBeVisible();
+    expect(screen.queryByText(/Browser received this status/)).toBeNull();
+    await act(async () => finishV2(Response.json({ delivery_receipt: { ...v2, browser_confirmed_version: 2 } })));
+    expect(screen.getByText(/Follow-up processed · Browser received this status/)).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("shows retained material and the suppressed delivery reason after reload", () => {
     useSessionStore.getState().setResearch("s1", [job({
       status: "completed", phase: "done", injection_status: "failed", error: "Original work is closed",
     })]);
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     expect(screen.queryByText(/Report delivered below/)).toBeNull();
     expect(screen.getByText(/Report retained as material/)).toBeTruthy();
     expect(screen.getByText(/Original work is closed/)).toBeTruthy();
@@ -144,7 +181,7 @@ describe("ResearchCard", () => {
 
   it("keeps access to a saved report when delivery failed or remains unknown", () => {
     useSessionStore.getState().setResearch("s1", [job({ status: "completed", injection_status: "unknown", report_path: "/owned/research/saved.md" })]);
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     expect(screen.getByRole("link", { name: "Download report" }).getAttribute("href"))
       .toContain("/api/sessions/s1/research/r1/report?token=tok");
     expect(screen.getByText(/admission is unconfirmed/)).toBeTruthy();
@@ -155,7 +192,7 @@ describe("ResearchCard", () => {
     useSessionStore.getState().setResearch("s1", [job()]);
     if (source === "snapshot") useSessionStore.getState().setResearch("s1", [job({ status: "failed", error })]);
     else handleWsMessage({ type: "research_failed", session_id: "s1", research_id: "r1", status: "failed", error });
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     const failure = screen.getByText(/Report synthesis failed: original synthesis refusal/);
     expect(failure).toHaveTextContent("Synthesis diagnostic material unavailable: PermissionError: diagnostic open refused");
     expect(screen.queryByRole("link", { name: "Download report" })).toBeNull();
@@ -166,15 +203,15 @@ describe("ResearchCard", () => {
     // A progress/completed event arriving without a prior research_started
     // (missed after reconnect / in a 2nd tab) must NOT create a card with no
     // question/status (Vera review).
-    useSessionStore.getState().upsertResearch("s1", { id: "ghost", phase: "verify" });
-    render(<ResearchCard sessionId="s1" />);
+    handleWsMessage({ type: "research_progress", session_id: "s1", research_id: "ghost", phase: "verify" });
+    render(<ResearchCard sessionId="s1" foreground />);
     expect(screen.queryByText(/Verifying claims/)).toBeNull();
     expect(useSessionStore.getState().research["s1"] ?? []).toHaveLength(0);
   });
 
   it("cancel POSTs to the cancel route", async () => {
     useSessionStore.setState({ research: { s1: [job()] } });
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     fireEvent.click(screen.getByTitle("Cancel research"));
     await waitFor(() =>
       expect(
@@ -188,7 +225,7 @@ describe("ResearchCard", () => {
   it("merges the authoritative completed response without a broadcast", async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify(job({ status: "completed", phase: "done" }))));
     useSessionStore.setState({ research: { s1: [job()] } });
-    render(<ResearchCard sessionId="s1" />);
+    render(<ResearchCard sessionId="s1" foreground />);
     fireEvent.click(screen.getByTitle("Cancel research"));
     await waitFor(() => expect(screen.getByText(/Report ready/)).toBeTruthy());
     expect(screen.queryByTitle("Cancel research")).toBeNull();
@@ -198,7 +235,7 @@ describe("ResearchCard", () => {
     let reply!: (value: Response) => void;
     fetchMock.mockImplementation(() => new Promise<Response>((resolve) => { reply = resolve; }));
     useSessionStore.setState({ research: { s1: [job()] }, activeSessionId: "s1", dispatchGeneration: "service-a" });
-    const view = render(<ResearchCard sessionId="s1" />);
+    const view = render(<ResearchCard sessionId="s1" foreground />);
     fireEvent.click(screen.getByTitle("Cancel research"));
     await act(async () => {
       if (change === "account") useSessionStore.setState({ accountGeneration: useSessionStore.getState().accountGeneration + 1 });

@@ -1,12 +1,12 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { IconWorldSearch, IconX, IconCheck, IconAlertTriangle } from "@tabler/icons-react";
 import { useSessionStore, type ResearchJob } from "../stores/sessionStore";
 import { sessions } from "../lib/sessionList";
 import { observeSessionAuxiliary } from "../lib/hydrateSession";
 import { useTaskControl } from "../hooks/useTaskControl";
 import { TaskControlFeedback } from "./TaskControlFeedback";
-import { readResearchEvidence } from "../lib/researchEvidence";
+import { isResearchJob, isResearchReceipt } from "../lib/researchProjection";
 
 const API = window.location.origin;
 const EMPTY_JOBS: ResearchJob[] = [];
@@ -20,15 +20,25 @@ const PHASE_LABEL: Record<string, string> = {
   done: "Done",
 };
 
+function isPageVisible() {
+  return document.visibilityState === "visible";
+}
+
+function subscribePageVisibility(onChange: () => void) {
+  document.addEventListener("visibilitychange", onChange);
+  return () => document.removeEventListener("visibilitychange", onChange);
+}
+
 /** Live deep-research progress for the active session (native-deep-research.md
  * §7). The final cited report arrives as a normal injected turn; this card is
  * the progress/affordance surface. Terminal jobs linger briefly as a result. */
-export function ResearchCard({ sessionId }: { sessionId: string }) {
+export function ResearchCard({ sessionId, foreground }: { sessionId: string; foreground: boolean }) {
   const token = useSessionStore((s) => s.token);
   const jobs = useSessionStore((s) => s.research[sessionId]) ?? EMPTY_JOBS;
   const account = useSessionStore((s) => s.accountGeneration);
   const generation = useSessionStore((s) => s.dispatchGeneration);
   const connected = useSessionStore((s) => s.connected);
+  const pageVisible = useSyncExternalStore(subscribePageVisibility, isPageVisible);
   const confirmations = useRef(new Set<string>());
   const viewGeneration = useRef(0);
   useEffect(() => {
@@ -36,13 +46,13 @@ export function ResearchCard({ sessionId }: { sessionId: string }) {
     return () => { viewGeneration.current += 1; };
   }, [sessionId, token, account, generation, connected]);
   useEffect(() => {
-    if (!token) return;
+    if (!foreground || !pageVisible || !isPageVisible() || !token) return;
     const observation = sessions.capture();
     const view = viewGeneration.current;
     const seen = confirmations.current;
     for (const job of jobs) {
       const receipt = job.delivery_receipt;
-      if (!receipt || receipt.browser_confirmed_version === receipt.version) continue;
+      if (job.status !== "completed" || !receipt || receipt.browser_confirmed_version === receipt.version) continue;
       const key = `${job.id}:${receipt.request_id}:${receipt.version}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -51,16 +61,16 @@ export function ResearchCard({ sessionId }: { sessionId: string }) {
         body: JSON.stringify({ request_id: receipt.request_id, version: receipt.version }),
       }).then(async (response) => {
         if (!response.ok) throw new Error("Confirmation was not accepted");
-        const body = await response.json();
-        if (!sessions.current(observation) || viewGeneration.current !== view) return;
-        const store = useSessionStore.getState();
-        const current = store.research[sessionId]?.find((item) => item.id === job.id);
-        if (current?.delivery_receipt?.request_id === receipt.request_id && current.delivery_receipt.version === receipt.version) {
-          if (body.delivery_receipt) store.confirmResearchSeen(sessionId, job.id, body.delivery_receipt);
+        const confirmed: unknown = (await response.json())?.delivery_receipt;
+        if (!isResearchReceipt(confirmed) || confirmed.request_id !== receipt.request_id ||
+            confirmed.version !== receipt.version || confirmed.browser_confirmed_version !== receipt.version) {
+          throw new Error("Confirmation did not match the displayed receipt");
         }
+        if (!sessions.current(observation) || viewGeneration.current !== view) return;
+        useSessionStore.getState().confirmResearchSeen(sessionId, job.id, confirmed);
       }).catch(() => { seen.delete(key); });
     }
-  }, [jobs, sessionId, token, account, generation, connected]);
+  }, [jobs, sessionId, foreground, pageVisible, token, account, generation, connected]);
   if (jobs.length === 0) return null;
 
   return (
@@ -73,7 +83,7 @@ export function ResearchCard({ sessionId }: { sessionId: string }) {
 function ResearchJobCard({ sessionId, job, token }: { sessionId: string; job: ResearchJob; token: string }) {
   const control = useTaskControl(sessionId, job.id);
   const running = job.status === "running";
-  const evidence = job.evidence_state === "available" ? readResearchEvidence(job.evidence) : null;
+  const evidence = job.evidence_state === "available" ? job.evidence : null;
   const findings = evidence?.claims.filter((claim) => claim.status !== "refuted");
   const verified = findings?.filter((claim) => claim.status === "verified").length;
   const unverified = findings ? findings.length - (verified ?? 0) : 0;
@@ -82,11 +92,10 @@ function ResearchJobCard({ sessionId, job, token }: { sessionId: string; job: Re
     ...(evidence?.claims.flatMap((claim) => claim.votes.flatMap((vote) => vote.sources)) ?? []),
   ]).size;
   const phaseIdx = PHASES.indexOf(job.phase ?? "scope");
-  const cancel = () => control.cancel(`${API}/api/sessions/${encodeURIComponent(sessionId)}/research/${encodeURIComponent(job.id)}/cancel`, undefined, (value) => {
-    const result = value as ResearchJob;
-    const store = useSessionStore.getState();
-    const current = store.research[sessionId]?.find((item) => item.id === job.id);
-    if (result.id === job.id && result.session_id === sessionId && current?.status === "running") store.upsertResearch(sessionId, result);
+  const cancel = () => control.cancel(`${API}/api/sessions/${encodeURIComponent(sessionId)}/research/${encodeURIComponent(job.id)}/cancel`, undefined, (value, start) => {
+    if (isResearchJob(value, sessionId) && value.id === job.id) {
+      useSessionStore.getState().applyResearchControl(sessionId, value, start.research[sessionId]?.find((item) => item.id === job.id));
+    }
   });
   return (
   <div
@@ -185,7 +194,7 @@ function ResearchJobCard({ sessionId, job, token }: { sessionId: string; job: Re
         </details>
       </>}
     </div>}
-    <TaskControlFeedback control={control} onRefresh={() => { void control.refresh(() => observeSessionAuxiliary(sessionId, "research")); }} />
+    <TaskControlFeedback control={control} onRefresh={() => { void control.refresh(() => observeSessionAuxiliary(sessionId, "research", job.id)); }} />
   </div>
   );
 }

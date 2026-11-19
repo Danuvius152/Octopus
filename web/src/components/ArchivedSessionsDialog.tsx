@@ -93,7 +93,7 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
           (sessionList.current(observation) || sessionList.initialGenerationCurrent(observation))) {
         foreground.current = false;
         onOpenChange(false);
-        await selectSession(result.session.id, result.session.agent_id);
+        await selectSession(result.session.id, result.session.agent_id, { fresh: true });
       }
     } finally {
       finish();

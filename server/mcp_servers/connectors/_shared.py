@@ -51,6 +51,14 @@ class RequestFailure:
 class ResourceDecodeError(ValueError):
     """A provider resource cannot supply the fields this call needs."""
 
+    code: FailureCode = "resource_decode"
+
+
+class ResourceBudgetError(ResourceDecodeError):
+    """A resource cannot fit within the operation's read budget."""
+
+    code: FailureCode = "budget"
+
 
 def object_data(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -85,7 +93,8 @@ def decode_response(
     try:
         return project(data), None
     except ResourceDecodeError as error:
-        return {}, RequestFailure(f"Invalid {provider} resource response: {error}", "resource_decode")
+        reason = f"Invalid {provider} resource response: {error}" if error.code == "resource_decode" else str(error)
+        return {}, RequestFailure(reason, error.code)
 
 
 @dataclass
@@ -93,6 +102,20 @@ class ResourceResult:
     # A wrapper must explicitly accept a fully decoded result. An unexpected
     # exception still propagates, with one failed sample rather than success.
     error_code: FailureCode | None = "internal"
+    _independent_seconds: float = 0.0
+    _independent_failure: BaseException | None = None
+
+    @contextmanager
+    def independent_call(self) -> Iterator[None]:
+        """Keep an independently monitored call out of this resource's sample."""
+        start = time.monotonic()
+        try:
+            yield
+        except (CancelledError, Exception) as error:
+            self._independent_failure = error
+            raise
+        finally:
+            self._independent_seconds += time.monotonic() - start
 
 
 @contextmanager
@@ -107,11 +130,9 @@ def logical_resource(ctx: ConnectorContext) -> Iterator[ResourceResult]:
     result = ResourceResult()
     try:
         yield result
-    except CancelledError:
-        result.error_code = "cancelled"
-        raise
-    except Exception:
-        result.error_code = "internal"
+    except (CancelledError, Exception) as error:
+        if result._independent_failure is not error:
+            result.error_code = "cancelled" if isinstance(error, CancelledError) else "internal"
         raise
     finally:
         try:
@@ -119,7 +140,7 @@ def logical_resource(ctx: ConnectorContext) -> Iterator[ResourceResult]:
 
             record(Event(
                 kind="connector_call", session_id=session,
-                duration_ms=(time.monotonic() - start) * 1000,
+                duration_ms=max(0.0, time.monotonic() - start - result._independent_seconds) * 1000,
                 ok=result.error_code is None, error_code=result.error_code,
                 detail={"installation_id": installation, "unit": "logical_resource_v1"},
             ))
@@ -180,9 +201,25 @@ def retry_delay(response: httpx.Response, attempt: int) -> float | None:
     return max(float(2**attempt), delay) if delay is not None else float(2**attempt)
 
 
+async def _read_bounded_response(response: httpx.Response, limit: int) -> httpx.Response:
+    # Error statuses are sufficient for the calling resource. The retry
+    # decision has already consumed the response headers.
+    if not response.is_success:
+        return httpx.Response(response.status_code)
+    if response.headers.get("Content-Encoding", "identity").strip().lower() != "identity":
+        raise ResourceDecodeError("bounded resource response must use identity encoding")
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(body) + len(chunk) > limit:
+            raise ResourceBudgetError(f"resource response byte budget ({limit} bytes) exhausted")
+        body.extend(chunk)
+    return httpx.Response(response.status_code, content=bytes(body))
+
+
 async def request_with_retry(
     method: str, url: str, *, retry_safe: bool, operation: str, check: str,
     delay_for_response: Callable[[httpx.Response, int], float | None] = retry_delay,
+    max_response_bytes: int | None = None,
     **kwargs: Any,
 ) -> tuple[httpx.Response | None, RequestFailure | None]:
     """One resource budget includes response bodies, all attempts and backoff.
@@ -193,6 +230,10 @@ async def request_with_retry(
     deadline = time.monotonic() + RESOURCE_CALL_BUDGET_SECONDS
     reason = f"resource call budget ({RESOURCE_CALL_BUDGET_SECONDS:g}s) exhausted"
     code: FailureCode = "budget"
+    if max_response_bytes is not None:
+        headers = httpx.Headers(kwargs.get("headers"))
+        headers["Accept-Encoding"] = "identity"
+        kwargs["headers"] = headers
     try:
         async with asyncio.timeout(RESOURCE_CALL_BUDGET_SECONDS):
             async with httpx.AsyncClient(follow_redirects=False) as client:
@@ -200,10 +241,16 @@ async def request_with_retry(
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
-                    response = await client.request(method, url, timeout=remaining, **kwargs)
-                    delay = delay_for_response(response, attempt)
-                    if delay is None:
-                        return response, None
+                    if max_response_bytes is None:
+                        response = await client.request(method, url, timeout=remaining, **kwargs)
+                        delay = delay_for_response(response, attempt)
+                        if delay is None:
+                            return response, None
+                    else:
+                        async with client.stream(method, url, timeout=remaining, **kwargs) as response:
+                            delay = delay_for_response(response, attempt)
+                            if delay is None:
+                                return await _read_bounded_response(response, max_response_bytes), None
                     limited = response.status_code in {403, 429}
                     reason = f"{'rate_limited' if limited else 'upstream_unavailable'}: HTTP {response.status_code}; retry delay at least {delay:g}s"
                     if not retry_safe:
@@ -224,6 +271,9 @@ async def request_with_retry(
     except TimeoutError:
         reason = f"resource call budget ({RESOURCE_CALL_BUDGET_SECONDS:g}s) exhausted"
         code = "budget"
+    except ResourceDecodeError as error:
+        reason = str(error)
+        code = error.code
     except httpx.HTTPError as error:
         # Preserve the old direct-failure behavior for transport errors. An
         # unsafe write may already have taken effect before any such error.

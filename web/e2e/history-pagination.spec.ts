@@ -17,6 +17,90 @@ function holdAnimationFrames() {
   };
 }
 
+test("native cards retain content, order and saved references across a long history boundary", async ({ page }) => {
+  const session = { id: "long-native-history", agent_id: "history-agent", name: "Native history",
+    backend: "codex", status: "idle", archived: false, working_dir: "/tmp", created_at: "2026-11-02T00:00:00Z" };
+  const run = (thread: string, name: string, status: "completed" | "running" = "completed") => ({
+    task_id: thread, card_id: `card-${thread}`, native_thread_id: thread, native_turn_id: "turn",
+    name, status, description: "", prompt: "", summary: "", steps: [], runtime_metadata: {
+      request_id: "request", attempt_id: "attempt", native: { thread_id: thread, turn_id: "turn",
+        root_thread_id: "root", root_turn_id: "turn" },
+    },
+  });
+  const reader = run("reader", "Saved reader");
+  const sibling = run("sibling", "Saved sibling");
+  const detached = run("uncaptured", "Snapshot only", "running");
+  const row = (seq: number, content = `History row ${seq}`): Message => ({ role: "assistant", type: "text", seq, content });
+  const status = ({ runtime_metadata, ...tool_input }: ReturnType<typeof run>, seq: number): Message => ({
+    role: "system", type: "native_subagent", seq, runtime_metadata, tool_input,
+  });
+  const messages = Array.from({ length: 200 }, (_, index) => row(200 + index));
+  messages[0] = { ...row(200, "Recent reader body"), runtime_metadata: reader.runtime_metadata };
+  messages[2] = status(sibling, 202);
+  messages[3] = { ...row(203, "Sibling body"), runtime_metadata: sibling.runtime_metadata };
+  const earlier = Array.from({ length: 200 }, (_, index) => row(index));
+  earlier[198] = status(reader, 198);
+  earlier[199] = { ...row(199, "Earlier reader body"), runtime_metadata: reader.runtime_metadata };
+  const pages: Route[] = [];
+  const detailReads: number[] = [];
+  const prefix = `/api/sessions/${session.id}`;
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (!path.startsWith("/api/")) { await route.continue(); return; }
+    let data: unknown = [];
+    if (path === "/api/auth/state") data = { accounts_exist: true };
+    else if (path === "/api/auth/login") data = { token: "history-token" };
+    else if (path === "/api/auth/identity") data = { user_id: "history-user", label: "Reader", is_admin: false };
+    else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
+    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/sessions") data = [session];
+    else if (path === `${prefix}/messages`) {
+      expect(url.searchParams.get("before_seq")).toBe("200");
+      pages.push(route);
+      return;
+    } else if (path.startsWith(`${prefix}/native-details/`)) {
+      const anchor_seq = Number(path.split("/").at(-1));
+      detailReads.push(anchor_seq);
+      data = { anchor_seq, child: reader, availability: "available", messages: [], next_after_seq: null, has_more: false };
+    } else if (path === prefix) data = { ...session, messages, next_message_seq: 400, oldest_loaded_seq: 200,
+      has_more_messages: true, pending_questions: [], subagents: [detached],
+      dispatch_state: { generation: "native-history-service", revision: 1, paused: false,
+        active_request_id: null, active_operation: null, items: [] } };
+    await route.fulfill({ json: data });
+  });
+  await page.routeWebSocket("**/ws?*", () => {});
+  await page.goto("/");
+  await enterAccountCredentials(page);
+  await page.locator(".agent-item", { hasText: "Octo" }).click();
+  await page.locator(".session-item", { hasText: session.name }).click();
+  const scroller = page.locator(".chat-messages");
+  const snapshot = scroller.locator(".subagent-card", { hasText: detached.name });
+  await snapshot.getByRole("button").click();
+  await expect(snapshot.getByText(/No saved reference/)).toBeVisible();
+  expect(detailReads).toEqual([]);
+
+  await scroller.press("Home");
+  await expect.poll(() => pages.length).toBe(1);
+  const names = scroller.locator(".subagent-name");
+  const summaries = scroller.locator(".subagent-summary");
+  await expect(names).toHaveText(["agent reader", sibling.name]);
+  await expect(summaries).toHaveText(["Recent reader body", "Sibling body"]);
+  const observedCard = scroller.getByRole("button", { name: /agent reader/ });
+  await observedCard.click();
+  await expect.poll(() => [...new Set(detailReads)]).toEqual([200]);
+  await observedCard.click();
+
+  await pages[0].fulfill({ json: { messages: earlier, oldest_loaded_seq: 0, has_more_messages: false } });
+  await expect(scroller.getByText("Loading earlier messages…")).toHaveCount(0);
+  await expect(names).toHaveText([reader.name, sibling.name]);
+  await expect(summaries).toHaveText(["Earlier reader body Recent reader body", "Sibling body"]);
+  const savedCard = scroller.getByRole("button", { name: /Saved reader/ });
+  await savedCard.click();
+  await expect.poll(() => [...new Set(detailReads)]).toEqual([200, 198]);
+  expect(pages).toHaveLength(1);
+});
+
 for (const scenario of ["mixed", "child-only", "interrupted", "deep-mixed", "deep-child-only", "live-footer", "jump-latest"] as const) {
 const childOnly = scenario === "child-only" || scenario === "deep-child-only";
 const deep = scenario.startsWith("deep-");

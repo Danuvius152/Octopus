@@ -493,6 +493,9 @@ class SessionManagerBase:
     def _require_session_writer(self, session: Session) -> SessionOwner | None:
         raise NotImplementedError  # provided by a mixin
 
+    def _configuration_boundary(self, session: Session) -> AbstractAsyncContextManager[None]:
+        raise NotImplementedError  # provided by a mixin
+
     def _session_removed(self, session: Session) -> None:
         raise NotImplementedError  # provided by a mixin
 
@@ -936,8 +939,12 @@ class SessionManagerBase:
     async def _broadcast(
         self, message: dict, *, user_id: str | None = None,
         format_error: Callable[[BaseException], str] | None = None,
+        wrap_required_cancellation: bool = False,
     ) -> None:
         """Deliver to the subscribers entitled to see it.
+
+        Callers that combine ordinary failures can wrap a required subscriber's
+        own cancellation while retaining its cause. Task cancellation still propagates.
 
         Before accounts this was a fan-out to every callback, which with
         accounts would stream one person's assistant text into another
@@ -965,10 +972,12 @@ class SessionManagerBase:
                 # A subscriber's cancellation is a delivery fact. A new cancel
                 # of the task invoking this bus still belongs to its original
                 # operation (for example Research shutdown), not the observer.
-                if (isinstance(error, asyncio.CancelledError) and caller is not None
-                        and caller.cancelling() > cancellations):
+                is_cancellation = isinstance(error, asyncio.CancelledError)
+                if is_cancellation and caller is not None and caller.cancelling() > cancellations:
                     raise
                 if required:
+                    if wrap_required_cancellation and is_cancellation:
+                        raise RuntimeError("Required broadcast subscriber cancelled") from error
                     raise
                 else:
                     detail = (format_error(error) if format_error is not None else

@@ -2,13 +2,14 @@ import { accountFetch as fetch } from "./accountFetch";
 import { captureStreamingRead, useSessionStore, type SessionInfo, type StreamingReadBasis } from "../stores/sessionStore";
 import { applyTranscript } from "./transcript";
 import { readDispatchState } from "./sessionDispatch";
-import { sessions, type SessionObservation } from "./sessionList";
+import { isSelectedChat, sessions, type SessionObservation } from "./sessionList";
 import { observeDelegations } from "./delegationReads";
+import { qualifyPairedSnapshot, SessionSnapshotFlights, type DetailGeneration, type DetailPair, type SnapshotStart } from "./sessionSnapshotFlights";
 import { SnapshotReads, TaskSnapshotReads } from "./snapshotReads";
+import { isResearchJob } from "./researchProjection";
 import type { BgTask, PendingQuestion, ResearchJob, SessionAuxiliaryKind, SubagentRun } from "../stores/sessionStore";
 
 const API = window.location.origin;
-const SNAPSHOT_TIMEOUT_MS = 30_000;
 
 /** Fields `GET /api/sessions/{id}` adds on top of SessionInfo. */
 const DETAIL_ONLY_FIELDS = [
@@ -52,82 +53,118 @@ export async function hydrateSession(sessionId: string): Promise<void> {
   }
 }
 
-type SnapshotStart = ReturnType<typeof useSessionStore.getState>;
 const detailReads = new SnapshotReads();
+type Detail = Record<string, unknown>;
+type DetailResult = { data: Detail } & NonNullable<ReturnType<typeof applySessionSnapshot>>;
+type SessionReadPurpose = "complete" | "detail" | "metadata";
+interface DetailSnapshot {
+  response: Promise<Detail>;
+  finish: () => void;
+  publish: (data: Detail, dispatch: ReturnType<typeof readDispatchState>) => DetailResult | null;
+  reportFailure: (error: unknown) => void;
+  generation: DetailGeneration;
+  confirmations: () => SessionSnapshotFlights<DetailSnapshot>;
+}
+const detailFlights = new SessionSnapshotFlights<DetailSnapshot>();
 
-async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, observation: SessionObservation,
-  current: () => boolean, read: ReturnType<SnapshotReads["begin"]>, streamingBasis: StreamingReadBasis | undefined) {
-  if (!res.ok) throw new Error(`Could not load session state (HTTP ${res.status}).`);
-  const data: Record<string, unknown> = await res.json();
-  const dispatch = readDispatchState(data.dispatch_state);
-  if (!current() || !sessions.current(observation, dispatch?.generation)) return null;
-  const applied = applySessionSnapshot(sessionId, data, start, !read.claim(), streamingBasis);
-  if (!applied) return null;
-  sessions.detail(sessionInfoFromDetail(data), observation, dispatch);
-  return { data, ...applied };
+function issueDetail(sessionId: string, purpose: SessionReadPurpose, start: SnapshotStart,
+  observation: SessionObservation, signal: AbortSignal): DetailSnapshot {
+  const metadata = purpose === "metadata";
+  const read = metadata ? undefined : detailReads.begin(sessionId);
+  const streamingBasis = metadata ? undefined : captureStreamingRead(sessionId);
+  if (!metadata) useSessionStore.getState().setTranscriptReadError(sessionId, null, start);
+  const response: Promise<Detail> = fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}${metadata ? "/info" : "?view=browser"}`, {
+    headers: { Authorization: `Bearer ${start.token}` }, signal,
+  }).then(async (res) => {
+    if (!res.ok) throw new Error(`Could not load session ${metadata ? "information" : "state"} (HTTP ${res.status}).`);
+    return res.json();
+  });
+  let result: DetailResult | null | undefined;
+  let generation: string | undefined;
+  let reported = false;
+  let confirmations: SessionSnapshotFlights<DetailSnapshot> | undefined;
+  return {
+    response, finish: () => read?.finish(), generation: () => generation,
+    confirmations: () => confirmations ??= new SessionSnapshotFlights<DetailSnapshot>(),
+    publish: (data, dispatch) => {
+      if (result !== undefined) return result;
+      if (metadata) {
+        result = sessions.detail(data as unknown as SessionInfo, observation, null) ?
+          { data, needsExecutionConfirmation: false } : null;
+      } else {
+        const applied = applySessionSnapshot(sessionId, data, start, !read!.claim(), streamingBasis);
+        result = applied ? { data, ...applied } : null;
+        if (result) {
+          sessions.detail(sessionInfoFromDetail(data), observation, dispatch);
+          generation = dispatch?.generation;
+        }
+      }
+      return result;
+    },
+    reportFailure: (error) => {
+      if (!read || reported) return;
+      reported = true;
+      useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
+      if (read.claim()) useSessionStore.getState().setTranscriptReadError(sessionId,
+        error instanceof Error ? error.message : String(error), start);
+    },
+  };
 }
 
-interface SessionRead { done: Promise<Record<string, unknown> | null>; cancel: () => void }
+interface SessionRead { done: Promise<Detail | null>; cancel: () => void }
 
-/** One read owns its original identity, baseline, publication and lifetime.
- * Ending observation does not stop any server-side execution. */
-export function observeSession(sessionId: string, purpose: "complete" | "detail" | "metadata" = "complete", confirmExecution = true): SessionRead {
+export function observeSession(sessionId: string, purpose: SessionReadPurpose = "complete", options?: { fresh?: boolean }): SessionRead {
+  return readSession(sessionId, purpose, !options?.fresh && purpose !== "detail");
+}
+
+/** Each consumer qualifies independently against the snapshot's original observation. */
+function readSession(sessionId: string, purpose: SessionReadPurpose, share: boolean,
+  executionConfirmations?: SessionSnapshotFlights<DetailSnapshot>): SessionRead {
   const start = useSessionStore.getState();
-  const lifetime = sessions.observe(sessionId);
-  const { observation } = lifetime;
-  const read = detailReads.begin(sessionId);
-  if (purpose !== "metadata") useSessionStore.getState().setTranscriptReadError(sessionId, null, start);
-  let active = true;
+  const lease = (executionConfirmations ?? detailFlights).acquire(sessionId, purpose, start, share,
+    (original, signal) => issueDetail(sessionId, purpose, start, original, signal));
+  const { observation, snapshot, original } = lease;
   let confirmation: SessionRead | undefined;
-  const current = () => active;
   const done = (async () => {
     try {
-      const streamingBasis = purpose === "metadata" ? undefined : captureStreamingRead(sessionId);
-      const res = await fetch(`${API}/api/sessions/${sessionId}${purpose === "metadata" ? "/info" : "?view=browser"}`, {
-        headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
-      });
-      if (purpose === "metadata") {
-        if (!res.ok) throw new Error(`Could not load session information (HTTP ${res.status}).`);
-        const info: SessionInfo = await res.json();
-        if (!current() || !sessions.current(observation)) return null;
-        return sessions.detail(info, observation, null) ? info as unknown as Record<string, unknown> : null;
-      }
-      const result = await applyDetailResponse(sessionId, res, start, observation, current, read, streamingBasis);
+      const data = await lease.wait(snapshot.response);
+      if (data === undefined || !lease.active()) return null;
+      const dispatch = purpose === "metadata" ? null : readDispatchState(data.dispatch_state);
+      if (!sessions.current(observation, dispatch?.generation) || !sessions.current(original, dispatch?.generation)) return null;
+      const result = snapshot.publish(data, dispatch);
       const detail = result?.data ?? null;
-      if (detail && start.activeSessionId === sessionId && useSessionStore.getState().activeSessionId === sessionId && typeof detail.agent_id === "string") {
+      if (purpose !== "metadata" && detail && start.activeSessionId === sessionId && useSessionStore.getState().activeSessionId === sessionId && typeof detail.agent_id === "string") {
         useSessionStore.getState().setActiveAgentId(detail.agent_id);
       }
-      if (result?.needsExecutionConfirmation && confirmExecution && current()) {
+      if (result?.needsExecutionConfirmation && !executionConfirmations && lease.active()) {
         // Keep safe history now. One fresh read confirms a target whose live
-        // baseline moved; continuous traffic cannot create a polling loop.
-        confirmation = observeSession(sessionId, "detail", false);
+        // baseline moved. Each original consumer independently owns its lease.
+        confirmation = readSession(sessionId, "detail", true, snapshot.confirmations());
         void confirmation.done.catch(() => {});
       }
       return detail;
     } catch (error) {
-      if (purpose !== "metadata" && current() && sessions.current(observation)) {
-        useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
-        if (read.claim()) useSessionStore.getState().setTranscriptReadError(sessionId,
-          error instanceof Error ? error.message : String(error), start);
+      if (lease.active() && sessions.current(observation) && sessions.current(original)) {
+        snapshot.reportFailure(error);
       }
       throw error;
     } finally {
-      read.finish();
-      lifetime.finish();
+      lease.release();
     }
   })();
   let delegations: ReturnType<typeof observeDelegations> | undefined;
   const auxiliary: Array<{ cancel: () => void }> = [];
   if (purpose === "complete") {
+    const pair = { accepted: done, generation: snapshot.generation };
     for (const kind of ["background", "research"] as const) {
-      const reading = observeAuxiliarySnapshot(sessionId, kind, start, done, current);
+      const reading = observeAuxiliarySnapshot(sessionId, kind, start, pair, share);
       void reading.done.catch(() => {});
       auxiliary.push(reading);
     }
-    delegations = observeDelegations(sessionId, done);
+    delegations = observeDelegations(sessionId, pair, { fresh: !share });
     void delegations.done.catch(() => {});
   }
-  return { done, cancel: () => { active = false; lifetime.finish(); delegations?.cancel(); confirmation?.cancel(); auxiliary.forEach((read) => read.cancel()); } };
+  return { done, cancel: () => { lease.release(); delegations?.cancel(); confirmation?.cancel(); auxiliary.forEach((read) => read.cancel()); } };
 }
 
 export async function loadSessionSnapshot(sessionId: string) {
@@ -140,8 +177,8 @@ export async function loadBgTaskSnapshot(sessionId: string): Promise<void> {
 }
 
 /** Cancelling a view's observation never cancels the server's job. */
-export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliaryKind, bgTaskId?: string) {
-  return observeAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), undefined, undefined, bgTaskId);
+export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliaryKind, taskId?: string) {
+  return observeAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), undefined, false, undefined, taskId);
 }
 
 // Outstanding reads order replaceable fields and errors. Valid older successes
@@ -149,96 +186,181 @@ export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliar
 const auxiliaryReads: Record<SessionAuxiliaryKind, SnapshotReads> = {
   background: new SnapshotReads(), research: new SnapshotReads(),
 };
-const backgroundReads = new TaskSnapshotReads();
+const auxiliaryTaskReads = {
+  background: { success: new TaskSnapshotReads(), outcome: new TaskSnapshotReads() },
+  research: { success: new TaskSnapshotReads(), outcome: new TaskSnapshotReads() },
+};
 
-// Event confirmation owns only an in-flight demand, never a second task cache.
-const backgroundEvents = new Map<string, { current: () => boolean; dirty: boolean }>();
-export function confirmBackgroundEvent(sessionId: string, taskId: string): void {
-  const key = JSON.stringify([sessionId, taskId]);
-  const pending = backgroundEvents.get(key);
-  if (pending?.current()) { pending.dirty = true; return; }
+// Confirmation owns the request demand and its original observation.
+const taskConfirmations = new Map<string, { current: () => boolean; dirty: boolean; resumeIfIdle: () => void }>();
+export function confirmAuxiliaryTask(kind: SessionAuxiliaryKind, sessionId: string, taskId: string, source: "event" | "list" | "retry"): void {
+  const key = JSON.stringify([kind, sessionId, taskId]);
+  const pending = taskConfirmations.get(key);
+  if (pending?.current()) {
+    if (source === "event") pending.dirty = true;
+    pending.resumeIfIdle();
+    return;
+  }
   const start = useSessionStore.getState();
-  if (!start.token || start.bgTasks[sessionId]?.some(task => task.id === taskId)) return;
+  const tasks = kind === "background" ? start.bgTasks[sessionId] : start.research[sessionId];
+  if (!start.token || kind === "research" && !isSelectedChat(sessionId, start) || source === "event" && tasks?.some(task => task.id === taskId)) return;
   const lifetime = sessions.observe(sessionId, start);
-  const demand = { current: () => sessions.current(lifetime.observation) || sessions.initialGenerationCurrent(lifetime.observation), dirty: false };
-  backgroundEvents.set(key, demand);
-  void (async () => {
-    try {
-      do {
-        demand.dirty = false;
-        // Each pass starts after the events it confirms, using the original
-        // account/session qualification and the live task merge baseline.
-        const baseline = useSessionStore.getState();
-        const read = observeAuxiliarySnapshot(sessionId, "background", baseline, undefined, demand.current, taskId);
-        await read.done.catch(() => {}); // Existing auxiliary error/retry UI owns failures.
-        // The first service confirmation preserves demand, not the old read's
-        // authority. Confirm again in that service's current scope.
-        demand.dirty ||= baseline.dispatchGeneration !== useSessionStore.getState().dispatchGeneration;
-      } while (demand.dirty && demand.current());
-    } finally {
-      lifetime.finish();
-      if (backgroundEvents.get(key) === demand) backgroundEvents.delete(key);
+  let read: ReturnType<typeof observeAuxiliarySnapshot> | undefined;
+  const failed = (state: SnapshotStart) => state.researchReadFailures[sessionId]?.includes(taskId);
+  const demand = {
+    current: () => taskConfirmations.get(key) === demand &&
+      (sessions.current(lifetime.observation) || sessions.initialGenerationCurrent(lifetime.observation)),
+    dirty: false,
+    resumeIfIdle: () => { if (!read) void run(); },
+  };
+  const unsubscribe = kind === "research" ? useSessionStore.subscribe((state) => {
+    if (!isSelectedChat(sessionId, state) || !demand.current()) finish();
+    else if (!read) {
+      if (sessions.initialGenerationCurrent(lifetime.observation)) demand.resumeIfIdle();
+      else if (!failed(state)) finish();
     }
-  })();
+  }) : undefined;
+  function finish() {
+    if (taskConfirmations.get(key) === demand) taskConfirmations.delete(key);
+    unsubscribe?.();
+    read?.cancel();
+    lifetime.finish();
+  }
+  async function run() {
+    do {
+      demand.dirty = false;
+      // Each pass starts after the events it confirms, with a fresh merge baseline.
+      const baseline = useSessionStore.getState();
+      read = observeAuxiliarySnapshot(sessionId, kind, baseline, undefined, false, demand.current, taskId);
+      await read.done.catch(() => {}); // Existing auxiliary error/retry UI owns failures.
+      read = undefined;
+      // Establishing the first service preserves the demand and retires the old read.
+      demand.dirty ||= baseline.dispatchGeneration !== useSessionStore.getState().dispatchGeneration;
+    } while (demand.dirty && demand.current());
+    const state = useSessionStore.getState();
+    // A settled failure still needs an exact read if the first service is established.
+    if (kind === "research" && state.dispatchGeneration === null && demand.current() && failed(state)) return;
+    finish();
+  }
+  taskConfirmations.set(key, demand);
+  demand.resumeIfIdle();
+}
+
+type AuxiliaryResult = { rows: unknown[] } | { error: unknown };
+interface AuxiliarySnapshot {
+  response: Promise<AuxiliaryResult>;
+  generation?: DetailGeneration;
+  publish: (result: AuxiliaryResult) => void;
+  finish: () => void;
+}
+const auxiliaryFlights = new SessionSnapshotFlights<AuxiliarySnapshot>();
+
+function issueAuxiliarySnapshot(sessionId: string, kind: SessionAuxiliaryKind, start: SnapshotStart,
+  signal: AbortSignal, generation?: DetailGeneration, taskId?: string): AuxiliarySnapshot {
+  const read = taskId ? undefined : auxiliaryReads[kind].begin(sessionId);
+  const taskRead = auxiliaryTaskReads[kind].success.begin(sessionId);
+  // A failed detail can own its task's Retry while older successes still fill data.
+  const taskOutcome = auxiliaryTaskReads[kind].outcome.begin(sessionId);
+  const finish = () => { read?.finish(); taskRead.finish(); taskOutcome.finish(); };
+  if (read) useSessionStore.getState().setSessionAuxiliaryError(sessionId, kind, null);
+  const label = kind === "background" ? "background task details" : "research updates";
+  const path = kind === "background" ? "bg-tasks" : "research";
+  const target = taskId ? `/${encodeURIComponent(taskId)}` : "";
+  const response: Promise<AuxiliaryResult> = fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/${path}${target}`, {
+    headers: { Authorization: `Bearer ${start.token}` }, signal,
+  }).then(async (res) => {
+    if (!res.ok) throw new Error(`Could not refresh ${label} (HTTP ${res.status}).`);
+    const data: unknown = await res.json();
+    if (taskId && (!data || typeof data !== "object" || !("id" in data) || data.id !== taskId ||
+        !("session_id" in data) || data.session_id !== sessionId)) {
+      throw new Error(kind === "background" ? "Invalid background task detail." : "Invalid research task detail.");
+    }
+    const rows: unknown = taskId ? [data] : data;
+    if (!Array.isArray(rows)) throw new Error(`Could not read ${label}.`);
+    if (kind === "research" && !rows.every((row) => isResearchJob(row, sessionId))) throw new Error(`Could not read ${label}.`);
+    return rows;
+  }).then((rows) => ({ rows }), (error: unknown) => ({ error }));
+  let published = false;
+  const publish = (result: AuxiliaryResult) => {
+    if (published) return;
+    published = true;
+    // Valid older successes contribute terminal facts and output without
+    // replacing a newer snapshot's delivery diagnostics or explicit clearing.
+    const ownsError = read?.claim() ?? false;
+    const store = useSessionStore.getState();
+    if (taskId && taskOutcome.claim(taskId)) store.setAuxiliaryTaskFailure(kind, sessionId, taskId, "error" in result);
+    if ("error" in result) {
+      if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, `Could not refresh ${label}.`);
+      return;
+    }
+    if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, null);
+    if (taskId) {
+      const advanceOnly = !taskRead.claim(taskId);
+      if (kind === "background") store.upsertBgTask(sessionId, result.rows[0] as BgTask,
+        start.bgTasks[sessionId]?.find((task) => task.id === taskId) ?? null, advanceOnly);
+      else store.applyResearchDetail(sessionId, result.rows[0] as ResearchJob,
+        start.research[sessionId]?.find((job) => job.id === taskId), advanceOnly);
+      return;
+    }
+
+    const failures = kind === "background" ? store.bgTaskReadFailures[sessionId] : store.researchReadFailures[sessionId];
+    for (const task of result.rows as (BgTask | ResearchJob)[]) {
+      if (taskOutcome.claim(task.id) && failures?.includes(task.id)) store.setAuxiliaryTaskFailure(kind, sessionId, task.id, false);
+    }
+    if (kind === "background") {
+      const rows = result.rows as BgTask[];
+      const basis = start.bgTasks[sessionId] ?? [];
+      store.setBgTasks(sessionId, rows, basis, taskRead.claim);
+
+      // A bounded list cannot settle a previously known active task outside
+      // its window. Recheck those tasks by id even when their cards are folded.
+      const listed = new Set(rows.map(task => task.id));
+      const known = new Set(basis.map(task => task.id));
+      for (const task of store.bgTasks[sessionId] ?? []) {
+        if ((task.status === "pending" || task.status === "running") && known.has(task.id) && !listed.has(task.id)) {
+          confirmAuxiliaryTask("background", sessionId, task.id, "list");
+        }
+      }
+    } else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] ?? [], taskRead.claim);
+  };
+  return { response, generation, publish, finish };
 }
 
 function observeAuxiliarySnapshot(
   sessionId: string, kind: SessionAuxiliaryKind, start: SnapshotStart,
-  acceptedDetail?: Promise<Record<string, unknown> | null>,
-  current = () => true,
-  bgTaskId?: string,
+  pair?: DetailPair, share = false, current = () => true, taskId?: string,
 ): { done: Promise<unknown[] | null>; cancel: () => void } {
-  const lifetime = sessions.observe(sessionId, start);
-  const { observation } = lifetime;
-  if (!start.token || !sessions.current(observation)) { lifetime.finish(); return { done: Promise.resolve(null), cancel: () => {} }; }
-  const read = auxiliaryReads[kind].begin(sessionId);
-  const taskRead = kind === "background" ? backgroundReads.begin(sessionId) : undefined;
-  const controller = new AbortController();
-  let active = true;
-  const finish = () => { read.finish(); taskRead?.finish(); lifetime.finish(); };
-  useSessionStore.getState().setSessionAuxiliaryError(sessionId, kind, null);
-  const label = kind === "background" ? "background task details" : "research updates";
-  // Start alongside detail, handling rejection immediately. Only its accepted
-  // service generation can authorize this paired read's eventual publication.
-  const path = kind === "background" ? `bg-tasks${bgTaskId ? `/${encodeURIComponent(bgTaskId)}` : ""}` : "research";
-  const response = fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/${path}`, {
-    headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS)]),
-  }).then(async (res) => {
-    if (!res.ok) throw new Error(`Could not refresh ${label} (HTTP ${res.status}).`);
-    const data: unknown = await res.json();
-    if (bgTaskId && (!data || typeof data !== "object" || !("id" in data) || data.id !== bgTaskId ||
-        !("session_id" in data) || data.session_id !== sessionId)) throw new Error("Invalid background task detail.");
-    const rows: unknown = bgTaskId ? [data] : data;
-    if (!Array.isArray(rows)) throw new Error(`Could not read ${label}.`);
-    return rows;
-  }).then((rows) => ({ rows }), (error: unknown) => ({ error }));
-  const done = (async () => { try {
-    const detail = acceptedDetail ? await acceptedDetail.catch(() => null) : undefined;
-    if (acceptedDetail && !detail) return null;
-    const generation = detail ? readDispatchState(detail.dispatch_state)?.generation : undefined;
-    const result = await response;
-    if (!active || !current() || !sessions.current(observation, generation)) {
+  if (!start.token || !sessions.current(sessions.capture(start))) return { done: Promise.resolve(null), cancel: () => {} };
+  const lease = auxiliaryFlights.acquire(sessionId, kind, start, share,
+    (_original, signal) => issueAuxiliarySnapshot(sessionId, kind, start, signal, pair?.generation, taskId));
+  const { snapshot, observation, original } = lease;
+  let next: ReturnType<typeof observeAuxiliarySnapshot> | undefined;
+  const done = (async () => {
+    try {
+      // A consumer waits for its own detail, but a changed generation must
+      // also be confirmed by the detail issued with the physical request.
+      const detail = pair && await lease.wait(pair.accepted.catch(() => null));
+      if (pair && !detail) return null;
+      const generation = detail ? readDispatchState(detail.dispatch_state)?.generation : undefined;
+      const qualify = () => qualifyPairedSnapshot(observation, original, generation, snapshot.generation);
+      if (lease.active() && current() && qualify() === "new-generation") {
+        lease.release();
+        next = observeAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), pair, share, current, taskId);
+        return await next.done;
+      }
+      const result = await lease.wait(snapshot.response);
+      if (!result || !lease.active()) return null;
+      if (current() && qualify() === "current") {
+        snapshot.publish(result);
+        if ("rows" in result) return result.rows;
+      }
       if ("error" in result) throw result.error;
       return null;
+    } finally {
+      lease.release();
     }
-    // Valid older successes contribute terminal facts and output without
-    // replacing a newer snapshot's delivery diagnostics or explicit clearing.
-    const ownsError = read.claim();
-    const store = useSessionStore.getState();
-    if ("error" in result) {
-      if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, `Could not refresh ${label}.`);
-      throw result.error;
-    }
-    if (kind === "background" && bgTaskId) store.upsertBgTask(sessionId, result.rows[0] as BgTask,
-      start.bgTasks[sessionId]?.find((task) => task.id === bgTaskId) ?? null, !taskRead!.claim(bgTaskId));
-    else if (kind === "background") store.setBgTasks(sessionId, result.rows as BgTask[], start.bgTasks[sessionId] || [], false, taskRead!.claim);
-    else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] || [], !ownsError);
-    if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, null);
-    return result.rows;
-  } finally {
-    finish();
-  } })();
-  return { done, cancel: () => { active = false; controller.abort(); finish(); } };
+  })();
+  return { done, cancel: () => { lease.release(); next?.cancel(); } };
 }
 
 /** Selection, archived viewing and reconnect retain their original event
@@ -248,8 +370,8 @@ export async function loadResearchSnapshot(sessionId: string): Promise<void> {
 }
 
 /** Navigation finishes with detail; auxiliary reads own independent errors. */
-export async function loadSessionSnapshots(sessionId: string) {
-  return observeSession(sessionId).done;
+export async function loadSessionSnapshots(sessionId: string, options?: { fresh?: boolean }) {
+  return observeSession(sessionId, "complete", options).done;
 }
 
 /** One queue-state path for selection, archived viewing and reconnect. */

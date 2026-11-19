@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { accountFetch } from "../lib/accountFetch";
-import { sessions } from "../lib/sessionList";
+import { isSelectedChat, sessions } from "../lib/sessionList";
 import { useSessionStore } from "../stores/sessionStore";
 
 type Start = ReturnType<typeof useSessionStore.getState>;
@@ -13,42 +13,52 @@ export function useTaskControl(sessionId: string, identity: string) {
   const token = useSessionStore((s) => s.token);
   const generation = useSessionStore((s) => s.dispatchGeneration);
   const selected = useSessionStore((s) => s.activeSessionId);
+  const inChat = useSessionStore((s) => s.mainView === "chat");
   const connected = useSessionStore((s) => s.connected);
-  // Returning to the same session or connection value is a new view lifetime.
+  // Returning to the same chat or connection value is a new view lifetime.
   // Its feedback cannot inherit an operation from before leaving.
-  const scope = useMemo(() => ({ sessionId, identity, account, token, generation, selected, connected }),
-    [sessionId, identity, account, token, generation, selected, connected]);
-  type Operation = { scope: typeof scope; read?: Read };
+  const scope = useMemo(() => ({ sessionId, identity, account, token, generation, selected, inChat, connected }),
+    [sessionId, identity, account, token, generation, selected, inChat, connected]);
+  type Operation = { scope: typeof scope; finish: () => void; read?: Read };
   const [feedback, setFeedback] = useState<{ scope: typeof scope; pending: boolean; result?: Feedback }>();
   const operation = useRef<Operation | null>(null);
   useEffect(() => () => {
     const original = operation.current;
-    if (original?.scope !== scope) return;
-    operation.current = null;
-    const read = original.read;
-    original.read = undefined;
-    read?.cancel();
+    if (original?.scope === scope) original.finish();
   }, [scope]);
 
   const execute = async (work: (current: () => boolean, start: Start, own: (read: Read) => void) => Promise<Feedback>, unconfirmedMessage: string) => {
     if (operation.current?.scope === scope) return;
-    const original: Operation = { scope };
-    operation.current = original;
     const started = useSessionStore.getState();
+    if (!isSelectedChat(started.activeSessionId, started)) return;
+    const original: Operation = { scope, finish };
+    operation.current = original;
     const lifetime = sessions.observe(sessionId, started);
-    const current = () => operation.current === original &&
-      sessions.current(lifetime.observation) && useSessionStore.getState().activeSessionId === started.activeSessionId;
+    const unsubscribe = useSessionStore.subscribe((state) => {
+      if (isSelectedChat(started.activeSessionId, state)) return;
+      finish();
+      setFeedback((previous) => previous?.scope === scope ? undefined : previous);
+    });
+    function finish() {
+      if (operation.current === original) operation.current = null;
+      unsubscribe();
+      const read = original.read;
+      original.read = undefined;
+      read?.cancel();
+      lifetime.finish();
+    }
+    const current = () => operation.current === original && sessions.current(lifetime.observation);
     setFeedback({ scope, pending: true });
     try {
-      const result = await work(current, started, (read) => { original.read = read; });
+      const result = await work(current, started, (read) => {
+        if (current()) original.read = read;
+        else read.cancel();
+      });
       if (current()) setFeedback({ scope, pending: false, result });
     } catch {
       if (current()) setFeedback({ scope, pending: false, result: { message: unconfirmedMessage, failed: true } });
     } finally {
-      original.read?.cancel();
-      original.read = undefined;
-      lifetime.finish();
-      if (operation.current === original) operation.current = null;
+      finish();
     }
   };
 
@@ -77,7 +87,7 @@ export function useTaskControl(sessionId: string, identity: string) {
   const refresh = (read: () => Read) => execute(async (_current, _start, own) => {
     const observation = read();
     own(observation);
-    await observation.done;
+    if (await observation.done === null) throw new Error("Status observation ended before confirmation");
     return { message: "Current status refreshed.", failed: false };
   }, "Could not confirm current status. Refresh again.");
 

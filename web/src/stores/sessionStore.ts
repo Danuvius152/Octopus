@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import { readResearchEvidence, type ResearchEvidence } from "../lib/researchEvidence";
-import { mergeAuxiliarySnapshot, mergeCardSnapshot } from "../lib/cardSnapshots";
+import { mergeCardSnapshot } from "../lib/cardSnapshots";
+import { confirmResearchDetail, confirmResearchJobSeen, initializeResearchJob, mergeResearchJob, researchChangedSince, researchConfirmedByDetail, researchEventPatch, type ResearchEvent, type ResearchJob } from "../lib/researchProjection";
 import { agentOrderIsProtected, agentReadStatusIsCurrent, agentRequestIsCurrent, agentSnapshotCovers, beginAgentRequest, canApplyAgent, canApplyAgentObservation, endAgentRequest, finishAgentOrder, recordAgentChanges, recordAgentOrder, recordAgentOrderReceipt, recordAgentSnapshot, type AgentRequest } from "../lib/agentUpdates";
 import { withPinOrder } from "../lib/sidebarPins";
 import { unreadList, type ListReadState } from "../lib/listState";
@@ -11,6 +11,7 @@ import { readActiveAttempt, readDispatchState, type ActiveAttempt, type Dispatch
 import { nativeItemKey } from "../lib/nativeOutput";
 import { readAttemptIdentity, sameAttempt, type AttemptIdentity } from "../lib/toolIdentity";
 import { readContextState, type ContextState } from "../lib/sessionContext";
+import type { WsEvent } from "../lib/wsEvents";
 import type {
   AgentRead as ApiAgentRead,
   ApplicationRead as ApiApplicationRead,
@@ -30,10 +31,6 @@ import type {
   ToolPolicySupport,
   WikiJobCard,
 } from "../api";
-
-// Provenance for immutable per-job updates, including WS and API receipts.
-// Snapshot rows stay unmarked. Weak references retain no second task state.
-const researchUpdates = new WeakMap<ResearchJob, symbol>();
 
 interface AcceptedTextConsumer { sessionId: string; account: number; notify: () => void }
 // Only openings waiting for their one timeout recovery subscribe. The original
@@ -88,12 +85,8 @@ export function captureStreamingRead(sessionId: string): StreamingReadBasis {
       [key, streamingFacts.get(item)?.arrival])),
   };
 }
-const bgUpdates = new WeakMap<BgTask, symbol>();
 const subagentUpdates = new WeakMap<SubagentRun, symbol>();
 const delegationUpdates = new WeakMap<Delegation, symbol>();
-// Only delivery events advance this observation. Entity/list replacement does
-// not prove a new delivery fact; immutable copies retain their event marker.
-const bgDeliveryUpdates = new WeakMap<BgTask, symbol>();
 
 // Re-export contract types under the names the rest of the frontend
 // already uses. Source of truth is `web/src/api/contracts.ts`, regenerated
@@ -472,8 +465,12 @@ interface SessionStore {
   // to the `mcp__bg__run` tool_use block that started it.
   bgTasks: Record<string, BgTask[]>;
   upsertBgTask: (sessionId: string, task: BgTask, baseline?: BgTask | null, advanceOnly?: boolean) => void;
-  updateBgTaskDelivery: (sessionId: string, taskId: string, delivery: Pick<BgTask, "delivery_disposition" | "delivery_error">) => void;
-  setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[], advanceOnly?: boolean, deliveryCurrent?: (id: string) => boolean) => void;
+  applyBgTaskEvent: (event: BgTaskEvent) => void;
+  setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[], claim?: (id: string) => boolean) => void;
+  bgTaskReadFailures: Record<string, string[]>;
+  researchReadFailures: Record<string, string[]>;
+  setAuxiliaryTaskFailure: (kind: SessionAuxiliaryKind, sessionId: string, taskId: string, failed: boolean) => void;
+  clearAuxiliaryTaskFailures: (sessionId: string) => void;
   sessionAuxiliaryErrors: Record<string, Partial<Record<SessionAuxiliaryKind, string>>>;
   setSessionAuxiliaryError: (sessionId: string, kind: SessionAuxiliaryKind, error: string | null) => void;
 
@@ -515,74 +512,84 @@ interface SessionStore {
   research: Record<string, ResearchJob[]>;
   initializeResearch: (sessionId: string, job: ResearchJob) => void;
   confirmResearchSeen: (sessionId: string, jobId: string, receipt: NonNullable<ResearchJob["delivery_receipt"]>) => void;
-  upsertResearch: (sessionId: string, job: Partial<ResearchJob> & { id: string }) => void;
-  setResearch: (sessionId: string, jobs: ResearchJob[], baseline?: ResearchJob[], advanceOnly?: boolean) => void;
+  applyResearchEvent: (event: ResearchEvent) => void;
+  applyResearchControl: (sessionId: string, job: ResearchJob, baseline?: ResearchJob) => void;
+  applyResearchDetail: (sessionId: string, job: ResearchJob, baseline: ResearchJob | undefined, advanceOnly: boolean) => void;
+  setResearch: (sessionId: string, jobs: ResearchJob[], baseline?: ResearchJob[], canReplace?: (id: string) => boolean) => void;
 }
 
-export interface ResearchJob {
-  id: string;
-  session_id: string;
-  question: string;
-  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
-  phase: string | null;        // scope | search | verify | synthesize | done
-  detail?: string;
-  created_at?: string;
-  report_path?: string | null;
-  counts?: Record<string, number>;
-  sources?: string[];
-  verified?: number;
-  unverified?: number;
-  evidence?: ResearchEvidence | null;
-  evidence_state?: "available" | "unavailable";
-  delivery_receipt?: {
-    request_id: string;
-    version: number;
-    stage: "queued" | "processing" | "processed" | "failed" | "recording_unconfirmed" | "unknown";
-    error?: string | null;
-    browser_confirmed_version?: number;
-    browser_confirmed_at?: string;
-  } | null;
-  error?: string | null;
-  injection_status?: "pending" | "delivered" | "failed" | "unknown";
+export type { ResearchJob } from "../lib/researchProjection";
+
+function updateResearch(s: SessionStore, sessionId: string, id: string, merge: (job?: ResearchJob) => ResearchJob | undefined) {
+  const current = s.research[sessionId] ?? [];
+  const index = current.findIndex((job) => job.id === id);
+  const previous = current[index];
+  const updated = merge(previous);
+  if (!updated || updated === previous) return s;
+  const rows = index < 0 ? [...current, updated] : current.map((job, i) => i === index ? updated : job);
+  return { research: { ...s.research, [sessionId]: rows } };
 }
 
-function normalizeResearchEvidence<T extends Partial<ResearchJob>>(job: T): T {
-  const evidence = job.evidence_state === "available" ? readResearchEvidence(job.evidence) : null;
-  return { ...job, evidence, evidence_state: evidence ? "available" : "unavailable" };
-}
+// HTTP responses are complete; live events may omit fields the card has yet to observe.
+type BgOptionalField = "exit_code" | "truncated" | "idle_timeout_seconds" | "timeout_seconds"
+  | "stop_reason" | "delivery_disposition" | "delivery_error";
+export type BgTask = Omit<ApiBgTaskResponse, "work_id" | BgOptionalField>
+  & Partial<Pick<ApiBgTaskResponse, BgOptionalField>>;
 
-// HTTP responses are complete; live events may omit limits and delivery facts.
-export type BgTask = Omit<ApiBgTaskResponse,
-  "work_id" | "idle_timeout_seconds" | "timeout_seconds" | "stop_reason" | "delivery_disposition" | "delivery_error"
-> & Partial<Pick<ApiBgTaskResponse,
-  "idle_timeout_seconds" | "timeout_seconds" | "stop_reason" | "delivery_disposition" | "delivery_error"
->>;
+type BgTaskEvent = Extract<WsEvent, { type: "bg_started" | "bg_completed" | "bg_delivery" }>;
+const bgCompletionFields = ["exit_code", "completed_at", "stop_reason", "truncated"] as const;
+const bgDeliveryFields = ["delivery_disposition", "delivery_error"] as const;
+type BgEventField = (typeof bgCompletionFields | typeof bgDeliveryFields)[number];
+// Only a WS event carrying a field advances its marker. Snapshots inherit the
+// markers so an in-flight read cannot undo a newer observation of that field.
+const bgFieldUpdates = new WeakMap<BgTask, Partial<Record<BgEventField, symbol>>>();
 
-/** Execution, complete output and delivery have independent evidence. Both
- * list and detail responses pass through this same per-task boundary. */
-function mergeBgTask(task: BgTask, previous: BgTask | undefined, baseline: BgTask | null | undefined,
-  advanceOnly: boolean, event = false): BgTask {
-  const updated = { ...previous, ...task };
-  const deliveryUpdate = previous && bgDeliveryUpdates.get(previous);
-  if (previous && baseline !== undefined) {
-    if (advanceOnly || deliveryUpdate !== undefined && deliveryUpdate !== (baseline ? bgDeliveryUpdates.get(baseline) : undefined)) {
-      updated.delivery_disposition = previous.delivery_disposition;
-      updated.delivery_error = previous.delivery_error;
+type BgTaskSource = { baseline?: BgTask | null; advanceOnly?: boolean } | { event: BgTaskEvent["type"] };
+
+function mergeBgTask(previous: BgTask, patch: Partial<BgTask>, source: BgTaskSource): BgTask {
+  const terminal = previous.status !== "running" && previous.status !== "pending";
+  const replacesStatus = patch.status !== undefined && patch.status !== previous.status;
+  const keepStatus = replacesStatus && (terminal || previous.status === "running" && patch.status === "pending");
+  const markers = bgFieldUpdates.get(previous);
+  const updated = { ...previous, ...patch };
+
+  if ("event" in source) {
+    if (keepStatus) return previous;
+    const observed = { ...markers };
+    const arrival = Symbol();
+    const fields = source.event === "bg_completed" ? bgCompletionFields
+      : source.event === "bg_delivery" ? bgDeliveryFields : [];
+    for (const field of fields) {
+      if (patch[field] !== undefined) observed[field] = arrival;
+      else if (source.event === "bg_completed" && !terminal) {
+        // Values from the running row provide no evidence about its outcome.
+        Object.assign(updated, { [field]: undefined });
+      }
     }
-    const terminal = previous.status !== "running" && previous.status !== "pending";
-    const changed = bgUpdates.get(previous) !== (baseline ? bgUpdates.get(baseline) : undefined);
-    if (terminal && (advanceOnly || changed || previous.status !== task.status) || previous.status === "running" && task.status === "pending") {
-      for (const field of ["status", "exit_code", "completed_at", "stop_reason", "truncated"] as const) {
-        if (previous[field] !== undefined) Object.assign(updated, { [field]: previous[field] });
+    bgFieldUpdates.set(updated, observed);
+  } else {
+    const basis = source.baseline ? bgFieldUpdates.get(source.baseline) : undefined;
+    if (keepStatus) updated.status = previous.status;
+    for (const field of bgCompletionFields) {
+      if (keepStatus || terminal && previous[field] !== undefined &&
+          (source.advanceOnly || markers?.[field] !== basis?.[field])) {
+        Object.assign(updated, { [field]: previous[field] });
+      }
+    }
+    for (const field of bgDeliveryFields) {
+      if (source.advanceOnly || markers?.[field] !== basis?.[field]) {
+        Object.assign(updated, { [field]: previous[field] });
       }
     }
     for (const field of ["stdout", "stderr"] as const) {
-      if ((previous[field]?.length ?? 0) > (updated[field]?.length ?? 0)) updated[field] = previous[field];
+      const previousLength = previous[field]?.length ?? 0;
+      const nextLength = updated[field]?.length ?? 0;
+      if (previousLength > nextLength || previousLength === nextLength && (keepStatus || source.advanceOnly)) {
+        updated[field] = previous[field];
+      }
     }
+    if (markers) bgFieldUpdates.set(updated, markers);
   }
-  if (deliveryUpdate) bgDeliveryUpdates.set(updated, deliveryUpdate);
-  const marker = event ? Symbol() : previous && bgUpdates.get(previous);
-  if (marker) bgUpdates.set(updated, marker);
   return updated;
 }
 
@@ -607,6 +614,7 @@ function dispatchUpdate(s: SessionStore, sessionId: string, snapshot: DispatchSt
   delete errors[sessionId];
   return {
     dispatchGeneration: snapshot.generation,
+    ...(s.dispatchGeneration !== snapshot.generation ? { bgTaskReadFailures: {}, researchReadFailures: {} } : {}),
     ...(changed ? { activeAttempts: {}, executionObservations: {}, closedQuestionIds: {}, pendingQuestions: {},
       sessionMembership: {}, sessionAuxiliaryErrors: {}, streamingText: {}, streamingItems: {}, contextStates: {} } : {}),
     retiredDispatchGenerations: changed ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
@@ -973,7 +981,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     oldestSeq: dropKey(s.oldestSeq, id), hasMoreMessages: dropKey(s.hasMoreMessages, id),
     messageWindows: dropKey(s.messageWindows, id), lastAppliedSeq: dropKey(s.lastAppliedSeq, id),
     transcriptReadErrors: dropKey(s.transcriptReadErrors, id),
-    bgTasks: dropKey(s.bgTasks, id), research: dropKey(s.research, id), delegations: dropKey(s.delegations, id),
+    bgTasks: dropKey(s.bgTasks, id), bgTaskReadFailures: dropKey(s.bgTaskReadFailures, id),
+    research: dropKey(s.research, id), researchReadFailures: dropKey(s.researchReadFailures, id), delegations: dropKey(s.delegations, id),
     wikiJobs: dropKey(s.wikiJobs, id), wikiJobDirty: dropKey(s.wikiJobDirty, id),
     wikiJobReadErrors: dropKey(s.wikiJobReadErrors, id), sessionAuxiliaryErrors: dropKey(s.sessionAuxiliaryErrors, id),
   })),
@@ -1198,17 +1207,17 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       };
     }),
   setSubagents: (sessionId, runs, baseline, advanceOnly) =>
-    set((s) => ({
-      subagents: {
-        ...s.subagents,
-        [sessionId]: Object.fromEntries(
-          mergeCardSnapshot(runs.filter((r) => r.card_id || r.tool_call_id), Object.values(s.subagents[sessionId] || {}),
-            baseline === undefined ? undefined : Object.values(baseline), (r) => (r.card_id || r.tool_call_id)!,
-            subagentUpdates, (r) => r.status === "running", advanceOnly)
-            .map((r) => [(r.card_id || r.tool_call_id)!, r]).slice(-64)
-        ),
-      },
-    })),
+    set((s) => {
+      const current = s.subagents[sessionId];
+      const merged = mergeCardSnapshot(runs.filter((r) => r.card_id || r.tool_call_id), Object.values(current ?? {}),
+        baseline === undefined ? undefined : Object.values(baseline), (r) => (r.card_id || r.tool_call_id)!,
+        subagentUpdates, (r) => r.status === "running", advanceOnly);
+      const next = Object.fromEntries(merged.slice(-64).map((r) => [(r.card_id || r.tool_call_id)!, r]));
+      // Compare after merging event provenance. Keep the observed rows when
+      // an equivalent snapshot only inherits their existing markers.
+      if (current && sameJsonValue(Object.entries(current), Object.entries(next))) return s;
+      return { subagents: { ...s.subagents, [sessionId]: next } };
+    }),
 
   schedules: [],
   scheduleRead: unreadList(),
@@ -1353,6 +1362,18 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   closeViewer: () => set({ viewer: null }),
 
   bgTasks: {},
+  bgTaskReadFailures: {},
+  researchReadFailures: {},
+  setAuxiliaryTaskFailure: (kind, sessionId, taskId, failed) => set((s) => {
+    const key = kind === "background" ? "bgTaskReadFailures" : "researchReadFailures";
+    const failures = s[key];
+    const ids = failures[sessionId] ?? [];
+    if (ids.includes(taskId) === failed) return s;
+    const remaining = failed ? [...ids, taskId] : ids.filter(id => id !== taskId);
+    return { [key]: remaining.length ? { ...failures, [sessionId]: remaining } : dropKey(failures, sessionId) };
+  }),
+  clearAuxiliaryTaskFailures: (sessionId) => set((s) => s.bgTaskReadFailures[sessionId] || s.researchReadFailures[sessionId]
+    ? { bgTaskReadFailures: dropKey(s.bgTaskReadFailures, sessionId), researchReadFailures: dropKey(s.researchReadFailures, sessionId) } : s),
   sessionAuxiliaryErrors: {},
   setSessionAuxiliaryError: (sessionId, kind, error) => set((s) => {
     const current = s.sessionAuxiliaryErrors[sessionId];
@@ -1369,106 +1390,108 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set((s) => {
       const current = s.bgTasks[sessionId] || [];
       const idx = current.findIndex((t) => t.id === task.id);
-      const updated = mergeBgTask(task, current[idx], baseline, advanceOnly, baseline === undefined);
+      const updated = idx >= 0 ? mergeBgTask(current[idx], task, { baseline, advanceOnly }) : task;
       const next = idx >= 0
         ? [...current.slice(0, idx), updated, ...current.slice(idx + 1)]
         : [...current, updated];
       return { bgTasks: { ...s.bgTasks, [sessionId]: next } };
     }),
-  updateBgTaskDelivery: (sessionId, taskId, delivery) =>
+  applyBgTaskEvent: (event) =>
     set((s) => {
+      const sessionId = event.session_id;
       const current = s.bgTasks[sessionId] || [];
-      const idx = current.findIndex((t) => t.id === taskId);
-      if (idx < 0) return s;
-      const updated = { ...current[idx], ...delivery };
-      bgDeliveryUpdates.set(updated, Symbol());
-      bgUpdates.set(updated, Symbol());
-      return { bgTasks: { ...s.bgTasks, [sessionId]: [
-        ...current.slice(0, idx), updated, ...current.slice(idx + 1),
-      ] } };
+      const idx = current.findIndex((task) => task.id === event.task_id);
+      const previous = current[idx];
+      let updated: BgTask;
+
+      if (event.type === "bg_started") {
+        if (previous && previous.status !== "pending") return s;
+        const started = {
+          status: "running" as const,
+          command: event.command,
+          started_at: event.started_at,
+          ...(event.description !== undefined && { description: event.description }),
+          ...(event.idle_timeout_seconds !== undefined && { idle_timeout_seconds: event.idle_timeout_seconds }),
+          ...(event.timeout_seconds !== undefined && { timeout_seconds: event.timeout_seconds }),
+        };
+        updated = previous ? mergeBgTask(previous, started, { event: event.type }) : {
+          id: event.task_id, session_id: sessionId, description: null, working_dir: "",
+          completed_at: null, stdout: "", stderr: "",
+          ...started,
+        };
+      } else {
+        if (!previous) return s; // The observation layer reads missing tasks by id.
+        if (event.type === "bg_completed") {
+          updated = mergeBgTask(previous, {
+            status: event.status,
+            completed_at: event.completed_at,
+            ...(event.exit_code !== undefined && { exit_code: event.exit_code }),
+            ...(event.truncated !== undefined && { truncated: event.truncated }),
+            ...(event.stop_reason !== undefined && { stop_reason: event.stop_reason }),
+            ...(event.idle_timeout_seconds !== undefined && { idle_timeout_seconds: event.idle_timeout_seconds }),
+            ...(event.timeout_seconds !== undefined && { timeout_seconds: event.timeout_seconds }),
+          }, { event: event.type });
+        } else {
+          updated = mergeBgTask(previous, {
+            ...(event.delivery_disposition !== undefined && { delivery_disposition: event.delivery_disposition }),
+            ...(event.delivery_error !== undefined && { delivery_error: event.delivery_error }),
+          }, { event: event.type });
+        }
+      }
+      if (updated === previous) return s;
+      const rows = idx < 0 ? [...current, updated] : current.map((task, i) => i === idx ? updated : task);
+      return { bgTasks: { ...s.bgTasks, [sessionId]: rows } };
     }),
-  setBgTasks: (sessionId, tasks, baseline, advanceOnly = false, deliveryCurrent) =>
+  setBgTasks: (sessionId, tasks, baseline, claim) =>
     set((s) => {
       const current = s.bgTasks[sessionId] || [];
       const previous = new Map(current.map((task) => [task.id, task]));
       const start = baseline && new Map(baseline.map((task) => [task.id, task]));
-      const rows = tasks.map((task) => mergeBgTask(task, previous.get(task.id), start ? start.get(task.id) ?? null : undefined,
-        advanceOnly || deliveryCurrent !== undefined && !deliveryCurrent(task.id)));
-      if (start) {
-        const incoming = new Set(tasks.map((task) => task.id));
-        for (const task of current) {
-          if (!incoming.has(task.id) && (!start.has(task.id) || advanceOnly ||
-              bgUpdates.get(task) !== bgUpdates.get(start.get(task.id)!) ||
-              start.get(task.id)?.status !== task.status)) rows.push(task);
-        }
-      }
+      const rows = tasks.map((task) => {
+        const existing = previous.get(task.id);
+        const advanceOnly = claim ? !claim(task.id) : false;
+        return existing ? mergeBgTask(existing, task, { baseline: start?.get(task.id), advanceOnly }) : task;
+      });
+      const incoming = new Set(tasks.map((task) => task.id));
+      // The server only returns its most recent window. Omission does not
+      // retire a task that a card may already be observing.
+      for (const task of current) if (!incoming.has(task.id)) rows.push(task);
       return { bgTasks: { ...s.bgTasks, [sessionId]: rows } };
     }),
 
   research: {},
-  initializeResearch: (sessionId, job) => set((s) => {
-    const current = s.research[sessionId] || [];
-    const previous = current.find((item) => item.id === job.id);
-    if (!previous) return { research: { ...s.research, [sessionId]: [...current, job] } };
-    const updated = { ...previous };
-    for (const field of ["question", "session_id", "created_at", "report_path"] as const) {
-      if (updated[field] == null || updated[field] === "") Object.assign(updated, { [field]: job[field] });
+  initializeResearch: (sessionId, job) => set((s) => updateResearch(s, sessionId, job.id, (previous) =>
+    previous ? mergeResearchJob(previous, job, { kind: "creation" }) : initializeResearchJob(job, true))),
+  confirmResearchSeen: (sessionId, jobId, receipt) => set((s) => updateResearch(s, sessionId, jobId, (job) =>
+    job && confirmResearchJobSeen(job, receipt))),
+  applyResearchEvent: (event) => set((s) => updateResearch(s, event.session_id, event.research_id, (previous) => {
+    if (event.type === "research_started") {
+      return previous ?? (event.question ? initializeResearchJob({ id: event.research_id, session_id: event.session_id,
+        question: event.question, status: "running", phase: "scope" }, true) : undefined);
     }
-    const marker = researchUpdates.get(previous);
-    if (marker) researchUpdates.set(updated, marker);
-    return { research: { ...s.research, [sessionId]: current.map((item) => item === previous ? updated : item) } };
-  }),
-  confirmResearchSeen: (sessionId, jobId, receipt) => set((s) => {
-    const current = s.research[sessionId] || [];
-    const previous = current.find((item) => item.id === jobId);
-    const before = previous?.delivery_receipt;
-    if (!previous || !before || before.request_id !== receipt.request_id || before.version !== receipt.version ||
-        receipt.browser_confirmed_version !== before.version) return s;
-    const updated = { ...previous, delivery_receipt: { ...before,
-      browser_confirmed_version: receipt.browser_confirmed_version, browser_confirmed_at: receipt.browser_confirmed_at } };
-    const marker = researchUpdates.get(previous);
-    if (marker) researchUpdates.set(updated, marker);
-    return { research: { ...s.research, [sessionId]: current.map((item) => item === previous ? updated : item) } };
-  }),
-  upsertResearch: (sessionId, job) =>
-    set((s) => {
-      if (job.status === "completed" || "evidence" in job) job = normalizeResearchEvidence(job);
-      const current = s.research[sessionId] || [];
-      const idx = current.findIndex((j) => j.id === job.id);
-      if (idx < 0) {
-        // Inserting a NEW card: only do so from a full payload (started /
-        // snapshot). A bare progress/completed/failed patch for an unknown id
-        // (missed `research_started` after reconnect or in a 2nd tab) would
-        // render a card with no question/status — skip it; the /research
-        // snapshot fetch on session load seeds those properly (Vera review).
-        if (!job.question || !job.status) return {};
-        const added = { ...job } as ResearchJob;
-        researchUpdates.set(added, Symbol());
-        return { research: { ...s.research, [sessionId]: [...current, added] } };
-      }
-      const updated = { ...current[idx], ...job };
-      researchUpdates.set(updated, Symbol());
-      const next = [
-        ...current.slice(0, idx),
-        updated,
-        ...current.slice(idx + 1),
-      ];
-      return { research: { ...s.research, [sessionId]: next } };
-    }),
-  setResearch: (sessionId, jobs, baseline, advanceOnly) => set((s) => {
-    const current = s.research[sessionId] || [];
-    const rows = mergeAuxiliarySnapshot(jobs.map(normalizeResearchEvidence), current, baseline, researchUpdates, advanceOnly).map((item) => {
-      const before = current.find((row) => row.id === item.id)?.delivery_receipt;
-      const receipt = item.delivery_receipt;
-      if (!receipt || before?.request_id !== receipt.request_id || !before.browser_confirmed_version ||
-          before.browser_confirmed_version > receipt.version || before.browser_confirmed_version <= (receipt.browser_confirmed_version ?? 0)) return item;
-      const updated = { ...item, delivery_receipt: { ...receipt,
-        browser_confirmed_version: before.browser_confirmed_version, browser_confirmed_at: before.browser_confirmed_at } };
-      const marker = researchUpdates.get(item);
-      if (marker) researchUpdates.set(updated, marker);
-      return updated;
-    });
-    return { research: { ...s.research, [sessionId]: rows } };
+    return previous && mergeResearchJob(previous, researchEventPatch(event), { kind: "event" });
+  })),
+  applyResearchControl: (sessionId, job, baseline) => set((s) => updateResearch(s, sessionId, job.id, (previous) =>
+    previous?.status === "running" ? mergeResearchJob(previous, job, { kind: "control", baseline }) : previous)),
+  applyResearchDetail: (sessionId, job, baseline, advanceOnly) => set((s) => updateResearch(s, sessionId, job.id, (previous) =>
+    confirmResearchDetail(previous ? mergeResearchJob(previous, job, { kind: "snapshot", baseline, advanceOnly }) : initializeResearchJob(job)))),
+  setResearch: (sessionId, jobs, baseline, canReplace) => set((s) => {
+    const current = s.research[sessionId] ?? [];
+    const known = new Map(current.map((job) => [job.id, job]));
+    const start = new Map((baseline ?? current).map((job) => [job.id, job]));
+    const rows = new Map<string, ResearchJob>();
+    for (const job of jobs) {
+      const previous = known.get(job.id);
+      const advanceOnly = canReplace ? !canReplace(job.id) : false;
+      rows.set(job.id, previous ? mergeResearchJob(previous, job, { kind: "snapshot", baseline: start.get(job.id), advanceOnly })
+        : initializeResearchJob(job));
+    }
+    for (const job of current) {
+      const before = start.get(job.id);
+      if (!rows.has(job.id) && (researchConfirmedByDetail(job) || !before || researchChangedSince(job, before) ||
+        before.status === "running" && job.status !== "running")) rows.set(job.id, job);
+    }
+    return { research: { ...s.research, [sessionId]: [...rows.values()] } };
   }),
 
   delegations: {},

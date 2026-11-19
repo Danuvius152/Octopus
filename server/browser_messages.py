@@ -129,7 +129,9 @@ def _input_parts(value: dict[str, Any] | None, kind: str) -> tuple[dict[str, Any
     return controls, display
 
 
-def _input_view(controls: dict[str, Any] | None, display: dict[str, Any], kind: str, *, minimal: bool = False) -> dict[str, Any] | None:
+def _input_view(
+    controls: dict[str, Any] | None, display: dict[str, Any], kind: str, body: Any, *, minimal: bool = False,
+) -> dict[str, Any] | None:
     if controls is None:
         return None
     if kind == "native_subagent":
@@ -137,6 +139,9 @@ def _input_view(controls: dict[str, Any] | None, display: dict[str, Any], kind: 
         return {**shown, **controls, "display_truncated": shown != display or bool(controls.get("display_truncated"))}
     budget = 512 if minimal else 16 * 1024
     shown = display if encoded_size(display) <= budget else {**_small_fields(display, budget - 256), "preview": _STRUCTURED}
+    if (kind == "result" and isinstance(body, dict) and body.get("status") == "failed"
+            and "rejected_input" in display and "rejected_input" not in shown):
+        shown["rejected_input_preview"] = True
     return {**shown, **controls}
 
 
@@ -163,7 +168,7 @@ def message_view(session_id: str, message: MessageContent) -> BrowserMessageCont
     values = dict(source)
     input_parts = _input_parts(source["tool_input"], message.type)
     values["content"] = _body_view(values["content"], message.type)
-    values["tool_input"] = _input_view(*input_parts, message.type)
+    values["tool_input"] = _input_view(*input_parts, message.type, source["content"])
     compared = dict(values)
     if values["tool_input"] is not None:
         compared["tool_input"] = dict(values["tool_input"])
@@ -179,7 +184,7 @@ def message_view(session_id: str, message: MessageContent) -> BrowserMessageCont
         # Spend display bytes only after the original associations fit. This
         # second, smaller body can rescue a large but representable identity.
         values["content"] = _body_view(source["content"], message.type, minimal=True)
-        values["tool_input"] = _input_view(*input_parts, message.type, minimal=True)
+        values["tool_input"] = _input_view(*input_parts, message.type, source["content"], minimal=True)
         values["body_state"] = "preview"
         values["detail_ref"] = f"/api/sessions/{quote(session_id, safe='')}/messages/{message.seq}" if message.seq is not None else None
         view = BrowserMessageContent.model_validate(values)

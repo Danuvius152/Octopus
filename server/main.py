@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette._utils import get_route_path
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.routing import compile_path
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import deps
@@ -379,19 +380,26 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
         raise RuntimeError(f"Independent service resource cleanup failed: {names}") from failures[0][1]
 
 
-class _HTTPCompression(GZipMiddleware):
-    """MCP streams must send headers before their first event.
+_APP_AGENT_CHAT_ROUTE = compile_path(applications_router.APP_AGENT_CHAT_PATH)[0]
 
-    GZip buffers response.start even for excluded SSE content. An idle MCP
-    GET can therefore disconnect before the outer middleware sees a response.
+
+class _HTTPCompression(GZipMiddleware):
+    """MCP and app agent streams send headers before their first event.
+
+    GZip buffers response.start even for excluded SSE content. Send headers
+    directly so a disconnect before the first body frame can preserve them.
     Match the same root-relative path as Starlette's mounted namespaces.
     """
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and get_route_path(scope).startswith(MOUNT_PREFIX + "/"):
-            await self.app(scope, receive, send)
-        else:
-            await super().__call__(scope, receive, send)
+        if scope["type"] == "http":
+            path = get_route_path(scope)
+            if path.startswith(MOUNT_PREFIX + "/") or (
+                scope["method"] == "POST" and _APP_AGENT_CHAT_ROUTE.fullmatch(path)
+            ):
+                await self.app(scope, receive, send)
+                return
+        await super().__call__(scope, receive, send)
 
 
 app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)

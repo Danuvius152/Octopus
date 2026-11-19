@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 from typing import Any
 
@@ -12,6 +13,7 @@ from ..credential_bindings import validate_credential_binding
 from ..db.credentials import CredentialOwnerUnavailable
 from ..harness import all_backends, get_harness, has_backend, model_settings
 from .base import Session, SessionManagerBase
+from .runtime_types import SessionOwnerUnavailable
 
 
 class SessionConfigurationError(ValueError):
@@ -26,34 +28,37 @@ class ConfigurationMixin(SessionManagerBase):
         assert self.db is not None
         return self.db.configuration_lock
 
+    def _configuration_boundary(self, session: Session) -> AbstractAsyncContextManager[None]:
+        lock = self.configuration_lock
+        owner = self._session_owners.get(id(session))
+        if owner is not None and asyncio.current_task() is owner.task:
+            return owner.runtime.configuration_boundary(lock)
+        return lock
+
     async def capture_request_configuration(self, context: Session) -> tuple[Session, dict[str, Any] | None]:
-        from .owner_runtime import CaptureConfiguration
-
-        current = self.get_session(context.id, context.user_id)
-        if current is None:
+        """Read a consistent configuration without blocking the execution writer."""
+        defaults = self.get_session(context.id, context.user_id)
+        if defaults is None:
             raise SessionConfigurationError("Session not found", 404)
-        return await self._session_owner(current).call_runtime(CaptureConfiguration(context))
-
-    async def _capture_request_configuration(self, context: Session) -> tuple[Session, dict[str, Any] | None]:
-        """Keep original request context; capture defaults after lock acquisition.
-
-        Credential refresh, connectors and other slow preparation run after
-        this returns. Retries retain this value instead of reading it again.
-        """
+        if defaults._archive_reservation is not None or self.session_owner_failed(defaults.id):
+            raise SessionOwnerUnavailable("Session owner is unavailable; retained input requires review")
+        owner = self._session_owners.get(id(defaults))
+        if owner is not None:
+            owner.require_available()
         async with self.configuration_lock:
-            defaults = self.get_session(context.id, context.user_id)
-            if defaults is None:
-                raise SessionConfigurationError("Session not found", 404)
-            configured = replace(context, backend=defaults.backend, credential_id=defaults.credential_id,
-                                 model=defaults.model, reasoning_effort=defaults.reasoning_effort,
-                                 service_tier=defaults.service_tier)
-            agent = await self._load_agent(configured)
+            agent = await self._load_agent(defaults)
             if self.get_session(context.id, context.user_id) is not defaults:
                 raise SessionConfigurationError("Session not found", 404)
             if defaults._admission_closed:
                 raise SessionConfigurationError("Session admission is closed", 409)
-            await self._align_context_locked(defaults, agent)
-            return replace(configured, context_state=defaults.context_state), agent
+            if owner is not None:
+                owner.require_available()
+            # Adopt the same binding the Owner will compare when accepting
+            # an observation. Only the Owner persists live context changes.
+            state = align_context(defaults.context_state, context_target(defaults, agent))
+            return replace(context, backend=defaults.backend, credential_id=defaults.credential_id,
+                           model=defaults.model, reasoning_effort=defaults.reasoning_effort,
+                           service_tier=defaults.service_tier, context_state=state), agent
 
     async def update_session_configuration(
         self, session_id: str, fields: dict[str, Any], user_id: str | None = None,

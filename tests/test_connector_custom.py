@@ -167,9 +167,10 @@ async def test_resolve_connector(db):
     assert (await resolve_connector(db, "github")).kind == "github"
     assert await resolve_connector(db, "ghost") is None
     now = dt.datetime.now(dt.UTC).isoformat()
-    await db.save_custom_connector(
+    await db.create_custom_connector(
         kind="linear", display_name="Linear", authorize_url="a", token_url="t",
-        scopes=["x"], pkce=True, api_base="https://api.linear.app", now=now,
+        scopes=["x"], pkce=True, api_base="https://api.linear.app",
+        client_id="cid", client_secret_encrypted="ciphertext", now=now,
     )
     c = await resolve_connector(db, "linear")
     assert isinstance(c, CustomConnector) and c.kind == "linear"

@@ -41,6 +41,7 @@ import anyio.to_thread
 from .aio import complete_cleanup
 from .crypto import new_dek, unwrap_dek, wrap_dek
 from .db.users import owner_is_available as _owner_is_available
+from .expiry import is_expired
 
 if TYPE_CHECKING:
     from .database import Database
@@ -162,15 +163,13 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _expired(iso: str | None, *, now: datetime | None = None) -> bool:
-    if not iso:
-        return False
-    try:
-        return datetime.fromisoformat(iso) <= (now or datetime.now(UTC))
-    except ValueError:
-        # An unparseable expiry is treated as expired: failing closed is the
-        # only safe reading of "we do not know when this stops being valid".
-        return True
+def _require_valid_invite(invite: dict[str, Any] | None) -> None:
+    if invite is None or invite["revoked_at"] is not None:
+        raise UserError("That invite code is not valid", status_code=403)
+    if is_expired(invite["expires_at"]):
+        raise UserError("That invite code has expired", status_code=403)
+    if invite["used_count"] >= invite["max_uses"]:
+        raise UserError("That invite code has been used", status_code=403)
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +444,7 @@ class UserManager:
 
     @staticmethod
     def _token_user(row: dict[str, Any] | None) -> dict[str, Any] | None:
-        if row is None or row["revoked_at"] or _expired(row["expires_at"]) or row["user"]["disabled_at"]:
+        if row is None or row["revoked_at"] or is_expired(row["expires_at"]) or row["user"]["disabled_at"]:
             return None
         return row["user"]
 
@@ -491,19 +490,14 @@ class UserManager:
         """Create a subsequent account against an invite, or raise.
 
         The code is checked before the name is validated so a wrong code cannot
-        be used to probe which usernames are taken, and it is *claimed* before
-        the user is created so a failure after the claim costs a use rather
-        than leaving a code that was spent on nothing.
+        be used to probe which usernames are taken. A fresh check under the
+        write transaction decides whether to consume a use. The claim commits
+        before account creation, so a failure after the claim costs a use.
         """
         if not await self.db.count_users():
             raise UserError("Complete first-account setup before registering", status_code=409)
-        invite = await self.db.get_invite((invite_code or "").strip())
-        if invite is None or invite["revoked_at"]:
-            raise UserError("That invite code is not valid", status_code=403)
-        if _expired(invite["expires_at"]):
-            raise UserError("That invite code has expired", status_code=403)
-        if invite["used_count"] >= invite["max_uses"]:
-            raise UserError("That invite code has been used", status_code=403)
+        code = (invite_code or "").strip()
+        _require_valid_invite(await self.db.get_invite(code))
 
         prepared = await _password_work(partial(
             self.prepare_user, username=username, password=password, is_admin=False,
@@ -511,7 +505,10 @@ class UserManager:
         if await self.db.get_user_by_username(prepared["username"]) is not None:
             raise UserError("That username is taken", status_code=409)
 
-        if not await self.db.claim_invite(invite["code"]):
-            # Lost a race for the last use.
-            raise UserError("That invite code has been used", status_code=403)
+        async with self.db.transaction(write=True) as tx:
+            if not await self.db._claim_invite(tx, code):
+                _require_valid_invite(await self.db._get_invite(tx, code))
+                # The row stayed stable under the write lock. Only the clock
+                # could make the later explanation see a usable invite.
+                raise UserError("That invite code has expired", status_code=403)
         return await self._insert(prepared)

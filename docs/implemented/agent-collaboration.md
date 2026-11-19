@@ -120,10 +120,18 @@ A delegation child session keeps the ordinary session retention policy:
   and recheck sealing after any required terminal-return observation. An unknown
   original terminal handoff retains that responsibility. With no return to admit,
   the withdrawal precedes archival, so an archive fault cannot block a parent
-  whose work is settled. Setup cleanup archives only the original Session
-  instance. If follow-up setup reopened an archived conversation, rollback
-  can retire that same instance with its history intact. A file check that
-  outlives the Session finishes before admission and rejects the retired instance.
+  whose work is settled. After a structured nonacceptance receipt, a confirmed
+  archive rollback or a failed post-commit archive notification leaves the
+  committed terminal eligible for its original return. For automatic archive
+  and terminal delivery notifications, a required subscriber's own cancellation
+  is a notification failure with the original cause. Cancellation of the task
+  itself propagates. The original cleanup command retains the archive failure
+  together with any ordinary failure during terminal observation. Authoritative
+  storage failure still stops processing. Setup cleanup archives only the
+  original Session instance. If follow-up setup reopened an archived
+  conversation, rollback can retire that same instance with its history intact.
+  A file check that outlives the Session finishes before admission and rejects
+  the retired instance.
 
   Follow-up setup keeps its own admission phase. Typed SessionOwner refusals
   prove no input was accepted and permit restoring the previous round. A plain

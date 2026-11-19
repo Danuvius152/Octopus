@@ -15,13 +15,13 @@ Two routers live here:
 from __future__ import annotations
 
 import asyncio
-import json
 import mimetypes
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from importlib.resources import files
 from urllib.parse import quote, unquote, unquote_to_bytes, urlencode
 
+import anyio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import (
@@ -30,9 +30,11 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
+from starlette.requests import ClientDisconnect
+from starlette.types import Message, Receive, Scope, Send
 
 from .. import deps
-from ..app_agent import AppAgentError, app_agent_manager
+from ..app_agent import APP_REQUEST_STATUS_PATH, AppAgentError, app_agent_manager
 from ..app_backends import (
     BackendAbsentError,
     BackendCapacityError,
@@ -69,6 +71,7 @@ static_router = APIRouter(tags=["applications"])
 # The cookie the SPA sets before mounting an application's iframe. Scoped to
 # /apps so it never rides along with API or SPA requests.
 APP_TOKEN_COOKIE = "octopus_app_token"
+APP_AGENT_CHAT_PATH = "/apps/{app_id}/agent/chat"
 
 # Injected at startup (mirrors the agents/connectors routers).
 _manager: ApplicationManager | None = None
@@ -487,6 +490,10 @@ def _agent_error(e: AppAgentError) -> HTTPException:
     return HTTPException(e.status_code, {"message": e.message, **e.recovery} if e.recovery else e.message)
 
 
+def _app_status_url_prefix(request: Request) -> str:
+    return quote(request.scope.get("root_path", "").rstrip("/"), safe="/")
+
+
 @static_router.get("/apps/{app_id}/agent/client.js", include_in_schema=False)
 async def app_agent_client(request: Request, app_id: str):
     await _application_for_request(request, app_id)
@@ -494,7 +501,7 @@ async def app_agent_client(request: Request, app_id: str):
                     media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
 
-@static_router.get("/apps/{app_id}/agent/conversations/{conversation_id}/requests/{request_id}")
+@static_router.get(APP_REQUEST_STATUS_PATH)
 async def get_app_request_status(request: Request, app_id: str, conversation_id: str, request_id: str):
     await _application_for_request(request, app_id)
     try:
@@ -562,43 +569,63 @@ async def app_agent_ask(
     """One question, one answer. The shape a backend script wants."""
     row = await _application_for_request(request, app_id)
     try:
-        return await app_agent_manager.ask(row, **body.model_dump())
+        return await app_agent_manager.ask(row, status_url_prefix=_app_status_url_prefix(request), **body.model_dump())
     except AppAgentError as e:
         raise _agent_error(e)
 
 
-def _sse(events) -> AsyncIterator[bytes]:
-    """Frame the manager's event dicts as Server-Sent Events.
+_APP_SSE_SEND_TIMEOUT_SECONDS = 10.0
 
-    The type goes in the SSE `event:` field *and* inside the JSON, so a client
-    can use `addEventListener("delta", …)` or a single `onmessage` handler —
-    both are normal, and picking one for the app would be picking wrong half
-    the time.
-    """
 
-    async def gen() -> AsyncIterator[bytes]:
-        async for event in events:
-            payload = json.dumps(event, ensure_ascii=False)
-            yield f"event: {event['type']}\ndata: {payload}\n\n".encode()
-
-    return gen()
+class _AppSSESendTimeout(Exception):
+    pass
 
 
 class AppAgentStreamingResponse(StreamingResponse):
     """The accepted turn's HTTP consumer ends with the full ASGI invocation."""
 
-    def __init__(self, content, *, detach: Callable[[], None], **kwargs):
+    def __init__(self, content: AsyncGenerator[bytes], *, detach: Callable[[], None], **kwargs):
         super().__init__(content, **kwargs)
+        self._content = content
         self._detach = detach
 
-    async def __call__(self, scope, receive, send):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async def bounded_send(message: Message) -> None:
+            try:
+                with anyio.fail_after(_APP_SSE_SEND_TIMEOUT_SECONDS):
+                    await send(message)
+            except TimeoutError as error:
+                raise _AppSSESendTimeout from error
+
+        send_failure = None
         try:
-            await super().__call__(scope, receive, send)
+            async with anyio.create_task_group() as tasks:
+                async def watch_disconnect() -> None:
+                    await self.listen_for_disconnect(receive)
+                    tasks.cancel_scope.cancel()
+
+                # Also watch on ASGI 2.4+, since there may be no write that
+                # detects a disconnect while the response awaits its next frame.
+                tasks.start_soon(watch_disconnect)
+                try:
+                    await self.stream_response(bounded_send)
+                except _AppSSESendTimeout:
+                    pass
+                except OSError as error:
+                    send_failure = error
+                finally:
+                    tasks.cancel_scope.cancel()
+            if send_failure is not None:
+                spec_version = tuple(map(int, scope.get("asgi", {}).get("spec_version", "2.0").split(".")))
+                if spec_version >= (2, 4):
+                    raise ClientDisconnect() from send_failure
+                raise send_failure
         finally:
             self._detach()
+            await self._content.aclose()
 
 
-@static_router.post("/apps/{app_id}/agent/chat", include_in_schema=False)
+@static_router.post(APP_AGENT_CHAT_PATH, include_in_schema=False)
 async def app_agent_chat(
     request: Request, app_id: str, body: AppAgentTurnRequest
 ):
@@ -612,15 +639,19 @@ async def app_agent_chat(
     row = await _application_for_request(request, app_id)
     manager = app_agent_manager
     try:
-        turn = await manager.begin_turn(row, **body.model_dump())
+        turn = await manager.begin_turn(
+            row, observe_stream=True, status_url_prefix=_app_status_url_prefix(request), **body.model_dump(),
+        )
     except AppAgentError as e:
         raise _agent_error(e)
     return AppAgentStreamingResponse(
-        _sse(manager.stream_turn(turn)),
-        detach=lambda: manager.detach_consumer(turn),
+        manager.stream_turn(turn),
+        detach=turn.close_stream,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-store",
+            "X-Octopus-Conversation-Id": turn.session_id,
+            "X-Octopus-Request-Id": turn.request_id,
             # Nginx and friends buffer proxied responses by default, which
             # turns a stream into one lump at the end.
             "X-Accel-Buffering": "no",

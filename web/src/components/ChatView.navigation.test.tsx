@@ -173,13 +173,168 @@ it("settles an automatically confirmed archive after an attachment revokes hando
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
   api.holdList();
   await api.loseResponse();
-  expect(screen.getByRole("alert")).toHaveTextContent("Checking the session list");
+  expect(screen.getByText("Checking archive…")).toHaveAttribute("role", "status");
+  expect(screen.queryByRole("alert")).toBeNull();
   await api.confirmList();
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed. Viewing the archived conversation.");
   expect(screen.queryByRole("button", { name: "Confirm original archive" })).toBeNull();
   expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
   expect(api.fetcher.mock.calls.some(([url]) => new URL(url).pathname === `/api/sessions/${child.id}`)).toBe(false);
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+});
+
+it.each(["restore", "restore and archive again"])("drops the old archive feedback after %s during the successor read", async (change) => {
+  const api = server();
+  const archive = { type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name };
+  mount();
+  api.holdDetail(child.id);
+  command("/archive");
+  act(() => handleWsMessage(archive));
+  await api.loseResponse();
+  expect(api.detailPending()).toBe(true);
+  expect(screen.getByText("Checking archive…")).toBeVisible();
+  expect(screen.queryByRole("textbox")).toBeNull();
+
+  act(() => {
+    handleWsMessage({ type: "session_unarchived", session_id: a.id, session: a });
+    if (change === "restore and archive again") handleWsMessage(archive);
+    else api.setRows([a, b, child]);
+  });
+  await api.confirmDetail();
+
+  if (change === "restore") expect(screen.getByRole("textbox")).toBeEnabled();
+  else expect(screen.queryByRole("textbox")).toBeNull();
+  expect(screen.queryByText("Checking archive…")).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+});
+
+it.each([["lost", 200], ["lost", 503], ["201", 200], ["201", 503]] as const)(
+  "keeps the %s archive receipt across reconnect during a successor read that returns HTTP %s", async (receipt, status) => {
+    const api = server();
+    const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+    const next = { ...source, socket: {} };
+    const fetchSession = api.fetcher.getMockImplementation()!;
+    api.fetcher.mockImplementation(async (url, init) => {
+      const response = await fetchSession(url, init);
+      return status === 503 && new URL(url).pathname === `/api/sessions/${child.id}`
+        ? Response.json({ detail: "Unavailable successor" }, { status }) : response;
+    });
+    await act(async () => { sessions.connect(source); });
+    mount();
+    api.holdDetail(child.id);
+    command("/archive");
+    act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }, source));
+    if (receipt === "lost") await api.loseResponse();
+    else await api.complete(Response.json({ ...child, forked_from_session_id: null, fork_prefilled_prompt: null }, { status: 201 }));
+    expect(api.detailPending()).toBe(true);
+    expect(screen.getByText("Checking archive…")).toBeVisible();
+
+    await act(async () => { sessions.disconnect(source); });
+    const disconnectedFeedback = screen.queryByRole("alert")?.textContent ?? "";
+    await act(async () => { sessions.connect(next); });
+    await api.confirmDetail();
+
+    const receiptMessage = receipt === "lost" ? "Original command result is unknown" : "Archive committed";
+    expect(disconnectedFeedback).toContain(receiptMessage);
+    const feedback = screen.getByRole("alert");
+    expect(feedback).toHaveTextContent(receiptMessage);
+    if (receipt === "lost") {
+      expect(disconnectedFeedback).toContain("Archive confirmed");
+      expect(feedback).toHaveTextContent("Archive confirmed");
+    } else expect(feedback).not.toHaveTextContent("unknown");
+    expect(feedback).not.toHaveTextContent("Could not load session state");
+    expect(screen.getByRole("button", { name: "Open successor" })).toBeEnabled();
+    expect(screen.queryByText("Checking archive…")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+    expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+    await act(async () => { sessions.disconnect(next); });
+  },
+);
+
+it.each(["restore", "restore and archive again", "new service"])(
+  "retires a published archive confirmation after reconnect and %s while keeping the unknown receipt", async (change) => {
+    const api = server();
+    const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+    const next = { ...source, socket: {} };
+    const archive = { type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name };
+    await act(async () => { sessions.connect(source); });
+    mount();
+    api.holdDetail(child.id);
+    command("/archive");
+    act(() => handleWsMessage(archive, source));
+    await api.loseResponse();
+    expect(api.detailPending()).toBe(true);
+    expect(screen.getByText("Checking archive…")).toBeVisible();
+
+    await act(async () => { sessions.disconnect(source); });
+    expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed");
+    await act(async () => { sessions.connect(next); });
+    expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed");
+
+    await act(async () => {
+      if (change === "new service") {
+        useSessionStore.getState().applyDispatchState(a.id, { ...dispatch, generation: "new-service" });
+      } else {
+        handleWsMessage({ type: "session_unarchived", session_id: a.id, session: a }, next);
+        if (change === "restore and archive again") handleWsMessage(archive, next);
+        else api.setRows([a, b, child]);
+      }
+    });
+    await api.confirmDetail();
+
+    const feedback = screen.getByRole("alert");
+    expect(feedback).toHaveTextContent("Original command result is unknown");
+    expect(feedback).not.toHaveTextContent("Archive confirmed");
+    if (change === "restore") expect(screen.getByRole("textbox")).toBeEnabled();
+    else expect(screen.queryByRole("textbox")).toBeNull();
+    expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+    expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+    await act(async () => { sessions.disconnect(next); });
+  },
+);
+
+it("keeps the successful archive receipt after restoration retires a displayed successor read error", async () => {
+  const api = server();
+  const fetchSession = api.fetcher.getMockImplementation()!;
+  api.fetcher.mockImplementation(async (url, init) => new URL(url).pathname === `/api/sessions/${child.id}`
+    ? Response.json({ detail: "Unavailable successor" }, { status: 503 }) : fetchSession(url, init));
+  mount();
+  command("/archive");
+  await api.complete();
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive committed");
+  expect(screen.getByRole("alert")).toHaveTextContent("Could not load session state (HTTP 503)");
+
+  act(() => handleWsMessage({ type: "session_unarchived", session_id: a.id, session: a }));
+  expect(screen.getByRole("textbox")).toBeEnabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive committed");
+  expect(screen.getByRole("alert")).not.toHaveTextContent("Could not load session state");
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+});
+
+it("clears a displayed successor read error on disconnect while preserving the archive confirmation and receipt", async () => {
+  const api = server();
+  const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+  const fetchSession = api.fetcher.getMockImplementation()!;
+  api.fetcher.mockImplementation(async (url, init) => new URL(url).pathname === `/api/sessions/${child.id}`
+    ? Response.json({ detail: "Unavailable successor" }, { status: 503 }) : fetchSession(url, init));
+  await act(async () => { sessions.connect(source); });
+  mount();
+  command("/archive");
+  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }, source));
+  await api.loseResponse();
+  expect(screen.getByRole("alert")).toHaveTextContent("Could not load session state (HTTP 503)");
+
+  await act(async () => { sessions.disconnect(source); });
+  const feedback = screen.getByRole("alert");
+  expect(feedback).not.toHaveTextContent("Could not load session state");
+  expect(feedback).toHaveTextContent("Archive confirmed");
+  expect(feedback).toHaveTextContent("Original command result is unknown");
+  expect(screen.getByRole("button", { name: "Open successor" })).toBeEnabled();
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
 });
 
@@ -291,7 +446,7 @@ it("resumes a hidden successor's remaining budget and ignores layout after it ex
     vi.advanceTimersByTime(1099);
   });
   expect(staged()).toHaveAttribute("inert");
-  act(() => vi.advanceTimersByTime(1));
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
   expect(staged()).toBeNull();
   expect(screen.getByRole("alert")).toHaveTextContent("The successor could not be positioned");
   expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
@@ -323,9 +478,9 @@ it.each(["headers", "success body", "error body"])("bounds the original archive 
     await api.complete(response);
   }
   await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
-  expect(screen.queryByText(/Archive result is unknown/)).toBeNull();
+  expect(screen.queryByText("Checking archive…")).toBeNull();
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  expect(screen.getByText("Checking archive…")).toHaveAttribute("role", "status");
   const post = api.fetcher.mock.calls.find(([, init]) => init?.method === "POST")!;
   expect(post[1]!.signal!.aborted).toBe(true);
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
@@ -356,7 +511,7 @@ it.each([201, 409])("shares the POST header/body deadline and rejects a late HTT
   await act(async () => { await vi.advanceTimersByTimeAsync(999); });
   expect(screen.queryByRole("alert")).toBeNull();
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  expect(screen.getByText("Checking archive…")).toHaveAttribute("role", "status");
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
   const manual = screen.getByRole("button", { name: "Confirm original archive" });
   fireEvent.click(manual);
@@ -364,7 +519,7 @@ it.each([201, 409])("shares the POST header/body deadline and rejects a late HTT
   expect(manual).toBeDisabled();
   // The old body has no authority over this successor read or its deadline.
   await act(async () => body.resolve(status === 201 ? child : { detail: "Late refusal" }));
-  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is still unknown");
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   fireEvent.click(manual);
   await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
@@ -436,6 +591,13 @@ it("retains the original archive through disconnect and uses a new read scope wi
   expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed");
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   expect(useSessionStore.getState().sessionSuccessors[a.id]).toBe(child.id);
+  await act(async () => { sessions.patch(b.id, { status: "running" }); });
+  expect(screen.getByRole("alert")).toHaveTextContent("Archive confirmed");
+  api.setRows([a, b, child]);
+  act(() => handleWsMessage({ type: "session_unarchived", session_id: a.id, session: a }, next));
+  expect(screen.getByRole("textbox")).toBeEnabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
+  expect(screen.getByRole("alert")).not.toHaveTextContent("Archive confirmed");
   expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   sessions.disconnect(next);
 });
@@ -569,7 +731,8 @@ it.each(["network", "json", "shape", "null"])("confirms an unknown %s archive by
   if (failure === "network") await api.loseResponse();
   else await api.complete(failure === "json" ? new Response("invalid JSON") : Response.json(failure === "null" ? null : {}));
   await waitFor(() => expect(api.listPending()).toBe(true));
-  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  expect(screen.getByText("Checking archive…")).toHaveAttribute("role", "status");
+  expect(screen.queryByRole("alert")).toBeNull();
   await api.confirmList();
   expect(useSessionStore.getState().archivedSessions.map((row) => row.id)).toContain(a.id);
   // A list proves archive, but does not identify a successor by name or agent.
@@ -620,7 +783,8 @@ it("keeps a concurrent archive broadcast separate from a lost local POST result"
   api.holdList();
   await api.loseResponse();
   expect(api.listPending()).toBe(true);
-  expect(screen.getByRole("alert")).toHaveTextContent("Archive result is unknown");
+  expect(screen.getByText("Checking archive…")).toHaveAttribute("role", "status");
+  expect(screen.getByRole("alert")).toHaveTextContent("Other tab's settings failed");
   await api.confirmList();
   expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
   expect(screen.getByRole("alert")).toHaveTextContent("Other tab's settings failed");

@@ -4,13 +4,76 @@ import { expect, test } from "./test";
 
 const API = "http://localhost:8765/api";
 
+test.use({ launchOptions: { ignoreDefaultArgs: ["--hide-scrollbars"] } });
+
+test("only a visible chat confirms rendered Research, including cards outside the viewport", async ({ page, request }) => {
+  const headers = { Authorization: `Bearer ${accountToken()}` };
+  const imported = await request.post(`${API}/sessions/import`, { headers, data: {
+    name: "Research foreground", messages: [{ role: "user", type: "text", content: "Original chat" }],
+  } });
+  expect(imported.ok(), await imported.text()).toBeTruthy();
+  const session: { id: string; name: string } = await imported.json();
+  const delivery = { request_id: "foreground-follow-up", version: 1, stage: "queued" };
+  const confirmations: unknown[] = [];
+  let release!: () => void;
+  const researchGate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(`**/api/sessions/${session.id}/research`, async (route) => {
+    await researchGate;
+    await route.fulfill({ json: [{ id: "report", session_id: session.id, question: "Foreground report", status: "completed", phase: "done",
+      injection_status: "delivered", delivery_receipt: delivery }] });
+  });
+  await page.route(`**/api/sessions/${session.id}/research/report/seen`, (route) => {
+    confirmations.push(route.request().postDataJSON());
+    return route.fulfill({ json: { delivery_receipt: { ...delivery, browser_confirmed_version: delivery.version } } });
+  });
+  const paint = () => page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const visibility = (state: DocumentVisibilityState) => page.evaluate((value) => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, state);
+  try {
+    await page.goto("/");
+    await enterAccountCredentials(page);
+    await expect(page.locator(".conn-status.on")).toBeVisible();
+    const agent = page.locator(".agent-item", { hasText: "Octo" });
+    if (!(await agent.locator(".agent-fold.rotate-90").count())) await agent.click();
+    const row = page.locator(".session-item", { hasText: session.name });
+    await row.click();
+    await expect(page.getByText("Original chat", { exact: true })).toBeVisible();
+    await page.locator(".btn-manage-schedules").click();
+    await expect(page.getByText("Original chat", { exact: true })).toBeHidden();
+    release();
+
+    const card = page.locator(".research-card", { hasText: "Foreground report" });
+    await expect(card).toContainText("Report queued for follow-up");
+    await expect(card).toBeHidden();
+    await paint();
+    expect(confirmations).toEqual([]);
+
+    await visibility("hidden");
+    await row.click();
+    await expect(card).toBeVisible();
+    await page.addStyleTag({ content: ".research-card { transform: translateY(100vh); }" });
+    await expect(card).not.toBeInViewport();
+    await paint();
+    expect(confirmations).toEqual([]);
+
+    await visibility("visible");
+    await expect(card).toContainText("Browser received this status");
+    expect(confirmations).toEqual([{ request_id: delivery.request_id, version: delivery.version }]);
+  } finally { release(); }
+});
+
 for (const [scenario, title, initialHeight] of [
   ["handoff", "archive waits for the successor's readable layout before changing the foreground"],
+  ["abandoned", "abandoning a mounted archive successor does not confirm its Research status"],
   ["reopened", "a late archive keeps the reading position of the reopened source"],
   ...[360, 280].map((height) => ["short", `archive keeps the reading position at ${height}px viewport height`, height] as const),
 ] as const) {
 test(title, async ({ page, request }, info) => {
   const reopened = scenario === "reopened";
+  const abandoned = scenario === "abandoned";
+  const checkResearch = scenario === "handoff" || abandoned;
   const headers = { Authorization: `Bearer ${accountToken()}` };
   const imported = await request.post(`${API}/sessions/import`, { headers, data: {
     name: "Archive layout source", messages: [
@@ -21,7 +84,7 @@ test(title, async ({ page, request }, info) => {
   expect(imported.ok(), await imported.text()).toBeTruthy();
   const source: { id: string; name: string } = await imported.json();
   const otherName = "Read another conversation";
-  if (reopened) {
+  if (reopened || abandoned) {
     const other = await request.post(`${API}/sessions/import`, { headers, data: {
       name: otherName, messages: [{ role: "user", type: "text", content: otherName }],
     } });
@@ -61,13 +124,25 @@ test(title, async ({ page, request }, info) => {
     const detail = await response.json();
     await route.fulfill({ response, json: { ...detail, name: "Prepared successor", message_count: 3,
       messages: [{ role: "user", type: "text", seq: 1, content: "Successor first message" }, {
-        role: "assistant", type: "text", seq: 2, content: "A long paragraph in the successor.\n\n".repeat(80),
+        role: "assistant", type: "text", seq: 2,
+        content: "A long paragraph in the successor.\n\n".repeat(80) + (scenario === "handoff" ? "wide".repeat(300) : ""),
       }, { role: "user", type: "text", seq: 3, content: tail }],
       oldest_loaded_seq: 1, next_message_seq: 4, has_more_messages: false,
       pending_questions: [{ question_id: "outside", request_id: "current-request", attempt_id: "current-attempt",
         body_state: "preview", message_seq: 0, detail_ref: `/api/sessions/${successorId}/messages/0`, questions: [] }],
     } });
   });
+  const delivery = { request_id: "successor-follow-up", version: 2, stage: "processed" };
+  const confirmations: unknown[] = [];
+  if (checkResearch) {
+    await page.route((url) => Boolean(successorId) && url.pathname === `/api/sessions/${successorId}/research`, (route) =>
+      route.fulfill({ json: [{ id: "report", session_id: successorId, question: "Successor Research", status: "completed", phase: "done",
+        injection_status: "delivered", delivery_receipt: delivery }] }));
+    await page.route((url) => Boolean(successorId) && url.pathname === `/api/sessions/${successorId}/research/report/seen`, (route) => {
+      confirmations.push(route.request().postDataJSON());
+      return route.fulfill({ json: { delivery_receipt: { ...delivery, browser_confirmed_version: delivery.version } } });
+    });
+  }
   try {
     await page.goto("/");
     await enterAccountCredentials(page);
@@ -168,19 +243,54 @@ test(title, async ({ page, request }, info) => {
     const layoutGate = await page.addStyleTag({ content:
       `[data-chat-session="${successorId}"][inert] .chat-messages { height: 0 !important; flex: none !important; }` });
 
+    const staged = page.locator(`[data-chat-session="${successorId}"][inert]`);
+    const expectNoPreparedConfirmation = async () => {
+      await expect(staged.locator(".research-status")).toContainText("Follow-up processed");
+      await expect(staged.locator(".research-card")).toBeHidden();
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      expect(confirmations).toEqual([]);
+    };
+    if (abandoned) {
+      release();
+      await expectNoPreparedConfirmation();
+      await page.locator(".session-item", { hasText: otherName }).click();
+      await expect(page.locator(".chat-messages").getByText(otherName, { exact: true })).toBeInViewport();
+      await expect(staged).toHaveCount(0);
+      await layoutGate.evaluate((element) => element.parentNode?.removeChild(element));
+      await expect(page.getByText("Successor Research", { exact: true })).toHaveCount(0);
+      expect(confirmations).toEqual([]);
+      expect(writes).toBe(1);
+      return;
+    }
+
+    await page.addStyleTag({ content: `
+      [data-chat-session="${successorId}"] .chat-messages { zoom: 1.1; }
+      [data-chat-session="${successorId}"] .msg-content { font-size: 14.5px; line-height: 1.47; overflow-wrap: normal; }
+    ` });
     const tracker = await page.evaluateHandle(({ marker, successorId }) => {
       let measured: Element | undefined;
       let preparedHeight: number | undefined;
       let preparedTailHeight: number | undefined;
       let first: { sameNode: boolean; sameHeight: boolean; sameTailHeight: boolean; tailInView: boolean;
-        titleInView: boolean; ownedComposer: boolean; height: number } | undefined;
+        fractionalTail: boolean; horizontalScrollbar: boolean; titleInView: boolean; ownedComposer: boolean; height: number } | undefined;
       const transitions: string[] = [];
+      const findTail = (rendered: Element | null | undefined) => Array.from(rendered?.querySelectorAll(".msg-content") ?? [])
+        .find((node) => node.textContent === marker);
+      const tailGeometry = (rendered: Element | null | undefined, content: Element | undefined) => {
+        const rect = content?.getBoundingClientRect(), view = rendered?.getBoundingClientRect();
+        const height = rendered?.querySelector('[data-viewport-type="element"]')?.getBoundingClientRect().height;
+        const bottom = view && height ? view.top + height : 0;
+        return { tailInView: !!rect && !!view && getComputedStyle(content!).visibility === "visible" && rect.top >= view.top && rect.bottom <= bottom + 1,
+          fractionalTail: !!rect && rect.height % 1 !== 0, horizontalScrollbar: !!rendered && !!view && !!height &&
+            rendered.scrollWidth > rendered.clientWidth && view.height > height + 1 };
+      };
       const sample = () => {
         const visible = document.querySelector<HTMLElement>("[data-chat-session]:not([inert])");
         const id = visible?.dataset.chatSession;
         if (id && id !== transitions.at(-1)) transitions.push(id);
+        if (first) return;
         const rendered = Array.from(document.querySelectorAll(".chat-messages")).find((node) => node.textContent?.includes(marker));
-        const content = Array.from(rendered?.querySelectorAll(".msg-content") ?? []).find((node) => node.textContent === marker);
+        const content = findTail(rendered);
         const row = content?.closest("[data-message-key]");
         const rowHeight = row?.getBoundingClientRect().height;
         if (rendered?.closest("[data-chat-session][inert]") && rendered.clientHeight) {
@@ -188,7 +298,7 @@ test(title, async ({ page, request }, info) => {
           preparedHeight = rendered.clientHeight;
           preparedTailHeight = rowHeight;
         }
-        if (id !== successorId || first) return;
+        if (id !== successorId) return;
         const heading = visible!.querySelector(".chat-header");
         const title = heading?.querySelector<HTMLElement>(".crumb-current");
         const glyphs = document.createRange();
@@ -197,25 +307,29 @@ test(title, async ({ page, request }, info) => {
         const titleInView = !!titleRect && title?.textContent === "Prepared successor" &&
           textRect.width > 0 && textRect.left >= titleRect.left && textRect.right <= titleRect.right + 1 &&
           title.contains(document.elementFromPoint(textRect.x + textRect.width / 2, textRect.y + textRect.height / 2));
-        const rect = content?.getBoundingClientRect(), view = rendered?.getBoundingClientRect();
         first = { sameNode: measured === rendered && !!measured,
           sameHeight: preparedHeight !== undefined && preparedHeight === rendered?.clientHeight,
           sameTailHeight: preparedTailHeight !== undefined && preparedTailHeight === rowHeight,
-          tailInView: !!rect && !!view && getComputedStyle(content!).visibility === "visible" && rect.top >= view.top && rect.bottom <= view.bottom + 1,
+          ...tailGeometry(rendered, content),
           titleInView, ownedComposer: Boolean(visible!.querySelector('.chat-input-bar textarea:not([readonly])')),
           height: rendered?.clientHeight ?? 0 };
       };
       const observer = new MutationObserver(sample);
       observer.observe(document.body, { attributes: true, childList: true, subtree: true });
       sample();
-      return { read: () => first, transitions: () => transitions, stop: () => observer.disconnect() };
+      return { read: () => first, sampleTail: () => {
+        const rendered = document.querySelector(`[data-chat-session="${successorId}"]:not([inert]) .chat-messages`);
+        return tailGeometry(rendered, findTail(rendered));
+      },
+        transitions: () => transitions, stop: () => observer.disconnect() };
     }, { marker: tail, successorId });
     try {
       await capturePaint(page, info, async (frames) => {
         release();
-        const preparing = page.locator(`[data-chat-session="${successorId}"][inert] .chat-messages`);
+        const preparing = staged.locator(".chat-messages");
         await expect(preparing).toHaveCount(1);
         expect(await preparing.evaluate((element) => element.clientHeight)).toBe(0);
+        await expectNoPreparedConfirmation();
         await expect(original).toBeInViewport();
         const stagedSourceTop = await sourceViewport.evaluate((element) => element.scrollTop);
         expect(stagedSourceTop).toBe(sourceTop);
@@ -223,14 +337,23 @@ test(title, async ({ page, request }, info) => {
         await expect.poll(() => sourceViewport.evaluate((element) => element.scrollTop)).toBeLessThan(stagedSourceTop - 150);
         await layoutGate.evaluate((element) => element.parentNode?.removeChild(element));
         await expect(page.getByText(tail, { exact: true })).toBeInViewport();
+        await expect(page.locator(`[data-chat-session="${successorId}"]:not([inert]) .research-status`))
+          .toContainText("Browser received this status");
+        expect(confirmations).toEqual([{ request_id: delivery.request_id, version: delivery.version }]);
         await expect(page.getByLabel("Questions outside the history window")).toBeVisible();
         const first = await tracker.evaluate((record) => record.read());
         await info.attach("archive-handoff.json", { contentType: "application/json", body: JSON.stringify({ first, frames }) });
         expect(first).toMatchObject({
-          sameNode: true, sameHeight: true, sameTailHeight: true, tailInView: true, titleInView: true, ownedComposer: true,
+          sameNode: true, sameHeight: true, sameTailHeight: true, tailInView: true, fractionalTail: true,
+          horizontalScrollbar: true, titleInView: true, ownedComposer: true,
         });
         expect(first!.height).not.toBe(height);
         await expect(original).toHaveCount(0);
+        const afterHandoff = await tracker.evaluate(async (record) => {
+          for (let frame = 0; frame < 24; frame++) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          return record.sampleTail();
+        });
+        expect(afterHandoff).toMatchObject({ horizontalScrollbar: true, tailInView: true });
       });
       await page.locator(".chat-input-bar textarea").fill("Continue with the successor");
       await page.getByRole("button", { name: "Send message" }).click();
@@ -391,6 +514,82 @@ for (const outcome of ["refusal", "lost-reply", "partial-failure"] as const) {
       expect(writes).toBe(1);
     } finally {
       await page.unroute(pattern);
+    }
+  });
+}
+
+for (const receipt of ["lost", "received"] as const) {
+  test(`a successor read failure preserves the archived conversation and its ${receipt} archive receipt`, async ({ page, request }) => {
+    const headers = { Authorization: `Bearer ${accountToken()}` };
+    const imported = await request.post(`${API}/sessions/import`, { headers, data: {
+      name: "Archive source with unavailable successor",
+      messages: [{ role: "user", type: "text", content: "Keep the original archive history" }],
+    } });
+    expect(imported.ok(), await imported.text()).toBeTruthy();
+    const source: { id: string; name: string } = await imported.json();
+    let successorId = "", writes = 0, confirmations = 0, detailReads = 0;
+    let releaseConfirmation!: () => void;
+    const confirmationGate = new Promise<void>((resolve) => { releaseConfirmation = resolve; });
+    let releaseDetail!: () => void;
+    const detailGate = new Promise<void>((resolve) => { releaseDetail = resolve; });
+    await page.route(`**/api/sessions/${source.id}/archive`, async (route) => {
+      writes++;
+      const committed = await route.fetch();
+      expect(committed.status()).toBe(201);
+      successorId = (await committed.json()).id;
+      if (receipt === "lost") await route.abort("failed");
+      else await route.fulfill({ response: committed });
+    });
+    await page.route("**/api/sessions?include_archived=true", async (route) => {
+      if (!writes || receipt !== "lost") return route.fallback();
+      confirmations++;
+      await confirmationGate;
+      await route.continue();
+    });
+    await page.route((url) => Boolean(successorId) && url.pathname === `/api/sessions/${successorId}`, async (route) => {
+      detailReads++;
+      await detailGate;
+      await route.fulfill({ status: 503, json: { detail: "Successor state unavailable" } });
+    });
+    try {
+      await page.goto("/");
+      await enterAccountCredentials(page);
+      const agent = page.locator(".agent-item", { hasText: "Octo" });
+      if (!(await agent.locator(".agent-fold.rotate-90").count())) await agent.click();
+      await page.locator(".session-item", { hasText: source.name }).click();
+      const original = page.getByText("Keep the original archive history", { exact: true });
+      await expect(original).toBeVisible();
+      await expect(page.locator(".conn-status.on")).toBeVisible();
+      const chat = page.locator(".chat-view");
+      await chat.locator(".chat-input-bar textarea").fill("/archive");
+      await chat.getByRole("button", { name: "Send message" }).click();
+      const busy = chat.getByRole("status").filter({ hasText: "Checking archive…" });
+      if (receipt === "lost") {
+        await expect.poll(() => confirmations).toBeGreaterThan(0);
+        await expect(busy).toBeVisible();
+        await expect(chat.getByRole("alert")).toHaveCount(0);
+        await expect(chat.getByRole("button", { name: "Confirm original archive" })).toHaveCount(0);
+        await expect(original).toBeVisible();
+        releaseConfirmation();
+      }
+      await expect.poll(() => detailReads).toBe(1);
+      await expect(busy).toBeVisible();
+      await expect(chat.getByRole("alert")).toHaveCount(0);
+      await expect(chat.locator(".chat-archived-banner")).toContainText("viewing read-only history");
+      await expect(chat.getByRole("button", { name: "Open successor" })).toBeEnabled();
+      releaseDetail();
+      const feedback = chat.getByRole("alert").filter({ hasText: "Could not load session state (HTTP 503)" });
+      await expect(feedback).toContainText(receipt === "lost" ? "Archive confirmed" : "Archive committed");
+      if (receipt === "lost") await expect(feedback).toContainText("Original command result is unknown");
+      else await expect(feedback).not.toContainText("unknown");
+      await expect(busy).toHaveCount(0);
+      await expect(original).toBeVisible();
+      await expect(chat.locator(".chat-input-bar textarea")).toHaveCount(0);
+      await expect(chat.getByRole("button", { name: "Open successor" })).toBeEnabled();
+      expect(writes).toBe(1);
+    } finally {
+      releaseConfirmation();
+      releaseDetail();
     }
   });
 }

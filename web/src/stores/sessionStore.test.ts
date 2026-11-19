@@ -28,6 +28,7 @@ describe("sessionStore", () => {
       activeSessionId: null,
       messages: {},
       connected: false,
+      bgTasks: {},
     });
   });
 
@@ -164,7 +165,7 @@ describe("sessionStore", () => {
     expect(tasks.find((t) => t.id === "a")?.exit_code).toBe(0);
   });
 
-  it("setBgTasks replaces the entire list for a session", () => {
+  it("setBgTasks keeps known tasks outside a recent list", () => {
     const { upsertBgTask, setBgTasks } = useSessionStore.getState();
     const base = {
       session_id: "s1",
@@ -181,8 +182,7 @@ describe("sessionStore", () => {
     upsertBgTask("s1", { id: "old", status: "running", ...base });
     setBgTasks("s1", [{ id: "new", status: "completed", ...base, exit_code: 0 }]);
     const tasks = useSessionStore.getState().bgTasks["s1"];
-    expect(tasks).toHaveLength(1);
-    expect(tasks[0].id).toBe("new");
+    expect(tasks.map((task) => task.id)).toEqual(["new", "old"]);
   });
 
   it("opens and closes the file viewer", () => {

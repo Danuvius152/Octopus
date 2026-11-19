@@ -588,7 +588,20 @@ executes as an ordinary request does not leave a stale notice.
 
 Saved inputs **Dismiss notice** commits only a persistent visibility edit,
 then best-effort notifies the original Owner. An unavailable or retired Owner
-does not veto the edit or get recreated. **Stop** interrupts the active request
+does not veto the edit or get recreated. After the server confirms Dismiss,
+the browser removes the notice and retires earlier refresh and pagination
+responses. If a first-page refresh was in flight, the browser replaces it
+with a fresh read. Paging can use the retained cursor while that read is
+pending. When a fresh first page arrives, pages read during that refresh
+remain visible if their cursors still connect to it. Incompatible in-flight
+page reads are canceled and release the pagination control.
+A failed write keeps the target notice and its error visible even if a
+concurrent first page has no room for the notice. Explicit reload or
+another item action, including text-only restore, clears that protection.
+Leaving the account or conversation, or unmounting the view, retires its
+pending requests.
+
+**Stop** interrupts the active request
 and pauses dispatch; **Resume processing** explicitly resumes the backlog.
 An unstarted unattended question-solving return instead expires on Stop and
 completes its original receipt, ending that child's bounded opportunity; it

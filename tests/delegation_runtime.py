@@ -44,7 +44,7 @@ async def notification_runtime(tmp_path, monkeypatch):
     starts, processes, receipts, frames = [], [], [], []
     questioned = set()
     question_entered, release_question = asyncio.Event(), asyncio.Event()
-    controls = SimpleNamespace(enabled=True, archive_error=None)
+    controls = SimpleNamespace(enabled=True, archive_error=None, command_error=None)
     failure = asyncio.CancelledError("Original delegated question publication was cancelled")
     harness = get_harness("codex")
 
@@ -94,19 +94,29 @@ async def notification_runtime(tmp_path, monkeypatch):
     delegations = DelegationManager()
     delegations.bind(manager, database)
 
+    def observed_archive_failure(error):
+        return error is controls.archive_error or (
+            isinstance(error, asyncio.CancelledError) and isinstance(controls.archive_error, asyncio.CancelledError)
+        )
+
     async def confirm_recording():
-        if controls.archive_error is None:
+        failure = controls.command_error
+        if failure is None:
             await delegations.confirm_recording()
+            return
+        if isinstance(failure, asyncio.CancelledError):
+            with pytest.raises(RuntimeError, match="Delegation command was cancelled before cleanup"):
+                await delegations.confirm_recording()
             return
         with pytest.raises(RuntimeError, match="Delegation command cleanup failed") as blocked:
             await delegations.confirm_recording()
-        assert blocked.value.__cause__ is controls.archive_error
+        assert blocked.value.__cause__ is failure
 
     try:
         yield SimpleNamespace(
             manager=manager, delegations=delegations, parent=parent, starts=starts, receipts=receipts,
             frames=frames, entered=question_entered, release=release_question, controls=controls, root=tmp_path,
-            confirm_recording=confirm_recording,
+            confirm_recording=confirm_recording, observed_archive_failure=observed_archive_failure,
         )
     finally:
         release_question.set()
@@ -115,8 +125,8 @@ async def notification_runtime(tmp_path, monkeypatch):
         try:
             try:
                 await asyncio.wait_for(manager.drain_turns(timeout=3), 4)
-            except RuntimeError as error:
-                if error is not controls.archive_error:
+            except (Exception, asyncio.CancelledError) as error:
+                if not observed_archive_failure(error):
                     raise
             await manager.stop_all_held_processes()
             await confirm_recording()

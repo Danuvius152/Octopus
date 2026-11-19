@@ -1,12 +1,16 @@
 """Custom definition deletion orders real OAuth bindings and all-account cleanup."""
 
 import asyncio
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from server import connector_manager
 from server.connector_manager import ConnectorError, ConnectorManager
 from server.connectors.custom import GenericOAuthProvider
 from server.connectors.oauth import ConnectorLoginManager
@@ -58,6 +62,181 @@ async def install(client, kind="linear", headers=None):
     receipt = await client.get(f"/api/connectors/oauth/status/{login_id}", headers=headers)
     assert receipt.json()["status"] == "success"
     return login_id, receipt.json()["installation_id"]
+
+
+async def test_custom_creation_rolls_back_definition_when_client_write_is_rejected(custom_runtime):
+    client, manager, _ = custom_runtime
+    db = manager.db
+    async with db.transaction() as tx:
+        await tx.execute(
+            "CREATE TRIGGER refuse_oauth_client BEFORE INSERT ON connector_oauth_clients "
+            "BEGIN SELECT RAISE(ABORT, 'client insert rejected'); END"
+        )
+
+    await _create_custom(client, expected_status=500)
+    catalog = await client.get("/api/connectors/catalog")
+    assert catalog.status_code == 200
+    assert "linear" not in {entry["kind"] for entry in catalog.json()}
+    assert await db.get_connector_oauth_client("linear") is None
+
+    async with db.transaction() as tx:
+        await tx.execute("DROP TRIGGER refuse_oauth_client")
+
+    created = await _create_custom(client)
+    assert created.json()["available"] is True
+    assert await manager.resolve_client_creds("linear") == ("cid", "csec")
+
+
+async def test_custom_creation_response_survives_deletion_after_commit(custom_runtime, monkeypatch):
+    client, manager, _ = custom_runtime
+    create = manager.create_custom_connector
+
+    async def create_then_delete(**kwargs):
+        result = await create(**kwargs)
+        assert (await client.delete("/api/connectors/custom/linear")).status_code == 204
+        return result
+
+    monkeypatch.setattr(manager, "create_custom_connector", create_then_delete)
+    created = await _create_custom(client, " LINEAR ", display_name=" Linear ")
+    assert created.json() == {
+        "kind": "linear", "display_name": "Linear", "category": "custom",
+        "allows_multiple": True, "available": True, "scopes": ["read"],
+        "custom": True, "setup_url": None, "setup_steps": [],
+    }
+    assert (await client.get("/api/connectors/linear/oauth-client")).status_code == 404
+
+
+async def test_custom_creation_encryption_failure_allows_same_name_retry(custom_runtime, monkeypatch):
+    client, manager, _ = custom_runtime
+
+    def unavailable_encryption(*args):
+        raise ValueError("encryption unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(connector_manager, "encrypt", unavailable_encryption)
+        await _create_custom(client, expected_status=500)
+
+    assert (await client.get("/api/connectors/linear/oauth-client")).status_code == 404
+    assert await manager.db.get_connector_oauth_client("linear") is None
+    await _create_custom(client)
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+async def test_cancel_custom_creation_waiter_keeps_one_complete_state(custom_runtime, monkeypatch, admitted):
+    client, manager, _ = custom_runtime
+    entered, release = asyncio.Event(), asyncio.Event()
+    create, execute = manager.create_custom_connector, manager.db.conn.execute
+
+    async def observed_create(**kwargs):
+        if not admitted:
+            entered.set()
+        return await create(**kwargs)
+
+    async def gated_execute(sql, parameters=()):
+        if sql.startswith("INSERT INTO connector_oauth_clients"):
+            entered.set()
+            await release.wait()
+        return await execute(sql, parameters)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(manager, "create_custom_connector", observed_create)
+        if admitted:
+            patch.setattr(manager.db.conn, "execute", gated_execute)
+        else:
+            await manager._definition_lock.acquire()
+        creating = asyncio.create_task(_create_custom(client))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            creating.cancel()
+            await asyncio.sleep(0)
+            if admitted:
+                assert not creating.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await creating
+        finally:
+            release.set()
+            if not admitted:
+                manager._definition_lock.release()
+            await asyncio.gather(creating, return_exceptions=True)
+
+    info = await client.get("/api/connectors/linear/oauth-client")
+    assert info.status_code == (200 if admitted else 404)
+    assert (await manager.resolve_client_creds("linear")) == (("cid", "csec") if admitted else None)
+
+
+@pytest.mark.parametrize("fault", ["client_write", "before_commit", "after_commit"])
+async def test_custom_creation_storage_failure_exits_before_success(tmp_path, fault):
+    path = tmp_path / "custom-fault.db"
+    program = """
+import asyncio
+import sys
+from pathlib import Path
+
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from server.connector_manager import ConnectorManager
+from server.database import Database
+from server.routers import connectors
+from tests.accounts import create_account
+
+async def main():
+    database = Database(sys.argv[1])
+    await database.initialize()
+    _, bearer = await create_account(database)
+    connectors.set_manager(ConnectorManager(database))
+    app = FastAPI()
+    app.include_router(connectors.router)
+    fault = sys.argv[2]
+    execute, commit = database.conn.execute, database.conn.commit
+    writing_client = False
+
+    async def faulty_execute(sql, parameters=()):
+        nonlocal writing_client
+        if sql.startswith("INSERT INTO connector_oauth_clients"):
+            writing_client = True
+            if fault == "client_write":
+                raise OSError("storage write failed")
+        return await execute(sql, parameters)
+
+    async def faulty_commit():
+        if not writing_client:
+            return await commit()
+        if fault == "after_commit":
+            await commit()
+        raise OSError("commit acknowledgment unavailable")
+
+    database.conn.execute = faulty_execute
+    database.conn.commit = faulty_commit
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
+                           headers={"Authorization": "Bearer " + bearer}) as client:
+        response = await client.post("/api/connectors/custom", json={
+            "kind": "linear", "display_name": "Linear", "authorize_url": "https://provider.test/auth",
+            "token_url": "https://provider.test/token", "api_base": "https://provider.test/api",
+            "client_id": "cid", "client_secret": "csec",
+        })
+        if response.status_code == 201:
+            Path(sys.argv[3]).touch()
+    await database.close()
+
+asyncio.run(main())
+"""
+    success = tmp_path / "created-successfully"
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(path), fault, str(success)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 70, result.stderr
+    assert not success.exists()
+    db = Database(str(path))
+    await db.initialize()
+    try:
+        committed = fault == "after_commit"
+        assert (await db.get_custom_connector("linear") is not None) == committed
+        assert (await db.get_connector_oauth_client("linear") is not None) == committed
+    finally:
+        await db.close()
 
 
 async def test_reconnect_custom_updates_selected_installation_and_enabled_agent(custom_runtime):

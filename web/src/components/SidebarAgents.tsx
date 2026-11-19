@@ -222,7 +222,7 @@ export function SidebarAgents() {
       const accepted = await sessionList.created(session, observation);
       const current = useSessionStore.getState();
       if (accepted && sessionList.current(observation) && current.activeSessionId === start.activeSessionId && current.mainView === start.mainView) {
-        void selectSession(session.id, agentId);
+        void selectSession(session.id, agentId, { fresh: true });
       }
     } catch {
       if (sessionList.accountCurrent(observation)) {

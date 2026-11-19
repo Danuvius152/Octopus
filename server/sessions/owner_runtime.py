@@ -13,6 +13,8 @@ import json
 import time
 import uuid
 from collections import deque
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -27,7 +29,7 @@ from ..credential_bindings import CredentialBindingError
 from ..diagnostics import diagnostic_text, exception_diagnostic, safe_diagnostic
 from ..harness import HarnessCredential, HarnessEvent, HarnessRun, get_harness
 from ..harness.driver import ActiveTurnRef, SteerNotAccepted
-from ..harness.events import HarnessPreparationError
+from ..harness.events import HarnessDeadlineExceeded, HarnessPreparationError
 from ..harness.model_settings import (
     ModelControlError,
     effective_settings,
@@ -140,11 +142,6 @@ class ReadContext:
 
 
 @dataclass(frozen=True)
-class CaptureConfiguration:
-    context: Session
-
-
-@dataclass(frozen=True)
 class UpdateConfiguration:
     fields: dict[str, Any]
     user_id: str | None
@@ -245,7 +242,7 @@ class IdlePublication:
     reply: asyncio.Future[bool] | None = None
 
 
-RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | ReadContext | CaptureConfiguration | UpdateConfiguration | CloseWork | RetireProcess | RetireHeldProcess
+RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | ReadContext | UpdateConfiguration | CloseWork | RetireProcess | RetireHeldProcess
                   | CloseExecution | ReleaseApplication | ReserveFork | OwnForkProcess | ReleaseArchive | AutoArchive | FinishAutoArchive
                   | IdleEvent | CorrelatedControl | RecoveryDismissed | RegisterTicketBatch)
 
@@ -357,7 +354,7 @@ class Execution:
     settlement: _Settlement
     completed: asyncio.Future[None]
     retired: asyncio.Future[None]
-    phase: Literal["claim", "input", "prepare", "start", "stream", "retire", "retry", "terminal"] = "claim"
+    phase: Literal["claim", "input", "prepare", "resume", "start", "stream", "retire", "retry", "terminal"] = "claim"
     operation: asyncio.Task[Any] | None = None
     turn: _Turn | None = None
     attempt: _Attempt | None = None
@@ -377,6 +374,8 @@ class Execution:
     retirement: asyncio.Task[None] | None = None
     publication_failed: bool = False
     input_changed: asyncio.Event = field(default_factory=asyncio.Event)
+    input_history: asyncio.Task[tuple[str | None, bool, str | None]] | None = None
+    input_history_dirty: bool = False
     completion_reason: Literal["expired"] | None = None
 
     def format_exception(self, error: BaseException) -> str:
@@ -511,10 +510,8 @@ class OwnerRuntime:
         session, manager = self.owner.session, self.owner.manager
         if isinstance(command, ReadContext):
             return await manager._read_context_owned(session)
-        if isinstance(command, CaptureConfiguration):
-            return await manager._capture_request_configuration(command.context)
         if isinstance(command, UpdateConfiguration):
-            async with manager.configuration_lock:
+            async with manager._configuration_boundary(session):
                 return await manager._save_session_configuration(session.id, command.fields, command.user_id)
         if isinstance(command, Submit):
             return await self._submit(command)
@@ -718,6 +715,35 @@ class OwnerRuntime:
         if isinstance(command, CorrelatedControl):
             return await _process_owned_command(manager, session, command.data, command.user_id, command.source)
         raise AssertionError(f"Unknown Session command: {type(command).__name__}")
+
+    @asynccontextmanager
+    async def configuration_boundary(self, lock: asyncio.Lock) -> AsyncIterator[None]:
+        execution = self.current
+        deadline = (execution.settlement.overall_deadline
+                    if execution is not None and execution.settlement.outcome is None else None)
+        if deadline is None:
+            async with lock:
+                yield
+            return
+
+        assert execution is not None
+        # Keep the original place in the lock queue and leave the commit with
+        # this Owner. A configuration wait cannot defer the turn deadline.
+        waiter = asyncio.create_task(lock.acquire(), name=f"configuration-lock-{self.owner.session.id}")
+        try:
+            while not waiter.done() and (remaining := deadline - time.monotonic()) > 0:
+                await asyncio.wait({waiter}, timeout=remaining)
+            if execution.settlement.overall_expired_at(time.monotonic()):
+                await self._deadline(execution)
+                self._flush(execution)
+            await asyncio.shield(waiter)
+            yield
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)
+            if not waiter.cancelled() and waiter.exception() is None and waiter.result():
+                lock.release()
 
     def can_close_request(self, request_id: str | None) -> bool:
         """The same original-input boundary survives a failed writer."""
@@ -1433,17 +1459,37 @@ class OwnerRuntime:
     def flush_ready(self) -> None:
         self._flush(self.current)
 
+    def _refresh_input_history(self, execution: Execution) -> None:
+        session, database = self.owner.session, self.owner.manager.db
+        if execution.input_changed.is_set():
+            execution.input_changed.clear()
+            execution.input_history_dirty = True
+            # Saved-input observers follow the committed evidence. The history
+            # read refreshes the Owner's projection independently.
+            self.changed()
+        history = execution.input_history
+        if history is not None:
+            if not history.done():
+                return
+            execution.input_history = None
+            if not execution.input_history_dirty:
+                session.claude_session_id, session.fork_needs_replay, session.fork_metadata = history.result()
+            else:
+                history.exception()
+        if execution.input_history_dirty:
+            execution.input_history_dirty = False
+            if database is not None:
+                request_id = execution.request.request_id
+                execution.input_history = self.task(database.session_input_history(session.id, request_id),
+                                                    f"input-history-{request_id}")
+
     async def advance(self) -> None:
         """Consume a bounded amount of ready evidence before the next command."""
         session, manager = self.owner.session, self.owner.manager
         self._clear_replaced_ticket_batch()
         execution = self.current
-        if execution is not None and execution.input_changed.is_set():
-            execution.input_changed.clear()
-            if manager.db is not None:
-                session.claude_session_id, session.fork_needs_replay, session.fork_metadata = await manager.db.session_input_history(
-                    session.id, execution.request.request_id)
-            self.changed()
+        if execution is not None:
+            self._refresh_input_history(execution)
         idle_prefix_ready = self._offer_idle_publication()
         for key, resource in tuple(session._run.retirements.items()):
             # Real output already handed off by the original reader precedes
@@ -1527,7 +1573,7 @@ class OwnerRuntime:
             self.owner.wake()
             return
         await self._deadline(execution)
-        if execution.interrupted or execution.settlement.outcome is not None and execution.settlement.seq is None:
+        if execution.interrupted or (execution.settlement.outcome is not None and execution.phase != "terminal"):
             if (execution.attempt is not None and getattr(execution.attempt.backend, "captures_retirement_output", False)
                     and not execution.stream_ended):
                 await self._consume_runtime(execution)
@@ -1568,6 +1614,8 @@ class OwnerRuntime:
                 return
             configured = capture_configuration(session)
             request = replace(execution.request)
+            execution.settlement.started_at = time.monotonic()
+            execution.settlement.overall_limit = settings.turn_max_seconds
             if get_harness(configured.backend).runtime_profile(None).native_input_evidence:
                 native_input = NativeInputEvidence(input_id=request.request_id, attempt_id=uuid.uuid4().hex,
                     kind="compact" if request.operation == "compact" else "start")
@@ -1576,9 +1624,12 @@ class OwnerRuntime:
                 await manager.input_database().record_native_input(session.id, request.request_id, native_input)
                 execution.settlement.attempt_id = native_input.attempt_id
             execution.request.started = True
+            execution.phase = "input"
+            if await self._overall_expired(execution):
+                return
             execution.operation = self.task(self._prepare_input(configured, request, execution),
                                             f"request-input-{request.request_id}")
-            execution.phase = "input"
+            self._arm_deadline(execution)
             return
         if execution.phase == "input":
             operation = execution.operation
@@ -1595,17 +1646,25 @@ class OwnerRuntime:
                 return
             await self._input_ready(execution, prepared)
             return
-        if execution.phase == "prepare":
+        if execution.phase in {"prepare", "resume"}:
             operation = execution.operation
             assert operation is not None
             if not operation.done():
                 return
             try:
-                prepared = execution.prepared = operation.result()
+                result = operation.result()
             except Exception as error:
-                await self._failed(execution, error, "backend_exception")
+                self._retire_resume_candidate(execution)
+                code = error.error_code if isinstance(error, HarnessPreparationError) else None
+                await self._failed(execution, error, code or "backend_exception")
                 return
-            await self._begin_attempt(execution, prepared)
+            if execution.phase == "prepare":
+                execution.prepared = result
+                await self._prepare_attempt(execution, result)
+            else:
+                prepared = execution.prepared
+                assert prepared is not None
+                await self._begin_attempt(execution, prepared, prepared.backend, reused=False, resume_id=result)
             return
         if execution.phase in {"start", "stream"}:
             await self._consume_runtime(execution)
@@ -1617,6 +1676,9 @@ class OwnerRuntime:
             if (execution.deadline is not None and execution.deadline.task is not None
                     and not execution.deadline.task.done()):
                 return
+            # A retry may rearm the same overall limit with a new timer.
+            # The retired attempt's cancelled timer can no longer wake it.
+            execution.deadline = None
             try:
                 for resource in session._run.retirements.values():
                     resource.task.result()
@@ -1627,8 +1689,6 @@ class OwnerRuntime:
             return
         if execution.phase == "retry":
             if execution.operation is not None and not execution.operation.done():
-                return
-            if await self._overall_expired(execution):
                 return
             assert execution.prepared is not None and execution.turn is not None
             configured = capture_configuration(execution.prepared.configured)
@@ -1681,8 +1741,8 @@ class OwnerRuntime:
         if request.operation == "compact":
             self.notify_status(SessionStatus.running)
             diagnostic = execution.preparation_diagnostic = PreparationDiagnostic()
-            execution.operation = self.task(self._prepare_run(capture_configuration(session), "", [], diagnostic,
-                compact=True), f"request-prepare-{request.request_id}")
+            execution.operation = self.task(self._prepare_run(capture_configuration(session), "", diagnostic,
+                request_id=request.request_id, compact=True), f"request-prepare-{request.request_id}")
             execution.phase = "prepare"
             self.owner.wake()
             return
@@ -1702,6 +1762,7 @@ class OwnerRuntime:
             message.tool_input["handoff_id"] = request.delivery_id
         seq = await manager._persist_message(session, message, git_head=prepared.git_head,
             git_status_clean=prepared.git_clean, git_ignored_baseline=prepared.git_ignored_baseline)
+        execution.phase = "prepare"
         if request.source == "handoff":
             session.claude_session_id = None
             session.context_state = None
@@ -1718,26 +1779,28 @@ class OwnerRuntime:
         if knowledge.origin.request_id != request.request_id:
             prompt = render(knowledge) + "\n\n" + prompt
         prompt = _augment_prompt_with_attachments(prompt, list(prepared.paths))
-        copied: list[MessageContent] = []
-        if manager.db is not None:
-            try:
-                session.claude_session_id, session.fork_needs_replay, session.fork_metadata = await manager.db.session_input_history(
-                    session.id, request.request_id)
-            except ValueError as error:
-                await self._failed(execution, error, "replay_installation_unknown")
-                return
-        if session.fork_needs_replay and manager.db is not None:
-            cutoff = session.fork_after_seq if session.fork_after_seq is not None else -1
-            copied = [MessageContent(**row) for row in await manager.db.load_messages(session.id, max_seq=cutoff)]
         configured = capture_configuration(session)
+        if await self._overall_expired(execution):
+            return
         diagnostic = execution.preparation_diagnostic = PreparationDiagnostic()
-        execution.operation = self.task(self._prepare_run(configured, prompt, copied, diagnostic), f"request-prepare-{request.request_id}")
-        execution.phase = "prepare"
+        execution.operation = self.task(self._prepare_run(configured, prompt, diagnostic, request_id=request.request_id),
+                                        f"request-prepare-{request.request_id}")
         self.owner.wake()
 
-    async def _prepare_run(self, configured: Session, prompt: str, copied: list[MessageContent], diagnostic: PreparationDiagnostic,
-                           *, compact: bool = False) -> _PreparedRun:
+    async def _prepare_run(self, configured: Session, prompt: str, diagnostic: PreparationDiagnostic,
+                           *, request_id: str, compact: bool = False) -> _PreparedRun:
         manager = self.owner.manager
+        if not compact:
+            database = manager.input_database()
+            try:
+                configured.claude_session_id, configured.fork_needs_replay, configured.fork_metadata = (
+                    await database.session_input_history(configured.id, request_id))
+            except ValueError as error:
+                raise HarnessPreparationError(str(error), error_code="replay_installation_unknown") from error
+            if configured.fork_needs_replay:
+                cutoff = configured.fork_after_seq if configured.fork_after_seq is not None else -1
+                copied = await database.load_messages(configured.id, max_seq=cutoff)
+                prompt = fork_helpers.wrap_for_fork_replay(prompt, [MessageContent(**row) for row in copied])
         configured, agent = await manager.capture_request_configuration(configured)
         harness = get_harness(configured.backend)
         try:
@@ -1759,48 +1822,36 @@ class OwnerRuntime:
                 configured.backend, inherited=not bool(getattr(configured, error.field)),
             )) from error
         connectors = await manager._load_connectors(agent)
-        if configured.fork_needs_replay and not compact:
-            prompt = fork_helpers.wrap_for_fork_replay(prompt, copied)
         if configured.user_id is None:
             raise ValueError("The session has no file owner")
         backend = manager._make_run(configured, agent, connectors)
+        prompt = await self._prepare_backend_input(configured, backend, prompt, compact=compact)
+        return _PreparedRun(configured, agent, credential, connectors, backend, prompt,
+                            context_binding(context_target(configured, agent), configured.context_state))
+
+    async def _prepare_retry(self, captured: Session, prepared: _PreparedRun, prompt: str) -> _PreparedRun:
+        backend = self.owner.manager._make_run(captured, prepared.agent, prepared.connectors)
+        if isinstance(backend, HarnessRun) and isinstance(prepared.backend, HarnessRun):
+            backend.continue_configuration(prepared.backend)
+        prompt = await self._prepare_backend_input(captured, backend, prompt)
+        return replace(prepared, configured=captured, backend=backend, prompt=prompt)
+
+    async def _prepare_backend_input(
+        self, configured: Session, backend: HarnessRun, prompt: str, *, compact: bool = False,
+    ) -> str:
+        if configured.user_id is None:
+            raise ValueError("The session has no file owner")
         if not compact and (not isinstance(backend, HarnessRun) or not backend.profile.inline_large_inputs):
             prompt = await asyncio.to_thread(spill_if_large, configured.id, prompt, user_id=configured.user_id)
         if configured.agent_id:
             from ..agent_memory import ensure_agent_dirs
             await asyncio.to_thread(ensure_agent_dirs, configured.agent_id, configured.user_id)
-        return _PreparedRun(configured, agent, credential, connectors, backend, prompt,
-                            context_binding(context_target(configured, agent), configured.context_state))
+        return prompt
 
-    async def _prepare_retry(self, captured: Session, prepared: _PreparedRun, prompt: str) -> _PreparedRun:
-        if captured.user_id is None:
-            raise ValueError("The session has no file owner")
-        backend = self.owner.manager._make_run(captured, prepared.agent, prepared.connectors)
-        if isinstance(backend, HarnessRun) and isinstance(prepared.backend, HarnessRun):
-            backend.continue_configuration(prepared.backend)
-        if not isinstance(backend, HarnessRun) or not backend.profile.inline_large_inputs:
-            prompt = await asyncio.to_thread(spill_if_large, captured.id, prompt, user_id=captured.user_id)
-        if captured.agent_id:
-            from ..agent_memory import ensure_agent_dirs
-            await asyncio.to_thread(ensure_agent_dirs, captured.agent_id, captured.user_id)
-        return replace(prepared, configured=captured, backend=backend, prompt=prompt)
-
-    async def _begin_attempt(self, execution: Execution, prepared: _PreparedRun) -> None:
-
+    async def _prepare_attempt(self, execution: Execution, prepared: _PreparedRun) -> None:
         if await self._overall_expired(execution):
             return
         session = self.owner.session
-        # Each attempt owns its actual clock. Its predecessor has been joined
-        # by the retirement phase; a cancelled clock cannot time a retry.
-        execution.deadline = None
-        if execution.turn is None:
-            execution.settlement.started_at = time.monotonic()
-            execution.turn = _Turn(
-                prepared.prompt, get_harness(prepared.configured.backend),
-                prepared.configured.credential_id or (prepared.agent or {}).get("credential_id"),
-                execution.settlement,
-                operation=execution.request.operation,
-            )
         backend, reused = prepared.backend, False
         held = session._run.backend
         if held is not None:
@@ -1810,16 +1861,37 @@ class OwnerRuntime:
                 backend, reused = held, True
             else:
                 self.retire(held, "configuration_changed")
-                execution.phase = "prepare"
                 # The completed preparation remains the original result; do
                 # not replace an unretired writer with its candidate.
                 return
         if session._run.retirements:
             return
+        if not reused and isinstance(backend, HarnessRun):
+            # A preceding writer can commit a newer history before it exits.
+            # Keep the candidate owned while waiting for the post-exit read.
+            database = self.owner.manager.input_database()
+            execution.operation = self.task(database.get_session_resume_id(session.id), f"request-resume-{execution.request.request_id}")
+            execution.phase = "resume"
+            return
+        await self._begin_attempt(execution, prepared, backend, reused=reused)
+
+    async def _begin_attempt(
+        self, execution: Execution, prepared: _PreparedRun, backend: HarnessRun, *, reused: bool, resume_id: str | None = None,
+    ) -> None:
+        if await self._overall_expired(execution):
+            return
+        session = self.owner.session
+        if execution.turn is None:
+            execution.turn = _Turn(
+                prepared.prompt, get_harness(prepared.configured.backend),
+                prepared.configured.credential_id or (prepared.agent or {}).get("credential_id"),
+                execution.settlement,
+                operation=execution.request.operation,
+            )
         # Native preparation already owns its first attempt identity. A retry
         # after an actual attempt still gets a fresh identity.
         attempt_id = execution.settlement.attempt_id if execution.attempt is None else None
-        attempt = execution.attempt = _Attempt(backend, prepared.prompt, reused, attempt_id=attempt_id or uuid.uuid4().hex)
+        attempt = _Attempt(backend, prepared.prompt, reused, attempt_id=attempt_id or uuid.uuid4().hex)
         attempt.credential = getattr(backend, "credential", None) if reused else prepared.credential
         attempt.context_binding = prepared.context_binding
         if isinstance(backend, HarnessRun):
@@ -1828,13 +1900,23 @@ class OwnerRuntime:
             execution.turn.harness = Harness(backend.profile)
             database = self.owner.manager.db
             assert database is not None
-            # A prior attempt may commit its history before its reader is
-            # cancelled. The next writer resumes that fact, not a lost event.
-            session.claude_session_id = await database.get_session_resume_id(session.id)
+            if not reused:
+                session.claude_session_id = resume_id
             if execution.request.operation == "compact" and session.claude_session_id != execution.request.native_session_id:
+                execution.attempt = attempt
                 await self._failed(execution, ValueError("The original native history changed before compaction"), "native_history_changed")
                 return
 
+        await self.owner.questions.handle(BeginQuestionAttempt(attempt.attempt_id, attempt.watchdog))
+        if await self._overall_expired(execution):
+            await self.owner.questions.handle(EndQuestionAttempt(attempt.attempt_id, "hard_cap", ()))
+            return
+        if execution.attempt is None and execution.request.operation == "message":
+            session.fork_needs_replay = prepared.configured.fork_needs_replay
+            session.fork_metadata = prepared.configured.fork_metadata
+        execution.attempt = attempt
+        if isinstance(backend, HarnessRun):
+            backend.bind_turn_deadline(execution.settlement.overall_deadline)
             input_changed, wake = execution.input_changed, self.owner.wake
             request_id, history_attempt_id = execution.request.request_id, attempt.attempt_id
             backend_name = backend.profile.backend
@@ -1879,17 +1961,16 @@ class OwnerRuntime:
         if hasattr(backend, "bind_activity"):
             execution.activity_token = backend.bind_activity(activity.observe)
         if hasattr(backend, "bind_observation_clock"):
-            turn = execution.turn
-            assert turn is not None
-            started_at, watchdog = turn.started_at, attempt.watchdog
+            started_at, watchdog = execution.settlement.started_at, attempt.watchdog
+            assert started_at is not None
+            overall_limit = execution.settlement.overall_limit
             backend.bind_observation_clock(lambda at: {
                 "overall_elapsed_ms": max(0, at - started_at) * 1000,
                 "idle_elapsed_ms": max(0, at - watchdog["last"]) * 1000,
-                "overall_limit_ms": settings.turn_max_seconds * 1000 if settings.turn_max_seconds > 0 else None,
+                "overall_limit_ms": overall_limit * 1000 if overall_limit > 0 else None,
                 "idle_limit_ms": settings.turn_idle_timeout_seconds * 1000 if settings.turn_idle_timeout_seconds > 0 else None,
                 "idle_suspended": bool(watchdog.get("waiting_questions")),
             })
-        await self.owner.questions.handle(BeginQuestionAttempt(attempt.attempt_id, attempt.watchdog))
         execution.frames.append({"type": "attempt_started", "session_id": session.id,
                                  "request_id": execution.request.request_id, "attempt_id": attempt.attempt_id})
         execution.start_ended, execution.stream_ended = False, False
@@ -1903,7 +1984,7 @@ class OwnerRuntime:
         execution.operation = self.task(self._start_original(
             backend, prepared.prompt, reused, prepared.configured.working_dir,
             session.claude_session_id, prepared.credential, session._run.wiki_task_id,
-            compact=execution.request.operation == "compact",
+            compact=execution.request.operation == "compact", overall_deadline=execution.settlement.overall_deadline,
         ), f"runtime-start-{attempt.attempt_id}")
         execution.phase = "start"
         self._arm_deadline(execution)
@@ -1911,8 +1992,10 @@ class OwnerRuntime:
     async def _start_original(
         self, backend: HarnessRun, prompt: str, reused: bool, working_dir: str,
         resume_id: str | None, credential: HarnessCredential | None, wiki_task_id: str | None,
-        *, compact: bool = False,
+        *, compact: bool, overall_deadline: float | None,
     ) -> None:
+        if overall_deadline is not None and time.monotonic() >= overall_deadline:
+            return  # The task completion wakes the Owner to apply the original deadline.
         if hasattr(backend, "bind_wiki_task"):
             backend.bind_wiki_task(wiki_task_id)
         if compact:
@@ -1926,55 +2009,66 @@ class OwnerRuntime:
             await backend.start(prompt, working_dir, resume_id, credential=credential)
 
     def _arm_deadline(self, execution: Execution) -> None:
-        attempt, turn = execution.attempt, execution.turn
-        if attempt is None or turn is None or execution.interrupted:
+        if execution.interrupted or execution.settlement.outcome is not None:
             return
-        if getattr(attempt.backend, "captures_retirement_output", False) and not attempt.backend.question_admission_open:
+        attempt = execution.attempt if execution.phase in {"start", "stream"} else None
+        if attempt is not None and getattr(attempt.backend, "captures_retirement_output", False) and not attempt.backend.question_admission_open:
             # The original run has frozen execution and started its bounded
             # retirement. Late records cannot restart the active root's clock.
             if execution.deadline is not None:
                 execution.deadline.cancel()
                 execution.deadline = None
             return
-        deadlines = []
-        if settings.turn_max_seconds > 0:
-            deadlines.append(turn.started_at + settings.turn_max_seconds)
-        if settings.turn_idle_timeout_seconds > 0 and not attempt.watchdog.get("waiting_questions"):
+        overall = execution.settlement.overall_deadline
+        deadlines = [overall] if overall is not None else []
+        if attempt is not None and settings.turn_idle_timeout_seconds > 0 and not attempt.watchdog.get("waiting_questions"):
             deadlines.append(attempt.watchdog["last"] + settings.turn_idle_timeout_seconds)
         if execution.deadline is None:
+            if not deadlines and attempt is None:
+                return
             deadline = execution.deadline = RuntimeDeadline()
-            deadline.task = self.task(deadline.wait(self.owner.wake), f"runtime-deadline-{attempt.attempt_id}")
+            deadline.task = self.task(deadline.wait(self.owner.wake), f"runtime-deadline-{execution.request.request_id}")
         execution.deadline.when = min(deadlines) if deadlines else None
         execution.deadline.expired = False
         execution.deadline.changed.set()
 
-    async def _deadline(self, execution: Execution | None) -> None:
-        if (execution is None or execution.interrupted or execution.attempt is None or execution.turn is None
-                or execution.attempt.timeout is not None):
+    async def _deadline(self, execution: Execution) -> None:
+        if execution.interrupted or execution.settlement.outcome is not None:
+            return
+        if execution.phase in {"input", "prepare", "resume", "retry"}:
+            await self._overall_expired(execution)
+            return
+        attempt = execution.attempt
+        if execution.phase not in {"start", "stream"} or attempt is None or attempt.timeout is not None:
             return
         activity = execution.activity
         if activity is not None and activity.latest > activity.consumed:
             activity.consumed = activity.latest
-            execution.attempt.touch(activity.latest)
+            attempt.touch(activity.latest)
             self._arm_deadline(execution)
-        if getattr(execution.attempt.backend, "captures_retirement_output", False) and not execution.attempt.backend.question_admission_open:
+        if getattr(attempt.backend, "captures_retirement_output", False) and not attempt.backend.question_admission_open:
             self._arm_deadline(execution)
             return
-        if execution.deadline is None or not execution.deadline.expired:
-            return
-        attempt, turn = execution.attempt, execution.turn
+        deadline = execution.deadline
         now = time.monotonic()
-        reason = None
-        if settings.turn_max_seconds > 0 and now - turn.started_at >= settings.turn_max_seconds:
-            reason = ("overall", settings.turn_max_seconds)
+        if execution.settlement.overall_expired_at(now):
+            reason = ("overall", execution.settlement.overall_limit)
+        elif deadline is None or not deadline.expired:
+            return
         elif (settings.turn_idle_timeout_seconds > 0 and not attempt.watchdog.get("waiting_questions")
               and now - attempt.watchdog["last"] >= settings.turn_idle_timeout_seconds):
             reason = ("idle", settings.turn_idle_timeout_seconds)
-        if reason is None:
+        else:
             self._arm_deadline(execution)
             return
+        await self._stop_timed_out_attempt(execution, reason)
+
+    async def _stop_timed_out_attempt(self, execution: Execution, reason: tuple[str, int]) -> None:
+        attempt = execution.attempt
+        assert attempt is not None
         attempt.watchdog["tripped"] = reason
-        execution.deadline.cancel()
+        if execution.deadline is not None:
+            execution.deadline.cancel()
         self.owner.session._steer_open = False
         execution.retirement = self.retire(attempt.backend, "parent_timeout")
         if execution.operation is not None and not execution.operation.done():
@@ -2002,6 +2096,10 @@ class OwnerRuntime:
             execution.start_ended = True
             try:
                 execution.operation.result()
+            except HarnessDeadlineExceeded:
+                if not execution.interrupted:
+                    await self._stop_timed_out_attempt(execution, ("overall", execution.settlement.overall_limit))
+                    return
             except HarnessPreparationError as error:
                 attempt.preparation_failed = True
                 manager._capture_error_text(attempt, HarnessEvent(type="error", content=str(error), error_code=error.error_code))
@@ -2089,13 +2187,20 @@ class OwnerRuntime:
         if self.owner.questions.mcp_calls:
             return
         settlement = execution.settlement
+        timeout = attempt.timeout
+        overall_timeout = (timeout is not None and timeout[0] == "overall") or attempt.overall_expired_at_end(settlement)
+        overall_timeout_before_input = overall_timeout and getattr(attempt.backend, "input_may_have_run", None) is False
+        # The retired writer's unsent-input proof is enough to settle its hard
+        # cap. A pending history projection still belongs to this execution.
+        if execution.input_history is not None and not overall_timeout_before_input:
+            return
         if execution.request.source == "handoff":
             turn.continuation_id = session.claude_session_id
         elif attempt.conversation_id is not None:
             turn.continuation_id = attempt.conversation_id
         if attempt.result is not None and attempt.result.cost is not None:
             settlement.cost = (settlement.cost or 0) + attempt.result.cost
-        if session.fork_needs_replay and manager.db is not None:
+        if session.fork_needs_replay and manager.db is not None and not overall_timeout_before_input:
             # A retry needs the committed installation fact too. Its generic
             # continuation cannot stand in for the original replay input.
             session.claude_session_id, session.fork_needs_replay, session.fork_metadata = await manager.db.session_input_history(
@@ -2119,10 +2224,9 @@ class OwnerRuntime:
             execution.frames.extend({**event, "retrying": True} for event in decision.events)
             if decision.prompt is not None:
                 turn.current_prompt = decision.prompt
-            remaining = manager._remaining_turn_time(turn)
-            delay = decision.delay if remaining is None else min(decision.delay, remaining)
-            execution.operation = self.task(asyncio.sleep(delay), f"runtime-retry-{attempt.attempt_id}")
+            execution.operation = self.task(asyncio.sleep(decision.delay), f"runtime-retry-{attempt.attempt_id}")
             execution.phase = "retry"
+            self._arm_deadline(execution)
             self.owner.wake()
             return
         detail = decision.events[-1] if decision.events else {}
@@ -2175,22 +2279,29 @@ class OwnerRuntime:
             for location in getattr(attempt.backend, "protocol_locations", [])[:max(0, 8 - len(settlement.protocol_locations))])
 
     async def _overall_expired(self, execution: Execution) -> bool:
-        turn, manager = execution.turn, self.owner.manager
-        if turn is None:
+        if not execution.settlement.overall_expired_at(time.monotonic()):
             return False
-        remaining = manager._remaining_turn_time(turn)
-        if remaining is None or remaining > 0:
-            return False
+        if execution.deadline is not None:
+            execution.deadline.cancel()
+        if execution.phase == "retry" and execution.operation is not None:
+            execution.operation.cancel()
+        session, manager = self.owner.session, self.owner.manager
         event = await manager._surface_turn_timeout(
-            self.owner.session, reason="overall", limit=settings.turn_max_seconds,
-            backend=turn.harness.backend, retries=turn.settlement.recovery["idle"],
+            session, reason="overall", limit=execution.settlement.overall_limit,
+            backend=session.backend, retries=execution.settlement.recovery["idle"],
         )
+        request = execution.request
+        rejected_input = None
+        if (execution.phase == "input" and execution.settlement.attempt_id is None
+                and isinstance(request, QueuedPrompt) and request.source == "human"):
+            rejected_input = {"content": request.prompt, "attachment_ids": request.attachment_ids}
         await self.settle(
             execution, status="failed",
             message=event["message"], code=event["code"],
+            rejected_input=rejected_input,
         )
-        execution.phase = "terminal"
-        self.owner.wake()
+        # Keep the preparation phase until the selected outcome's cleanup
+        # joins the original task and retires any candidate it returns.
         return True
 
     async def _failed(self, execution: Execution, error: Exception, code: str) -> None:
@@ -2234,6 +2345,11 @@ class OwnerRuntime:
             execution.phase = "terminal"
         self.owner.wake()
 
+    def _retire_resume_candidate(self, execution: Execution) -> None:
+        if execution.phase == "resume" and execution.prepared is not None:
+            execution.retirement = self.retire(execution.prepared.backend, "late_preparation")
+            execution.prepared = None
+
     async def _finish_selected(self, execution: Execution) -> None:
         if self.steer is not None and self.steer.execution is execution:
             return
@@ -2249,7 +2365,8 @@ class OwnerRuntime:
                     if isinstance(result, _PreparedRun):
                         execution.retirement = self.retire(result.backend, "late_preparation")
                         execution.operation = None
-        if execution.attempt is not None and execution.retirement is None:
+        self._retire_resume_candidate(execution)
+        if execution.interrupted and execution.attempt is not None and execution.retirement is None:
             execution.retirement = self.retire(execution.attempt.backend, "user_stop")
         if execution.retirement is not None:
             if not execution.retirement.done():
@@ -2285,7 +2402,7 @@ class OwnerRuntime:
             return False
         if self.steer is not None and self.steer.execution is execution:
             return False
-        for operation in (execution.operation, execution.reader.task if execution.reader is not None else None,
+        for operation in (execution.operation, execution.input_history, execution.reader.task if execution.reader is not None else None,
                           execution.deadline.task if execution.deadline is not None else None):
             if operation is not None and not operation.done():
                 return False
@@ -2587,9 +2704,9 @@ class OwnerRuntime:
         if execution is not None:
             if execution.operation is not None:
                 operations.add(execution.operation)
-                if execution.phase not in {"input", "prepare"} and not execution.operation.done():
+                if execution.phase not in {"input", "prepare", "resume"} and not execution.operation.done():
                     execution.operation.cancel()
-            for task in (execution.reader.task if execution.reader is not None else None,
+            for task in (execution.input_history, execution.reader.task if execution.reader is not None else None,
                          execution.deadline.task if execution.deadline is not None else None):
                 if task is not None:
                     operations.add(task)
@@ -2611,6 +2728,8 @@ class OwnerRuntime:
             for result in results:
                 if isinstance(result, _PreparedRun):
                     await result.backend.stop()
+        if execution is not None and execution.phase == "resume" and execution.prepared is not None:
+            await execution.prepared.backend.stop()
         backend = self.owner.session._run.backend
         if backend is not None:
             await backend.stop()

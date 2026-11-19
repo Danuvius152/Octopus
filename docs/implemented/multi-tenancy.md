@@ -14,6 +14,14 @@ The old pre-account business mode, installation adoption, global access-token
 rotation and its recovery route have been retired. Current account transfer is
 the explicit [offline operation](../backup-and-migrate.md#account-export-and-import).
 
+Registration checks the invitation before validating the username. The SQLite
+write that consumes a use also requires an unrevoked invitation with a remaining
+use and checks its expiry against the current time as the statement executes.
+The precheck and the write use the same deadline interpretation. A refused
+claim leaves usage untouched and ends registration before account creation.
+The invitation use commits before account creation, so a later registration
+failure leaves that use spent. [SQLite registration tests](../../tests/test_users.py)
+
 The browser's Login, Setup and Register actions share one synchronous POST
 admission before the first await. Enter and button activation cannot issue a
 second request while it is held. Native IME composition, including key code 229,

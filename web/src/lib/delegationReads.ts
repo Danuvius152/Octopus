@@ -2,22 +2,24 @@ import { accountFetch } from "./accountFetch";
 import { sessions } from "./sessionList";
 import { readDispatchState } from "./sessionDispatch";
 import { TaskSnapshotReads } from "./snapshotReads";
+import { qualifyPairedSnapshot, type DetailGeneration, type DetailPair } from "./sessionSnapshotFlights";
 import { isDelegationState } from "./delegationState";
 import { useSessionStore, type Delegation } from "../stores/sessionStore";
 
-type Detail = Record<string, unknown> | null;
 type Work = Pick<Delegation, "delegation_id" | "work_id">;
 type Result = { rows: Delegation[] } | { error: unknown };
 type Lifetime = ReturnType<typeof sessions.observe>;
 interface Demand {
-  lifetime: Lifetime; work?: Work; detail?: Promise<Detail>;
+  lifetime: Lifetime; work?: Work; pair?: DetailPair;
   status?: (unavailable: boolean) => void;
+  cancelReplacement?: () => void;
   finish: (rows: Delegation[] | null, error?: unknown) => void;
   cancelled: Promise<null>; cancel: () => void;
 }
 interface Flight {
   start: ReturnType<typeof useSessionStore.getState>; lifetime: Lifetime;
   order: ReturnType<TaskSnapshotReads["begin"]>; controller: AbortController;
+  generation?: DetailGeneration;
   response: Promise<Result>; users: Set<Demand>; startedWith: Set<Demand>;
   settled: boolean; published: boolean;
 }
@@ -41,37 +43,31 @@ class DelegationReads {
 
   retire() { for (const demand of [...this.demands]) demand.finish(null); }
 
-  observe(detail?: Promise<Detail>, work?: Work, status?: Demand["status"], fresh = false) {
+  observe(pair?: DetailPair, work?: Work, status?: Demand["status"], fresh = false) {
     let resolve!: (rows: Delegation[] | null) => void, reject!: (error: unknown) => void;
     const done = new Promise<Delegation[] | null>((yes, no) => { resolve = yes; reject = no; });
     if (work) void done.catch(() => {});
     let cancel!: () => void;
     const cancelled = new Promise<null>((yes) => { cancel = () => yes(null); });
     const demand: Demand = {
-      lifetime: sessions.observe(this.sessionId), detail, work, status, cancelled, cancel,
+      lifetime: sessions.observe(this.sessionId), pair, work, status, cancelled, cancel,
       finish: (rows, error) => { if (error !== undefined) reject(error); else resolve(rows); this.remove(demand); },
     };
     this.demands.add(demand);
-    if (fresh) this.attach(demand, this.start(true));
+    if (fresh) this.attach(demand, this.start(true, pair?.generation));
     else if (this.ordinary && sessions.current(this.ordinary.lifetime.observation)) this.attach(demand, this.ordinary);
     else if (this.failures >= 3) {
       status?.(true);
       if (!work) demand.finish(null, new Error("Automatic delegation refresh is paused. Refresh status explicitly."));
-    } else if (!work || this.timer === undefined) this.attach(demand, this.start());
+    } else if (!work || this.timer === undefined) this.attach(demand, this.start(false, pair?.generation));
     return { done, cancel: () => demand.finish(null) };
   }
 
   private remove(demand: Demand) {
     if (!this.demands.delete(demand)) return;
+    demand.cancelReplacement?.();
     demand.cancel(); demand.lifetime.finish();
-    for (const flight of this.flights) {
-      if ([...flight.users].every((user) => !this.demands.has(user))) {
-        // The coordinator can outlive one flight (for example a forced read
-        // still has a reader). Withdraw admission before abort can settle.
-        if (this.ordinary === flight) this.ordinary = undefined;
-        flight.controller.abort();
-      }
-    }
+    for (const flight of this.flights) this.abortUnused(flight);
     if (!this.demands.size) {
       if (this.timer !== undefined) clearTimeout(this.timer);
       this.timer = undefined;
@@ -79,7 +75,15 @@ class DelegationReads {
     }
   }
 
-  private start(fresh = false): Flight {
+  private abortUnused(flight: Flight) {
+    if ([...flight.users].some((user) => this.demands.has(user))) return;
+    // The coordinator can outlive one flight, for example when a forced
+    // read still has a reader. Withdraw admission before abort can settle.
+    if (this.ordinary === flight) this.ordinary = undefined;
+    if (!flight.settled) flight.controller.abort();
+  }
+
+  private start(fresh = false, generation?: DetailGeneration): Flight {
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
     const start = useSessionStore.getState();
@@ -97,7 +101,7 @@ class DelegationReads {
       }
       return { rows: rows as Delegation[] };
     }).catch((error: unknown) => ({ error }));
-    const flight: Flight = { start, lifetime, controller, response, order: pending.begin(this.sessionId),
+    const flight: Flight = { start, lifetime, controller, generation, response, order: pending.begin(this.sessionId),
       users: new Set(), startedWith: new Set(this.demands), settled: false, published: false };
     this.flights.add(flight);
     if (!fresh) this.ordinary = flight;
@@ -121,13 +125,24 @@ class DelegationReads {
     flight.users.add(demand);
     void (async () => {
       try {
-        const detail = demand.detail ? await Promise.race([demand.detail.catch(() => null), demand.cancelled]) : undefined;
-        const result = await Promise.race([flight.response, demand.cancelled]);
+        const detail = demand.pair ? await Promise.race([demand.pair.accepted.catch(() => null), demand.cancelled]) : undefined;
         if (!this.demands.has(demand)) return;
         const generation = detail ? readDispatchState(detail.dispatch_state)?.generation : undefined;
-        if (demand.detail && !detail || !sessions.current(demand.lifetime.observation, generation) ||
-            !sessions.current(flight.lifetime.observation, generation)) { demand.finish(null); return; }
-        if (!result) return;
+        const qualify = () => qualifyPairedSnapshot(demand.lifetime.observation, flight.lifetime.observation, generation, flight.generation);
+        const qualification = qualify();
+        if (demand.pair && !detail || qualification === "obsolete") { demand.finish(null); return; }
+        if (qualification === "new-generation") {
+          flight.users.delete(demand);
+          this.abortUnused(flight); this.release(flight);
+          const next = coordinator(this.sessionId).observe();
+          demand.cancelReplacement = next.cancel;
+          try { demand.finish(await next.done); }
+          catch (error) { demand.finish(null, error); }
+          return;
+        }
+        const result = await Promise.race([flight.response, demand.cancelled]);
+        if (!result || !this.demands.has(demand)) return;
+        if (qualify() !== "current") { demand.finish(null); return; }
         if ("error" in result) {
           if (demand.work) demand.status?.(this.failures >= 3);
           else demand.finish(null, result.error);
@@ -183,8 +198,8 @@ function coordinator(sessionId: string) {
 }
 
 /** One-shot hydration shares transport, retaining its accepted-detail gate. */
-export function observeDelegations(sessionId: string, acceptedDetail?: Promise<Detail>) {
-  return coordinator(sessionId).observe(acceptedDetail);
+export function observeDelegations(sessionId: string, pair?: DetailPair, options?: { fresh?: boolean }) {
+  return coordinator(sessionId).observe(pair, undefined, undefined, options?.fresh);
 }
 
 /** Exact-work demand ends independently of other cards or the server's work. */

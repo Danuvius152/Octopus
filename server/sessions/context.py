@@ -27,14 +27,14 @@ class ContextMixin(SessionManagerBase):
 
     async def _reset_context_owned(self, session: Session) -> None:
         assert self.db is not None
-        async with self.db.configuration_lock:
+        async with self._configuration_boundary(session):
             agent = await self._load_agent(session)
             await self._save_context(session, invalidate_context(session.context_state,
                 context_target(session, agent), "native_context_changed", binding=True))
 
     async def _unconfirmed_context_owned(self, session: Session) -> None:
         assert self.db is not None
-        async with self.db.configuration_lock:
+        async with self._configuration_boundary(session):
             agent = await self._load_agent(session)
             await self._save_context(session, invalidate_context(session.context_state,
                 context_target(session, agent), "operation_unconfirmed"))
@@ -72,7 +72,7 @@ class ContextMixin(SessionManagerBase):
 
     async def _read_context_owned(self, session: Session) -> ContextState | None:
         assert self.db is not None
-        async with self.db.configuration_lock:
+        async with self._configuration_boundary(session):
             agent = await self._load_agent(session)
             await self._align_context_locked(session, agent)
             return session.context_state
@@ -92,7 +92,7 @@ class ContextMixin(SessionManagerBase):
             return
         attempt.context_observation_seq = source.observation_seq
         assert self.db is not None
-        async with self.db.configuration_lock:
+        async with self._configuration_boundary(session):
             agent = await self._load_agent(session)
             await self._align_context_locked(session, agent)
             target = context_target(session, agent)

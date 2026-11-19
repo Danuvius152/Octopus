@@ -164,14 +164,15 @@ async def test_github_rename_keeps_original_installation_and_agent_authorization
     assert {row["id"] for row in (await client.get("/api/connectors")).json()} == {selected, other["installation_id"]}
 
 
-async def _create_custom(client, kind="linear", **overrides):
+async def _create_custom(client, kind="linear", *, expected_status=201, **overrides):
     response = await client.post("/api/connectors/custom", json={
         "kind": kind, "display_name": kind.title(), "authorize_url": "https://provider.test/authorize",
         "token_url": "https://provider.test/token", "scopes": ["read"], "pkce": True,
         "api_base": "https://provider.test/api", "client_id": "cid", "client_secret": "csec",
         **overrides,
     })
-    assert response.status_code == 201, response.text
+    assert response.status_code == expected_status, response.text
+    return response
 
 
 @pytest.mark.parametrize(("public_base", "request_base", "forwarded", "expected_base"), [

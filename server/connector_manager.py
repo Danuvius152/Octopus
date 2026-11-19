@@ -161,19 +161,19 @@ class ConnectorManager:
             raise ConnectorError(f"{kind!r} is a built-in connector")
 
         async def create() -> dict[str, Any]:
+            duplicate = f"a custom connector {kind!r} already exists"
             if await self.db.get_custom_connector(kind) is not None:
-                raise ConnectorError(f"a custom connector {kind!r} already exists")
-            now = datetime.now(UTC).isoformat()
-            await self.db.save_custom_connector(
+                raise ConnectorError(duplicate)
+            row = await self.db.create_custom_connector(
                 kind=kind, display_name=display_name.strip() or kind,
                 authorize_url=authorize_url.strip(), token_url=token_url.strip(),
-                scopes=list(scopes), pkce=bool(pkce), api_base=api_base.strip(), now=now,
+                scopes=list(scopes), pkce=bool(pkce), api_base=api_base.strip(),
+                client_id=client_id, client_secret_encrypted=encrypt(client_secret, master_key()),
+                now=datetime.now(UTC).isoformat(),
             )
-            # Client creds reuse the in-app config store (same as built-ins).
-            await self._store_client_creds(kind, client_id, client_secret)
-            row = await self.db.get_custom_connector(kind)
-            assert row is not None
-            return row
+            if row is None:
+                raise ConnectorError(duplicate)
+            return self._catalog_entry(CustomConnector(row), available=bool(client_id or _env_client_creds(kind)))
 
         async with self._definition_lock:
             return await complete_cleanup(create())
@@ -214,13 +214,10 @@ class ConnectorManager:
             raise ConnectorError(f"unknown connector kind: {kind}")
         async with self._definition_lock:
             self._require_definition(connector)
-            await self._store_client_creds(kind, client_id, client_secret)
-
-    async def _store_client_creds(self, kind: str, client_id: str, client_secret: str) -> None:
-        now = datetime.now(UTC).isoformat()
-        await self.db.set_connector_oauth_client(
-            kind, client_id, encrypt(client_secret, master_key()), now
-        )
+            now = datetime.now(UTC).isoformat()
+            await self.db.set_connector_oauth_client(
+                kind, client_id, encrypt(client_secret, master_key()), now
+            )
 
     async def clear_client_creds(self, kind: str) -> bool:
         connector = await self.get(kind)
@@ -268,27 +265,28 @@ class ConnectorManager:
 
     # --- catalog + installations -----------------------------------------
 
+    @staticmethod
+    def _catalog_entry(connector: ConnectorBase, *, available: bool) -> dict[str, Any]:
+        return {
+            "kind": connector.kind,
+            "display_name": connector.display_name,
+            "category": connector.category,
+            "allows_multiple": connector.allows_multiple,
+            "available": available,
+            "scopes": list(getattr(connector.oauth, "default_scopes", [])),
+            "custom": getattr(connector, "is_custom", False),
+            "setup_url": getattr(connector, "setup_url", "") or None,
+            "setup_steps": list(getattr(connector, "setup_steps", [])),
+        }
+
     async def catalog(self) -> list[dict[str, Any]]:
         connectors = list(all_connectors()) + [
             CustomConnector(row) for row in await self.db.list_custom_connectors()
         ]
-        out: list[dict[str, Any]] = []
-        for c in connectors:
-            out.append(
-                {
-                    "kind": c.kind,
-                    "display_name": c.display_name,
-                    "category": c.category,
-                    "allows_multiple": c.allows_multiple,
-                    "available": (await self.resolve_client_creds(c.kind))
-                    is not None,
-                    "scopes": list(getattr(c.oauth, "default_scopes", [])),
-                    "custom": getattr(c, "is_custom", False),
-                    "setup_url": getattr(c, "setup_url", "") or None,
-                    "setup_steps": list(getattr(c, "setup_steps", [])),
-                }
-            )
-        return out
+        return [
+            self._catalog_entry(connector, available=(await self.resolve_client_creds(connector.kind)) is not None)
+            for connector in connectors
+        ]
 
     async def list_installations(
         self, user_id: str | None = None

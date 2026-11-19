@@ -5,6 +5,8 @@ import { handleWsMessage } from "../hooks/useWebSocket";
 import { applySessionSnapshot, hydrateSession, loadBgTaskSnapshot, loadResearchSnapshot, loadSessionSnapshots, loadSessionSnapshot, observeSession, observeSessionAuxiliary } from "./hydrateSession";
 import { selectSession } from "./selectSession";
 import { nativeItemKey } from "./nativeOutput";
+import { sessions } from "./sessionList";
+import { watchDelegation } from "./delegationReads";
 
 // Real session details always distinguish a missing attempt from explicit null.
 const json = (value: unknown) => new Response(JSON.stringify(
@@ -246,7 +248,7 @@ it.each([200, 503])("another task's newer HTTP %s cannot prevent this detail fro
   expect(useSessionStore.getState().bgTasks.s.find((row) => row.id === "a")).toMatchObject({
     stdout: "Complete original output", delivery_disposition: null, delivery_error: null,
   });
-  expect(Boolean(useSessionStore.getState().sessionAuxiliaryErrors.s?.background)).toBe(status === 503);
+  expect(useSessionStore.getState().bgTaskReadFailures.s).toEqual(status === 503 ? ["b"] : undefined);
 });
 
 it.each([false, true])("a list fills final output across an execution event while respecting delivery events (%s)", async (delivery) => {
@@ -298,7 +300,26 @@ it("a newer same-task failure owns only the error surface, leaving older success
   fresh.resolve(new Response("Unavailable", { status: 503 })); await newer;
   old.resolve(json(backgroundTask("a", { stdout: "Saved output", delivery_error: null, delivery_disposition: null }))); await older;
   expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ stdout: "Saved output", delivery_error: null });
-  expect(useSessionStore.getState().sessionAuxiliaryErrors.s?.background).toBeTruthy();
+  expect(useSessionStore.getState().bgTaskReadFailures.s).toEqual(["a"]);
+});
+
+it.each([false, true])("a newer list only supersedes detail errors for tasks it returns (covered=%s)", async (covered) => {
+  const task = backgroundTask("failed-read");
+  const other = backgroundTask("other");
+  useSessionStore.getState().setBgTasks("s", [task, other]);
+  const detail = deferred<Response>();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(detail.promise)
+    .mockResolvedValueOnce(json(covered ? [task, other] : [other]))
+    .mockResolvedValueOnce(json([other])).mockResolvedValueOnce(json([task, other])));
+  const older = observeSessionAuxiliary("s", "background", task.id).done.catch(() => {});
+  await loadBgTaskSnapshot("s");
+  detail.resolve(new Response(null, { status: 503 }));
+  await older;
+  expect(useSessionStore.getState().bgTaskReadFailures.s).toEqual(covered ? undefined : [task.id]);
+  await loadBgTaskSnapshot("s");
+  expect(useSessionStore.getState().bgTaskReadFailures.s).toEqual(covered ? undefined : [task.id]);
+  await loadBgTaskSnapshot("s");
+  expect(useSessionStore.getState().bgTaskReadFailures.s).toBeUndefined();
 });
 
 it("view cancellation releases a read without publishing its late data or poisoning future reads", async () => {
@@ -711,21 +732,273 @@ it("ends all parts of an observation without cancelling server work", async () =
   expect(fetch).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ method: "POST" }));
 });
 
-it("keeps legal previous-session history without taking selection during A to B to A", async () => {
-  const a = deferred<Response>(), b = deferred<Response>(), again = deferred<Response>();
-  let aReads = 0;
-  vi.stubGlobal("fetch", vi.fn((url: string) => {
-    if (new URL(url).pathname === "/api/sessions/a") return ++aReads === 1 ? a.promise : again.promise;
-    if (new URL(url).pathname === "/api/sessions/b") return b.promise;
-    return Promise.resolve(json([]));
-  }));
-  const first = selectSession("a"), second = selectSession("b"), third = selectSession("a");
-  again.resolve(json({ id: "a", agent_id: "agent-a", messages: [], dispatch_state: dispatch("service") })); await third;
-  b.resolve(json({ id: "b", agent_id: "agent-b", messages: [{ type: "text", role: "user", seq: 0, content: "Cached B" }], dispatch_state: dispatch("service") })); await second;
-  a.resolve(json({ id: "a", agent_id: "agent-a", messages: [], dispatch_state: dispatch("service") })); await first;
+const auxiliarySuffixes = ["/bg-tasks", "/research", "/delegations"] as const;
+const suffixes = ["", ...auxiliarySuffixes] as const;
+const pathFor = (id: string, suffix: string) => `/api/sessions/${id}${suffix}`;
+const selectionInfo = (id: string) => ({ id, agent_id: `agent-${id}`, name: id, status: "idle", archived: false } as SessionInfo);
+const selectionDetail = (id: string, generation = "service", content = `Cached ${id.toUpperCase()}`) => ({
+  ...selectionInfo(id), messages: [{ type: "text", role: "user", seq: 0, content }], dispatch_state: dispatch(generation),
+});
+const selectionRows = (id: string, prefix: string) => ({
+  "/bg-tasks": [backgroundTask(`${prefix}-bg`, { session_id: id })],
+  "/research": [{ id: `${prefix}-research`, session_id: id, status: "completed", question: "Research complete", phase: null }],
+  "/delegations": [{ delegation_id: `${prefix}-child`, work_id: `${prefix}-work`, state: "completed", parent_session_id: id }],
+});
+
+function expectAuxiliaryRows(id: string, prefix: string) {
+  const state = useSessionStore.getState();
+  expect(state.bgTasks[id]?.map((row) => row.id)).toEqual([`${prefix}-bg`]);
+  expect(state.research[id]?.map((row) => row.id)).toEqual([`${prefix}-research`]);
+  expect(state.delegations[id]?.map((row) => row.delegation_id)).toEqual([`${prefix}-child`]);
+}
+
+it("shares detail, BG, Research and delegation GETs through A to B to A selection", async () => {
+  const known = [selectionInfo("a"), selectionInfo("b")];
+  useSessionStore.setState({ dispatchGeneration: "service", sessions: known });
+  const aResponses = new Map(suffixes.map((suffix) => [pathFor("a", suffix), deferred<unknown>()]));
+  const get = vi.fn(async (url: string) => {
+    const path = new URL(url).pathname;
+    if (path === "/api/sessions") return json(known);
+    const held = aResponses.get(path);
+    return json(held ? await held.promise : path === pathFor("b", "") ? selectionDetail("b") : []);
+  });
+  vi.stubGlobal("fetch", get);
+  const first = selectSession("a");
+  await selectSession("b");
+  expect(useSessionStore.getState().messages.b[0].content).toBe("Cached B");
+  const returned = selectSession("a");
+  const paths = () => get.mock.calls.map(([url]) => new URL(url).pathname).filter((path) => path !== "/api/sessions");
+  try {
+    for (const id of ["a", "b"]) for (const suffix of suffixes) {
+      expect(paths().filter((path) => path === pathFor(id, suffix)), pathFor(id, suffix)).toHaveLength(1);
+    }
+  } finally {
+    const rows = selectionRows("a", "shared");
+    for (const suffix of suffixes) aResponses.get(pathFor("a", suffix))!.resolve(suffix ? rows[suffix] : selectionDetail("a"));
+    await Promise.all([first, returned]);
+  }
+  await vi.waitFor(() => expectAuxiliaryRows("a", "shared"));
+  expect(paths().sort()).toEqual(["a", "b"].flatMap((id) => suffixes.map((suffix) => pathFor(id, suffix))).sort());
   expect(useSessionStore.getState().activeSessionId).toBe("a");
   expect(useSessionStore.getState().activeAgentId).toBe("agent-a");
-  expect(useSessionStore.getState().messages.b[0].content).toBe("Cached B");
+  expect(useSessionStore.getState().messages.a[0].content).toBe("Cached A");
+});
+
+function holdSelectionReads() {
+  const received = new Map<string, Array<{ response: ReturnType<typeof deferred<Response>>; signal: AbortSignal }>>();
+  vi.stubGlobal("fetch", vi.fn((url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path === "/api/sessions") return Promise.resolve(json([selectionInfo("s")]));
+    if (path !== pathFor("s", "") && !path.startsWith(pathFor("s", "/"))) return Promise.resolve(json([]));
+    const reads = received.get(path) ?? [];
+    const response = deferred<Response>();
+    reads.push({ response, signal: init.signal! });
+    received.set(path, reads);
+    return response.promise;
+  }));
+  return {
+    count: (suffix = "") => received.get(pathFor("s", suffix))?.length ?? 0,
+    signal: (suffix: string, index: number) => received.get(pathFor("s", suffix))![index].signal,
+    detail: (index: number, generation = "service", content?: string) =>
+      received.get(pathFor("s", ""))![index].response.resolve(json(selectionDetail("s", generation, content))),
+    auxiliary: (index: number, prefix: string) => {
+      const rows = selectionRows("s", prefix);
+      for (const suffix of auxiliarySuffixes) {
+        received.get(pathFor("s", suffix))![index].response.resolve(json(rows[suffix]));
+      }
+    },
+  };
+}
+
+it("keeps the shared requests when the first consumer cancels before the first service is confirmed", async () => {
+  const http = holdSelectionReads();
+  const first = observeSession("s"), next = observeSession("s");
+  first.cancel();
+  expect(await first.done).toBeNull();
+  for (const suffix of suffixes) {
+    expect(http.count(suffix)).toBe(1);
+    expect(http.signal(suffix, 0).aborted).toBe(false);
+  }
+  http.auxiliary(0, "shared");
+  http.detail(0);
+  expect(await next.done).not.toBeNull();
+  await vi.waitFor(() => expectAuxiliaryRows("s", "shared"));
+});
+
+it("retains the issued execution baseline for a late joiner and keeps its fresh confirmation alive", async () => {
+  const initial = { ...dispatch("service"), active_request_id: "r", active_operation: "message" as const };
+  useSessionStore.getState().applyDispatchState("s", initial);
+  const old = deferred<Response>(), fresh = deferred<Response>();
+  const signals: AbortSignal[] = [];
+  vi.stubGlobal("fetch", vi.fn((url: string, init: RequestInit) => {
+    if (new URL(url).pathname !== pathFor("s", "")) return Promise.resolve(json([]));
+    signals.push(init.signal!);
+    return signals.length === 1 ? old.promise : fresh.promise;
+  }));
+  const first = observeSession("s");
+  handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "r", attempt_id: "live" });
+  const next = observeSession("s");
+  try {
+    expect(signals).toHaveLength(1);
+    old.resolve(json({ ...selectionDetail("s"), dispatch_state: initial, active_attempt: null }));
+    await Promise.all([first.done, next.done]);
+    expect(useSessionStore.getState().activeAttempts.s.attempt_id).toBe("live");
+    expect(signals).toHaveLength(2);
+    first.cancel();
+    expect(signals[1].aborted).toBe(false);
+    fresh.resolve(json({ ...selectionDetail("s"), dispatch_state: initial,
+      active_attempt: { request_id: "r", attempt_id: "confirmed" } }));
+    await vi.waitFor(() => expect(useSessionStore.getState().activeAttempts.s.attempt_id).toBe("confirmed"));
+    expect(signals).toHaveLength(2);
+  } finally { first.cancel(); next.cancel(); }
+});
+
+it("does not qualify an old auxiliary response using a later detail from another service", async () => {
+  useSessionStore.setState({ dispatchGeneration: "old" });
+  const http = holdSelectionReads();
+  const first = observeSession("s");
+  http.detail(0, "old");
+  expect(await first.done).not.toBeNull();
+  const next = observeSession("s");
+  expect(http.count()).toBe(2);
+  for (const suffix of auxiliarySuffixes) expect(http.count(suffix)).toBe(1);
+  http.detail(1, "new");
+  expect(await next.done).not.toBeNull();
+  await vi.waitFor(() => {
+    for (const suffix of auxiliarySuffixes) expect(http.count(suffix)).toBe(2);
+  });
+  http.auxiliary(1, "current");
+  await vi.waitFor(() => expectAuxiliaryRows("s", "current"));
+  http.auxiliary(0, "retired");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expectAuxiliaryRows("s", "current");
+  expect(http.count()).toBe(2);
+  for (const suffix of auxiliarySuffixes) expect(http.count(suffix)).toBe(2);
+});
+
+it.each([false, true])("releases a cancelled delegation replacement synchronously (card still observing=%s)", async (keepCard) => {
+  useSessionStore.setState({ dispatchGeneration: "old" });
+  const http = holdSelectionReads();
+  const first = observeSession("s");
+  http.detail(0, "old");
+  await first.done;
+  const next = observeSession("s");
+  http.detail(1, "new");
+  await next.done;
+  await vi.waitFor(() => expect(http.count("/delegations")).toBe(2));
+  const card = keepCard ? watchDelegation("s", { delegation_id: "current-child", work_id: "current-work" }, () => {}) : undefined;
+  try {
+    expect(http.count("/delegations")).toBe(2);
+    http.auxiliary(1, "current");
+    next.cancel();
+    expect(http.signal("/delegations", 1).aborted).toBe(!keepCard);
+    http.auxiliary(0, "retired");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const state = useSessionStore.getState();
+    expect(state.delegations.s?.map((row) => row.delegation_id)).toEqual(keepCard ? ["current-child"] : undefined);
+    expect(state.bgTasks.s).toBeUndefined();
+    expect(state.research.s).toBeUndefined();
+  } finally { card?.cancel(); first.cancel(); next.cancel(); }
+});
+
+it("retires cold-start auxiliary responses after the first accepted service is replaced", async () => {
+  const http = holdSelectionReads();
+  const opening = observeSession("s");
+  try {
+    handleWsMessage({ type: "dispatch_state", session_id: "other", dispatch_state: dispatch("first") });
+    http.auxiliary(0, "first");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    handleWsMessage({ type: "dispatch_state", session_id: "other", dispatch_state: dispatch("current") });
+    http.detail(0, "current");
+    await opening.done;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const state = useSessionStore.getState();
+    expect(state.dispatchGeneration).toBe("current");
+    expect(state.bgTasks.s).toBeUndefined();
+    expect(state.research.s).toBeUndefined();
+    expect(state.delegations.s).toBeUndefined();
+    for (const suffix of auxiliarySuffixes) expect(http.count(suffix)).toBe(1);
+  } finally { opening.cancel(); }
+});
+
+it.each(["account", "connection", "service", "archive"])("uses new GETs when the original %s changes", async (boundary) => {
+  useSessionStore.setState({ dispatchGeneration: "service" });
+  const http = holdSelectionReads();
+  const first = observeSession("s");
+  const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+  const generation = boundary === "service" ? "new" : "service";
+  if (boundary === "account") {
+    useSessionStore.getState().setToken("other-account");
+    useSessionStore.getState().setToken("test-bearer");
+    useSessionStore.setState({ dispatchGeneration: "service" });
+  }
+  if (boundary === "connection") sessions.connect(source);
+  if (boundary === "service") useSessionStore.getState().applyDispatchState("other", dispatch(generation));
+  if (boundary === "archive") sessions.archive("s");
+  const next = observeSession("s");
+  const retired = boundary === "account" ? expect(first.done).rejects.toThrow("previous sign-in") : expect(first.done).resolves.toBeNull();
+  try {
+    for (const suffix of suffixes) expect(http.count(suffix)).toBe(2);
+    http.detail(1, generation, "Current detail"); http.auxiliary(1, "current");
+    http.detail(0, "service", "Retired detail"); http.auxiliary(0, "retired");
+    await retired;
+    expect(await next.done).not.toBeNull();
+    await vi.waitFor(() => expectAuxiliaryRows("s", "current"));
+    expect(useSessionStore.getState().messages.s[0].content).toBe("Current detail");
+  } finally {
+    first.cancel(); next.cancel();
+    if (boundary === "connection") sessions.disconnect(source);
+  }
+});
+
+it("uses fresh GETs for a post-write observation and keeps ordinary navigation separate", async () => {
+  useSessionStore.setState({ dispatchGeneration: "service" });
+  const http = holdSelectionReads();
+  const beforeWrite = observeSession("s");
+  const afterWrite = observeSession("s", "complete", { fresh: true });
+  const ordinary = observeSession("s");
+  try {
+    for (const suffix of suffixes) expect(http.count(suffix)).toBe(2);
+    http.detail(0, "service", "Pre-write detail"); http.auxiliary(0, "before");
+    expect(await beforeWrite.done).toEqual(expect.objectContaining({ messages: [expect.objectContaining({ content: "Pre-write detail" })] }));
+    expect(await ordinary.done).not.toBeNull();
+    const finished = vi.fn();
+    void afterWrite.done.then(finished);
+    await vi.waitFor(() => expectAuxiliaryRows("s", "before"));
+    expect(finished).not.toHaveBeenCalled();
+    http.detail(1, "service", "Post-write detail"); http.auxiliary(1, "after");
+    expect(await afterWrite.done).toEqual(expect.objectContaining({ messages: [expect.objectContaining({ content: "Post-write detail" })] }));
+    await vi.waitFor(() => {
+      const state = useSessionStore.getState();
+      expect(state.bgTasks.s?.[0].id).toBe("after-bg");
+      expect(state.research.s?.[0].id).toBe("after-research");
+      expect(state.delegations.s?.[0].delegation_id).toBe("after-child");
+    });
+  } finally { beforeWrite.cancel(); afterWrite.cancel(); ordinary.cancel(); }
+});
+
+it("keeps the original sidebar baseline when metadata is joined after a settings write", async () => {
+  const old = { ...selectionInfo("s"), model: "old" };
+  const updated = { ...old, model: "new" };
+  useSessionStore.setState({ dispatchGeneration: "service", sessions: [old] });
+  const metadata = deferred<Response>();
+  const get = vi.fn((url: string) => {
+    const path = new URL(url).pathname;
+    if (path === pathFor("s", "/info")) return metadata.promise;
+    return Promise.resolve(json(path === "/api/sessions" ? [updated] : { ...selectionDetail("s"), model: "new" }));
+  });
+  vi.stubGlobal("fetch", get);
+  const first = observeSession("s", "metadata");
+  expect(sessions.patch("s", { model: "new" })).toBe(true);
+  const next = observeSession("s", "metadata");
+  first.cancel();
+  const detail = observeSession("s", "detail");
+  metadata.resolve(json(old));
+  expect(await first.done).toBeNull();
+  expect(await next.done).toBeNull();
+  expect(await detail.done).toEqual(expect.objectContaining({ model: "new" }));
+  expect(get.mock.calls.filter(([url]) => url.endsWith("/info"))).toHaveLength(1);
+  expect(useSessionStore.getState().sessions[0].model).toBe("new");
 });
 
 it.each(["session_deleted", "session_archived"])("does not rehydrate an old open after %s", async (type) => {

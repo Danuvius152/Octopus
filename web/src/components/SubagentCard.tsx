@@ -9,18 +9,20 @@ import {
   IconUsersGroup,
 } from "@tabler/icons-react";
 
-import { useSessionStore, type SubagentRun } from "../stores/sessionStore";
+import { useSessionStore, type Message, type SubagentRun } from "../stores/sessionStore";
 import { nativeCard, nativeDetailAnchor, nativeWorkKey } from "../lib/nativeOutput";
 import { NativeSubagentDetails } from "./NativeSubagentDetails";
 
+const EMPTY_MESSAGES: Message[] = [];
+
 export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; cardId: string }) {
-  const messages = useSessionStore((s) => s.messages[sessionId]);
+  const messages = useSessionStore((s) => s.messages[sessionId] ?? EMPTY_MESSAGES);
   const streaming = useSessionStore((s) => s.streamingItems[sessionId]);
-  const snapshots = useSessionStore((s) => s.subagents[sessionId]);
+  const snapshot = useSessionStore((s) => s.subagents[sessionId]?.[cardId]);
   // Saved facts own the collected body and its detail anchor. Live deltas
-  // only compose the current preview; they do not invalidate that scan.
-  const saved = useMemo(() => nativeCard(messages || [], cardId, Object.values(snapshots || {})), [messages, cardId, snapshots]);
-  const anchorSeq = useMemo(() => saved ? nativeDetailAnchor(messages || [], saved) : undefined, [messages, saved]);
+  // only compose the current preview.
+  const saved = useMemo(() => nativeCard(messages, cardId, snapshot), [messages, cardId, snapshot]);
+  const anchorSeq = useMemo(() => saved ? nativeDetailAnchor(messages, saved) : undefined, [messages, saved]);
   const run = useMemo(() => {
     if (!saved) return undefined;
     const partials = Object.values(streaming || {}).filter((item) =>

@@ -745,6 +745,20 @@ class DelegationManager:
             parent_work_id=parent_work_id,
             owned_context=owned_context,
         )
+
+        async def settle_initial_terminal_return() -> None:
+            await self._inject_terminal(rec)
+            if rec._terminal_injecting:
+                # A concurrent cancellation may own this observation;
+                # setup still owns the subsequent responsibility exit.
+                observer = rec._terminal_command
+                assert observer is not None and observer is not asyncio.current_task()
+                await asyncio.wait({observer})
+                observer.result()
+            # An unknown handoff still depends on the original receipt or consumption.
+            if rec._terminal_disposition != "unknown":
+                await self._withdraw_child_responsibility(rec)
+
         async def abandon_setup(
             error: str = "Delegation setup ended before child request admission",
             *, return_terminal: bool = False,
@@ -785,23 +799,32 @@ class DelegationManager:
                 # Proven refusal has no return to admit. Release the exact
                 # parent responsibility before archival can fail independently.
                 await self._withdraw_child_responsibility(rec)
-            await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child)
-            if not observe_return:
-                return
-            await self._inject_terminal(rec)
-            if rec._terminal_injecting:
-                # A concurrent cancellation may own this observation;
-                # setup still owns the subsequent responsibility exit.
-                observer = rec._terminal_command
-                assert observer is not None and observer is not asyncio.current_task()
-                await asyncio.wait({observer})
-                observer.result()
-            if rec._terminal_disposition == "unknown":
-                # Finishing this observation does not confirm return
-                # admission. The original receipt/consumption still owns
-                # the parent's exact responsibility.
-                return
-            await self._withdraw_child_responsibility(rec)
+            try:
+                await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child)
+            except ServiceUnavailable:
+                raise
+            except Exception as archive_failure:
+                # The original archive task still reports its failure. The
+                # committed child terminal still belongs to the parent.
+                if not observe_return:
+                    raise
+                try:
+                    await settle_initial_terminal_return()
+                except ServiceUnavailable:
+                    raise
+                except Exception as return_failure:
+                    raise ExceptionGroup(
+                        "Initial delegation archive and terminal return failed", [archive_failure, return_failure],
+                    ) from None
+                finally:
+                    # A later terminal write can settle its own diagnostic.
+                    # This command still owns the archive failure.
+                    task = asyncio.current_task()
+                    assert task is not None
+                    self._commands[task].write_failed = False
+                raise
+            if observe_return:
+                await settle_initial_terminal_return()
 
         # Commit before publishing, then register before child admission:
         # a fast child can synchronously broadcast its complete result there.
@@ -1756,7 +1779,7 @@ class DelegationManager:
             await self.session_mgr._broadcast({
                 "type": "delegation_delivery", "session_id": rec.parent_session_id,
                 "delegation": rec.to_public_dict(),
-            })
+            }, wrap_required_cancellation=True)
 
     async def _stop_terminal_delivery(
         self, rec: DelegationRunState, disposition: TerminalDisposition, error: BaseException | str,

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import signal
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,7 +28,7 @@ from tests.native_app_server import (
     until,
     wire_frames,
 )
-from tests.session_runtime import wait_dispatch_idle
+from tests.session_runtime import fail_destination_owner, wait_dispatch_idle
 
 native_runtime = native_tests.native_runtime
 
@@ -597,6 +598,221 @@ async def test_late_root_terminal_cannot_erase_idle_expiry_while_owner_storage_w
     await wait_dispatch_idle(manager, session.id)
     result = await database.read_session_result(session.id, receipt["request_id"])
     assert result.outcome.status == "failed" and result.outcome.code == "turn_timeout"
+
+
+@pytest.mark.parametrize("blocked", ["configuration", "configuration-with-update", "configuration-with-context-refresh",
+                                     "input-history", "resume-history", "resume-history-owner-failure"])
+async def test_overall_deadline_records_before_preparation_read_is_released(native_runtime, monkeypatch, blocked):
+    manager, database, session, _, starts, _ = native_runtime
+    monkeypatch.setattr(settings, "turn_max_seconds", .5)
+    entered, release = asyncio.Event(), asyncio.Event()
+    update = None
+    if blocked.startswith("configuration"):
+        lock = manager.configuration_lock
+        acquire = lock.acquire
+        waiting = asyncio.Queue()
+        await acquire()
+
+        async def hold_acquire():
+            entered.set()
+            waiting.put_nowait(None)
+            return await acquire()
+
+        monkeypatch.setattr(lock, "acquire", hold_acquire)
+    else:
+        read_name = "session_input_history" if blocked == "input-history" else "get_session_resume_id"
+        read_history = getattr(database, read_name)
+
+        async def slow_history_read(*args):
+            value = await read_history(*args)
+            entered.set()
+            await release.wait()
+            return value
+
+        monkeypatch.setattr(database, read_name, slow_history_read)
+
+    try:
+        receipt = await manager.start_message(session.id, "Wait for preparation")
+        assert receipt.execution is not None
+        await asyncio.wait_for(entered.wait(), 2)
+        if blocked in {"configuration-with-update", "configuration-with-context-refresh"}:
+            await waiting.get()
+            if blocked == "configuration-with-update":
+                update = asyncio.create_task(manager.update_session_configuration(session.id, {"name": "Saved separately"}, session.user_id))
+            else:
+                manager.wake_contexts(session.agent_id, session.user_id)
+            await asyncio.wait_for(waiting.get(), 2)
+        async with asyncio.timeout(2):
+            while (saved := await database.get_committed_terminal(session.id, receipt.request_id)) is None:
+                await asyncio.sleep(.01)
+        assert saved["code"] == "turn_timeout"
+        assert receipt.execution.driver_state == "pending" and not starts
+        if update is not None:
+            assert not update.done() and session.name != "Saved separately"
+        if blocked == "resume-history-owner-failure":
+            await fail_destination_owner(manager, session, monkeypatch)
+            assert receipt.execution.driver_state == "pending"
+    finally:
+        release.set()
+        if blocked.startswith("configuration"):
+            lock.release()
+        if update is not None:
+            await asyncio.wait_for(update, 2)
+
+    completion = await asyncio.wait_for(receipt.wait(), 3)
+    await asyncio.wait_for(receipt.execution.wait_driver(), 3)
+    assert completion.outcome.code == "turn_timeout"
+    assert not receipt.execution.attempts and not starts
+    results = await database.load_committed_request_messages(session.id, receipt.request_id)
+    result, = [row for row in results if row["type"] == "result"]
+    assert result["content"]["code"] == "turn_timeout"
+    if update is not None:
+        assert session.name == "Saved separately"
+
+
+async def test_overall_deadline_prevents_spawn_after_slow_authority_check(native_runtime, monkeypatch):
+    manager, database, session, _, _, _ = native_runtime
+    limit = .75
+    monkeypatch.setattr(settings, "turn_max_seconds", limit)
+    checking, release_authority, saving = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    authorize = database.require_run_authority
+    lock = manager.configuration_lock
+    acquire = lock.acquire
+    spawn = asyncio.create_subprocess_exec
+    spawned = []
+
+    async def hold_authority(*args):
+        await authorize(*args)
+        checking.set()
+        await release_authority.wait()
+
+    async def observe_spawn(*args, **kwargs):
+        if str(native_tests.PEER) in args:
+            spawned.append(args[0])
+        return await spawn(*args, **kwargs)
+
+    async def observe_save():
+        saving.set()
+        return await acquire()
+
+    monkeypatch.setattr(database, "require_run_authority", hold_authority)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
+    receipt = await manager.start_message(session.id, "Wait for launch authority")
+    try:
+        await asyncio.wait_for(checking.wait(), 2)
+        async with lock:
+            monkeypatch.setattr(lock, "acquire", observe_save)
+            update = asyncio.create_task(manager.update_session_configuration(session.id, {"name": "Updated"}, session.user_id))
+            await asyncio.wait_for(saving.wait(), 2)
+            await asyncio.sleep(limit + .05)
+            release_authority.set()
+            await asyncio.sleep(.05)
+    finally:
+        release_authority.set()
+    await asyncio.wait_for(update, 2)
+    completion = await asyncio.wait_for(receipt.wait(), 3)
+    assert completion.outcome.code == "turn_timeout" and spawned == []
+
+
+@pytest.mark.parametrize("detector", ["owner", "harness"])
+async def test_starting_run_retires_while_native_history_refresh_is_pending(native_runtime, monkeypatch, detector):
+    from server.harness import run as run_module
+
+    manager, database, session, _, _, _ = native_runtime
+    limit = .75 if detector == "owner" else 5
+    monkeypatch.setattr(settings, "turn_max_seconds", limit)
+    reading, release_read = asyncio.Event(), asyncio.Event()
+    checking, release_authority = asyncio.Event(), asyncio.Event()
+    read, authorize = database.session_input_history, database.require_run_authority
+    reads, authorizations = 0, 0
+
+    async def hold_start_refresh(*args):
+        nonlocal reads
+        result = await read(*args)
+        reads += 1
+        if reads == 2:
+            reading.set()
+            await release_read.wait()
+        return result
+
+    async def hold_authority(*args):
+        nonlocal authorizations
+        await authorize(*args)
+        authorizations += 1
+        if authorizations == (1 if detector == "owner" else 2):
+            checking.set()
+            await release_authority.wait()
+
+    monkeypatch.setattr(database, "session_input_history", hold_start_refresh)
+    monkeypatch.setattr(database, "require_run_authority", hold_authority)
+    receipt = await manager.start_message(session.id, "Wait for a native history refresh")
+    try:
+        await asyncio.wait_for(reading.wait(), 2)
+        await asyncio.wait_for(checking.wait(), 2)
+        run = session._run.backend
+        assert run is not None and run.question_admission_open
+        if detector == "harness":
+            assert run.process_group_id is not None
+            # Only the Harness clock advances, so admission closes before the
+            # Owner's watchdog can mark the attempt.
+            clock = run_module.time
+            with monkeypatch.context() as patch:
+                patch.setattr(run_module, "time", SimpleNamespace(monotonic=lambda: clock.monotonic() + limit + 1, time=clock.time))
+                release_authority.set()
+                await until(lambda: not run.question_admission_open)
+        else:
+            await until(lambda: not run.question_admission_open)
+            assert run.process_group_id is None
+            release_authority.set()
+        await asyncio.wait_for(run.wait_retirement(), 2)
+        assert not run.input_may_have_run and not release_read.is_set()
+        async with asyncio.timeout(2):
+            while (saved := await database.get_committed_terminal(session.id, receipt.request_id)) is None:
+                await asyncio.sleep(.01)
+        assert saved["code"] == "turn_timeout"
+        assert receipt.execution is not None and receipt.execution.driver_state == "pending"
+    finally:
+        release_read.set()
+        release_authority.set()
+    completion = await asyncio.wait_for(receipt.wait(), 3)
+    assert completion.outcome.code == "turn_timeout" and run.retirement_state == "proven"
+    results = await database.load_committed_request_messages(session.id, receipt.request_id)
+    result, = [row for row in results if row["type"] == "result"]
+    assert result["content"]["code"] == "turn_timeout"
+
+
+async def test_root_closing_before_overall_deadline_survives_late_owner_storage(native_runtime, tmp_path, monkeypatch):
+    manager, database, session, _, starts, _ = native_runtime
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    monkeypatch.setattr(settings, "turn_max_seconds", 1)
+    entered, release = asyncio.Event(), asyncio.Event()
+    append = database.append_message
+
+    async def hold_progress(**kwargs):
+        if kwargs.get("role") == "assistant" and kwargs.get("content") == "Progress":
+            entered.set()
+            await release.wait()
+        return await append(**kwargs)
+
+    monkeypatch.setattr(database, "append_message", hold_progress)
+    receipt = await start_output(native_runtime)
+    run = session._run.backend
+    assert run is not None
+    progress = item(ROOT, "turn-1", "progress", "Progress")
+    progress["params"]["item"]["phase"] = "commentary"
+    try:
+        inject(tmp_path, progress)
+        await asyncio.wait_for(entered.wait(), 2)
+        inject(tmp_path, item(ROOT, "turn-1", "answer", "Completed before the deadline"), terminal())
+        await until(lambda: run.admission_closed_at is not None)
+        await asyncio.sleep(1.05)
+        assert await database.get_committed_terminal(session.id, receipt["request_id"]) is None
+    finally:
+        release.set()
+    await wait_dispatch_idle(manager, session.id)
+    saved = await database.read_session_result(session.id, receipt["request_id"])
+    assert saved.outcome.status == "success" and saved.outcome.native_status == "completed"
+    assert saved.fragments[-1] == "Completed before the deadline" and len(starts) == 1
 
 
 async def test_start_wait_failure_keeps_the_same_finite_late_output_prefix(native_runtime, tmp_path, monkeypatch):

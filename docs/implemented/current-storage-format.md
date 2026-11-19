@@ -2,7 +2,7 @@
 
 > **Status:** implemented — 当前格式准入、持久资源、完整记录与离线交接不变量。
 
-The main database uses format **11**, and Wiki uses format **17**. Each database
+The main database uses format **12**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -156,6 +156,13 @@ CAS checks the original parent and child together in one read snapshot. The
 caller compares exact owners and bindings, using present rows to distinguish
 changed relations from deletion. The snapshot ends with the walk or CAS check.
 Admission and cleanup are owned by [delegation](agent-collaboration.md#invocation-and-identity).
+
+### Active-session index
+
+Agent active-session counts come from `sessions` rows with `archived = 0`.
+The partial index `idx_sessions_active_agent` serves that predicate by `agent_id`.
+Archiving and restoring a session changes its index membership in the same
+transaction as the session row. Account exports still exclude session rows.
 
 ### Message range index
 
@@ -409,6 +416,15 @@ marker together and compares all other retained facts. Unknown COMMIT/ROLLBACK
 keeps business closed. Reentry inspects actual committed facts under the same
 candidate and frozen inputs; it must not overwrite newer files/databases or
 replay model/tool effects. Runtime callbacks cannot be restored from JSON.
+
+For the finite main-format 11 to 12 handoff, the online preflight uses the
+source release's format declaration. The offline transaction installs the
+partial index and advances `user_version` together. A fresh read verifies the
+candidate layout and checks retained main rows, including SQLite's message ID
+allocation sequence, against the baseline captured after the source writer
+retired. The first candidate start still requires that comparison if the
+release pointer has already changed. A verified ready process bound to the
+same publication supplies the evidence that later normal writes can exist.
 
 Only verified current storage permits candidate start and credential writes.
 Do not rotate or clean credentials by opening an uncertain store. A running

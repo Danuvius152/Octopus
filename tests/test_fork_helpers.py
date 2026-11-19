@@ -841,33 +841,28 @@ def _msg(i: int, role=MessageRole.user, type_="text", content=None):
     )
 
 
-def test_select_lost_history_keeps_the_tail_and_counts_what_it_drops():
-    kept, omitted = fh.select_lost_history([_msg(i) for i in range(70)])
-    assert len(kept) == 60
-    assert omitted == 10
-    # The TAIL is what "continue where we left off" needs.
-    assert kept[-1].seq == 69
-    assert kept[0].seq == 10
+def test_lost_history_replays_all_60_dialogue_messages_from_90_rows():
+    messages = [message for index in range(30) for message in (
+        _msg(3 * index),
+        _msg(3 * index + 1, role=MessageRole.assistant),
+        _msg(3 * index + 2, role=MessageRole.system, type_="result"),
+    )]
+
+    prompt, replayed, omitted = fh.build_lost_history_replay("Continue", messages)
+
+    header, block = prompt.split("\n\n", 1)
+    body = block.split("\n</session-history>", 1)[0]
+    assert body.splitlines() == [line for index in range(30) for line in (
+        f"[seq {3 * index}] user: message {3 * index}",
+        f"[seq {3 * index + 1}] assistant: message {3 * index + 1}",
+    )]
+    assert (replayed, omitted) == (60, 0)
+    assert "earlier message(s)" not in header
 
 
-def test_select_lost_history_keeps_everything_when_it_fits():
-    kept, omitted = fh.select_lost_history([_msg(i) for i in range(5)])
-    assert [m.seq for m in kept] == [0, 1, 2, 3, 4]
-    assert omitted == 0
-
-
-def test_select_lost_history_drops_thinking_blocks():
-    msgs = [
-        _msg(0),
-        _msg(1, role=MessageRole.assistant, type_="thinking", content="hmm"),
-        _msg(2, role=MessageRole.assistant),
-    ]
-    kept, _ = fh.select_lost_history(msgs)
-    assert [m.seq for m in kept] == [0, 2]
-
-
-def test_wrap_for_lost_history_frames_it_as_transcript_not_instructions():
-    out = fh.wrap_for_lost_history("what next?", [_msg(1)], omitted=3)
+def test_lost_history_wraps_the_recent_tail_as_transcript():
+    out, replayed, omitted = fh.build_lost_history_replay("what next?", [_msg(i) for i in range(63)])
+    assert (replayed, omitted) == (60, 3)
     # The framing is load-bearing: replayed user lines must not read as fresh
     # commands.
     assert '<session-history origin="this-session"' in out
@@ -875,10 +870,30 @@ def test_wrap_for_lost_history_frames_it_as_transcript_not_instructions():
     assert "not new instructions" in out
     assert "3 earlier message(s) are not included" in out
     assert out.endswith("<continue-from-here>\nwhat next?\n</continue-from-here>")
-    assert "message 1" in out
+    body = out.split("\n\n", 1)[1].split("\n</session-history>", 1)[0]
+    assert body.splitlines() == [f"[seq {i}] user: message {i}" for i in range(3, 63)]
 
 
-def test_wrap_for_lost_history_with_no_messages_still_carries_the_prompt():
-    out = fh.wrap_for_lost_history("hello", [])
-    assert "hello" in out
-    assert "<session-history" in out
+def test_lost_history_keeps_the_last_handoff_in_a_full_window():
+    handoff = _msg(1, content="next ticket").model_copy(update={
+        "tool_input": {"request_context": {"source": "handoff"}},
+    })
+    messages = [_msg(0), handoff, *(_msg(i) for i in range(2, 63))]
+
+    out, replayed, omitted = fh.build_lost_history_replay("Continue", messages)
+
+    assert (replayed, omitted) == (60, 2)
+    body = out.split("\n\n", 1)[1].split("\n</session-history>", 1)[0]
+    assert body.splitlines() == [
+        "[seq 1] ticket handoff: next ticket",
+        *(f"[seq {i}] user: message {i}" for i in range(4, 63)),
+    ]
+
+
+def test_lost_history_without_replayable_messages_returns_the_original_prompt():
+    assert fh.build_lost_history_replay("hello", []) == ("hello", 0, 0)
+    assert fh.build_lost_history_replay("hello", [
+        _msg(0, role=MessageRole.system),
+        _msg(1, role=MessageRole.system, type_="result"),
+        _msg(2, role=MessageRole.assistant, type_="thinking"),
+    ]) == ("hello", 0, 0)

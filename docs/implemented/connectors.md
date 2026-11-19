@@ -100,12 +100,20 @@ the provider. A deleted definition is refused before sending a replacement's
 client secret to the old endpoint. Network I/O holds no definition lock; a
 definition deleted while I/O is in flight is refused again at local binding.
 
+Creation, deletion, binding and independent client set/clear operations share
+the short local definition lock. Creation encrypts the client secret before the
+write and commits the definition and OAuth client in one transaction. The create
+response reports the definition and its OAuth availability from that commit.
+A rejected write rolls back both records so the operator can retry the same kind.
+Cancelling the lock wait prevents admission. An admitted creation settles before
+waiter cancellation returns.
+Storage or commit uncertainty follows the [storage failure policy](current-storage-format.md#事务与失信边界).
+
 Definition deletion atomically removes its OAuth client and all accounts'
-installations, secrets and agent enablement links. Creation, deletion, binding
-and independent client set/clear operations share the short local ordering;
-deletion retires the in-memory identity only after confirmed DB deletion, even
-when its waiter is cancelled. Delete/recreate under the same slug gets a different
-identity, so old callbacks and client writers cannot attach to the replacement.
+installations, secrets and agent enablement links. It retires the in-memory
+identity after confirmed DB deletion, even when its waiter is cancelled.
+Delete/recreate under the same slug gets a different identity, so old callbacks
+and client writers cannot attach to the replacement.
 A binding that commits first is removed by deletion, while its historical
 successful login receipt remains successful. Built-ins retain their registry
 identity and need no custom-definition row.
@@ -306,11 +314,12 @@ require at least a minute and thus exceed this budget. Ordinary GitHub permissio
 403 remains distinct. HTTP-date/reset conversion uses wall time, separately from
 elapsed-time accounting.
 
-The budget belongs to a resource HTTP call, not an entire multi-request tool:
-Gmail search can make separate list and metadata calls. Host token and rejection
-callbacks keep their existing independent timeout and execute off the host loop;
-OAuth refresh ownership remains as described above. Cancellation of a waiter or
-resource I/O does not prove that an external write was cancelled.
+Each resource HTTP call has its own budget. Gmail search can make separate list
+and metadata calls, and [Gmail message reads](#gmail-message-body) also have an
+overall deadline. Host token and rejection callbacks execute off the host loop
+with their independent timeout. OAuth refresh ownership remains as described
+above. Cancellation of a waiter or resource I/O does not prove that an external
+write was cancelled.
 
 The retry policy follows [HTTP replay semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2)
 and [Retry-After](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3), with
@@ -323,6 +332,51 @@ General provider retry advice is not evidence of safe write replay. The current
 [draft lifecycle](https://developers.google.com/workspace/gmail/api/guides/drafts)
 and [label modification](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/modify)
 contracts do not establish the reliable replay capability required here.
+
+## Gmail message body
+
+`get` uses the `format=full` MIME structure to select the message body. Mixed
+parts contribute eligible text in order. For alternatives, it prefers plain
+text, then HTML, then other text. It skips known-empty parts. If the part that
+gave a branch its priority decodes to empty, all enclosing alternatives are
+compared again before more data is read. An inline check that can rule out a
+branch takes precedence when it fits the available budget. Selection skips
+malformed MIME branches when a valid nonempty alternative exists. Related
+parts contribute only the root identified by `start`, or the first child when
+`start` is absent.
+A declared `start` must match exactly one direct child, and that root's own
+disposition and filename are ignored. Other parts marked as attachments or
+carrying filenames, binary parts and enclosed messages are skipped. HTML is
+returned as text. Each selected part is decoded from base64url using its
+declared charset, with UTF-8 as the default. Returned bytes are checked against
+any declared size on their resource before the decoded text is accepted.
+
+The budget allows up to 256 KiB of body data before charset conversion and at
+most four external reads across all attempted branches. The plan reserves
+budget for confirmed required parts and the minimum cost of outstanding
+choices. It picks a check that fits the remaining byte and request budget. A
+branch's remaining parts enter the preflight once the choice is confirmed.
+Actual decoded byte lengths consume the budget even if a branch produces no
+text. The initial
+`format=full` JSON response supplies the MIME tree. Each required external GET
+obtains a fresh host token and streams a bounded JSON response. HTTP status
+and retry headers are handled before reading its data. The existing three
+attempts per resource allow up to 15 provider HTTP attempts across the message
+GET and its external reads. A
+50-second tool deadline covers the message GET, the subsequent reads and their
+authorization callbacks, while each resource retains its own 30-second I/O
+budget.
+
+The tool returns the body only after all selected parts are available and
+decodable. Empty bodies succeed with an empty string. External read, decode and
+budget failures return errors. The message resource accounts for its MIME
+projection, including inline data selected after an external read. Each
+external read accounts for its own time and cancellation. Successful output
+uses the shared result truncation. Controlled HTTP regressions in
+`tests/test_connector_gmail_mcp.py` cover selection, budgets, deadlines and
+authorization. The byte fields and related root rule follow
+[Gmail's MessagePartBody](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages.attachments)
+and [RFC 2387](https://www.rfc-editor.org/rfc/rfc2387.html#section-3.2).
 
 ## Gmail reply drafts
 
@@ -444,8 +498,9 @@ authorization replacement, deletion/disable and concurrent calls sharing Context
 response, at the save lock and during COMMIT, sharing, shutdown and real save
 failures. Refresh ownership survives waiter cancellation; regressions reopen
 SQLite and require the saved original grant.
-`tests/test_connector_custom_lifecycle.py` and the router tests cover deletion,
-rollback, binding order, same-slug replacement and stale client writers. Explicit
+`tests/test_connector_custom_lifecycle.py` and the router tests cover creation
+and deletion, rollback, cancellation, commit uncertainty, binding order,
+same-slug replacement and stale client writers. Explicit
 NULL-identity reconnect also goes through enabled-Agent scope and the actual
 Custom MCP resource call, including a delayed rejection of the replaced token.
 Rendered same-kind installation cards verify which target the start request

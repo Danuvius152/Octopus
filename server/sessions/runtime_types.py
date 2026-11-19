@@ -25,6 +25,7 @@ class _Settlement:
     protocol_issues: dict[str, int] = field(default_factory=dict)
     protocol_locations: list[dict[str, Any]] = field(default_factory=list)
     started_at: float | None = None
+    overall_limit: int = 0
     # Per-logical-turn retry budgets, also captured in the terminal outcome.
     recovery: dict[str, int] = field(default_factory=lambda: {
         "transient": 0, "idle": 0, "stale_session": 0, "premature_exit": 0,
@@ -38,6 +39,16 @@ class _Settlement:
     # Original notification resources can outlive the question attempt/record.
     question_prefix: tuple[QuestionNotification, ...] = ()
     interruption_cause: Literal["user", "shutdown"] | None = None
+
+    @property
+    def overall_deadline(self) -> float | None:
+        if self.started_at is not None and self.overall_limit > 0:
+            return self.started_at + self.overall_limit
+        return None
+
+    def overall_expired_at(self, when: float) -> bool:
+        deadline = self.overall_deadline
+        return deadline is not None and when >= deadline
 
     def request_interruption(self, cause: Literal["user", "shutdown"]) -> None:
         if self.outcome is None and self.interruption_cause is None:
@@ -103,6 +114,15 @@ class _Attempt:
         return self.watchdog["tripped"]
 
     @property
+    def admission_closed_at(self) -> float | None:
+        return self.backend.admission_closed_at if getattr(self.backend, "captures_retirement_output", False) else None
+
+    def overall_expired_at_end(self, settlement: _Settlement, *, observed_at: float | None = None) -> bool:
+        closed_at = self.admission_closed_at
+        ended_at = closed_at if closed_at is not None else observed_at
+        return ended_at is not None and settlement.overall_expired_at(ended_at)
+
+    @property
     def failed(self) -> bool:
         """A turn that errored, or ended without ever saying it was done."""
         return self.result is None or self.result.is_error
@@ -127,7 +147,6 @@ class _Turn:
     # (harness-credential-reauth.md §4). None = host-default CLI auth.
     cred_id: str | None
     settlement: _Settlement
-    started_at: float = field(default_factory=time.monotonic)
     # A conversation observed during this logical turn, usable only by a
     # protocol that supports continuation. It is not proof of safe replay.
     continuation_id: str | None = None

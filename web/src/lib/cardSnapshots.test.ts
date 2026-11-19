@@ -5,6 +5,61 @@ import { applySessionSnapshot } from "./hydrateSession";
 
 beforeEach(() => useSessionStore.setState({ subagents: {}, bgTasks: {}, research: {}, delegations: {} }));
 
+const subagentDispatch = { generation: "cards", revision: 0, paused: false, active_request_id: null,
+  active_operation: null, items: [] };
+
+it("reuses the subagent collection across five equivalent complete snapshots", () => {
+  const run: SubagentRun = { task_id: "child", card_id: "card", status: "running", name: "Worker",
+    description: "Read history", prompt: "Check the history", summary: "", steps: ["Read history"],
+    runtime_metadata: { request_id: "request", attempt_id: "attempt" } };
+  const runs = [run, { ...run, task_id: "second-child", card_id: "second-card" }];
+  const snapshot = { messages: [], dispatch_state: subagentDispatch, active_attempt: null, subagents: runs };
+  applySessionSnapshot("s", structuredClone(snapshot));
+  const first = useSessionStore.getState().subagents.s;
+  expect(Object.keys(first)).toEqual(["card", "second-card"]);
+
+  for (let read = 0; read < 5; read++) {
+    applySessionSnapshot("s", structuredClone(snapshot));
+    expect(useSessionStore.getState().subagents.s).toBe(first);
+  }
+
+  applySessionSnapshot("s", { ...snapshot, subagents: [...runs].reverse() });
+  expect(Object.keys(useSessionStore.getState().subagents.s)).toEqual(["second-card", "card"]);
+});
+
+it("publishes a subagent's terminal status from a complete snapshot", () => {
+  const run: SubagentRun = { task_id: "child", card_id: "card", status: "running", name: "Worker",
+    description: "", prompt: "", summary: "", steps: [] };
+  const { setSubagents } = useSessionStore.getState();
+  setSubagents("s", [run], {});
+  const running = useSessionStore.getState().subagents.s;
+
+  const finished: SubagentRun = { ...run, status: "completed", summary: "Done" };
+  setSubagents("s", [finished], running);
+  const completed = useSessionStore.getState().subagents.s;
+  expect(completed).not.toBe(running);
+  expect(completed.card).toMatchObject({ status: "completed", summary: "Done" });
+});
+
+it("retains a same-value live observation when an older subagent snapshot arrives", () => {
+  const live = { type: "subagent", session_id: "s", task_id: "child", tool_call_id: "call",
+    status: "running", name: "Worker", description: "Observed progress" };
+  const { setSubagents } = useSessionStore.getState();
+  handleWsMessage(live);
+  const readStart = useSessionStore.getState().subagents.s;
+  handleWsMessage(live);
+  const observed = useSessionStore.getState().subagents.s;
+  expect(observed).toEqual(readStart);
+
+  setSubagents("s", [structuredClone(observed.call)], observed);
+  expect(useSessionStore.getState().subagents.s).toBe(observed);
+
+  setSubagents("s", [{ ...readStart.call, description: "Earlier progress" }], readStart);
+  const afterOldRead = useSessionStore.getState().subagents.s;
+  expect(afterOldRead).toBe(observed);
+  expect(afterOldRead.call.description).toBe("Observed progress");
+});
+
 it("retains committed return diagnostics when an older delegation list arrives", () => {
   const store = useSessionStore.getState();
   const running: Delegation = { delegation_id: "child", work_id: "work", parent_session_id: "s", state: "running",
@@ -66,7 +121,7 @@ it("merges background and research snapshots using request-start entities", () =
   store.setResearch("s", [research]);
   const before = useSessionStore.getState();
   store.upsertBgTask("s", { ...bg, status: "completed", stdout: "new result" });
-  store.upsertResearch("s", { id: "research", status: "completed", verified: 2 });
+  handleWsMessage({ type: "research_completed", session_id: "s", research_id: "research", verified: 2 });
   store.setBgTasks("s", [bg], before.bgTasks.s);
   store.setResearch("s", [research], before.research.s);
   expect(useSessionStore.getState().bgTasks.s[0].stdout).toBe("new result");

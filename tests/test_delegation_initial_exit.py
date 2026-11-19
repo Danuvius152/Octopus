@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from types import SimpleNamespace
 
@@ -42,14 +43,13 @@ async def file_check(notification_runtime, monkeypatch):
             # Release the test's isolated connection after observing that fact.
             if database._conn is not None:
                 await database._conn.close()
-            failure = runtime.controls.archive_error
-            if failure is None:
-                raise
+            if isinstance(error, asyncio.CancelledError) and runtime.observed_archive_failure(error):
+                return
             assert isinstance(error, RuntimeError) and str(error) == "Database teardown remains unconfirmed; connection kept open"
             cause = error.__cause__
-            while cause is not None and cause is not failure:
+            while cause is not None and not runtime.observed_archive_failure(cause):
                 cause = cause.__cause__
-            assert cause is failure
+            assert cause is not None
 
     def hold_files(session_id, identifiers, *, user_id):
         if gate.enabled and session_id != runtime.parent.id:
@@ -174,9 +174,22 @@ async def test_closed_initial_receipt_still_retires_the_existing_relationship(no
 
 
 @pytest.mark.parametrize("depth", [1, 2], ids=["child", "grandchild"])
-@pytest.mark.parametrize("exit_kind", ["deleted", "refused", "closed-receipt", "archive-write-failed", "archive-notice-failed"])
+@pytest.mark.parametrize(("exit_kind", "archive_fault"), [
+    pytest.param("deleted", None, id="deleted"),
+    pytest.param("refused", None, id="refused"),
+    pytest.param("closed-receipt", None, id="closed-receipt"),
+    pytest.param("refused", "write", id="archive-write-failed"),
+    pytest.param("refused", "notice", id="archive-notice-failed"),
+    pytest.param("closed-receipt", "write", id="closed-receipt-archive-write-failed"),
+    pytest.param("closed-receipt", "notice", id="closed-receipt-archive-notice-failed"),
+    pytest.param("closed-receipt", "subscriber-cancel", id="archive-subscriber-cancelled"),
+    pytest.param("closed-receipt", "task-cancel", id="archive-task-cancelled"),
+    pytest.param("closed-receipt", "both-notices", id="archive-and-return-failed"),
+    pytest.param("closed-receipt", "return-subscriber-cancel", id="archive-failed-return-subscriber-cancelled"),
+    pytest.param("closed-receipt", "return-task-cancel", id="archive-failed-return-task-cancelled"),
+])
 async def test_unadmitted_initial_descendant_releases_the_successful_outer_once(
-    notification_runtime, file_check, monkeypatch, depth, exit_kind,
+    notification_runtime, file_check, monkeypatch, depth, exit_kind, archive_fault,
 ):
     runtime = notification_runtime
     file_check.enabled = False
@@ -215,61 +228,125 @@ async def test_unadmitted_initial_descendant_releases_the_successful_outer_once(
         assert not deliveries
         if exit_kind == "deleted":
             assert await runtime.manager.delete_session(child_id)
-        elif exit_kind == "refused" or exit_kind.startswith("archive-"):
-            if exit_kind == "refused":
+        elif exit_kind == "refused":
+            if archive_fault is None:
                 await AgentManager(runtime.manager.db).archive_agent(child.target_agent_id)
             else:
                 # Keep the session row live until the exact setup cleanup
                 # archives it, while rejecting new work through its agent.
                 await runtime.manager.db.update_agent(child.target_agent_id, archived=True)
-            if exit_kind == "archive-write-failed":
-                failure = RuntimeError("Original archive write failed")
-                runtime.controls.archive_error = failure
-                update = runtime.manager.db.update_session_field
-
-                async def refuse_archive(session_id, **fields):
-                    if session_id == child_id and fields.get("archived") is True:
-                        raise failure
-                    return await update(session_id, **fields)
-
-                monkeypatch.setattr(runtime.manager.db, "update_session_field", refuse_archive)
-            if exit_kind == "archive-notice-failed":
-                failure = RuntimeError("Original archive notice failed")
-                runtime.controls.archive_error = failure
-
-                async def refuse_archive_notice(event):
-                    if event.get("type") == "session_archived" and event.get("old_session_id") == child_id:
-                        raise failure
-
-                runtime.manager.on_broadcast("refuse-initial-leaf-archive", refuse_archive_notice, required=True)
         else:
             close_work(child.work_id)
+        delivery_id = f"agent-terminal:{child.work_id}"
+        return_faults = {"both-notices", "return-subscriber-cancel", "return-task-cancel"}
+        if archive_fault == "write":
+            async with runtime.manager.db.transaction() as tx:
+                await tx.execute(
+                    "CREATE TEMP TRIGGER refuse_initial_leaf_archive AFTER UPDATE OF archived ON sessions "
+                    f"WHEN NEW.archived = 1 AND OLD.id = '{child_id}' "
+                    "BEGIN SELECT RAISE(ABORT, 'Original archive write failed'); END"
+                )
+        elif archive_fault is not None:
+            archive_notice_failed = RuntimeError("Original archive notice failed")
+            subscriber_cancelled = asyncio.CancelledError("Archive subscriber cancelled its delivery")
+            return_notice_failed = (
+                asyncio.CancelledError("Terminal subscriber cancelled its delivery")
+                if archive_fault == "return-subscriber-cancel"
+                else DelegationError("Original terminal delivery notice failed")
+            )
+
+            async def cancel_publication_task():
+                task = asyncio.current_task()
+                assert task is not None
+                asyncio.get_running_loop().call_soon(task.cancel)
+                await asyncio.Future()
+
+            async def refuse_notification(event):
+                if event.get("type") == "session_archived" and event.get("old_session_id") == child_id:
+                    if archive_fault == "task-cancel":
+                        await cancel_publication_task()
+                    if archive_fault == "subscriber-cancel":
+                        raise subscriber_cancelled
+                    raise archive_notice_failed
+                if (archive_fault in return_faults and event.get("type") == "delegation_delivery"
+                        and event["delegation"]["delegation_id"] == child_id):
+                    if archive_fault == "return-task-cancel":
+                        await cancel_publication_task()
+                    raise return_notice_failed
+
+            runtime.manager.on_broadcast("refuse-initial-leaf-archive", refuse_notification, required=True)
         file_check.release.set()
-        if exit_kind == "closed-receipt":
-            assert await asyncio.wait_for(starting, 2) is child
-        elif exit_kind.startswith("archive-"):
-            with pytest.raises(RuntimeError, match="Original archive (write|notice) failed"):
+        if archive_fault == "write":
+            with pytest.raises(sqlite3.IntegrityError, match="Original archive write failed") as archive_failed:
                 await asyncio.wait_for(starting, 2)
+            runtime.controls.archive_error = archive_failed.value
+            runtime.controls.command_error = archive_failed.value
+        elif archive_fault is not None:
+            with pytest.raises((Exception, asyncio.CancelledError)) as failed:
+                await asyncio.wait_for(starting, 2)
+            error = failed.value
+            if archive_fault == "notice" or archive_fault in return_faults:
+                runtime.controls.archive_error = archive_notice_failed
+            else:
+                runtime.controls.archive_error = error
+            if not isinstance(error, DelegationError):
+                runtime.controls.command_error = error
+            if archive_fault == "notice":
+                assert error is archive_notice_failed
+            elif archive_fault == "task-cancel":
+                assert isinstance(error, asyncio.CancelledError)
+                assert (await runtime.manager.db.get_session_binding(child_id))["archived"]
+                assert child.state == "cancelled" and parent._child_work_ids == {child.work_id}
+                assert not deliveries
+                assert await runtime.manager.db.get_source_submission("delegation", delivery_id) is None
+                await runtime.confirm_recording()
+                return
+        elif exit_kind == "closed-receipt":
+            assert await asyncio.wait_for(starting, 2) is child
         else:
             with pytest.raises(DelegationError):
                 await asyncio.wait_for(starting, 2)
         if exit_kind == "closed-receipt":
+            row = await runtime.manager.db.get_source_submission("delegation", delivery_id, session_id=parent.delegation_id)
+            assert row is not None, "The committed leaf terminal must reach the parent through its original return"
+            leaf_returns = [item for item in deliveries if item[2]["delivery_id"] == delivery_id]
+            assert len(leaf_returns) == 1
+            target, body, _, receipt = leaf_returns[0]
+            assert target == parent.delegation_id and receipt.request_id == row["request_id"]
+            assert receipt.accepted and f"delegation={child_id}" in body and "admission is closed" in body
+            assert child._terminal_disposition == "accepted" and all(rec.state == "running" for rec in chain)
+            if archive_fault == "subscriber-cancel":
+                assert isinstance(error, RuntimeError) and error.__cause__ is subscriber_cancelled
+            elif archive_fault == "return-task-cancel":
+                assert isinstance(error, asyncio.CancelledError)
+            elif archive_fault in return_faults:
+                assert isinstance(error, ExceptionGroup), "Both notification failures must remain on the original command"
+                archive_failure, return_failure = error.exceptions
+                assert archive_failure is archive_notice_failed
+                if archive_fault == "return-subscriber-cancel":
+                    assert isinstance(return_failure, RuntimeError) and return_failure.__cause__ is return_notice_failed
+                else:
+                    assert return_failure is return_notice_failed
+                with pytest.raises(RuntimeError, match="Delegation command cleanup failed") as blocked:
+                    await runtime.delegations.confirm_recording()
+                assert blocked.value.__cause__ is error
             await starts(runtime, parent.delegation_id, 2)
             assert runtime.manager.dispatch_snapshot(runtime.parent.id)["items"] == []
             await release_model(runtime, parent)
+            assert (await asyncio.wait_for(receipt.wait(), 2)).outcome.status == "success"
         if depth == 2:
             await starts(runtime, outer.delegation_id, 2)
             await release_model(runtime, outer)
         await wait_round_finished(runtime, outer)
         assert child.state == "cancelled" and not work_is_open(child.work_id)
-        assert all(rec.state == "completed" for rec in chain)
+        assert all(rec.state == "completed" and not rec._child_work_ids for rec in chain)
         for rec in chain:
             assert len([item for item in deliveries if item[2]["delivery_id"] == f"agent-terminal:{rec.work_id}"]) == 1
             assert not runtime.delegations.has_active_delegation_for_parent(rec.delegation_id)
         assert not any(scope.session_id == child_id for scope, _ in runtime.starts)
         assert len(runtime.starts) == depth * 2 - (exit_kind != "closed-receipt")
         if exit_kind != "deleted":
-            assert bool((await runtime.manager.db.get_session_binding(child_id))["archived"]) == (exit_kind != "archive-write-failed")
+            assert bool((await runtime.manager.db.get_session_binding(child_id))["archived"]) == (archive_fault != "write")
             assert runtime.delegations.get_delegation(child_id) is child
         queued = runtime.manager.dispatch_snapshot(runtime.parent.id)["items"]
         assert len(queued) == 1 and f"Original body from {outer.delegation_id}" in queued[0]["summary"]

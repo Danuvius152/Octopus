@@ -23,11 +23,13 @@ the caps that keep a looping app from turning into a fork bomb of CLI processes 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections import deque
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -49,6 +51,7 @@ logger = logging.getLogger(__name__)
 # everywhere: a build turn writes code and drives the app's status, a
 # conversation turn writes nothing and drives a reply.
 ORIGIN_APP = "app"
+APP_REQUEST_STATUS_PATH = "/apps/{app_id}/agent/conversations/{conversation_id}/requests/{request_id}"
 
 # Caps (§6). An app is a program and a program can loop; each of these turns
 # an invisible cost into a specific error.
@@ -70,6 +73,8 @@ _IDLE_POLL_SECONDS = 0.02
 # keeps running — the app can read the answer from the transcript later.
 ASK_TIMEOUT_SECONDS = 300.0
 _STATUS_READ_TIMEOUT_SECONDS = 5.0
+_SSE_MAX_FRAMES = 256
+_SSE_MAX_BYTES = 1024 * 1024
 
 # Bus key, mirroring DelegationManager's single keyed subscription.
 _BUS_KEY = "app_agent"
@@ -85,6 +90,77 @@ class AppAgentError(Exception):
         self.recovery = recovery
 
 
+@dataclass(frozen=True)
+class _SSEFrame:
+    body: bytes
+    terminal: bool
+
+
+class _SSEObservation:
+    """One bounded buffer shared by synchronous publication and one ASGI writer."""
+
+    def __init__(self) -> None:
+        self._waiting: deque[_SSEFrame] = deque()
+        self._sending: _SSEFrame | None = None
+        self._pending_bytes = 0
+        self._ready = asyncio.Event()
+        self.closed = False
+
+    def offer(self, event: dict[str, Any]) -> None:
+        if self.closed:
+            return
+        room = _SSE_MAX_BYTES - self._pending_bytes
+        if len(self._waiting) + (self._sending is not None) >= _SSE_MAX_FRAMES or any(
+            isinstance(value, str) and len(value) > room for value in event.values()
+        ):
+            self.close()
+            return
+        try:
+            payload = json.dumps(event, ensure_ascii=False, allow_nan=False)
+            body = f"event: {event['type']}\ndata: {payload}\n\n".encode()
+        except (TypeError, ValueError, RecursionError):
+            # Framing failure belongs to this HTTP observation. The required
+            # LiveReply subscriber still owns delivery of the original result.
+            self.close()
+            return
+        if len(body) > room:
+            self.close()
+            return
+        self._waiting.append(_SSEFrame(body, event["type"] in ("done", "error")))
+        self._pending_bytes += len(body)
+        self._ready.set()
+
+    async def wait_for_frame(self) -> None:
+        await self._ready.wait()
+
+    def begin_send(self) -> _SSEFrame | None:
+        if self.closed or not self._waiting:
+            return None
+        self._sending = self._waiting.popleft()
+        if not self._waiting:
+            self._ready.clear()
+        return self._sending
+
+    def end_send(self, frame: _SSEFrame) -> None:
+        self._pending_bytes -= len(frame.body)
+        self._sending = None
+
+    def close(self) -> None:
+        self.closed = True
+        self._discard_waiting()
+        self._ready.set()
+
+    def expire(self, event: dict[str, Any]) -> None:
+        # The response wait has ended. Events published during the bounded
+        # status read cannot overtake the response's timeout receipt.
+        self._discard_waiting()
+        self.offer(event)
+
+    def _discard_waiting(self) -> None:
+        self._waiting.clear()
+        self._pending_bytes = len(self._sending.body) if self._sending is not None else 0
+
+
 @dataclass
 class _Turn:
     """One in-flight turn of one conversation."""
@@ -92,14 +168,14 @@ class _Turn:
     session_id: str
     app_id: str
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    status_url_prefix: str = ""
     observer: asyncio.Task | None = field(default=None, repr=False)
-    queue: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
+    stream: _SSEObservation | None = field(default=None, repr=False)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     body: LiveReply = field(init=False)
     error: str | None = None
     error_code: str | None = None
     cost: float | None = None
-    consumer_attached: bool = True
 
     def __post_init__(self) -> None:
         self.body = LiveReply(self.request_id)
@@ -112,8 +188,12 @@ class _Turn:
         return self.body.text()
 
     def emit(self, event: dict[str, Any]) -> None:
-        if self.consumer_attached:
-            self.queue.put_nowait({**event, "request_id": self.request_id, "attempt_id": self.attempt_id})
+        if self.stream is not None:
+            self.stream.offer({**event, "request_id": self.request_id, "attempt_id": self.attempt_id})
+
+    def close_stream(self) -> None:
+        if self.stream is not None:
+            self.stream.close()
 
 
 class AppAgentManager:
@@ -164,8 +244,11 @@ class AppAgentManager:
 
     @staticmethod
     def _request_recovery(turn: _Turn, code: str) -> dict[str, Any]:
+        path = APP_REQUEST_STATUS_PATH.format(
+            app_id=turn.app_id, conversation_id=turn.session_id, request_id=turn.request_id,
+        )
         return {"code": code, "conversation_id": turn.session_id, "request_id": turn.request_id,
-                "status_url": f"/apps/{turn.app_id}/agent/conversations/{turn.session_id}/requests/{turn.request_id}"}
+                "status_url": turn.status_url_prefix + path}
 
     async def _response_wait_recovery(self, turn: _Turn) -> dict[str, Any]:
         """A response ends observation; only original owner/storage facts supply its state."""
@@ -200,7 +283,8 @@ class AppAgentManager:
         elif completion.outcome is not None and completion.outcome.status != "success":
             self._fail_turn(turn, completion.outcome.message or "The agent did not complete this request")
         else:
-            turn.emit({"type": "done", "reply": turn.reply(), "cost": turn.cost})
+            if turn.stream is not None and not turn.stream.closed:
+                turn.emit({"type": "done", "reply": turn.reply(), "cost": turn.cost})
             turn.done.set()
         # A failed Owner can publish unavailable before its captured cleanup
         # retires. Response completion alone must not release the app's slot.
@@ -209,12 +293,6 @@ class AppAgentManager:
         else:
             await self._require_session_mgr().await_session_execution(turn.session_id)
         self._release_turn(turn)
-
-    @staticmethod
-    def detach_consumer(turn: _Turn) -> None:
-        turn.consumer_attached = False
-        while not turn.queue.empty():
-            turn.queue.get_nowait()
 
     # ------------------------------------------------------------- read-side
 
@@ -320,7 +398,6 @@ class AppAgentManager:
     async def ask(self, app_row: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         """Run one turn and wait for the answer (§2 — the JSON delivery)."""
         turn = await self.begin_turn(app_row, **kwargs)
-        self.detach_consumer(turn)
         try:
             await asyncio.wait_for(turn.done.wait(), timeout=ASK_TIMEOUT_SECONDS)
         except TimeoutError:
@@ -370,37 +447,31 @@ class AppAgentManager:
         return {**result, "state": "unknown", "waiting_for_input": False,
                 "message": "No confirmed outcome is available. Do not blindly resubmit the operation."}
 
-    async def stream_turn(self, turn: _Turn) -> AsyncIterator[dict[str, Any]]:
-        """A turn already started, delivered as it happens (§2 — the SSE
-        delivery).
-
-        Takes a started turn rather than starting one itself: everything that
-        can be refused — a bad message, a cap, a busy conversation — has to be
-        refused with a status code, and by the time a streaming body is being
-        produced the response is already a 200.
-
-        Yields `conversation` first so a client can store the id even if the
-        connection drops mid-answer, then `delta`/`tool`/`question` as they
-        arrive, then exactly one terminal `done` or `error`.
-        """
-        # The HTTP Response owns consumer detachment for its entire ASGI
-        # invocation, including failures before this iterator is ever started.
-        yield {"type": "conversation", "conversation_id": turn.session_id, "request_id": turn.request_id}
-        while True:
-            try:
-                event = await asyncio.wait_for(
-                    turn.queue.get(), timeout=ASK_TIMEOUT_SECONDS
-                )
-            except TimeoutError:
-                yield {
-                    "type": "error",
-                    "message": "This response wait ended. Query the original request for its current result; no operation was repeated.",
-                    **await self._response_wait_recovery(turn),
-                }
-                return
-            yield event
-            if event["type"] in ("done", "error"):
-                return
+    async def stream_turn(self, turn: _Turn) -> AsyncGenerator[bytes]:
+        """Write already admitted frames in order, holding their budget during send."""
+        stream = turn.stream
+        assert stream is not None
+        try:
+            while not stream.closed:
+                try:
+                    await asyncio.wait_for(stream.wait_for_frame(), timeout=ASK_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    stream.expire({
+                        "type": "error",
+                        "message": "This response wait ended. Query the original request for its current result; no operation was repeated.",
+                        **await self._response_wait_recovery(turn),
+                    })
+                frame = stream.begin_send()
+                if frame is None:
+                    return
+                try:
+                    yield frame.body
+                finally:
+                    stream.end_send(frame)
+                if frame.terminal:
+                    return
+        finally:
+            stream.close()
 
     async def begin_turn(
         self,
@@ -412,6 +483,8 @@ class AppAgentManager:
         conversation_id: str | None = None,
         title: str | None = None,
         wiki_mode: str | None = None,
+        observe_stream: bool = False,
+        status_url_prefix: str = "",
     ) -> _Turn:
         """Validate, resolve the conversation, register the record, start the
         turn. Registration happens *before* `start_message` on purpose: the
@@ -445,6 +518,7 @@ class AppAgentManager:
                 raise AppAgentError("Application is unavailable or deletion is unfinished", status_code=409)
             session, first_turn, turn = await self._register_turn(
                 app_row, conversation_id=conversation_id, agent=agent, title=title,
+                observe_stream=observe_stream, status_url_prefix=status_url_prefix,
             )
 
         async def admit():
@@ -466,10 +540,9 @@ class AppAgentManager:
         try:
             await complete_cleanup(admit())
         except BaseException as exc:
+            turn.close_stream()
             if turn.observer is None:
                 self._release_turn(turn)
-            else:
-                self.detach_consumer(turn)
             if isinstance(exc, (asyncio.CancelledError, AppAgentError)):
                 raise
             raise AppAgentError(f"could not start the turn: {exc}", status_code=500) from exc
@@ -477,7 +550,7 @@ class AppAgentManager:
 
     async def _register_turn(
         self, app_row: dict[str, Any], *, conversation_id: str | None,
-        agent: str | None, title: str | None,
+        agent: str | None, title: str | None, observe_stream: bool, status_url_prefix: str,
     ) -> tuple[Session, bool, _Turn]:
         app_id = app_row["id"]
         active = sum(1 for t in self._turns.values() if t.app_id == app_id)
@@ -518,7 +591,10 @@ class AppAgentManager:
                 status_code=409,
             )
 
-        turn = _Turn(session_id=session.id, app_id=app_id)
+        turn = _Turn(session_id=session.id, app_id=app_id, status_url_prefix=status_url_prefix)
+        if observe_stream:
+            turn.stream = _SSEObservation()
+            turn.stream.offer({"type": "conversation", "conversation_id": turn.session_id, "request_id": turn.request_id})
         self._turns[session.id] = turn
         return session, first_turn, turn
 

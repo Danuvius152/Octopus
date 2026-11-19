@@ -1,10 +1,12 @@
 """Public first-turn dispatch consumes only proven resumable native input."""
 
+import asyncio
 import json
 import re
 
 import pytest
 
+from server.config import settings
 from server.sessions.client_submissions import submit_client_message
 from server.workspace import paths_for
 from tests.claude_runtime import claude_runtime as claude_runtime
@@ -19,6 +21,39 @@ async def branch(manager, parent):
         await manager.db.append_message(session_id=parent.id, seq=seq, role=role, type="text", content=text)
     parent._message_count = 3
     return await manager.fork_session(parent.id, 2)
+
+
+async def test_deadline_while_reading_fork_replay_records_before_read_returns(native_runtime, monkeypatch):
+    manager, db, parent, _, starts, _ = native_runtime
+    child = await branch(manager, parent)
+    builds_before_request = len(starts)  # Fork capacity validation also renders argv.
+    monkeypatch.setattr(settings, "turn_max_seconds", .5)
+    entered, release = asyncio.Event(), asyncio.Event()
+    load = db.load_messages
+
+    async def hold_replay(session_id, *args, **kwargs):
+        rows = await load(session_id, *args, **kwargs)
+        if session_id == child.id and kwargs.get("max_seq") == child.fork_after_seq:
+            entered.set()
+            await release.wait()
+        return rows
+
+    monkeypatch.setattr(db, "load_messages", hold_replay)
+    receipt = await manager.start_message(child.id, "Wait for copied history")
+    assert receipt.execution is not None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        async with asyncio.timeout(2):
+            while (saved := await db.get_committed_terminal(child.id, receipt.request_id)) is None:
+                await asyncio.sleep(.01)
+        assert saved["code"] == "turn_timeout" and len(starts) == builds_before_request
+        assert receipt.execution.driver_state == "pending"
+    finally:
+        release.set()
+    completion = await asyncio.wait_for(receipt.wait(), 3)
+    assert completion.outcome.code == "turn_timeout" and len(starts) == builds_before_request
+    assert not receipt.execution.attempts
+    assert child.fork_needs_replay
 
 
 async def test_ack_and_success_without_saved_replay_cannot_enable_replay_again(native_runtime, tmp_path):

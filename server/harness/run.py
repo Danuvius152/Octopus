@@ -38,7 +38,12 @@ from ..session_operations import CompactResult
 from ..submission_models import NativeInputEvidence
 from . import assembly
 from .driver import ActiveTurnRef, SteerNotAccepted
-from .events import HarnessCredential, HarnessEvent, NativeQuestionRef
+from .events import (
+    HarnessCredential,
+    HarnessDeadlineExceeded,
+    HarnessEvent,
+    NativeQuestionRef,
+)
 from .launch_limits import validate_launch
 from .private_settings import PrivateSettings
 from .profile import ActivityObserver, RuntimeProfile, TurnContext
@@ -235,6 +240,7 @@ class HarnessRun:
         self.run_lease_id = uuid_module.uuid4().hex
         self.work_id = self._config.work_id
         self._lease_closed = False
+        self._turn_deadline: float | None = None
         self.admission_closed_at: float | None = None
         # Harness owns this local submission boundary. False proves that no
         # business input was submitted by this attempt; True is uncertainty,
@@ -433,6 +439,7 @@ class HarnessRun:
             # No await separates current authority from submitting the spawn.
             try:
                 validate_launch(launch_argv, kwargs.get("env"))
+                self._check_turn_deadline()
                 if self._driver.input_in_argv:
                     self.input_may_have_run = True
                 return await asyncio.create_subprocess_exec(
@@ -453,6 +460,10 @@ class HarnessRun:
         try:
             process = await _await_owned_task(spawn)
             self._spawned_at = time.monotonic()
+        except HarnessDeadlineExceeded:
+            self._spawn_task = None
+            self._begin_retirement()
+            raise
         except asyncio.CancelledError:
             # A transport can have spawned the process before returning its
             # handle. Keep that reservation alive until the captured group is
@@ -558,6 +569,14 @@ class HarnessRun:
             await self._config.authorize_spawn()
         if self._lease_closed:
             raise RuntimeError("HarnessRun has been retired")
+        self._check_turn_deadline()
+
+    def bind_turn_deadline(self, deadline: float | None) -> None:
+        self._turn_deadline = deadline
+
+    def _check_turn_deadline(self) -> None:
+        if self._turn_deadline is not None and time.monotonic() >= self._turn_deadline:
+            raise HarnessDeadlineExceeded("The original turn deadline passed")
 
     def bind_input_recorder(self, recorder: Callable[[NativeInputEvidence], Awaitable[None]]) -> None:
         self._input_recorder = recorder

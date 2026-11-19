@@ -139,18 +139,16 @@ async def test_large_committed_answer_has_browser_preview_and_full_http_detail(r
     http_app.dependency_overrides[get_session_manager] = lambda: manager
     try:
         async with connection(manager, bearer) as browser:
+            session_id = session.id
             if kind == "text":
                 app_row = await db.get_application("large-reader")
-                turn = await app_agent.begin_turn(app_row, message="Produce the complete answer")
-                session = manager.get_session(turn.session_id)
-                assert session is not None
-                stream = [event async for event in app_agent.stream_turn(turn)]
-                assert [event["text"] for event in stream if event["type"] == "message"] == [answer]
-                assert next(event for event in stream if event["type"] == "done")["reply"] == answer
-                saved = await app_agent.get_request_status("large-reader", session.id, turn.request_id)
+                reply = await app_agent.ask(app_row, message="Produce the complete answer")
+                assert reply["reply"] == answer
+                session_id = reply["conversation_id"]
+                saved = await app_agent.get_request_status("large-reader", session_id, reply["request_id"])
                 assert saved["reply"] == answer
             else:
-                receipt = await manager.start_message(session.id, "Produce the complete answer")
+                receipt = await manager.start_message(session_id, "Produce the complete answer")
                 result = await asyncio.wait_for(receipt.wait(), 5)
                 assert result.outcome.status == "success"
             while True:
@@ -162,6 +160,7 @@ async def test_large_committed_answer_has_browser_preview_and_full_http_detail(r
                     assert "detail_ref" not in event
                 if event["type"] == wire_kind:
                     break
+            assert event["session_id"] == session_id
             assert event["body_state"] == "preview"
             expected = {"payload": answer} if kind == "tool_use" else answer
             assert event[body_field] and event[body_field] != expected
@@ -173,14 +172,14 @@ async def test_large_committed_answer_has_browser_preview_and_full_http_detail(r
                 assert detail.status_code == 200
                 assert original["tool_input" if kind == "tool_use" else "content"] == expected
                 assert "no-store" in detail.headers["cache-control"]
-                complete = await client.get(f"/api/sessions/{session.id}")
+                complete = await client.get(f"/api/sessions/{session_id}")
                 full = next(m for m in complete.json()["messages"] if m["seq"] == event["seq"])
                 assert full == original
-                display = await client.get(f"/api/sessions/{session.id}?view=browser")
+                display = await client.get(f"/api/sessions/{session_id}?view=browser")
                 shown = next(m for m in display.json()["messages"] if m["seq"] == event["seq"])
                 assert len(json.dumps(shown, ensure_ascii=False, separators=(",", ":")).encode()) <= 64 * 1024
                 assert shown["body_state"] == "preview" and shown["detail_ref"] == event["detail_ref"]
-                exported = await client.get(f"/api/sessions/{session.id}/message-export")
+                exported = await client.get(f"/api/sessions/{session_id}/message-export")
                 assert next(m for m in exported.json()["messages"] if m["seq"] == event["seq"]) == original
                 if kind == "text":
                     loop = asyncio.get_running_loop()
@@ -193,7 +192,7 @@ async def test_large_committed_answer_has_browser_preview_and_full_http_detail(r
 
                     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
                     output = tmp_path / "complete-pull"
-                    args = build_parser().parse_args(["pull", session.id, "--server", "http://test", f"--token={bearer}", "--project-dir", str(output)])
+                    args = build_parser().parse_args(["pull", session_id, "--server", "http://test", f"--token={bearer}", "--project-dir", str(output)])
                     await asyncio.to_thread(do_pull, args)
                     native = [json.loads(line) for line in (output / "large-answer-native.jsonl").read_text().splitlines()]
                     assert next(row for row in native if row["type"] == "assistant")["message"]["content"][0]["text"] == answer

@@ -469,6 +469,25 @@ async def test_terminal_reference_precedes_diagnostic_budget_in_http_and_ws(expo
             assert received["type"] == "browser_unavailable" and "success" in received["message"]
 
 
+async def test_large_rejected_draft_has_bounded_recovery_cue_in_http_and_ws(export_runtime):
+    db, manager, session, client, _, _ = export_runtime
+    body = {"kind": "outcome", "operation": "message", "request_id": "r", "status": "failed",
+            "code": "turn_timeout", "message": "Turn timed out during preparation", "recovery": {}}
+    inputs = {"rejected_input": {"content": "Entire original draft " * 2000, "attachment_ids": ["original-file"]}}
+    await db.append_message(session.id, 0, "system", "result", body, tool_input=inputs)
+    shown, = (await client.get(f"/api/sessions/{session.id}?view=browser")).json()["messages"]
+    async with connection(manager, client.headers["Authorization"].removeprefix("Bearer ")) as browser:
+        await manager._broadcast({"type": "result", "session_id": session.id, "seq": 0, "terminal": True,
+                                  "content": body, "tool_input": inputs})
+        wire = await frame(browser[1])
+    for preview in (shown, wire):
+        assert preview["body_state"] == "preview" and preview["content"]["request_id"] == "r"
+        assert preview["tool_input"].get("rejected_input_preview") is True
+        assert "rejected_input" not in preview["tool_input"] and wire_size(preview) < 4096
+        full = (await client.get(preview["detail_ref"])).json()
+        assert full["tool_input"] == inputs
+
+
 async def test_pending_question_keeps_saved_reference_outside_the_browser_window(export_runtime, monkeypatch):
     from server.harness import HarnessEvent
 

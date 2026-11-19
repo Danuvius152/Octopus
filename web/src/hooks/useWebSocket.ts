@@ -3,11 +3,9 @@ import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import {
   loadSessionSnapshots,
   hydrateSession,
-  loadResearchSnapshot,
-  confirmBackgroundEvent,
+  confirmAuxiliaryTask,
 } from "../lib/hydrateSession";
 import { decodeWsEvent, type WsEvent } from "../lib/wsEvents";
-import { readResearchEvidence } from "../lib/researchEvidence";
 import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList } from "../lib/sessionList";
 import { refreshKnownAgents } from "../lib/refreshAgents";
@@ -86,16 +84,6 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         [id]: { generation: snapshot.generation, revision: snapshot.revision } } });
     }
   }
-  // A second tab can miss research_started, including while its first list
-  // read is in flight. Recover the full record rather than inventing a card
-  // from a progress patch with no question or authoritative status.
-  const store = getState();
-  if (["research_progress", "research_completed", "research_failed", "research_delivery"].includes(type) &&
-      sessionId === store.activeSessionId &&
-      "research_id" in data && !store.research[sessionId]?.some((job) => job.id === data.research_id)) {
-    void loadResearchSnapshot(sessionId).catch(() => {});
-  }
-
   const seq = data.seq ?? null;
   // The time the server stamped on the row this event is (`_tag_persisted`).
   // Injected once here rather than spelled out in each `addMessage` call below:
@@ -400,52 +388,11 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       break;
     }
 
-    case "bg_started": {
-      const { upsertBgTask } = getState();
-      upsertBgTask(sessionId, {
-        id: data.task_id,
-        session_id: sessionId,
-        command: data.command,
-        description: (data.description) ?? null,
-        working_dir: "",
-        status: "running",
-        exit_code: null,
-        stdout: "",
-        stderr: "",
-        truncated: false,
-        started_at: data.started_at,
-        completed_at: null,
-        idle_timeout_seconds: (data.idle_timeout_seconds) ?? null,
-        timeout_seconds: (data.timeout_seconds) ?? null,
-        stop_reason: null,
-      });
-      break;
-    }
-
-    case "bg_completed": {
-      // Patch the existing row in place. We don't have stdout/stderr
-      // here — those land via the synthesized user_message turn — but
-      // the chip needs the status + exit_code to flip from spinner
-      // to badge. Full bytes are fetched on demand via the REST GET.
-      const { bgTasks, upsertBgTask } = getState();
-      const current = (bgTasks[sessionId] || []).find(
-        (t) => t.id === data.task_id
-      );
-      if (current) {
-        upsertBgTask(sessionId, {
-          ...current,
-          status: data.status,
-          exit_code: (data.exit_code) ?? null,
-          truncated: !!data.truncated,
-          completed_at: data.completed_at,
-          idle_timeout_seconds: (data.idle_timeout_seconds)
-            ?? current.idle_timeout_seconds ?? null,
-          timeout_seconds: (data.timeout_seconds)
-            ?? current.timeout_seconds ?? null,
-          stop_reason: (data.stop_reason) ?? null,
-        });
-      }
-      confirmBackgroundEvent(sessionId, data.task_id);
+    case "bg_started":
+    case "bg_completed":
+    case "bg_delivery": {
+      getState().applyBgTaskEvent(data);
+      if (data.type !== "bg_started") confirmAuxiliaryTask("background", sessionId, data.task_id, "event");
       break;
     }
 
@@ -456,68 +403,13 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       break;
     }
 
-    case "bg_delivery": {
-      getState().updateBgTaskDelivery(sessionId, data.task_id, {
-        ...("delivery_disposition" in data ? { delivery_disposition: data.delivery_disposition } : {}),
-        ...("delivery_error" in data ? { delivery_error: data.delivery_error } : {}),
-      });
-      confirmBackgroundEvent(sessionId, data.task_id);
-      break;
-    }
-
-    case "research_started": {
-      getState().upsertResearch(sessionId, {
-        id: data.research_id,
-        session_id: sessionId,
-        question: data.question,
-        status: "running",
-        phase: "scope",
-      });
-      break;
-    }
-
-    case "research_progress": {
-      getState().upsertResearch(sessionId, {
-        id: data.research_id,
-        ...("phase" in data ? { phase: data.phase } : {}),
-        ...("detail" in data ? { detail: data.detail } : {}),
-        ...("counts" in data ? { counts: data.counts } : {}),
-      });
-      break;
-    }
-
-    case "research_completed": {
-      getState().upsertResearch(sessionId, {
-        id: data.research_id,
-        status: "completed",
-        phase: "done",
-        evidence: data.evidence_state === "available" ? readResearchEvidence(data.evidence) : null,
-        evidence_state: data.evidence_state === "available" ? "available" : "unavailable",
-        ...(typeof data.report_path === "string" ? { report_path: data.report_path } : {}),
-        ...("sources" in data ? { sources: data.sources } : {}),
-        ...("verified" in data ? { verified: data.verified } : {}),
-        ...("unverified" in data ? { unverified: data.unverified } : {}),
-        injection_status: (data.injection_status) ?? "pending",
-      });
-      break;
-    }
-
-    case "research_delivery": {
-      getState().upsertResearch(sessionId, {
-        id: data.research_id,
-        injection_status: data.injection_status,
-        ...("error" in data ? { error: data.error } : {}),
-        ...("delivery_receipt" in data ? { delivery_receipt: data.delivery_receipt } : {}),
-      });
-      break;
-    }
-
+    case "research_started":
+    case "research_progress":
+    case "research_completed":
+    case "research_delivery":
     case "research_failed": {
-      getState().upsertResearch(sessionId, {
-        id: data.research_id,
-        status: (data.status) ?? "failed",
-        ...("error" in data ? { error: data.error } : {}),
-      });
+      getState().applyResearchEvent(data);
+      confirmAuxiliaryTask("research", sessionId, data.research_id, "event");
       break;
     }
 

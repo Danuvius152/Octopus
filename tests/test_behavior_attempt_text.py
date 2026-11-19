@@ -1,17 +1,18 @@
 """Consumers select the completed attempt without dropping its text blocks."""
 
 from server.agent_manager import AgentManager
-from server.app_agent import AppAgentManager, _Turn
+from server.app_agent import AppAgentManager, _SSEObservation, _Turn
 from server.database import Database
 from server.delegations import DelegationManager
 from server.sessions import SessionManager
 from tests.accounts import create_account
+from tests.app_sse import app_sse_event
 from tests.completion_models import CompletionModels
 
 
 async def test_app_recovery_replaces_failed_text_and_tells_stream_consumer():
     manager = AppAgentManager()
-    turn = _Turn(session_id="child", app_id="app", request_id="r1")
+    turn = _Turn(session_id="child", app_id="app", request_id="r1", stream=_SSEObservation())
     manager._turns["child"] = turn
     async def emit(kind, attempt, **fields):
         await manager._on_broadcast({"type": kind, "session_id": "child", "request_id": "r1",
@@ -23,9 +24,8 @@ async def test_app_recovery_replaces_failed_text_and_tells_stream_consumer():
     await emit("assistant_text", "a2", content="correct two")
     await emit("result", "a2", is_error=False)
     assert turn.reply() == "correct one\n\ncorrect two"
-    events = []
-    while not turn.queue.empty():
-        events.append(turn.queue.get_nowait())
+    turn.emit({"type": "done"})
+    events = [app_sse_event(frame) async for frame in manager.stream_turn(turn)]
     assert any(event["type"] == "reset" and event["attempt_id"] == "a2" for event in events)
     assert all("attempt_id" in event for event in events)
 

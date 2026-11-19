@@ -16,9 +16,11 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 
+import aiosqlite
 import anyio.to_thread
 import pytest
 
+from server import expiry
 from server.database import Database
 from server.users import (
     UserError,
@@ -508,6 +510,31 @@ async def test_password_change_has_one_durable_outcome(tmp_path, monkeypatch, in
         await reopened.close()
 
 
+@pytest.fixture
+async def invite_store(tmp_path):
+    path = tmp_path / "invites.db"
+    db = Database(str(path))
+    try:
+        await db.initialize()
+        mgr = UserManager(db)
+        admin = await mgr.create_user(username="owner", password="password1", is_admin=True)
+        yield mgr, db, path, admin
+    finally:
+        await db.close()
+
+
+async def _observe_write_attempt(db: Database) -> asyncio.Event:
+    loop = asyncio.get_running_loop()
+    waiting = asyncio.Event()
+
+    def observe_statement(sql):
+        if sql == "BEGIN IMMEDIATE":
+            loop.call_soon_threadsafe(waiting.set)
+
+    await db.conn.set_trace_callback(observe_statement)
+    return waiting
+
+
 class TestInvites:
     @pytest.mark.asyncio
     async def test_registration_consumes_the_code(self, users):
@@ -526,27 +553,123 @@ class TestInvites:
             )
         assert e.value.status_code == 403
 
-    @pytest.mark.asyncio
-    async def test_a_single_use_code_cannot_be_spent_twice_concurrently(self, users):
-        """The guard is in the UPDATE, not in a read-then-write, so two
-        registrations racing for the last use cannot both win."""
-        mgr, db = users
-        invite = await mgr.create_invite(created_by=None)
-        results = await asyncio.gather(
-            db.claim_invite(invite["code"]),
-            db.claim_invite(invite["code"]),
-            db.claim_invite(invite["code"]),
-        )
-        assert sum(1 for r in results if r) == 1
+    @pytest.mark.parametrize(("change", "message"), [
+        ("expires", "That invite code has expired"),
+        ("expires_at_update", "That invite code has expired"),
+        ("revoked", "That invite code is not valid"),
+    ])
+    async def test_invite_must_still_be_valid_when_registration_acquires_the_writer(
+        self, invite_store, monkeypatch, change, message,
+    ):
+        mgr, db, path, admin = invite_store
+        now = datetime.now(UTC)
+
+        class InviteClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz is UTC
+                return now
+
+        monkeypatch.setattr(expiry, "datetime", InviteClock)
+        invite = await mgr.create_invite(created_by=admin["id"], ttl_days=1)
+        deadline = datetime.fromisoformat(invite["expires_at"])
+        waiting = await _observe_write_attempt(db)
+        if change == "expires_at_update":
+            execute = db.conn.execute
+
+            async def execute_after_expiry(sql, parameters=()):
+                nonlocal now
+                if sql.startswith("UPDATE invites SET used_count"):
+                    now = deadline
+                return await execute(sql, parameters)
+
+            monkeypatch.setattr(db.conn, "execute", execute_after_expiry)
+
+        async with aiosqlite.connect(path) as writer:
+            await writer.execute("BEGIN IMMEDIATE")
+            registration = asyncio.create_task(mgr.register(
+                invite_code=invite["code"], username="vera", password="password2",
+            ))
+            try:
+                await asyncio.wait_for(waiting.wait(), 2)
+                assert not registration.done()
+                if change == "expires":
+                    now = deadline
+                elif change == "revoked":
+                    await writer.execute("UPDATE invites SET revoked_at = ? WHERE code = ?", (
+                        now.isoformat(), invite["code"],
+                    ))
+                await writer.commit()
+                with pytest.raises(UserError, match=message) as refused:
+                    await registration
+                assert refused.value.status_code == 403
+            finally:
+                await writer.rollback()
+                await asyncio.gather(registration, return_exceptions=True)
+
+        assert (await db.get_invite(invite["code"]))["used_count"] == 0
+        assert await db.get_user_by_username("vera") is None
+
+    async def test_two_registrations_waiting_for_the_last_use_create_one_account(self, invite_store):
+        mgr, db, path, admin = invite_store
+        invite = await mgr.create_invite(created_by=admin["id"])
+        peer_db = Database(str(path))
+        try:
+            await peer_db.initialize()
+            peer = UserManager(peer_db)
+            waiting = await _observe_write_attempt(db)
+            peer_waiting = await _observe_write_attempt(peer_db)
+            async with aiosqlite.connect(path) as writer:
+                await writer.execute("BEGIN IMMEDIATE")
+                registrations = asyncio.gather(
+                    mgr.register(invite_code=invite["code"], username="vera", password="password2"),
+                    peer.register(invite_code=invite["code"], username="pete", password="password3"),
+                    return_exceptions=True,
+                )
+                try:
+                    await asyncio.wait_for(asyncio.gather(waiting.wait(), peer_waiting.wait()), 2)
+                    assert not registrations.done()
+                    await writer.commit()
+                finally:
+                    await writer.rollback()
+                    results = await registrations
+        finally:
+            await peer_db.close()
+
+        winner, = [result for result in results if isinstance(result, dict)]
+        refused, = [result for result in results if isinstance(result, UserError)]
+        assert refused.status_code == 403
+        assert refused.message == "That invite code has been used"
         assert (await db.get_invite(invite["code"]))["used_count"] == 1
+        assert {user["username"] for user in await db.list_users()} == {"owner", winner["username"]}
 
     @pytest.mark.asyncio
     async def test_a_multi_use_code_is_good_exactly_that_many_times(self, users):
         mgr, db = users
-        invite = await mgr.create_invite(created_by=None, max_uses=2)
-        assert await db.claim_invite(invite["code"]) is True
-        assert await db.claim_invite(invite["code"]) is True
-        assert await db.claim_invite(invite["code"]) is False
+        admin = await mgr.create_user(username="owner", password="password1", is_admin=True)
+        invite = await mgr.create_invite(created_by=admin["id"], max_uses=2, ttl_days=None)
+        for username in ("vera", "pete"):
+            assert (await mgr.register(
+                invite_code=invite["code"], username=username, password="password2",
+            ))["username"] == username
+        with pytest.raises(UserError, match="That invite code has been used"):
+            await mgr.register(invite_code=invite["code"], username="chris", password="password2")
+        assert (await db.get_invite(invite["code"]))["used_count"] == 2
+
+    async def test_failed_account_insert_keeps_the_committed_invite_use(self, users):
+        mgr, db = users
+        admin = await mgr.create_user(username="owner", password="password1", is_admin=True)
+        invite = await mgr.create_invite(created_by=admin["id"])
+        async with db.transaction(write=True) as tx:
+            await tx.execute("""
+                CREATE TRIGGER reject_account_insert BEFORE INSERT ON users
+                BEGIN SELECT RAISE(ABORT, 'account insert rejected'); END
+            """)
+
+        with pytest.raises(sqlite3.IntegrityError, match="account insert rejected"):
+            await mgr.register(invite_code=invite["code"], username="vera", password="password2")
+        assert (await db.get_invite(invite["code"]))["used_count"] == 1
+        assert await db.get_user_by_username("vera") is None
 
     @pytest.mark.asyncio
     async def test_revoked_and_expired_codes_are_refused(self, users):
@@ -554,6 +677,8 @@ class TestInvites:
         admin = await mgr.create_user(username="owner", password="password1", is_admin=True)
         revoked = await mgr.create_invite(created_by=admin["id"])
         await db.revoke_invite(revoked["code"], at=datetime.now(UTC).isoformat())
+        revoked_without_timestamp = await mgr.create_invite(created_by=admin["id"])
+        await db.revoke_invite(revoked_without_timestamp["code"], at="")
         expired = await mgr.create_invite(created_by=admin["id"])
         await db.conn.execute(
             "UPDATE invites SET expires_at = ? WHERE code = ?",
@@ -561,12 +686,13 @@ class TestInvites:
         )
         await db.conn.commit()
 
-        for code in (revoked["code"], expired["code"], "never-existed"):
+        for code in (revoked["code"], revoked_without_timestamp["code"], expired["code"], "never-existed"):
             with pytest.raises(UserError) as e:
                 await mgr.register(
                     invite_code=code, username="vera", password="password2"
                 )
             assert e.value.status_code == 403
+        assert (await db.get_invite(revoked_without_timestamp["code"]))["used_count"] == 0
 
     @pytest.mark.asyncio
     async def test_a_bad_code_cannot_be_used_to_probe_usernames(self, users):

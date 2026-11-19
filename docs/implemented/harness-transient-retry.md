@@ -122,6 +122,15 @@ The current attempt owns its prepared input, including any large-prompt file
 pointer. Recovery selects the next attempt's input from that value; there is
 no separate original-prompt copy to synchronize after rebuilding history.
 
+The replay body and the recovery notice use a single window of up to 60
+renderable messages from the active transcript segment. Ordinary result rows,
+recovery markers and internal reasoning are skipped before taking the window.
+Native results retain their source and position. The last ticket handoff, when
+present, anchors the segment and occupies one slot. Omission counts describe
+older renderable messages within that segment. A window with no renderable
+messages sends the prepared input as-is. Replayed text is framed as historical
+context and the prepared input follows it separately.
+
 Recovery markers remain persisted and published. Exhaustion or insufficient
 continuation evidence ends the request instead of replaying it. An explicit
 failed outcome stays failed; restart claims and unknown steer retain their
@@ -143,9 +152,11 @@ evidence and controlled stdio through native reconnect activity, all legacy
 categories, capacity shapes, preparation snapshot drift, Stop/revocation/deadline
 and retirement boundaries. `tests/test_codex_app_server_results.py` checks actual
 App/SSE, build and named-delegation consumers through recovery.
-`tests/test_turn_recovery_state.py` also checks large input through preparation
-failures on both sides of stale-history recovery: the original spill file stays
-intact and subsequent attempts retain the rebuilt history and its pointer.
+[Turn recovery tests](../../tests/test_turn_recovery_state.py) verify the
+dispatched replay body against the published recovery notice. They also check
+large input through preparation failures on both sides of stale-history
+recovery. The original spill file stays intact and subsequent attempts retain
+the rebuilt history and its pointer.
 
 <a id="5-limits"></a>
 ## Limits

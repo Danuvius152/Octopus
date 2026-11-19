@@ -300,7 +300,22 @@ async def test_output_overflow_retires_before_presentation_and_never_reports_suc
     manager, database, session, mode, _, events = native_runtime
     mode[0] = "control_output"
     entered, release = asyncio.Event(), asyncio.Event()
+    history_waiting, release_history = asyncio.Event(), asyncio.Event()
+    reads = 0
+    read_history = database.session_input_history
     monkeypatch.setattr(run_module, "_EVENT_BUFFER_COUNT", 4)
+
+    async def hold_start_history(*args):
+        nonlocal reads
+        result = await read_history(*args)
+        reads += 1
+        if reads == 2:
+            history_waiting.set()
+            await release_history.wait()
+        return result
+
+    if child_terminal == "unfinished":
+        monkeypatch.setattr(database, "session_input_history", hold_start_history)
 
     async def hold(event):
         if event.get("type") == "assistant_text":
@@ -319,6 +334,10 @@ async def test_output_overflow_retires_before_presentation_and_never_reports_suc
         # Fill the Owner's original publication handoff before filling the
         # reader's one offered event and the four native queue slots.
         execution = manager._session_owners[id(session)].runtime.current
+        if child_terminal == "unfinished":
+            await asyncio.wait_for(history_waiting.wait(), 3)
+            release_history.set()
+            await until(lambda: execution.input_history is None and not execution.input_changed.is_set())
         inject(tmp_path, item("exact-native-thread", "turn-1", "item-0", "part-0"))
         await until(lambda: any(frame.get("content") == "part-0" for frame in execution.frames))
         inject(tmp_path, item("exact-native-thread", "turn-1", "item-1", "part-1"))
@@ -334,6 +353,7 @@ async def test_output_overflow_retires_before_presentation_and_never_reports_suc
         assert run._stream_failure.error_code == "native_output_overflow"
         assert not any(event.get("terminal") for event in events)
     finally:
+        release_history.set()
         release.set()
     await wait_dispatch_idle(manager, session.id)
     result = await database.read_session_result(session.id, receipt["request_id"])

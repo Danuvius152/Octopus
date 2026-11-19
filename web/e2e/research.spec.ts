@@ -209,3 +209,42 @@ test("research submitted before the first detail is confirmed by one current rea
     receipt.resolve();
   }
 });
+
+test("a missed Research start retries the failed task detail from chat", async ({ page, request }) => {
+  const name = "Research targeted recovery E2E";
+  const session = await importSession(request, name);
+  const job = { id: "research-recover-by-id", session_id: session.id, question: "Recover this report", status: "completed", phase: "done" };
+  let socket: WebSocketRoute | undefined;
+  let listReads = 0, detailReads = 0;
+  await page.routeWebSocket("**/ws?*", (ws) => { ws.connectToServer(); socket = ws; });
+  await page.route(`**/api/sessions/${session.id}/research`, async (route) => {
+    expect(route.request().method()).toBe("GET");
+    listReads++;
+    await route.fulfill({ json: [] });
+  });
+  await page.route(`**/api/sessions/${session.id}/research/${job.id}`, async (route) => {
+    expect(route.request().method()).toBe("GET");
+    const bearer = await page.evaluate(() => localStorage.getItem("octopus_token"));
+    expect(!!bearer && route.request().headers().authorization === `Bearer ${bearer}`).toBe(true);
+    detailReads++;
+    if (detailReads === 1) await route.fulfill({ status: 503 });
+    else await route.fulfill({ json: job });
+  });
+
+  await login(page);
+  await page.locator(".session-item .session-name", { hasText: name }).click();
+  await expect(page.getByText("hello", { exact: true })).toBeVisible();
+  await expect.poll(() => listReads).toBe(1);
+  expect(socket).toBeDefined();
+  socket!.send(JSON.stringify({ type: "research_progress", session_id: session.id, research_id: job.id, phase: "verify" }));
+
+  const card = page.locator(`.research-card[data-research-id="${job.id}"]`);
+  const retry = page.getByRole("button", { name: "Retry research updates" });
+  await expect(retry).toBeVisible();
+  await expect(card).toHaveCount(0);
+  await retry.click();
+  await expect(card).toContainText(job.question);
+  await expect(retry).toBeHidden();
+  expect(detailReads).toBe(2);
+  expect(listReads).toBe(1);
+});

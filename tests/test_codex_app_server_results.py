@@ -10,6 +10,7 @@ from server.applications import ApplicationManager
 from server.config import settings
 from server.delegations import DelegationManager
 from tests import native_app_server as native_tests
+from tests.app_sse import app_sse_event
 from tests.native_app_server import (
     ROOT,
     child_end,
@@ -42,10 +43,10 @@ async def test_native_app_stream_status_and_history_keep_the_original_tool_outco
     starts.clear()  # Static agent configuration inspection is not an execution.
 
     async def collect(turn):
-        return [event async for event in app_agent.stream_turn(turn)]
+        return [app_sse_event(frame) async for frame in app_agent.stream_turn(turn)]
 
     try:
-        turn = await app_agent.begin_turn(app_row, message="Try the operation once")
+        turn = await app_agent.begin_turn(app_row, message="Try the operation once", observe_stream=True)
         consuming = asyncio.create_task(collect(turn))
         original = manager.get_session(turn.session_id)
         await until(lambda: original._run.backend is not None and original._run.backend.active_turn is not None)
@@ -120,13 +121,13 @@ async def test_native_app_reply_stream_and_refresh_use_the_same_final(native_run
     starts.clear()
 
     async def collect_stream(turn):
-        return [event async for event in app_agent.stream_turn(turn)]
+        return [app_sse_event(frame) async for frame in app_agent.stream_turn(turn)]
 
     try:
         if delivery == "ask":
             operation = asyncio.create_task(app_agent.ask(app_row, message="Read the final"))
         else:
-            turn = await app_agent.begin_turn(app_row, message="Read the final")
+            turn = await app_agent.begin_turn(app_row, message="Read the final", observe_stream=True)
             operation = asyncio.create_task(collect_stream(turn))
         await until(lambda: any(s.app_id == app_row["id"] and s._run.backend is not None
                                and s._run.backend.active_turn is not None for s in manager.sessions.values()))

@@ -820,20 +820,38 @@ describe("session-owned attachment drafts", () => {
       message: "Some attachments are unavailable. Re-upload the files in this conversation.", recovery: {} },
     tool_input: { rejected_input: { content: "Queued complete input", attachment_ids: ["lost-file"] } },
   };
-  const recordQueuedFailure = (preview = false) => act(() => useSessionStore.getState().addMessage(session.id, {
-    ...queuedFailure, tool_input: preview ? undefined : queuedFailure.tool_input,
+  const rejectedCodes = ["attachment_unavailable", "turn_timeout"];
+  const inputFailure = (code: string) => ({ ...queuedFailure, content: { ...queuedFailure.content, code } });
+  const recordQueuedFailure = (preview = false, code = "attachment_unavailable") => act(() => useSessionStore.getState().addMessage(session.id, {
+    ...inputFailure(code), tool_input: preview ? { rejected_input_preview: true } : queuedFailure.tool_input,
     body_state: preview ? "preview" : undefined,
     detail_ref: preview ? `/api/sessions/${session.id}/messages/7` : undefined,
   }));
+  const serveFullFailure = (code: string) => {
+    useSessionStore.setState({ token: "restore-original-token" });
+    const upload = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(url), window.location.origin).pathname;
+      if (path === `/api/sessions/${session.id}/messages/7`) return Promise.resolve(Response.json(inputFailure(code)));
+      if (path.endsWith("/submissions")) return Promise.resolve(Response.json({ items: [], next_cursor: null }));
+      if (init?.method === "POST" && path.endsWith("/attachments")) return upload(url, init);
+      return Promise.resolve(Response.json([]));
+    }));
+  };
 
-  it("restores a queued-input failure using its original File objects", async () => {
+  it.each([
+    ...rejectedCodes.map(code => ({ code, representation: "inline" })), { code: "turn_timeout", representation: "live preview" },
+  ])("restores $code $representation using its original File objects", async ({ code, representation }) => {
+    const preview = representation === "live preview";
+    if (preview) serveFullFailure(code);
     const { input, send, sendMessage } = setup(async () => ({ accepted: true, requestId: "accepted-files" }));
     fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
     fireEvent.change(input, { target: { value: "Queued complete input" } });
     pick();
     await complete(0, "lost-file");
     await act(async () => fireEvent.click(send));
-    recordQueuedFailure();
+    recordQueuedFailure(preview, code);
+    if (preview) fireEvent.click(await screen.findByRole("button", { name: "View full message" }));
     fireEvent.click(await screen.findByRole("button", { name: "Restore draft and re-upload files" }));
     await waitFor(() => expect(uploads).toHaveLength(2));
     expect(input).toHaveValue("Queued complete input");
@@ -843,20 +861,12 @@ describe("session-owned attachment drafts", () => {
     expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Queued complete input", ["replacement-file"], undefined, expect.any(String));
   });
 
-  it.each(["inline", "expanded"])("requires file reselection when restoring a durable %s failure after reload", async (representation) => {
-    if (representation === "expanded") {
-      useSessionStore.setState({ token: "restore-original-token" });
-      const upload = globalThis.fetch;
-      vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
-        const path = new URL(String(url), window.location.origin).pathname;
-        if (path === `/api/sessions/${session.id}/messages/7`) return Promise.resolve(Response.json(queuedFailure));
-        if (path.endsWith("/submissions")) return Promise.resolve(Response.json({ items: [], next_cursor: null }));
-        if (init?.method === "POST" && path.endsWith("/attachments")) return upload(url, init);
-        return Promise.resolve(Response.json([]));
-      }));
-    }
+  it.each(
+    ["inline", "expanded"].flatMap(representation => rejectedCodes.map(code => ({ representation, code }))),
+  )("requires file reselection when restoring a durable $representation $code after reload", async ({ representation, code }) => {
+    if (representation === "expanded") serveFullFailure(code);
     const { input, send, sendMessage } = setup();
-    recordQueuedFailure(representation === "expanded");
+    recordQueuedFailure(representation === "expanded", code);
     fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
     if (representation === "expanded") fireEvent.click(await screen.findByRole("button", { name: "View full message" }));
     fireEvent.click(await screen.findByRole("button", { name: "Restore draft and re-upload files" }));
@@ -914,6 +924,64 @@ it("retires saved-input previews and reads when another session is selected", as
     expect(screen.queryByText(/Couldn't read saved input/)).toBeNull();
   } finally {
     await act(async () => otherPage.resolve(Response.json({ items: [] })));
+    vi.unstubAllGlobals();
+  }
+});
+
+it.each(["unmount", "account", "session"])("retires pending saved-input responses after %s", async (exit) => {
+  const other = { ...session, id: "other-session", name: "Other chat" };
+  useSessionStore.setState({ token: "original-account", sessions: [session, other], mainView: "chat" });
+  const refresh = deferred<Response>();
+  const pagination = deferred<Response>();
+  const dismissal = deferred<Response>();
+  const signals: (AbortSignal | null | undefined)[] = [];
+  const execution = { state: "withdrawn", state_version: 2, execution_owner_request_id: "saved-request", recoverable_input: true };
+  const original = { client_request_id: "saved-client", request_id: "saved-request", execution,
+    preview: "Original saved input", attachment_count: 0 };
+  let originalReads = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if (!url.includes("/submissions")) return Response.json([]);
+    const token = new Headers(init?.headers).get("Authorization");
+    if (token === "Bearer next-account" || url.includes(`/${other.id}/submissions`)) {
+      return Response.json({ items: [{ ...original, preview: "Current saved input" }] });
+    }
+    if (init?.method !== "DELETE" && !url.includes("before=") && ++originalReads === 1) {
+      return Response.json({ items: [original], next_cursor: 20 });
+    }
+    signals.push(init?.signal);
+    if (init?.method === "DELETE") return dismissal.promise;
+    return url.includes("before=") ? pagination.promise : refresh.promise;
+  }));
+  try {
+    setup();
+    const loadMore = await screen.findByRole("button", { name: "Load more saved inputs" });
+    act(() => useSessionStore.getState().applyDispatchState(session.id, {
+      generation: "saved-input-service", revision: 1, paused: false,
+      active_request_id: null, active_operation: null, items: [],
+    }));
+    fireEvent.click(loadMore);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    expect(signals).toHaveLength(3);
+    if (exit === "unmount") cleanup();
+    if (exit === "account") act(() => {
+      useSessionStore.getState().setToken("next-account");
+      useSessionStore.setState({ activeSessionId: session.id, sessions: [session], mainView: "chat" });
+    });
+    if (exit === "session") act(() => useSessionStore.getState().setActiveSessionId(other.id));
+    expect(signals.map((signal) => signal?.aborted)).toEqual([true, true, true]);
+    if (exit !== "unmount") await screen.findByText("Current saved input");
+    await act(async () => {
+      refresh.resolve(Response.json({ items: [original] }));
+      pagination.resolve(Response.json({ items: [{ ...original, client_request_id: "old-page", preview: "Old saved page" }] }));
+      dismissal.resolve(new Response(null, { status: 503 }));
+    });
+    expect(screen.queryByText("Original saved input")).toBeNull();
+    expect(screen.queryByText("Old saved page")).toBeNull();
+    expect(screen.queryByText(/Couldn't dismiss saved input/)).toBeNull();
+    if (exit !== "unmount") expect(screen.getByText("Current saved input")).toBeVisible();
+  } finally {
+    cleanup();
+    useSessionStore.getState().setToken("");
     vi.unstubAllGlobals();
   }
 });

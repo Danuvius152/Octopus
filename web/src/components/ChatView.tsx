@@ -60,9 +60,20 @@ interface ArchiveIntent {
   account: number;
 }
 
+interface ArchiveObservationFeedback {
+  reading: ReturnType<typeof sessionList.observe>;
+  confirmation?: string;
+  successorError?: string;
+}
+
 interface ArchiveLayout extends ArchiveIntent {
   controlsHeight: number;
   viewportHeight: number;
+}
+
+function retainsRejectedDraft(message: Message): boolean {
+  return message.outcome?.code === "attachment_unavailable" || Boolean(message.tool_input?.rejected_input)
+    || message.tool_input?.rejected_input_preview === true;
 }
 
 function SessionContextMeter({ sessionId, archived }: { sessionId: string; archived?: boolean }) {
@@ -218,6 +229,7 @@ export function ChatView({
   const [archiveFeedback, setArchiveFeedback] = useState<{
     intent: ArchiveIntent; version: number;
     observation: SessionObservation; message: string; activity: string | null;
+    observed?: ArchiveObservationFeedback;
     confirm?: () => Promise<void>; checking?: boolean;
   } | null>(null);
   const [rejectedDrafts, setRejectedDrafts] = useState<{
@@ -302,7 +314,7 @@ export function ChatView({
     if (!mounted.current || !draft.attachments.length) return;
     const state = useSessionStore.getState();
     const result = state.messages[draft.sessionId]?.find((message) => message.outcome?.request_id === requestId);
-    if (!result || result.outcome?.code === "attachment_unavailable") submittedDrafts.current.set(requestId, draft);
+    if (!result || retainsRejectedDraft(result)) submittedDrafts.current.set(requestId, draft);
     const recovery = pendingFileRestore.current;
     if (!recovery || recovery.requestId !== requestId || recovery.sessionId !== draft.sessionId) return;
     pendingFileRestore.current = null;
@@ -338,7 +350,7 @@ export function ChatView({
     if (state.messages === before.messages) return;
     for (const [requestId, draft] of submittedDrafts.current) {
       const result = state.messages[draft.sessionId]?.find((message) => message.outcome?.request_id === requestId);
-      if (result && result.outcome?.code !== "attachment_unavailable") submittedDrafts.current.delete(requestId);
+      if (result && !retainsRejectedDraft(result)) submittedDrafts.current.delete(requestId);
     }
   }), []);
   const activeSession = useSessionStore((s) => s.sessions.find(session => session.id === activeSessionId)
@@ -696,7 +708,13 @@ export function ChatView({
       let confirmation: ArchiveDeadline | undefined;
       let retirePreparation: (() => void) | undefined;
       let targetStillCurrent: (() => boolean) | undefined;
+      let observedFeedback: ArchiveObservationFeedback | undefined;
       let unsubscribe = () => {};
+      const updateObservedFeedback = (next?: ArchiveObservationFeedback) => {
+        const previousRead = observedFeedback?.reading;
+        if (previousRead && previousRead !== tracked && previousRead !== next?.reading) previousRead.finish();
+        observedFeedback = next;
+      };
       const revokeHandoff = () => {
         handoffAllowed = false;
         retirePreparation?.();
@@ -704,6 +722,7 @@ export function ChatView({
       const stop = () => {
         retired = true; foreground = false;
         revokeHandoff();
+        updateObservedFeedback();
         const accountEnded = !sessionList.accountCurrent(observation);
         if (accountEnded) { post.finish(); confirmation?.finish(); }
         // A bounded command still observes restoration and deletion while
@@ -718,7 +737,7 @@ export function ChatView({
       const current = () => mounted.current && foreground && viewing.current === intent &&
         sessionList.accountCurrent(observation) && textDraft.current() && textDraft.store.getState().version === version;
       const keepObserving = () => current() &&
-        (retain || !hasPostResult && sessionList.archiveActivityCurrent(activeSessionId, observation));
+        (retain || observedFeedback !== undefined || !hasPostResult && sessionList.archiveActivityCurrent(activeSessionId, observation));
       const failureDetail = (result: SessionArchiveResult) =>
         `${result.failure_stage === "successor_creation" ? "Successor creation" :
           result.failure_stage === "successor_configuration" ? "Successor configuration" : "Schedule rebinding"} failed: ${result.message}`;
@@ -733,11 +752,17 @@ export function ChatView({
           ? { ...value, activity: activityMessage(activity) }
           : activity ? { intent, version, observation, message: "", activity: activityMessage(activity) } : value);
       };
-      const feedback = (message: string, readAgain = false) => {
+      const feedback = (message: string, readAgain = false, observed?: ArchiveObservationFeedback) => {
         retain = readAgain;
         sharedActivity = getActivity();
-        if (current()) setArchiveFeedback({ intent, version, observation, message, activity: activityMessage(sharedActivity),
+        if (!current()) return;
+        updateObservedFeedback(observed);
+        setArchiveFeedback({ intent, version, observation, message, activity: activityMessage(sharedActivity), observed,
           confirm: readAgain ? () => confirm(true) : undefined, checking });
+      };
+      const finishChecking = () => {
+        checking = false;
+        if (current()) setArchiveFeedback((value) => value?.intent === intent ? { ...value, checking: false } : value);
       };
       const rememberPartial = (result: SessionArchiveResult) => {
         archived = true; knownSuccessor = result.new_session_id;
@@ -745,17 +770,29 @@ export function ChatView({
         feedback(partialMessage);
       };
       const ownsArchiveEffect = () => sessionList.archiveObservationCurrent(activeSessionId, observation);
-      const prepareSuccessor = (id: string) => new Promise<void>((done) => {
+      const confirmedArchiveCurrent = (reading: typeof tracked) => sessionList.archiveActivityCurrent(activeSessionId, reading.observation) &&
+        useSessionStore.getState().archivedSessions.some((row) => row.id === activeSessionId);
+      const syncObservedFeedback = () => {
+        const shown = observedFeedback;
+        if (!shown) return;
+        if (!confirmedArchiveCurrent(shown.reading)) updateObservedFeedback();
+        else if (shown.successorError && !ownsArchiveEffect()) {
+          updateObservedFeedback(shown.confirmation ? { ...shown, successorError: undefined } : undefined);
+        }
+        const observed = observedFeedback;
+        if (shown !== observed && current()) setArchiveFeedback((value) => value?.intent === intent ? { ...value, observed } : value);
+      };
+      const prepareSuccessor = (id: string) => new Promise<string | undefined>((done) => {
         const target = () => {
           if (!handoffAllowed || !current() || !ownsArchiveEffect()) return undefined;
           const state = useSessionStore.getState();
           if (state.sessionSuccessors[activeSessionId] !== id || !state.archivedSessions.some((row) => row.id === activeSessionId)) return undefined;
           return state.sessions.find((row) => row.id === id && !row.archived);
         };
-        if (!target()) { done(); return; }
+        if (!target()) { done(undefined); return; }
         const key = `successor:${++successorSerial.current}`;
-        const reading = observeSession(id);
-        const finish = (promoted: boolean) => {
+        const reading = observeSession(id, "complete", { fresh: true });
+        const finish = (promoted: boolean, error?: string) => {
           if (retirePreparation !== retire) return;
           retirePreparation = undefined;
           targetStillCurrent = undefined;
@@ -763,16 +800,12 @@ export function ChatView({
             reading.cancel();
             if (mounted.current) setPreparingSuccessor((pane) => pane?.key === key ? null : pane);
           }
-          done();
+          done(error);
         };
         const retire = () => finish(false);
         retirePreparation = retire;
         targetStillCurrent = () => Boolean(target());
-        const fail = (message: string) => {
-          if (retirePreparation !== retire) return;
-          feedback(message);
-          finish(false);
-        };
+        const fail = (message: string) => finish(false, message);
         const promote = (prepared: boolean) => {
           const successor = target();
           if (!successor || !hasTranscriptBaseline(useSessionStore.getState(), id) || successor.transcript_integrity === "duplicate_seq") {
@@ -823,8 +856,8 @@ export function ChatView({
         // command's receipt, successor registration or navigation.
         const reading = manual && !ownsArchiveEffect()
           ? sessionList.observe(activeSessionId, useSessionStore.getState(), "archive") : tracked;
-        feedback(partialMessage ?? (archived ? "Archive committed. Checking the session list." :
-          "Archive result is unknown. Checking the session list; the command will not be sent again."), true);
+        if (manual) setArchiveFeedback((value) => value?.intent === intent ? { ...value, checking: true } : value);
+        else feedback(partialMessage ?? "");
         try {
           const result = await sessionList.confirmArchive(activeSessionId, reading.observation, confirmation,
             knownSuccessor ? { successorId: knownSuccessor, original: observation } : undefined);
@@ -843,17 +876,19 @@ export function ChatView({
             return;
           }
           archived = true;
-          const message = "Archive confirmed. Viewing the archived conversation.";
-          feedback(hasPostResult ? message : `${message} Original command result is unknown.`);
-          if (result.successor && !manual && current() && ownsArchiveEffect() &&
-              useSessionStore.getState().sessionSuccessors[activeSessionId] === result.successor.id) {
-            await prepareSuccessor(result.successor.id);
-          }
+          const successorError = result.successor && !manual ? await prepareSuccessor(result.successor.id) : undefined;
+          // A confirmed archive can outlive the connection used to prepare its successor.
+          if (!confirmedArchiveCurrent(reading)) return;
+          feedback(hasPostResult ? "Archive committed." : "Original command result is unknown.", false, {
+            reading,
+            confirmation: hasPostResult ? "Viewing the archived conversation." : "Archive confirmed. Viewing the archived conversation.",
+            successorError: successorError && ownsArchiveEffect() ? successorError : undefined,
+          });
         } finally {
-          if (reading !== tracked) reading.finish();
-          checking = false;
+          // A displayed confirmation keeps its observation until the feedback retires.
+          if (reading !== tracked && reading !== observedFeedback?.reading) reading.finish();
           confirmation.finish();
-          if (current()) setArchiveFeedback((value) => value?.intent === intent ? { ...value, checking: false } : value);
+          finishChecking();
           if (!keepObserving()) stop();
         }
       };
@@ -862,6 +897,7 @@ export function ChatView({
         if (state.activeSessionId !== activeSessionId || state.mainView !== "chat") foreground = false;
         if (targetStillCurrent && !targetStillCurrent()) retirePreparation?.();
         syncActivity();
+        syncObservedFeedback();
         if (!posting && !checking && !keepObserving()) stop();
       });
       const unsubscribeDraft = textDraft.store.subscribe((state) => { if (state.version !== version) stop(); });
@@ -900,6 +936,8 @@ export function ChatView({
         // on both removal AND insertion so the two paths converge to
         // the same list regardless of arrival order.
         confirmation = new ArchiveDeadline();
+        checking = true;
+        feedback("");
         const accepted = await sessionList.created(fresh, observation, activeSessionId, confirmation);
         confirmation.finish();
         if (!accepted || !sessionList.current(observation)) {
@@ -907,8 +945,12 @@ export function ChatView({
           return;
         }
         cancelOriginalFork();
-        await prepareSuccessor(fresh.id);
+        const successorError = await prepareSuccessor(fresh.id);
+        const observed = successorError && ownsArchiveEffect() && confirmedArchiveCurrent(tracked)
+          ? { reading: tracked, successorError } : undefined;
+        feedback("Archive committed.", false, observed);
       } finally {
+        if (checking) finishChecking();
         posting = false;
         archiveWrites.current.delete(intent);
         if (mounted.current && !archiveInFlight(intent) &&
@@ -1205,7 +1247,7 @@ export function ChatView({
   // copied history. The composer adopts fork_prefilled_prompt (§6.1).
   const handleForked = async (fork: SessionInfo, observation: SessionObservation) => {
     if (!sessionList.current(observation)) return;
-    await selectSession(fork.id, fork.agent_id);
+    await selectSession(fork.id, fork.agent_id, { fresh: true });
   };
 
   const renderSavedDrafts = (sessionId: string | null, archived: boolean) => <div className="shrink-0 max-h-72 overflow-auto px-6">
@@ -1213,15 +1255,21 @@ export function ChatView({
           {submissionError && submissionError.command === submissionCommand.current &&
             submissionError.command.account === accountGeneration && submissionError.command.sessionId === sessionId &&
             <p role="alert" className="mb-2 text-sm text-destructive">{submissionError.message}</p>}
-          {archiveFeedback && (archiveFeedback.message || archiveFeedback.activity) && viewing.current === archiveFeedback.intent &&
+          {archiveFeedback && viewing.current === archiveFeedback.intent &&
             archiveFeedback.intent.account === accountGeneration && archiveFeedback.intent.sessionId === sessionId &&
             textDraft.store.getState().version === archiveFeedback.version && sessionList.accountCurrent(archiveFeedback.observation) &&
-            <div role="alert" className="mb-2 text-sm text-destructive">
-              {archiveFeedback.message && <p>{archiveFeedback.message}</p>}
-              {archiveFeedback.activity && <p>{archiveFeedback.activity}</p>}
-              {archiveFeedback.confirm && <Button size="sm" variant="outline" disabled={archiveFeedback.checking}
-                onClick={() => void archiveFeedback.confirm?.()}>Confirm original archive</Button>}
-            </div>}
+            <>
+              {archiveFeedback.checking && !archiveFeedback.confirm &&
+                <p role="status" className="mb-2 text-sm text-muted-foreground">Checking archive…</p>}
+              {(archiveFeedback.message || archiveFeedback.activity || archiveFeedback.observed) && <div role="alert" className="mb-2 text-sm text-destructive">
+                {archiveFeedback.message && <p>{archiveFeedback.message}</p>}
+                {archiveFeedback.observed?.confirmation && <p>{archiveFeedback.observed.confirmation}</p>}
+                {archiveFeedback.activity && <p>{archiveFeedback.activity}</p>}
+                {archiveFeedback.observed?.successorError && <p>{archiveFeedback.observed.successorError}</p>}
+                {archiveFeedback.confirm && <Button size="sm" variant="outline" disabled={archiveFeedback.checking}
+                  onClick={() => void archiveFeedback.confirm?.()}>Confirm original archive</Button>}
+              </div>}
+            </>}
           {sessionId && <QuestionDraftRecovery sessionId={sessionId}
             composerOccupied={inputOccupied || pendingAttachments.length > 0 || archived}
             onAcceptedInput={retainSubmittedInput}
@@ -1322,7 +1370,7 @@ export function ChatView({
           style={keptLayout ? { flexBasis: keptLayout.controlsHeight } : undefined}>
           <div className="research-card-wrap shrink-0 px-4 empty:hidden">
             <WikiJobCards key={sessionId} sessionId={sessionId} />
-            <ResearchCard sessionId={sessionId} />
+            <ResearchCard sessionId={sessionId} foreground={mainView === "chat" && !preparation} />
           </div>
           <DispatchQueue key={`dispatch:${sessionId}`} sessionId={sessionId} archived={archived} readOnly={archived || damaged} onCancelCompact={cancelCompact} />
           <CommandNotices sessionId={sessionId} />

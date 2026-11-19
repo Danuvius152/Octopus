@@ -63,7 +63,7 @@ installation records preserves the saved relationships and grant; it does not
 replay a callback or establish current provider access. See the
 [Connector lifecycle](implemented/connectors.md#oauth-and-lifecycle).
 
-Current archives contain complete main format 11 and Wiki format 17. GitHub
+Current archives contain complete main format 12 and Wiki format 17. GitHub
 installations preserve their canonical numeric identity, display label, original
 installation ID, encrypted grant and Agent links through export/import. The
 importer rejects an older main marker before creating the target; it does not

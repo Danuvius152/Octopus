@@ -263,10 +263,10 @@ async def test_stop_authorization_and_overall_deadline_prevent_another_business_
     credential = await _bind_credential(manager, "codex")
     await manager.update_session_configuration(session.id, {"credential_id": credential}, session.user_id)
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
-    monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", .3)
-    receipt = await start_output(native_runtime)
+    monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 3 if action == "deadline" else .3)
     if action == "deadline":
-        monkeypatch.setattr(settings, "turn_max_seconds", .2)
+        monkeypatch.setattr(settings, "turn_max_seconds", 1)
+    receipt = await start_output(native_runtime)
     failure = terminal("failed")
     failure["params"]["turn"]["error"] = {"codexErrorInfo": "serverOverloaded", "message": "Capacity"}
     inject(tmp_path, failure)
@@ -350,10 +350,10 @@ async def test_native_activity_cannot_extend_the_overall_logical_deadline(native
     manager, database, session, _, starts, _ = native_runtime
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
     monkeypatch.setattr(settings, "turn_idle_max_retries", 0)
+    monkeypatch.setattr(settings, "turn_max_seconds", .8)
     receipt = await start_output(native_runtime)
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .2)
-    monkeypatch.setattr(settings, "turn_max_seconds", .4)
-    for _ in range(15):
+    for _ in range(24):
         inject(tmp_path, {"method": "error", "params": {
             "threadId": ROOT, "turnId": "turn-1", "willRetry": True, "error": {"message": "Reconnecting..."}}})
         await asyncio.sleep(.04)
@@ -361,6 +361,38 @@ async def test_native_activity_cannot_extend_the_overall_logical_deadline(native
     result = await database.read_session_result(session.id, receipt["request_id"])
     assert result.outcome.status == "failed" and result.outcome.code == "turn_timeout"
     assert len(starts) == 1
+
+
+async def test_overall_deadline_in_backoff_survives_blocked_notifications(native_runtime, tmp_path, monkeypatch):
+    from server.sessions import publication
+
+    manager, database, session, _, starts, _ = native_runtime
+    monkeypatch.setattr(settings, "turn_max_seconds", 1)
+    monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", .15)
+    receipt = await start_output(native_runtime)
+    monkeypatch.setattr(publication, "_MAX_PUBLICATIONS", 1)
+    blocked, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_recovery(event):
+        if event.get("retrying"):
+            # This command offers a dispatch snapshot behind the held event.
+            await manager.resume_dispatch(session.id, resume_queue=False)
+            blocked.set()
+            await release.wait()
+
+    manager.on_broadcast("hold-retry-publication", hold_recovery)
+    failure = terminal("failed")
+    failure["params"]["turn"]["error"] = {"codexErrorInfo": "serverOverloaded", "message": "Capacity"}
+    try:
+        inject(tmp_path, failure)
+        await asyncio.wait_for(blocked.wait(), 2)
+        async with asyncio.timeout(2):
+            while (saved := await database.get_committed_terminal(session.id, receipt["request_id"])) is None:
+                await asyncio.sleep(.01)
+        assert saved["code"] == "turn_timeout" and len(starts) == 1
+    finally:
+        release.set()
+    await wait_dispatch_idle(manager, session.id)
 
 
 @pytest.mark.parametrize("info", ["unauthorized", "usageLimitExceeded", "rateLimitExceeded"])

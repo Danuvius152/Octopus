@@ -21,11 +21,16 @@ page reaches it at `agent/…` relative to itself, with no base URL to configure
 and no CORS. `ask` and `chat` are the same operation with two deliveries —
 a backend script wants one JSON blob, a chat UI wants tokens as they land.
 
-Successful replies and the initial SSE conversation event include `request_id`.
+Successful JSON replies include `conversation_id` and `request_id`. After SSE
+admission, `X-Octopus-Conversation-Id` and `X-Octopus-Request-Id` carry the same
+identities as the initial `conversation` event. The streaming route bypasses
+the response compression middleware so it can forward headers independently
+of the body. A caller can keep them even if the body ends before its first event.
 An `ask` response timeout returns HTTP 504 with structured `detail` containing
 `code=response_wait_timeout`, `conversation_id`, `request_id`, `status_url` and
 `operation_terminal=false`, including on a first call without a conversation ID.
-SSE returns the same recovery fields in an error event. The server observes the
+SSE returns the same recovery fields in an error event. Recovery URLs include
+the original HTTP mount prefix. The server observes the
 original status for at most five seconds: a result already committed can be
 reported even if live notification failed, while lookup failure or a bad answer
 reference keeps the timeout receipt and an observation error. A response timeout
@@ -56,13 +61,18 @@ Cancelling an app waiter does not cancel an admitted command.
 Result-recording conflicts and unconfirmed recording remain explicit errors.
 Their messages direct the caller to inspect the original conversation; they do
 not offer a saving retry or establish that the operation had no effects.
-HTTP timeouts, caller cancellation and SSE disconnection detach only that
-response consumer. The full SSE Response ASGI invocation owns detachment in
-its `finally`, including failed headers and cancellation before the generator's
-first iteration. Detachment is synchronous and idempotent: it clears queued
-events and prevents later enqueueing, without choosing an execution outcome.
-Generator cleanup alone cannot cover an unstarted body. The original completion
-observer continues independently of response cleanup.
+The SSE observation attaches before the request is admitted. Its buffer counts
+complete UTF-8 SSE frames, including the frame in the current ASGI write. The
+response listens for disconnects and applies the write deadline to headers,
+every frame and the end of the body. Overflow or an encoding error drops the
+waiting frames and stops accepting more. An ASGI write already in progress can
+finish within its existing deadline. If overflow precedes the first frame, the
+response still sends the identity headers when the connection permits it.
+
+HTTP timeouts, cancellation and disconnects end only the response observation.
+The ASGI response clears the buffer even if the body never starts. JSON `ask`
+waits on the original completion directly. The original completion observer
+continues independently of response cleanup.
 The application keeps the original execution in its active
 count and conversation list until its receipt and original driver finish,
 including cleanup after a failed SessionOwner. A reusable host may remain alive;
@@ -139,20 +149,27 @@ Apps can import the host module from an inline module in their entrypoint:
 one GET, bounded to ten seconds, and return the original receipt with an
 `observation` or `observation_error`; an unfinished observation remains available
 for an explicit later `status(receipt)`. They never loop or resend the POST.
-The SSE parser handles chunked UTF-8 and LF/CR/CRLF frames, cancels and releases
-its reader before the timeout lookup, and preserves the original identity on
-EOF, network failure or abort after `conversation`. Such exceptions carry
-`error.receipt` with `operation_terminal=false`; an immutable abort reason is
-retained as `cause`. Failure before receiving identity cannot invent one.
+The SSE parser reads the response headers first and also recognizes the
+complete initial `conversation` event from older servers. Either channel can
+supply the original identity. Valid fields in both channels must agree, even if
+only one channel supplies a complete pair. A mismatch or a conflicting
+recovery URL raises `sse_protocol_error` without a queryable receipt. On EOF,
+network failure or abort, `error.receipt` carries `operation_terminal=false` and any confirmed
+identity. Without that identity the outcome remains unknown. An immutable
+abort reason is retained as `cause`. The parser handles chunked UTF-8 and
+LF/CR/CRLF frames and releases its reader before a timeout lookup.
 
 Backend consumers can pass `baseUrl: process.env.OCTOPUS_AGENT_API` and
 `headers: { Authorization: "Bearer " + process.env.OCTOPUS_APP_TOKEN }` to
 `createAgentClient`; the supplied base works with or without a trailing slash.
-The default base is relative to the served module. Recovery URLs must identify
-the same application/conversation/request; status responses must confirm the
-original conversation/request. The authenticated module is served with no-store
-from the packaged source also exercised by the JS tests. It needs no package
-publication and does not migrate installed Apps.
+The default base is relative to the served module. The client builds the
+status GET from the same API base as the POST. A recovery URL in the receipt
+must identify the same origin, application, conversation and request. Its mount
+prefix may differ from the caller's prefix, such as when an application backend
+uses loopback. The status response must confirm the original identity. The
+authenticated module is served with no-store from the packaged source also
+exercised by the JS tests. It needs no package publication and does not migrate
+installed Apps.
 
 <a id="3-a-conversation-is-a-session"></a>
 ## A conversation is a session
@@ -212,6 +229,8 @@ rather than letting Octopus absorb the cost:
 | message | 32k chars | |
 | context | 200k chars | roughly 50k tokens; beyond this, summarize first |
 | `ask` wait | 300s | a real turn can be slow; a hung one shouldn't pin a socket |
+| SSE buffer | 256 frames and 1 MiB | includes the frame being sent |
+| individual SSE ASGI write | 10s | a stalled write ends the response |
 
 <a id="7-ui-chrome-that-gets-out-of-the-way"></a>
 ## UI: chrome that gets out of the way
@@ -247,9 +266,15 @@ required body delivery must produce a delivery error. Shared completion, notific
 also retain ordered business delivery, caller cancellation and diagnostics
 redacted with the original execution's credential context.
 
+The same tests bound ASGI writes and verify in-flight accounting with the first
+frame held while another conversation's JSON `ask` completes. The client tests
+cover recovery using either identity channel and reject conflicting identities
+before querying status.
+
 `tests/test_app_agent_owner_failure.py` invokes the public route's actual ASGI
 Response through header failure, pre-body cancellation, body failure and normal
-completion. It checks that a departed queue stays empty while the original
+completion, plus idle disconnect on ASGI 2.3 and 2.4. It checks that a closed
+observation cannot send later publications while the original
 execution remains counted and available through its original result lookup.
 
 <a id="9-what-this-defers"></a>

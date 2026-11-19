@@ -163,7 +163,7 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
             </code>
           )}
         </button>
-        {task.exit_code !== null && task.exit_code !== 0 && (
+        {task.exit_code != null && task.exit_code !== 0 && (
           <span className="shrink-0 rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-mono text-destructive">
             exit {task.exit_code}
           </span>

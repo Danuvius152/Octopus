@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from server import deps
 from server.crypto import decrypt, encrypt
 from server.database import Database
+from server.db.schema import CURRENT_VERSION
 from server.routers import auth, credentials, sessions
 from server.sessions import SessionManager
 from server.users import UserManager
@@ -71,7 +72,7 @@ async def test_current_startup_preserve_dek_rows_and_derived_http_relationships(
         assert stored["secret_encrypted"] == ciphertext and stored["user_id"] == owner["id"]
         assert decrypt(stored["secret_encrypted"], key) == "original-api-key"
         async with database.transaction(write=False) as tx:
-            assert await tx.fetch_one("PRAGMA user_version") == (11,)
+            assert await tx.fetch_one("PRAGMA user_version") == (CURRENT_VERSION,)
             assert "secret_encrypted" not in {row[1] for row in await tx.fetch_all("PRAGMA table_info(backend_credentials)")}
             assert "recovered_by" not in {row[1] for row in await tx.fetch_all("PRAGMA table_info(client_submissions)")}
         manager = SessionManager()

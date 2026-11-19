@@ -30,9 +30,9 @@ Fast preferences saved in the CLI. NULL at both levels resolves to Normal.
 Archived detail, restore, archive replacement, rewind and full-copy forks
 preserve the settings along with their existing ownership and resume state.
 
-One logical request captures its session overrides and Agent defaults together
-through its original Owner when preparation acquires the configuration lock. Queued input and preparation
-still waiting for that lock have not captured settings: changes saved before
+Preparation captures the session overrides and Agent defaults together under
+the configuration lock. The read runs in the original request's preparation
+task. The Owner retains execution and context writes. Changes saved before
 capture apply to that request. Later changes apply to a subsequent request;
 retries keep the original capture. A held process's spawn signature includes
 effort and speed, so incompatible settings replace the process while retaining

@@ -64,6 +64,91 @@ class _ScriptedRun(FakeRunBase):
         await self.stop()
 
 
+async def _recover_stale_history(recovery_host, monkeypatch, transcript):
+    manager, session = recovery_host
+    for seq, (role, kind, content, metadata) in enumerate(transcript):
+        await manager.db.append_message(session.id, seq, role, kind, content, runtime_metadata=metadata)
+    session.restore_message_state(*await manager.db.message_sequence_state(session.id))
+    session.claude_session_id = "missing-thread"
+    await manager.db.update_session_field(session.id, claude_session_id="missing-thread")
+    fresh = _ScriptedRun(HarnessEvent(type="result", session_id="recovered-thread"))
+    runs = iter([_ScriptedRun(preparation_error="No conversation found with session ID: missing-thread"), fresh])
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(runs))
+
+    notices = []
+
+    async def observe(event):
+        if event.get("type") == "recovery" and event.get("code") == "stale_session":
+            notices.append(event)
+
+    manager.on_broadcast("stale-recovery", observe)
+    receipt = await manager.start_message(session.id, "Continue the work")
+    assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
+    await asyncio.wait_for(manager.await_session_execution(session.id), 5)
+
+    history, _, pending = fresh.prompt.partition("</session-history>\n\n")
+    header, body = history.split("\n\n", 1)
+    assert pending == "<continue-from-here>\nContinue the work\n</continue-from-here>"
+    notice, = notices
+    assert notice["request_id"] == notice["content"]["request_id"] == receipt.request_id
+    return header, body.splitlines(), notice["message"]
+
+
+async def test_stale_resume_replays_all_60_dialogue_messages_from_90_rows(recovery_host, monkeypatch):
+    transcript = [row for index in range(29) for row in (
+        ("user", "text", f"Question {index}", None),
+        ("assistant", "text", f"Answer {index}", None),
+        ("system", "result", "ordinary result", None),
+    )]
+    # The Owner saves the current user input as the 90th row before recovery.
+    transcript.extend([
+        ("assistant", "text", "Last answer", None),
+        ("system", "result", "ordinary result", None),
+    ])
+
+    header, body, notice = await _recover_stale_history(recovery_host, monkeypatch, transcript)
+
+    expected = [line for index in range(29) for line in (
+        f"[seq {3 * index}] user: Question {index}",
+        f"[seq {3 * index + 1}] assistant: Answer {index}",
+    )]
+    assert body == [*expected, "[seq 87] assistant: Last answer", "[seq 89] user: Continue the work"]
+    assert "last 60 message(s)" in notice and "omitted" not in notice
+    assert "earlier message(s)" not in header
+
+
+@pytest.mark.parametrize("overflows", [False, True], ids=["all-fit", "tail-only"])
+async def test_stale_resume_notice_matches_the_mixed_history_sent_to_the_backend(recovery_host, monkeypatch, overflows):
+    start, end = (2, 60) if overflows else (0, 58)
+    transcript = [("user", "text", f"Earlier message {index}", None) for index in range(end)]
+    native = {
+        "request_id": "old-request", "attempt_id": "old-attempt",
+        "native": {"thread_id": "child", "turn_id": "child-turn",
+                   "root_thread_id": "root", "root_turn_id": "root-turn"},
+    }
+    transcript.extend([
+        ("system", "result", "ordinary result", None),
+        ("system", "recovery", {"message": "old recovery notice"}, native),
+        ("assistant", "thinking", "private reasoning", native),
+        ("system", "result", "native result", native),
+    ])
+
+    header, body, notice = await _recover_stale_history(recovery_host, monkeypatch, transcript)
+
+    assert body == [
+        *(f"[seq {index}] user: Earlier message {index}" for index in range(start, end)),
+        f"[seq {end + 3}] result child thread=child turn=child-turn: native result",
+        f"[seq {end + 4}] user: Continue the work",
+    ]
+    assert "last 60 message(s)" in notice
+    if overflows:
+        assert "2 earlier message(s) are not included" in header
+        assert "2 earlier one(s) omitted" in notice
+    else:
+        assert "earlier message(s)" not in header
+        assert "omitted" not in notice
+
+
 async def test_mixed_recovery_keeps_independent_budgets_and_prompt_modes(recovery_host, monkeypatch):
     manager, session = recovery_host
     session.claude_session_id = "missing-thread"

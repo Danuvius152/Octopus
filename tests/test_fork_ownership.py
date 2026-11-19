@@ -4,6 +4,7 @@
 import pytest
 
 from server.database import Database
+from server.db.schema import CURRENT_VERSION
 from server.session_manager import SessionManager
 from tests.accounts import create_account
 
@@ -68,7 +69,7 @@ async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_
         await db.initialize()
         assert {r["id"]: r for r in await db.load_sessions(include_archived=True)} == after
         async with db.transaction(write=False) as view:
-            assert await view.fetch_one("PRAGMA user_version") == (11,)
+            assert await view.fetch_one("PRAGMA user_version") == (CURRENT_VERSION,)
         manager = SessionManager()
         await manager.initialize(db)
         assert manager.get_session("child", owner_a) is not None

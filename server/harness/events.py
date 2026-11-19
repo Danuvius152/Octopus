@@ -40,6 +40,10 @@ class HarnessPreparationError(RuntimeError):
         self.error_code = error_code
 
 
+class HarnessDeadlineExceeded(RuntimeError):
+    """The captured turn deadline passed before submitting new work."""
+
+
 @dataclass
 class HarnessCredential:
     """Resolved credential, ready for a profile to apply to its subprocess.

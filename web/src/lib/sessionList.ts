@@ -25,6 +25,10 @@ interface ObservationTarget {
   activity?: { result: SessionArchiveResult; connection: number };
 }
 
+export function isSelectedChat(sessionId: string | null, state: Pick<ReturnType<typeof useSessionStore.getState>, "activeSessionId" | "mainView">): boolean {
+  return state.activeSessionId === sessionId && state.mainView === "chat";
+}
+
 /** Session list observations, not server revisions. Zustand owns the only rows.
  * A conflicting snapshot is discarded and one subsequent read confirms the list;
  * no per-session tombstone or second collection survives that read boundary.
@@ -107,6 +111,7 @@ export class SessionList {
         observation.invalidated = true; this.observations.delete(observation);
       }
     }
+    useSessionStore.getState().clearAuxiliaryTaskFailures(id);
   }
   accepts(source?: ListEventSource): boolean {
     return !this.closed && (!source || source.socket === this.socket && source.accountGeneration === this.scope().account);
@@ -116,12 +121,14 @@ export class SessionList {
     this.engaged = true;
     if (source.socket !== this.socket) {
       this.retire({ state: "obsolete" }); this.socket = source.socket; this.connection++;
+      useSessionStore.setState({ bgTaskReadFailures: {}, researchReadFailures: {} });
     }
     this.invalidate();
   }
   disconnect(source: ListEventSource): void {
     if (source.socket !== this.socket) return;
     this.socket = null; this.connection++; this.dirty = false;
+    useSessionStore.setState({ bgTaskReadFailures: {}, researchReadFailures: {} });
     this.retire({ state: "obsolete" }); this.state({ stale: true });
   }
   private state(patch: Partial<ListReadState>): void {

@@ -9,6 +9,7 @@ from contextlib import closing
 import pytest
 
 from server.database import Database
+from server.db.schema import CURRENT_VERSION
 from server.harness import HarnessRun
 from server.routers.sessions import get_session, get_submission_status, submit_input
 from server.sessions import SessionManager
@@ -82,9 +83,9 @@ async def test_native_local_failure_is_not_hidden_by_success_wrapper(claude_runt
     await manager.stop_all_held_processes()
     await manager.close_session_owners()
     with closing(sqlite3.connect(tmp_path / "product.db")) as source, closing(sqlite3.connect(tmp_path / "backup.db")) as target:
-        assert verify_main(source) == 11
+        assert verify_main(source) == CURRENT_VERSION
         source.backup(target)
-        assert verify_main(target) == 11
+        assert verify_main(target) == CURRENT_VERSION
     restored_db = Database(str(tmp_path / "backup.db"))
     await restored_db.initialize()
     restored = SessionManager()

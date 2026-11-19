@@ -49,6 +49,7 @@ from server.routers import applications as applications_mod
 from server.session_manager import SessionManager, session_manager
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.app_sse import app_sse_event
 from tests.submission import accepted_receipt
 
 # --------------------------------------------------------------- fixtures
@@ -565,7 +566,7 @@ async def test_an_errored_turn_is_reported_not_swallowed(aam, am, db, turns):
 async def test_app_waits_through_recovery_events(aam, am, db, mgr, turns):
     row = await _make_app(am, db)
     turns.emit = False
-    turn = await aam.begin_turn(row, message="hi")
+    turn = await aam.begin_turn(row, message="hi", observe_stream=True)
     sid = turn.session_id
     for event in (
         {"type": "result", "is_error": True, "retrying": True},
@@ -582,7 +583,7 @@ async def test_app_waits_through_recovery_events(aam, am, db, mgr, turns):
     receipt = turns.receipts[turn.request_id]
     receipt._completion.set_result(accepted_receipt(turn.request_id)._completion.result())
     async with asyncio.timeout(2):
-        events = [event async for event in aam.stream_turn(turn)]
+        events = [app_sse_event(frame) async for frame in aam.stream_turn(turn)]
     assert events[-1]["type"] == "done"
     assert events[-1]["reply"] == "recovered"
     assert not any(event["type"] == "error" for event in events)
@@ -592,11 +593,11 @@ async def test_app_waits_through_recovery_events(aam, am, db, mgr, turns):
 async def test_app_reports_recording_failure_without_a_saved_success(aam, am, db, mgr, turns, message):
     row = await _make_app(am, db)
     turns.emit = False
-    turn = await aam.begin_turn(row, message="hi")
+    turn = await aam.begin_turn(row, message="hi", observe_stream=True)
     await mgr._broadcast({"type": "recording_failed", "session_id": turn.session_id,
                           "request_id": turn.request_id, "recording_state": "unconfirmed", "message": message})
     assert turn.done.is_set()
-    events = [event async for event in aam.stream_turn(turn)]
+    events = [app_sse_event(frame) async for frame in aam.stream_turn(turn)]
     assert events[-1]["type"] == "error"
     assert events[-1]["code"] == "recording_unconfirmed"
     assert events[-1]["message"] == (
@@ -625,7 +626,7 @@ async def test_ask_that_outlives_its_wait_says_where_the_answer_went(
     # The socket stopped waiting, but the admitted execution still owns its cap.
     turn = aam._turns[e.value.recovery["conversation_id"]]
     assert not turn.done.is_set() and turn.observer is not None
-    assert not turn.observer.done() and not turn.consumer_attached
+    assert not turn.observer.done() and turn.stream is None
     assert aam.list_conversations(row["id"])[0]["running"]
 
 
@@ -715,8 +716,8 @@ async def test_reading_a_confirmed_request_does_not_commit_another_request(tmp_p
 @pytest.mark.asyncio
 async def test_stream_frames_arrive_in_order(aam, am, db, turns):
     row = await _make_app(am, db)
-    turn = await aam.begin_turn(row, message="hi")
-    events = [e async for e in aam.stream_turn(turn)]
+    turn = await aam.begin_turn(row, message="hi", observe_stream=True)
+    events = [app_sse_event(frame) async for frame in aam.stream_turn(turn)]
     kinds = [e["type"] for e in events]
     assert kinds[0] == "conversation"
     assert kinds[-1] == "done"
@@ -749,8 +750,8 @@ async def test_a_question_reaches_the_app(aam, am, db, mgr, turns, monkeypatch):
         return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", ask_then_question)
-    turn = await aam.begin_turn(row, message="hi")
-    events = [e async for e in aam.stream_turn(turn)]
+    turn = await aam.begin_turn(row, message="hi", observe_stream=True)
+    events = [app_sse_event(frame) async for frame in aam.stream_turn(turn)]
     question = next(e for e in events if e["type"] == "question")
     assert question["question_id"] == "q1"
     assert question["questions"][0]["question"] == "Which one?"

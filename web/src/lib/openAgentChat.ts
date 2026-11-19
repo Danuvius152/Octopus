@@ -39,7 +39,7 @@ export async function openAgentChat(agentId: string, foreground: () => boolean):
     const session = (await res.json()) as SessionInfo;
     const accepted = await sessionList.created(session, observation);
     if (!accepted || !sessionList.current(observation) || !foreground()) return;
-    await selectSession(session.id, agentId);
+    await selectSession(session.id, agentId, { fresh: true });
   } catch (error) {
     if (sessionList.current(observation) && foreground()) throw error;
   }

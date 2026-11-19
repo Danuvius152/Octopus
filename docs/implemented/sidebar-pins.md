@@ -52,7 +52,9 @@ everyone else). A drop sends the whole pinned order with
 * places pinned rows the list *doesn't* name after the named ones, in their
   existing order — a tab that last looked before another tab pinned something
   must not throw that pin away;
-* returns every live row as an observation for the client's domain merge.
+* returns every live row as an observation for the client's domain merge. For
+  applications, one write transaction validates and reorders the current
+  account's live pins, then reads that account's complete live application list.
 
 The client applies the new order optimistically. A successful Agent reorder
 confirms only its submitted ID positions; the attached list does not authorize

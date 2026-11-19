@@ -192,13 +192,10 @@ async def create_custom_connector(
 ):
     """The operator's, for the same reason as the OAuth client: a connector
     *kind* is install-level configuration, keyed by the kind alone."""
-    mgr = _require_manager()
     try:
-        await mgr.create_custom_connector(**req.model_dump())
+        entry = await _require_manager().create_custom_connector(**req.model_dump())
     except ConnectorError as e:
         raise _http_error(e)
-    # Return the new catalog entry (available, since creds were just set).
-    entry = next(c for c in await mgr.catalog() if c["kind"] == req.kind.strip().lower())
     return ConnectorCatalogEntry(**entry)
 
 

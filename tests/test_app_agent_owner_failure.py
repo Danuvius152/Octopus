@@ -95,7 +95,7 @@ async def test_failed_owner_receipt_keeps_app_counted_until_original_backend_ret
         await mgr.drain_turns(timeout=5)
 
 
-@pytest.mark.parametrize("phase", ["header_failure", "before_body_cancel", "body_failure", "normal"])
+@pytest.mark.parametrize("phase", ["header_failure", "before_body_cancel", "body_failure", "disconnect", "normal"])
 @pytest.mark.parametrize("asgi_version", ["2.3", "2.4"])
 async def test_app_chat_response_detaches_observation_while_original_execution_keeps_capacity(
     aam, am, db, mgr, monkeypatch, phase, asgi_version,
@@ -137,9 +137,12 @@ async def test_app_chat_response_detaches_observation_while_original_execution_k
     }
     response = await routes.app_agent_chat(Request(scope), row["id"], routes.AppAgentTurnRequest(message="Keep the original work"))
     turn = next(iter(aam._turns.values()))
+    disconnected = asyncio.Event()
+    first_frame_sent = asyncio.Event()
 
     async def receive():
-        await asyncio.Event().wait()
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
 
     headers_sent = asyncio.Event()
     messages = []
@@ -152,10 +155,12 @@ async def test_app_chat_response_detaches_observation_while_original_execution_k
                 raise OSError("controlled header send failure")
             if phase == "before_body_cancel":
                 await asyncio.Event().wait()
-        elif phase in {"body_failure", "normal"}:
-            stream_release.set()
-            if phase == "body_failure" and b"Original SSE reply" in message.get("body", b""):
-                raise OSError("controlled body send failure")
+        else:
+            first_frame_sent.set()
+            if phase in {"body_failure", "normal"}:
+                stream_release.set()
+                if phase == "body_failure" and b"Original SSE reply" in message.get("body", b""):
+                    raise OSError("controlled body send failure")
 
     responding = None
     try:
@@ -167,6 +172,11 @@ async def test_app_chat_response_detaches_observation_while_original_execution_k
             with pytest.raises(asyncio.CancelledError):
                 await responding
             assert len(messages) == 1
+        elif phase == "disconnect":
+            await asyncio.wait_for(first_frame_sent.wait(), 3)
+            disconnected.set()
+            await asyncio.wait_for(responding, 3)
+            assert len(messages) == 2
         elif phase == "normal":
             await asyncio.wait_for(stopping.wait(), 3)
             assert aam._turns.get(turn.session_id) is turn
@@ -179,9 +189,10 @@ async def test_app_chat_response_detaches_observation_while_original_execution_k
         else:
             with pytest.raises(ClientDisconnect if asgi_version == "2.4" else OSError):
                 await asyncio.wait_for(responding, 3)
-        assert not turn.consumer_attached
-        assert turn.queue.empty()
-        aam.detach_consumer(turn)  # Repeated cleanup remains harmless.
+        stream = turn.stream
+        assert stream is not None and stream.closed
+        assert not stream._waiting and stream._sending is None and stream._pending_bytes == 0
+        turn.close_stream()  # Repeated cleanup remains harmless.
         if phase != "normal":
             assert aam._turns.get(turn.session_id) is turn
             with pytest.raises(AppAgentError) as refused:
@@ -189,7 +200,7 @@ async def test_app_chat_response_detaches_observation_while_original_execution_k
             assert refused.value.status_code == 429
             stream_release.set()
             await asyncio.wait_for(stopping.wait(), 3)
-            assert turn.queue.empty(), "Late original execution events must not accumulate for a detached HTTP consumer."
+            assert stream.closed and not stream._waiting and stream._sending is None and stream._pending_bytes == 0
             assert aam._turns.get(turn.session_id) is turn
             assert turn.observer is not None and not turn.observer.done()
             stop_release.set()

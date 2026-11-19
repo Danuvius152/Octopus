@@ -317,7 +317,8 @@ class AgentsMixin(DatabaseBase):
     async def reorder_agent_pins(self, ordered_ids: list[str]) -> None:
         """The sidebar order of the pinned agents — see `_reorder_pins`."""
         async with self.transaction(write=True) as tx:
-            await self._reorder_pins(tx, "agents", ordered_ids)
+            current = await self._ordered_pins(tx, "agents")
+            await self._reorder_pins(tx, "agents", ordered_ids, current)
 
     async def delete_agent(self, agent_id: str) -> bool:
         """Hard-delete an agent. FK ON DELETE CASCADE removes its sessions,

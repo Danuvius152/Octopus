@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from server.db.schema import CURRENT_VERSION
 from tests.test_service_runtime import installation_settings
 
 
@@ -45,7 +46,7 @@ def test_owned_storage_recovery_can_be_interrupted_again_without_replaying_effec
                               "states": {"staged": "withdrawn", "started": "unknown", "unknown": "unknown",
                                          "exact": "done", "successor": "withdrawn"}}
     with sqlite3.connect(config.db_path) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (11,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (CURRENT_VERSION,)
     reader.close()
     run("wiki", 72)
     assert note.read_bytes() == applied

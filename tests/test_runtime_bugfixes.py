@@ -562,6 +562,122 @@ async def test_recording_reference_survives_a_cancellation_between_control_read_
     assert retained["phase"] == "unknown" and retained["recording_state"] == "unconfirmed"
 
 
+@pytest.mark.parametrize("limit", [.5, 0], ids=["expires", "disabled"])
+async def test_overall_deadline_during_first_preparation(manager, tmp_path, monkeypatch, limit):
+    from server import agent_memory
+    from server.harness import HarnessEvent
+
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
+    monkeypatch.setattr(settings, "turn_max_seconds", limit)
+    agent = await manager.db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Slow preparation", str(tmp_path))
+    loop = asyncio.get_running_loop()
+    entered, started, terminal = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    release, preparation_exited = threading.Event(), threading.Event()
+    starts = []
+    retiring, release_retirement, retired = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    ensure_agent_dirs = agent_memory.ensure_agent_dirs
+
+    def hold_preparation(*args):
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(5)
+            ensure_agent_dirs(*args)
+        finally:
+            preparation_exited.set()
+
+    class Run(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            starts.append(self)
+            started.set()
+
+        async def stream(self):
+            await started.wait()
+            yield HarnessEvent(type="result", is_error=False)
+
+        async def interrupt(self):
+            pass
+
+        async def stop(self):
+            assert preparation_exited.is_set()
+            retiring.set()
+            await release_retirement.wait()
+            retired.set()
+
+    async def observe(event):
+        if event.get("terminal") and event.get("session_id") == session.id:
+            terminal.set()
+
+    monkeypatch.setattr(agent_memory, "ensure_agent_dirs", hold_preparation)
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    manager.on_broadcast("observe-preparation-timeout", observe)
+    receipt = await manager.start_message(session.id, "Wait for the original preparation")
+    assert receipt.execution is not None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if limit:
+            monkeypatch.setattr(settings, "turn_max_seconds", 0)
+            async with asyncio.timeout(2):
+                while (saved := await manager.db.get_committed_terminal(session.id, receipt.request_id)) is None:
+                    await asyncio.sleep(.01)
+            assert saved["code"] == "turn_timeout"
+            await asyncio.wait_for(terminal.wait(), 2)
+        else:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(terminal.wait(), .6)
+            assert await manager.db.get_committed_terminal(session.id, receipt.request_id) is None
+        assert not starts and not preparation_exited.is_set() and not retired.is_set()
+        assert receipt.execution.driver_state == "pending"
+        release.set()
+        await asyncio.wait_for(retiring.wait(), 2)
+        assert preparation_exited.is_set() and receipt.execution.driver_state == "pending"
+    finally:
+        release.set()
+        release_retirement.set()
+
+    completion = await asyncio.wait_for(receipt.wait(), 3)
+    await asyncio.wait_for(receipt.execution.wait_driver(), 2)
+    assert preparation_exited.is_set() and retired.is_set()
+    assert len(starts) == (0 if limit else 1)
+    assert completion.outcome.status == ("failed" if limit else "success")
+    results = await manager.db.load_committed_request_messages(session.id, receipt.request_id)
+    result, = [row["content"] for row in results if row["type"] == "result"]
+    assert result["code"] == ("turn_timeout" if limit else None)
+
+
+async def test_timeout_before_chat_input_is_recorded_preserves_complete_draft(manager, tmp_path, monkeypatch):
+    from server import fork_helpers
+    from server.attachments import save_upload
+
+    monkeypatch.setattr(settings, "turn_max_seconds", .5)
+    agent = await manager.db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Draft recovery", str(tmp_path), backend="claude-code")
+    upload = save_upload(session.id, "original.txt", b"Original file", user_id=session.user_id)
+    entered, release = asyncio.Event(), asyncio.Event()
+    capture = fork_helpers.capture_git_anchor
+
+    async def hold_git_anchor(*args):
+        entered.set()
+        await release.wait()
+        return await capture(*args)
+
+    monkeypatch.setattr(fork_helpers, "capture_git_anchor", hold_git_anchor)
+    receipt = await manager.start_message(session.id, "Keep this draft", attachment_ids=[upload.id])
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        async with asyncio.timeout(2):
+            while (saved := await manager.db.get_committed_terminal(session.id, receipt.request_id)) is None:
+                await asyncio.sleep(.01)
+        assert saved["code"] == "turn_timeout"
+        messages = await manager.db.load_messages(session.id)
+        terminal, = [row for row in messages if row["type"] == "result"]
+        assert terminal["tool_input"]["rejected_input"] == {"content": "Keep this draft", "attachment_ids": [upload.id]}
+        assert not any(row["role"] == "user" for row in messages)
+    finally:
+        release.set()
+    await asyncio.wait_for(receipt.wait(), 3)
+
+
 async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_not(manager, monkeypatch, tmp_path):
     rows = [json.loads(line) for line in (Path(__file__).parent / "fixtures/codex-web-search-0.162.1.jsonl").read_text().splitlines()]
     clock = SimpleNamespace(now=299.0)

@@ -84,6 +84,8 @@ interface MessageBubbleProps {
 
 function OutcomeResult({ message, onRestoreInput, restoreInputDisabled }: Pick<MessageBubbleProps, "message" | "onRestoreInput" | "restoreInputDisabled">) {
   const { outcome, label, primary } = presentOutcome(message);
+  const rejected = message.tool_input?.rejected_input as { attachment_ids?: unknown } | undefined;
+  const hasFiles = Array.isArray(rejected?.attachment_ids) && rejected.attachment_ids.length > 0;
   return <div className="msg msg-system flex flex-col items-center gap-1 py-1">
     <span className={`result-badge rounded-full px-3 py-1 font-mono text-[11px] uppercase tracking-wider ${
       outcome.status === "failed" ? "bg-danger-bg text-destructive" : "bg-gray-100 text-gray-700"
@@ -91,9 +93,9 @@ function OutcomeResult({ message, onRestoreInput, restoreInputDisabled }: Pick<M
       {label}{message.cost != null ? ` · $${message.cost.toFixed(4)}` : ""}
     </span>
     {primary && <div className="max-w-[85%] whitespace-pre-wrap break-words text-sm">{primary}</div>}
-    {outcome.code === "attachment_unavailable" && Boolean(message.tool_input?.rejected_input) && onRestoreInput &&
+    {rejected && onRestoreInput &&
       <button type="button" className="text-sm text-primary underline" disabled={restoreInputDisabled}
-        onClick={() => onRestoreInput(message)}>Restore draft and re-upload files</button>}
+        onClick={() => onRestoreInput(message)}>{hasFiles ? "Restore draft and re-upload files" : "Restore draft"}</button>}
   </div>;
 }
 
@@ -139,13 +141,13 @@ function AttachmentList({
               href={url}
               target="_blank"
               rel="noreferrer"
-              className="attachment-thumb block rounded-md border border-border overflow-hidden bg-muted/40 hover:border-primary/60 transition-colors"
+              className="attachment-thumb relative block aspect-[8/5] w-64 max-w-full shrink-0 overflow-hidden rounded-md border border-border bg-muted/40 transition-colors hover:border-primary/60"
               title={`${a.filename} (${formatBytes(a.size)})`}
             >
               <img
                 src={url}
                 alt={a.filename}
-                className="block max-h-40 max-w-[16rem] object-contain"
+                className="absolute inset-0 size-full object-contain"
               />
             </a>
           );

@@ -14,6 +14,7 @@ from server.harness import HarnessEvent, get_harness
 from server.harness.claude_code import ClaudeDriver
 from server.sessions import SessionManager
 from tests.accounts import create_account
+from tests.app_sse import app_sse_event
 from tests.fake_run import FakeRunBase
 from tests.harness_profiles import process_profile
 
@@ -66,17 +67,19 @@ async def test_app_waits_for_its_request_after_prioritized_human_correction(runt
     apps = AppAgentManager()
     apps.bind(manager, db, None)
     try:
-        turn = await apps.begin_turn({"id": "app", "name": "Reader", "user_id": agent["user_id"]}, message="App question", conversation_id=session.id)
+        turn = await apps.begin_turn({"id": "app", "name": "Reader", "user_id": agent["user_id"]}, message="App question", conversation_id=session.id, observe_stream=True)
         correction = await manager.start_message(session.id, "Human correction")
         corrected = await asyncio.wait_for(correction.wait(), 2)
         assert corrected.outcome.status == "success"
         assert seen == ["Human correction"]
         assert not turn.done.is_set()
-        assert turn.reply() == "" and turn.queue.empty()
+        assert turn.reply() == ""
         await manager.resume_dispatch(session.id)
         await asyncio.wait_for(turn.done.wait(), 2)
         assert "App question" in turn.reply()
         assert "Human correction" not in turn.reply()
+        events = [app_sse_event(frame) async for frame in apps.stream_turn(turn)]
+        assert [event["text"] for event in events if event["type"] == "message"] == [turn.reply()]
     finally:
         apps.shutdown()
 

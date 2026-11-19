@@ -4,9 +4,8 @@ One slice of the persistence layer (§3 A4's one-file-per-subject split). The
 rows here are the control plane: who exists, who may create an account, and
 which bearers are currently good for which account.
 
-Nothing in this file decides policy — no password is hashed here, no token is
-minted here, no expiry is judged here. That lives in `server/users.py`, so the
-rules exist once and this file stays a set of statements about tables.
+Account policy lives in `server/users.py`. SQL predicates protect the persisted
+effects, using the same deadline check as account policy.
 """
 
 from __future__ import annotations
@@ -221,20 +220,15 @@ class UsersMixin(DatabaseBase):
                     out.append(invite)
             return out
 
-    async def claim_invite(self, code: str) -> bool:
-        """Consume one use, atomically.
-
-        The `used_count < max_uses` lives in the UPDATE rather than in a
-        read-then-write, so two registrations racing for the last use of a code
-        cannot both win — SQLite settles it and the loser sees 0 rows changed.
-        """
-        async with self.transaction(write=True) as tx:
-            cursor = await tx.execute(
-                "UPDATE invites SET used_count = used_count + 1 "
-                " WHERE code = ? AND revoked_at IS NULL AND used_count < max_uses",
-                (code,),
-            )
-            return (cursor.rowcount or 0) > 0
+    async def _claim_invite(self, tx: Transaction, code: str) -> bool:
+        """Evaluate the expiry on the SQLite worker as part of the update."""
+        cursor = await tx.execute(
+            "UPDATE invites SET used_count = used_count + 1 "
+            "WHERE code = ? AND revoked_at IS NULL AND used_count < max_uses "
+            "AND NOT octopus_is_expired(expires_at)",
+            (code,),
+        )
+        return cursor.rowcount > 0
 
     async def revoke_invite(self, code: str, *, at: str) -> None:
         async with self.transaction(write=True) as tx:

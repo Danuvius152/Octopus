@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { Profiler, type ProfilerOnRenderCallback } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
@@ -27,11 +28,12 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-function chat() {
-  return render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
+function chat(onRender?: ProfilerOnRenderCallback) {
+  const view = <VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
     <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} answerQuestion={vi.fn()}
       connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
-  </VirtuosoMockContext.Provider>);
+  </VirtuosoMockContext.Provider>;
+  return render(onRender ? <Profiler id="chat" onRender={onRender}>{view}</Profiler> : view);
 }
 
 it("opens trusted content immediately at expiry and retires delayed positioning work", () => {
@@ -96,7 +98,7 @@ it.each(["opening", "composer"])("does not let a pending timeout focus handoff o
   } else expect(document.activeElement).toBe(composer);
 });
 
-function timedOutViewport() {
+function timedOutViewport(onRender?: ProfilerOnRenderCallback) {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
   applyTranscript("cold", { messages: useSessionStore.getState().messages.cold,
     oldest_loaded_seq: 50, next_message_seq: 51 });
@@ -115,14 +117,14 @@ function timedOutViewport() {
   vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.set(++serial, callback); return serial; });
   vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
-  const view = chat();
+  const view = chat(onRender);
   const viewport = view.container.querySelector<HTMLElement>(".chat-messages")!;
   Object.defineProperty(viewport, "scrollHeight", { configurable: true, get: () => extent });
   Object.defineProperty(viewport, "clientHeight", { configurable: true, get: () => height });
   const writes: boolean[] = [];
   viewport.scrollTo = (options) => {
     if (typeof options !== "object") return;
-    viewport.scrollTop = options.top ?? 0;
+    viewport.scrollTop = Math.max(0, Math.min(extent - height, options.top ?? 0));
     writes.push(viewport.style.visibility === "hidden");
     fireEvent.scroll(viewport);
   };
@@ -553,6 +555,32 @@ it("dismisses only the timeout hint and keeps the one accepted-text recovery", (
   act(() => useSessionStore.getState().appendStreamingText("cold", "After dismissing the notice"));
   browser.settle();
   expect(browser.viewport.scrollTop).toBe(1000);
+});
+
+it("reuses the reading presentation on repeated wheel and scroll reports", () => {
+  const commits = vi.fn();
+  const browser = timedOutViewport(commits);
+  browser.viewport.scrollTop = 300;
+  const replayWheel = () => {
+    fireEvent.wheel(browser.viewport, { deltaY: -120 });
+    fireEvent.scroll(browser.viewport);
+  };
+  expect(screen.getByText(/New output will return/)).toBeVisible();
+  replayWheel();
+  expect(screen.queryByText(/New output will return/)).toBeNull();
+  commits.mockClear();
+
+  for (let index = 0; index < 8; index++) replayWheel();
+  expect(commits).toHaveBeenCalledTimes(0);
+  expect(screen.getByText(/Automatic positioning did not finish/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss positioning notice" }));
+  expect(screen.queryByText(/Automatic positioning did not finish/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+  browser.settle();
+  expect(browser.viewport.scrollTop).toBe(1000);
+  expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+  fireEvent.wheel(browser.viewport, { deltaY: 120 });
+  expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
 });
 
 function chatPointer(viewport: HTMLElement, type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel", pointerType: "mouse" | "touch" | "pen", clientY = 400) {
@@ -1197,6 +1225,22 @@ it("exposes a failed necessary history read and retains the explicit reading cho
     oldest_loaded_seq: 200, next_message_seq: 201 }));
   expect(view.container.querySelector(".chat-messages")).toBeVisible();
   expect(screen.queryByRole("button", { name: "Browse loaded content" })).toBeNull();
+});
+
+it("shows the latest failed history retry while the conversation is unavailable", async () => {
+  useSessionStore.setState({ token: "cold-token", connected: true });
+  let status = 503;
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({}, { status })));
+  chat();
+  await act(async () => { await observeSession("cold", "detail").done.catch(() => {}); });
+  const preparation = within(screen.getByLabelText("Conversation preparation"));
+  expect(preparation.getByText(/Could not load session state \(HTTP 503\)/)).toBeVisible();
+
+  status = 504;
+  await act(async () => fireEvent.click(preparation.getByRole("button", { name: "Retry loading" })));
+  expect(preparation.getByText("Conversation unavailable")).toBeVisible();
+  expect(preparation.getByText(/Could not load session state \(HTTP 504\)/)).toBeVisible();
+  expect(preparation.queryByText(/Could not load session state \(HTTP 503\)/)).toBeNull();
 });
 
 it("resumes the remaining preparation budget when a touch contact is cancelled", () => {

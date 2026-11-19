@@ -14,6 +14,7 @@ from typing import Any
 
 from ..connectors.grants import GrantDisposition, grant_stamp
 from .base import DatabaseBase
+from .transaction import Transaction
 from .users import owner_is_available
 
 
@@ -278,16 +279,22 @@ class ConnectorsMixin(DatabaseBase):
         self, kind: str, client_id: str, client_secret_encrypted: str, now: str
     ) -> None:
         async with self.transaction(write=True) as tx:
-            await tx.execute(
-                "INSERT INTO connector_oauth_clients "
-                "(kind, client_id, client_secret_encrypted, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(kind) DO UPDATE SET "
-                "client_id=excluded.client_id, "
-                "client_secret_encrypted=excluded.client_secret_encrypted, "
-                "updated_at=excluded.updated_at",
-                (kind, client_id, client_secret_encrypted, now, now),
-            )
+            await self._upsert_connector_oauth_client(tx, kind, client_id, client_secret_encrypted, now)
+
+    @staticmethod
+    async def _upsert_connector_oauth_client(
+        tx: Transaction, kind: str, client_id: str, client_secret_encrypted: str, now: str,
+    ) -> None:
+        await tx.execute(
+            "INSERT INTO connector_oauth_clients "
+            "(kind, client_id, client_secret_encrypted, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(kind) DO UPDATE SET "
+            "client_id=excluded.client_id, "
+            "client_secret_encrypted=excluded.client_secret_encrypted, "
+            "updated_at=excluded.updated_at",
+            (kind, client_id, client_secret_encrypted, now, now),
+        )
 
     async def get_connector_oauth_client(
         self, kind: str
@@ -333,7 +340,7 @@ class ConnectorsMixin(DatabaseBase):
         record["pkce"] = bool(record["pkce"])
         return record
 
-    async def save_custom_connector(
+    async def create_custom_connector(
         self,
         *,
         kind: str,
@@ -343,24 +350,27 @@ class ConnectorsMixin(DatabaseBase):
         scopes: list[str],
         pkce: bool,
         api_base: str,
+        client_id: str,
+        client_secret_encrypted: str,
         now: str,
-    ) -> None:
+    ) -> dict[str, Any] | None:
+        """Commit the new definition and its OAuth client together. An existing kind wins."""
         async with self.transaction(write=True) as tx:
-            await tx.execute(
+            row = await tx.fetch_one(
                 "INSERT INTO custom_connectors "
                 "(kind, display_name, authorize_url, token_url, scopes, pkce, "
                 " api_base, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(kind) DO UPDATE SET "
-                "display_name=excluded.display_name, "
-                "authorize_url=excluded.authorize_url, token_url=excluded.token_url, "
-                "scopes=excluded.scopes, pkce=excluded.pkce, "
-                "api_base=excluded.api_base, updated_at=excluded.updated_at",
+                f"ON CONFLICT(kind) DO NOTHING RETURNING {self._CUSTOM_COLS}",
                 (
                     kind, display_name, authorize_url, token_url,
                     json.dumps(scopes), int(bool(pkce)), api_base, now, now,
                 ),
             )
+            if row is None:
+                return None
+            await self._upsert_connector_oauth_client(tx, kind, client_id, client_secret_encrypted, now)
+            return self._row_to_custom(row)
 
     async def get_custom_connector(self, kind: str) -> dict[str, Any] | None:
         async with self.transaction(write=False) as tx:

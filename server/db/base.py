@@ -4,13 +4,14 @@ import asyncio
 import json
 import logging
 import sqlite3
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from typing import Any
 
 import aiosqlite
 
 from ..account_baseline import require_account_database
+from ..expiry import is_expired
 from ..service_health import ServiceHealth
 from .projection import RecordProjection
 from .schema import initialize_main_storage, require_current_main_format
@@ -224,6 +225,7 @@ class DatabaseBase:
                         raise RuntimeError("Runtime database requires synchronous=FULL")
                     await durability.close()
                     tx = Transaction(self.conn, self.health, deadline)
+                    await tx._wait(self.conn.create_function("octopus_is_expired", 1, is_expired))
                     await tx.execute("BEGIN IMMEDIATE")
                     await initialize_main_storage(tx)
                     await tx.finish()
@@ -256,23 +258,36 @@ class DatabaseBase:
                 f"UPDATE {table} SET pinned = 0 WHERE id = ?", (row_id,)
             )
 
-    async def _reorder_pins(self, tx: Transaction, table: str, ordered_ids: list[str]) -> None:
+    async def _ordered_pins(
+        self, tx: Transaction, table: str, *, user_id: str | None = None,
+    ) -> dict[str, int | None]:
+        scope = " AND user_id = ?" if user_id is not None else ""
+        params = (user_id,) if user_id is not None else ()
+        rows = await tx.fetch_all(
+            f"SELECT id, pin_order FROM {table} WHERE pinned = 1 AND archived = 0{scope} "
+            "ORDER BY pin_order, created_at, id",
+            params,
+        )
+        return dict(rows)
+
+    async def _reorder_pins(
+        self, tx: Transaction, table: str, ordered_ids: list[str], current_ids: Iterable[str],
+        *, user_id: str | None = None,
+    ) -> None:
         """Lay the pinned rows out in `ordered_ids` order.
 
         Any pinned, live row the list doesn't name — pinned from another tab
         after this one last looked — keeps its relative order and follows
         the named ones, so a reorder never drops someone else's pin.
         """
-        cursor = await tx.execute(
-            f"SELECT id FROM {table} WHERE pinned = 1 AND archived = 0 "
-            "ORDER BY pin_order, created_at, id"
-        )
         named = set(ordered_ids)
-        rest = [r[0] for r in await cursor.fetchall() if r[0] not in named]
+        rest = [row_id for row_id in current_ids if row_id not in named]
+        scope = " AND user_id = ?" if user_id is not None else ""
+        params = (user_id,) if user_id is not None else ()
         for position, row_id in enumerate([*ordered_ids, *rest], start=1):
             await tx.execute(
-                f"UPDATE {table} SET pin_order = ? WHERE id = ?",
-                (position, row_id),
+                f"UPDATE {table} SET pin_order = ? WHERE id = ?{scope}",
+                (position, row_id, *params),
             )
 
     async def _ensure_connected(self) -> None:

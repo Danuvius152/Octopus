@@ -109,6 +109,44 @@ async def test_held_opening_ignores_old_results_children_replays_and_duplicate_b
     assert records[0]["pid"] == records[1]["pid"] == previous["pid"]
 
 
+async def test_replacing_held_claude_resumes_history_committed_during_preparation(claude_runtime, tmp_path, monkeypatch):
+    from server.sessions.owner_runtime import OwnerRuntime
+
+    manager, database, session, starts, _ = claude_runtime
+    (tmp_path / "claude-fresh-ids.json").write_text(json.dumps([SID]))
+    first = await manager.start_message(session.id, "Open original history")
+    assert (await first.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, session.id)
+    original = session._run.backend
+    assert original is not None and original.is_alive()
+    await manager.update_session_configuration(session.id, {"model": "next-model"}, session.user_id)
+    prepared, release = asyncio.Event(), asyncio.Event()
+    prepare = OwnerRuntime._prepare_backend_input
+
+    async def hold_prepared(self, *args, **kwargs):
+        result = await prepare(self, *args, **kwargs)
+        prepared.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(OwnerRuntime, "_prepare_backend_input", hold_prepared)
+    second = await manager.start_message(session.id, "Resume the latest history")
+    new_history = "history-from-original-writer"
+    try:
+        await asyncio.wait_for(prepared.wait(), 2)
+        assert original.is_alive() and len(starts) == 1
+        inject(tmp_path, {"type": "system", "subtype": "init", "session_id": new_history})
+        async with asyncio.timeout(2):
+            while await database.get_session_resume_id(session.id) != new_history:
+                await asyncio.sleep(.01)
+    finally:
+        release.set()
+    completion = await asyncio.wait_for(second.wait(), 3)
+    assert completion.outcome.status == "success"
+    assert len(starts) == 2 and starts[1].resume_id == new_history
+    assert original.retirement_state == "proven"
+
+
 @pytest.mark.parametrize("models", [
     {}, {"sonnet": {"contextWindow": 200000}}, {MODEL: {"contextWindow": 0}},
     {MODEL: {"contextWindow": True}}, {MODEL: {"contextWindow": "200000"}},

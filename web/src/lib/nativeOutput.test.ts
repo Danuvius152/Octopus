@@ -34,6 +34,12 @@ test("a tool-only historical window exposes a saved child reference without inve
   const card = nativeCard(messages, cards[0].tool_input!.card_id as string)!;
   expect(card.status).toBe("unknown");
   expect(nativeDetailAnchor(messages, card)).toBe(40);
+  expect(nativeDetailAnchor([
+    { ...messages[0], seq: 38, runtime_metadata: { ...identity("child"),
+      native: { ...identity("child").native, root_turn_id: "other-root-turn" } } },
+    { ...messages[0], seq: undefined },
+    ...messages,
+  ], card)).toBe(40);
 });
 
 beforeEach(() => useSessionStore.setState({ messages: {}, streamingText: {}, streamingItems: {}, lastAppliedSeq: {}, activeAttempts: {} }));
@@ -123,10 +129,29 @@ test("a snapshot card remains visible when a 200-row tool window excludes its an
   const visible = nativeChatMessages(window, cache);
   expect(visible).toHaveLength(201);
   expect(visible[200].seq).toBeUndefined();
-  expect(nativeCard(window, "cached", cache)).toMatchObject({ status: "running", name: "/root/helper", native_turn_id: "t" });
+  expect(nativeCard(window, "cached", cache[0])).toMatchObject({ status: "running", name: "/root/helper", native_turn_id: "t" });
   const paged = [{ role: "system" as const, type: "native_subagent", seq: 1, runtime_metadata: identity("child"),
     tool_input: { task_id: "child", card_id: "cached", native_thread_id: "child", native_turn_id: "t", status: "running" } }, ...window];
   expect(nativeChatMessages(paged, cache).filter((row) => row.type === "native_subagent")).toHaveLength(1);
+});
+
+test("a long child history reads snapshots once for matching and preserves their first match and display order", () => {
+  const snapshots = Array.from({ length: 48 }, (_, index) => ({ task_id: `child-${index}`, card_id: `cached-${index}`,
+    native_thread_id: `child-${index}`, native_turn_id: "t", status: "completed" as const, name: `Child ${index}`,
+    description: "", summary: "", prompt: "", steps: [], runtime_metadata: identity(`child-${index}`) }));
+  snapshots.push({ ...snapshots[47], card_id: "other-card-for-same-work" });
+  const messages = Array.from({ length: 2_400 }, (_, seq) => ({ role: "assistant" as const, type: "text", seq,
+    content: `Collected ${seq}`, runtime_metadata: identity(`child-${47 - seq % 48}`) }));
+  let snapshotReads = 0;
+  const runs = new Proxy(snapshots, {
+    get(target, key, receiver) {
+      if (typeof key === "string" && /^\d+$/.test(key)) snapshotReads++;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  expect(nativeChatMessages(messages, runs).map((row) => [row.seq, row.tool_input?.card_id])).toEqual(
+    Array.from({ length: 48 }, (_, seq) => [seq, `cached-${47 - seq}`]));
+  expect(snapshotReads).toBeLessThanOrEqual(snapshots.length * 2);
 });
 
 test("a new service generation clears partial items from the previous native connection", () => {

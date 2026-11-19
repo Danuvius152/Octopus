@@ -176,7 +176,7 @@ export function useSessionFork() {
             if (completing) clearIntent(sid, intent);
             const accepted = await sessionList.created(fork, lifetime.observation);
             if (!accepted || !current() || !completing || useSessionStore.getState().pendingForks[sid]) return;
-            if (foreground) await selectSession(fork.id, fork.agent_id);
+            if (foreground) await selectSession(fork.id, fork.agent_id, { fresh: true });
             else notice(`⑂ Fork ready — “${fork.name}”. Open it from the sidebar.`);
           } catch {
             if (ownsIntent()) notice("Couldn't fork — network error.", true);

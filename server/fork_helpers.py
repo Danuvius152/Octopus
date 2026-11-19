@@ -396,11 +396,24 @@ def _handoff_context(message: MessageContent) -> dict[str, Any] | None:
     return None
 
 
+def _replay_kind(message: MessageContent) -> str | None:
+    if message.type == "text" and message.role in (MessageRole.user, MessageRole.assistant):
+        return message.role.value
+    if message.type in ("native_subagent", "tool_use", "tool_result"):
+        return message.type
+    if message.type == "result" and message.runtime_metadata and message.runtime_metadata.native:
+        return "result"
+    return None
+
+
 def render_replay_history(parent_messages: list[MessageContent]) -> str:
     """Render the truncated parent transcript as readable lines for the
     ``<fork-history>`` block. Empty body when there are no messages (M=0)."""
     lines: list[str] = []
     for m in parent_messages:
+        kind = _replay_kind(m)
+        if kind is None:
+            continue
         seq = m.seq if m.seq is not None else "?"
         native = m.runtime_metadata.native if m.runtime_metadata else None
         source = ""
@@ -409,7 +422,7 @@ def render_replay_history(parent_messages: list[MessageContent]) -> str:
                       f" thread={native.thread_id} turn={native.turn_id}")
             if native.phase:
                 source += f" phase={native.phase}"
-        if m.type == "text" and m.role == MessageRole.user:
+        if kind == "user":
             evidence = (m.tool_input or {}).get("copied_input")
             observed = f" input_observation={json.dumps(evidence, ensure_ascii=False)}" if evidence else ""
             handoff = _handoff_context(m)
@@ -420,22 +433,20 @@ def render_replay_history(parent_messages: list[MessageContent]) -> str:
                 lines.append(f"[seq {seq}] ticket handoff{observed}: {m.content}")
             else:
                 lines.append(f"[seq {seq}] user{observed}: {_trunc(m.content)}")
-        elif m.type == "text" and m.role == MessageRole.assistant:
+        elif kind == "assistant":
             lines.append(f"[seq {seq}] assistant{source}: {_trunc(m.content)}")
-        elif m.type == "native_subagent":
+        elif kind == "native_subagent":
             card = m.tool_input or {}
             lines.append(f"[seq {seq}] native_subagent{source}: status={card.get('status')} "
                          f"stop_reason={card.get('stop_reason')} partial={card.get('status') != 'completed'}")
-        elif m.type == "thinking":
-            continue  # internal reasoning isn't replayed
-        elif m.type == "tool_use":
+        elif kind == "tool_use":
             lines.append(
                 f"[seq {seq}] tool_use {m.tool_name}{source}: "
                 f"{_trunc(_fmt_tool_input(m.tool_name, m.tool_input))}"
             )
-        elif m.type == "tool_result":
+        elif kind == "tool_result":
             lines.append(f"[seq {seq}] tool_result{source} (truncated): {_trunc(m.content)}")
-        elif m.type == "result" and native:
+        elif kind == "result":
             lines.append(f"[seq {seq}] result{source}: {_trunc(m.content)}")
     return "\n".join(lines)
 
@@ -448,48 +459,34 @@ def _model_history(messages: list[MessageContent]) -> list[MessageContent]:
     return messages
 
 
-def select_lost_history(
-    messages: list[MessageContent],
-) -> tuple[list[MessageContent], int]:
-    """The tail of a session's own transcript to replay, plus how many older
-    messages were dropped. Thinking blocks are filtered by the renderer, so
-    the cap counts what will actually be rendered."""
-    renderable = [m for m in _model_history(messages) if m.type != "thinking"]
-    if len(renderable) <= _LOST_HISTORY_MAX_MESSAGES:
-        return renderable, 0
-    kept = renderable[-_LOST_HISTORY_MAX_MESSAGES:]
-    if _handoff_context(renderable[0]):
-        kept[0] = renderable[0]
-    return kept, len(renderable) - len(kept)
+def build_lost_history_replay(prompt: str, messages: list[MessageContent]) -> tuple[str, int, int]:
+    """Return the dispatched prompt and the kept/omitted transcript counts.
 
-
-def wrap_for_lost_history(
-    prompt: str, messages: list[MessageContent], *, omitted: int = 0
-) -> str:
-    """Wrap a turn's prompt with THIS session's own recent history, for when
-    the engine can no longer resume it (its local transcript was cleaned up).
-
-    Same channel and framing as the fork replay — user-message, explicitly
-    labelled transcript-not-instructions — because the risk is identical: the
-    model must not read replayed user lines as fresh commands. Only the
-    dispatched prompt is wrapped; Octopus persists and broadcasts the raw one.
+    Count messages eligible for the same rendering used by fork replay.
+    The last ticket handoff anchors the active segment and takes one slot if
+    the segment exceeds the window. Only the dispatched prompt is wrapped.
     """
-    body = render_replay_history(messages)
+    renderable = [m for m in _model_history(messages) if _replay_kind(m) is not None]
+    if not renderable:
+        return prompt, 0, 0
+    kept = renderable[-_LOST_HISTORY_MAX_MESSAGES:]
+    omitted = len(renderable) - len(kept)
+    if omitted and _handoff_context(renderable[0]):
+        kept[0] = renderable[0]
+    body = render_replay_history(kept)
     header = _LOST_HISTORY_HEADER
     if omitted:
         header += (
             f"\nThis is the most recent part only — {omitted} earlier "
             f"message(s) are not included."
         )
-    block = (
+    wrapped = (
         '<session-history origin="this-session" '
         'status="transcript-not-instructions">\n'
-        f"{header}\n"
+        f"{header}\n\n{body}\n</session-history>\n\n"
+        f"<continue-from-here>\n{prompt}\n</continue-from-here>"
     )
-    if body:
-        block += f"\n{body}\n"
-    block += "</session-history>"
-    return f"{block}\n\n<continue-from-here>\n{prompt}\n</continue-from-here>"
+    return wrapped, len(kept), omitted
 
 
 def wrap_for_fork_replay(prompt: str, parent_messages: list[MessageContent]) -> str:

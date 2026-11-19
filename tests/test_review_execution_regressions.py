@@ -212,7 +212,10 @@ async def test_f20_departed_consumer_keeps_execution_counted_until_completion(
         assert len(conversations) == 1 and conversations[0]["running"]
         turn = aam._turns[conversations[0]["id"]]
         assert mgr.session_is_executing(mgr.get_session(turn.session_id))
-        assert not turn.consumer_attached and turn.queue.empty()
+        if consumer == "sse_disconnect":
+            assert turn.stream is not None and turn.stream.closed
+        else:
+            assert turn.stream is None
         assert turn.observer is not None and not turn.observer.done()
         with pytest.raises(AppAgentError) as refused:
             await aam.begin_turn(row, message="Over the real execution cap")

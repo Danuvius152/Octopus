@@ -15,7 +15,7 @@ from mcp.client.streamable_http import streamable_http_client
 from server.bg_tasks import BgTaskManager
 from server.database import Database
 from server.deps import get_session_manager
-from server.fork_helpers import render_replay_history, select_lost_history
+from server.fork_helpers import build_lost_history_replay
 from server.knowledge import capture, derive
 from server.mcp_identity import McpScope, mint
 from server.models import MessageContent
@@ -228,8 +228,7 @@ async def test_answered_progress_stays_at_its_ticket_across_handoffs_and_returns
     assert "issues/C.md" in str(ticket_c["input"])
     visible = await database.load_messages(chat.id)
     assert any(message["role"] == "user" and message["content"] == progress for message in visible)
-    history, _ = select_lost_history([MessageContent(**message) for message in visible])
-    replay = render_replay_history(history)
+    replay, _, _ = build_lost_history_replay("Continue", [MessageContent(**message) for message in visible])
     assert progress not in replay
     assert all(text in replay for text in (root, migration, mixed))
 
