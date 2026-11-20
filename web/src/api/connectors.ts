@@ -5,6 +5,7 @@ import { accountFetch as fetch } from "../lib/accountFetch";
  * a popup + status-poll flow (the callback lands on the server, not here). */
 
 import type {
+  AgentConnectorsResponse,
   ConnectorCatalogEntry,
   ConnectorInstallationInfo,
   ConnectorOAuthClientInfo,
@@ -182,11 +183,14 @@ export async function deleteCustomConnector(
 
 export async function fetchAgentConnectors(
   token: string,
-  agentId: string
+  agentId: string,
+  signal: AbortSignal,
 ): Promise<string[]> {
-  const r = await json<{ installation_ids: string[] }>(
+  const r = await json<AgentConnectorsResponse>(
     await fetch(`${API}/api/agents/${agentId}/connectors`, {
       headers: authHeaders(token),
+      cache: "no-store",
+      signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
     })
   );
   return r.installation_ids;

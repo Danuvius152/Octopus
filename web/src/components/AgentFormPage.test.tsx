@@ -360,29 +360,54 @@ describe("AgentFormPage", () => {
     expect(screen.getByRole("button", { name: "All 2" })).toBeVisible();
   });
 
-  it("keeps a reopened Agent's connector selection when the first opening's GET arrives late", async () => {
-    const read = deferred<Response>();
+  it.each([
+    { transition: "Agent switch", lateFailure: false },
+    { transition: "A→B→A", lateFailure: true },
+    { transition: "close and reopen", lateFailure: false },
+    { transition: "account switch", lateFailure: true },
+  ])("ignores a retired binding read after $transition (failed=$lateFailure)", async ({ transition, lateFailure }) => {
+    const previous = deferred<Response>();
+    const current = deferred<Response>();
     let reads = 0;
     fetchMock.mockImplementation(async (url: string) => {
-      if (url.endsWith("/ag1/connectors")) {
-        if (++reads === 1) return read.promise;
-        return json({ installation_ids: [] });
-      }
-      return emptyRead(url);
+      if (!url.endsWith("/connectors")) return emptyRead(url);
+      if (transition === "A→B→A" && url.endsWith("/ag2/connectors")) return json({ installation_ids: ["github"] });
+      return ++reads === 1 ? previous.promise : current.promise;
     });
-    mount("ag1", [agent(), agent({ id: "ag2", name: "Vera" })]);
-    act(() => useSessionStore.setState({ connectorInstallations: [{
-      id: "github", kind: "github", label: "GitHub account", auth_type: "oauth", scopes: [],
+    const agents = [agent(), agent({ id: "ag2", name: "Vera" })];
+    const installation = {
+      id: "github", kind: "github", label: "GitHub account", auth_type: "oauth" as const, scopes: [],
       external_account_id: "1", enable_by_default: false, needs_reconnect: false,
       token_expires_at: null, last_refresh_error_code: null, created_at: "2026-11-10",
-    }] }));
-    await waitFor(() => expect(reads).toBe(1));
-    act(() => useSessionStore.getState().openAgentForm("ag2"));
-    act(() => useSessionStore.getState().openAgentForm("ag1"));
-    await waitFor(() => expect(reads).toBe(2));
-    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).not.toBeChecked();
-    await act(async () => read.resolve(json({ installation_ids: ["github"] })));
-    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).not.toBeChecked();
+    };
+    mount("ag1", agents);
+    act(() => useSessionStore.setState({ connectorInstallations: [installation] }));
+    expect(reads).toBe(1);
+    if (transition === "Agent switch" || transition === "A→B→A") {
+      await act(async () => useSessionStore.getState().openAgentForm("ag2"));
+      if (transition === "A→B→A") {
+        expect(screen.getByRole("checkbox", { name: /GitHub account/ })).toBeChecked();
+        act(() => useSessionStore.getState().openAgentForm("ag1"));
+      }
+    } else if (transition === "close and reopen") {
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      act(() => useSessionStore.getState().openAgentForm("ag1"));
+    } else {
+      act(() => {
+        useSessionStore.getState().setToken("other-account");
+        useSessionStore.setState({ agents, connectorInstallations: [installation] });
+        useSessionStore.getState().openAgentForm("ag1");
+      });
+    }
+    expect(reads).toBe(2);
+    const checkbox = screen.getByRole("checkbox", { name: /GitHub account/ });
+    await act(async () => previous.resolve(lateFailure ? json({}, 503) : json({ installation_ids: ["github"] })));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading Connector bindings…");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(checkbox).toBeDisabled();
+    await act(async () => current.resolve(json({ installation_ids: [] })));
+    expect(checkbox).not.toBeChecked();
+    expect(checkbox).toBeEnabled();
   });
 
   it("locks only a pending connector and confines its failed rollback to its original opening", async () => {
@@ -469,7 +494,7 @@ describe("AgentFormPage", () => {
     },
   );
 
-  it("keeps a connector edit made before its initial GET completes", async () => {
+  it.each([true, false])("admits Connector edits after confirming the initial binding (enabled=%s)", async enabled => {
     const read = deferred<Response>();
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (init?.method === "PATCH") return new Response(null, { status: 204 });
@@ -482,18 +507,28 @@ describe("AgentFormPage", () => {
       external_account_id: "1", enable_by_default: false, needs_reconnect: false,
       token_expires_at: null, last_refresh_error_code: null, created_at: "2026-11-10",
     }] }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /GitHub account/ }));
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: /GitHub account/ })).toBeEnabled());
-    await act(async () => read.resolve(json({ installation_ids: [] })));
-    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).toBeChecked();
+    const checkbox = screen.getByRole("checkbox", { name: /GitHub account/ });
+    expect(checkbox).toBeDisabled();
+    expect(screen.getByText("Loading Connector bindings…")).toBeVisible();
+    fireEvent.click(checkbox);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+    await act(async () => read.resolve(json({ installation_ids: enabled ? ["github"] : [] })));
+    expect(screen.queryByText("Loading Connector bindings…")).toBeNull();
+    expect(checkbox).toHaveProperty("checked", enabled);
+    expect(checkbox).toBeEnabled();
+    await act(async () => fireEvent.click(checkbox));
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/ag1/connectors/github"),
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ enabled: !enabled }) }));
   });
 
-  it.each(["before", "after"])("a failed connector edit restores the initial selection read %s rejection", async (order) => {
+  it("retries a failed binding read in the same form after Save unfreezes it", async () => {
     const read = deferred<Response>();
-    const write = deferred<Response>();
+    const retry = deferred<Response>();
+    const save = deferred<Response>();
+    let reads = 0;
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-      if (init?.method === "PATCH") return write.promise;
-      if (url.endsWith("/ag1/connectors")) return read.promise;
+      if (url.endsWith("/ag1/connectors")) return ++reads === 1 ? read.promise : retry.promise;
+      if (init?.method === "PATCH") return save.promise;
       return emptyRead(url);
     });
     mount("ag1");
@@ -502,12 +537,27 @@ describe("AgentFormPage", () => {
       external_account_id: "1", enable_by_default: false, needs_reconnect: false,
       token_expires_at: null, last_refresh_error_code: null, created_at: "2026-11-10",
     }] }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /GitHub account/ }));
-    if (order === "before") await act(async () => read.resolve(json({ installation_ids: ["github"] })));
-    await act(async () => write.resolve(new Response(null, { status: 503 })));
-    if (order === "after") await act(async () => read.resolve(json({ installation_ids: ["github"] })));
-    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: /GitHub account/ })).toBeEnabled();
+    const checkbox = screen.getByRole("checkbox", { name: /GitHub account/ });
+    const role = screen.getByLabelText("One-line role");
+    fireEvent.change(role, { target: { value: "Local draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    await act(async () => read.resolve(json({}, 503)));
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load Connector bindings.");
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    expect(checkbox).toBeDisabled();
+    fireEvent.click(retryButton);
+    expect(reads).toBe(1);
+    await act(async () => save.resolve(json({ detail: "Save refused" }, 409)));
+    expect(retryButton).toBeEnabled();
+    fireEvent.click(retryButton);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Loading Connector bindings…");
+    expect(checkbox).toBeDisabled();
+    await act(async () => retry.resolve(json({ installation_ids: ["github"] })));
+    expect(checkbox).toBeChecked();
+    expect(checkbox).toBeEnabled();
+    expect(role).toHaveValue("Local draft");
   });
 
   it.each(["update", "archive"])("a late form receipt preserves the newer WS %s", async (event) => {

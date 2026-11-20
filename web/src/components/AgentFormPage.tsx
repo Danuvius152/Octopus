@@ -43,6 +43,11 @@ type AgentDraft = {
   subagents: SubagentDefinition[];
 };
 
+type ConnectorBindingRead =
+  | { status: "loading" }
+  | { status: "ready"; ids: string[] }
+  | { status: "failed" };
+
 function agentFields(draft: AgentDraft) {
   return {
     name: draft.name.trim(),
@@ -151,7 +156,7 @@ function AgentFormInstance({
   const [toolAllow, setToolAllow] = useState(initialDraft.toolAllow);
   const [toolDeny, setToolDeny] = useState(initialDraft.toolDeny);
   const toolPolicy = backendToolPolicies[backend];
-  const [enabledConnectors, setEnabledConnectors] = useState<string[]>([]);
+  const [connectorBindings, setConnectorBindings] = useState<ConnectorBindingRead>({ status: "loading" });
   // Pending/successful writes override the opening read; rejection restores
   // the previous override, or the read's value when this was the first edit.
   const [connectorEdits, setConnectorEdits] = useState<Record<string, boolean>>({});
@@ -181,18 +186,18 @@ function AgentFormInstance({
   }, [defaultBackend, editingAgentId]);
 
   useEffect(() => {
-    if (!editing) {
-      setEnabledConnectors([]);
-      return;
-    }
-    fetchAgentConnectors(token, editing.id)
-      .then((ids) => {
-        if (isCurrent()) setEnabledConnectors(ids);
-      })
-      .catch(() => {});
-    // Other clients' Agent updates do not restart this opening's initial read.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, editingAgentId, isCurrent]);
+    if (!editingAgentId || connectorBindings.status !== "loading" || !isCurrent()) return;
+    const read = new AbortController();
+    void fetchAgentConnectors(token, editingAgentId, read.signal).then(
+      (ids) => {
+        if (!read.signal.aborted && isCurrent()) setConnectorBindings({ status: "ready", ids });
+      },
+      () => {
+        if (!read.signal.aborted && isCurrent()) setConnectorBindings({ status: "failed" });
+      },
+    );
+    return () => read.abort();
+  }, [token, editingAgentId, isCurrent, connectorBindings.status]);
 
   useEffect(() => {
     const read = useSessionStore.getState().archivedAgentsRead;
@@ -342,7 +347,8 @@ function AgentFormInstance({
   };
 
   const toggleConnector = async (installationId: string, enabled: boolean) => {
-    if (!editing || !isCurrent() || saving.current || pendingConnectors.current.has(installationId)) return;
+    if (!editing || connectorBindings.status !== "ready" || !isCurrent()
+      || saving.current || pendingConnectors.current.has(installationId)) return;
     pendingConnectors.current.add(installationId);
     setConnectorPending([...pendingConnectors.current]);
     const previous = connectorEdits[installationId];
@@ -602,21 +608,36 @@ function AgentFormInstance({
                       </span>
                     )}
                   </Label>
+                  {editingAgentId && connectorBindings.status === "loading" && (
+                    <p role="status" className="text-xs text-gray-700">Loading Connector bindings…</p>
+                  )}
+                  {editingAgentId && connectorBindings.status === "failed" && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p role="alert" className="text-xs text-destructive">Could not load Connector bindings.</p>
+                      <Button type="button" variant="outline" size="sm" onClick={() => {
+                        if (isCurrent() && !saving.current) setConnectorBindings({ status: "loading" });
+                      }}>
+                        Retry
+                      </Button>
+                    </div>
+                  )}
                   <div className="agent-connectors card divide-y divide-gray-300">
                     {installations.map((inst) => {
-                      const on = connectorEdits[inst.id] ?? enabledConnectors.includes(inst.id);
+                      const on = connectorEdits[inst.id]
+                        ?? (connectorBindings.status === "ready" && connectorBindings.ids.includes(inst.id));
+                      const disabled = !editing || connectorBindings.status !== "ready" || connectorPending.includes(inst.id);
                       return (
                         <label
                           key={inst.id}
-                          className={`flex cursor-pointer items-center gap-3 px-4 py-3 ${
-                            editing ? "" : "cursor-not-allowed opacity-60"
+                          className={`flex items-center gap-3 px-4 py-3 ${
+                            disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"
                           }`}
                         >
                           <input
                             type="checkbox"
                             className="size-4 accent-[hsl(var(--primary-600))]"
                             checked={on}
-                            disabled={!editing || connectorPending.includes(inst.id)}
+                            disabled={disabled}
                             onChange={(e) =>
                               toggleConnector(inst.id, e.target.checked)
                             }

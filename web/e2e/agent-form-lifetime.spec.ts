@@ -1,3 +1,4 @@
+import type { Request as BrowserRequest } from "@playwright/test";
 import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect } from "./test";
 
@@ -47,7 +48,7 @@ test("a saved Agent remains saved while its delayed receipt leaves the reopened 
   }
 });
 
-test("late connector reads and failed toggles stay with their original Agent opening", async ({ page, request }) => {
+test("closing an Agent form cancels its connector read and isolates its failed toggle", async ({ page, request }) => {
   const created = await request.post(agentsUrl, { headers, data: { name: "E2E Connector draft lifetime" } });
   expect(created.ok()).toBe(true);
   const agent = await created.json();
@@ -55,20 +56,22 @@ test("late connector reads and failed toggles stay with their original Agent ope
   const firstRead = new Promise<void>((resolve) => { releaseRead = resolve; });
   let releaseWrite!: () => void;
   const firstWrite = new Promise<void>((resolve) => { releaseWrite = resolve; });
-  let opening = 0;
-  const reads = [0, 0, 0];
+  let holdOpeningRead = true;
+  const openingReads: BrowserRequest[] = [];
   let writes = 0;
   await page.route(/\/api\/connectors$/, (route) => route.fulfill({ json: ["first", "second"].map((id) => ({
     id, kind: "github", label: `${id} account`, auth_type: "oauth", scopes: [], needs_reconnect: false,
     external_account_id: id, enable_by_default: false, created_at: "2026-11-10T00:00:00Z",
   })) }));
   await page.route(`**/api/agents/${agent.id}/connectors`, async (route) => {
-    // The development browser uses StrictMode and may repeat mount effects.
-    // Hold reads by opening, independently of that development-only count.
-    reads[opening]++;
-    const initial = opening === 0;
-    if (initial) await firstRead;
-    await route.fulfill({ json: { installation_ids: initial ? ["first"] : [] } });
+    if (holdOpeningRead) {
+      const read = route.request();
+      openingReads.push(read);
+      await firstRead;
+      if (!read.failure()) await route.fulfill({ json: { installation_ids: ["first"] } });
+      return;
+    }
+    await route.fulfill({ json: { installation_ids: [] } });
   });
   await page.route(`**/api/agents/${agent.id}/connectors/*`, async (route) => {
     if (++writes === 1) {
@@ -81,26 +84,31 @@ test("late connector reads and failed toggles stay with their original Agent ope
     await enterAccountCredentials(page);
     const row = page.locator(".agent-item", { hasText: agent.name });
     await row.dblclick();
-    await expect.poll(() => reads[0]).toBeGreaterThan(0);
-    opening = 1;
-    await page.locator(".btn-agent-cancel").click();
-    await row.dblclick();
-    await expect.poll(() => reads[1]).toBeGreaterThan(0);
-    const readReceived = page.waitForResponse((response) => response.url().endsWith(`/api/agents/${agent.id}/connectors`));
-    releaseRead();
-    await readReceived;
     const first = page.getByRole("checkbox", { name: /first account/ });
     const second = page.getByRole("checkbox", { name: /second account/ });
+    await expect(first).toBeDisabled();
+    await expect.poll(() => openingReads.some((read) => !read.failure())).toBe(true);
+    // StrictMode can already have cancelled an earlier request for this opening.
+    const originalRead = openingReads.findLast((read) => !read.failure());
+    expect(originalRead).toBeDefined();
+    const [cancelledRead] = await Promise.all([
+      page.waitForEvent("requestfailed", { predicate: (read) => read === originalRead, timeout: 5_000 }),
+      page.locator(".btn-agent-cancel").click(),
+    ]);
+    expect(cancelledRead.failure()?.errorText).toContain("ERR_ABORTED");
+    holdOpeningRead = false;
+    await row.dblclick();
+    await expect(first).toBeEnabled();
     await expect(first).not.toBeChecked();
+    releaseRead();
     await first.click();
     await expect(first).toBeDisabled();
     await expect(second).toBeEnabled();
     await second.click();
     await expect(second).toBeChecked();
-    opening = 2;
     await page.locator(".btn-agent-cancel").click();
     await row.dblclick();
-    await expect.poll(() => reads[2]).toBeGreaterThan(0);
+    await expect(first).toBeEnabled();
     const received = page.waitForResponse((response) => response.url().endsWith(`/connectors/first`));
     releaseWrite();
     await received;
