@@ -402,7 +402,7 @@ def interval_trigger(seconds: object, *, now: datetime, tz: str) -> IntervalTrig
         raise ScheduleParseError("`interval_seconds` is outside the SQLite signed 64-bit range.")
     zone = ZoneInfo(resolve_timezone(tz))
     try:
-        reference = now.astimezone(zone) if now.tzinfo else now.replace(tzinfo=zone)
+        reference = (now if now.tzinfo else now.replace(tzinfo=zone)).astimezone(UTC)
         trigger = IntervalTrigger(seconds=value, start_date=reference + timedelta(seconds=value), timezone=zone)
         if trigger.get_next_fire_time(None, reference) is None:
             raise ValueError("no first fire")

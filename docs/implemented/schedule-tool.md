@@ -188,8 +188,12 @@ in SQLite's signed 64-bit integer. The shared `interval_trigger` also constructs
 the actual APScheduler trigger and checks its first fire through datetime,
 timezone and timestamp conversion; there is no separate business-year ceiling.
 The rigid parser, AI candidates, explicit creation and timing edits use this
-same validation. Interval validation and registration both use the existing host
-timezone source; an interval does not acquire a new wall-clock zone contract.
+same validation. The trigger starts one interval after registration on the UTC
+timeline. The schedule's existing display zone, normally the host zone,
+determines the offset in `next_run_at`, including across daylight saving changes.
+APScheduler 3.11.3 is the minimum. It compares wakeup instants across daylight
+saving transitions while the Runner uses the host clock and calendar triggers
+use their own configured zones.
 
 The definition transaction repeats interval validation before and after the SQL
 and cursor cleanup, including re-enabling an invalid stored interval. Refusal
@@ -227,6 +231,10 @@ explicitly in their agent configuration.
   interval boundaries, rigid and AI rejection, a past `run_at`, and a naive
   `run_at` read in the schedule's zone. Route/Runner tests also preserve the
   old definition on rejection and exercise edit/delete during quarantine CAS.
+* **Runner timing** ([`test_scheduler.py`](../../tests/test_scheduler.py)) covers
+  interval registration and wakeup delays across daylight saving transitions.
+  The cron cases verify registration, due submission and advancement through
+  the repeated hour.
 * **A real model, both harnesses** (`test_schedule_mcp_real.py`) — the only
   test that settles the actual question. Claude is asked for "every weekday
   at 9am" and the resulting cron has to fire Mon-Fri at 09:00 (asserted by

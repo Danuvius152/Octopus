@@ -1,9 +1,14 @@
 """Tests for the agent-scoped ScheduleRunner (agent-refactor.md §5.3/§5.6)."""
 
 import asyncio
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
+from apscheduler.schedulers import base as apscheduler_base
+from apscheduler.triggers import cron as apscheduler_cron
 
+from server import scheduler
 from server.database import Database
 from server.knowledge import encode, for_account
 from server.scheduler import ScheduleRunner
@@ -23,12 +28,15 @@ async def save_schedule(db, **fields):
 
 
 @pytest.fixture
-async def setup(tmp_path):
+async def setup(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
     await create_account(db, extra_roots=[tmp_path])
     mgr = SessionManager()
     await mgr.initialize(db)
+    host_zone = ZoneInfo("America/Los_Angeles")
+    monkeypatch.setattr(apscheduler_base, "get_localzone", lambda: host_zone)
+    monkeypatch.setattr(apscheduler_cron, "get_localzone", lambda: host_zone)
     runner = ScheduleRunner(mgr, db)
     try:
         yield mgr, db, runner
@@ -584,13 +592,54 @@ async def test_add_job_captures_only_schedule_identity(setup):
     assert job.args == (row["id"],)
 
 
-@pytest.mark.asyncio
-async def test_cron_schedule_registers_cron_trigger(setup):
-    """A schedule with a cron expression registers an APScheduler CronTrigger
-    in the agent's timezone (not an interval job)."""
-    from apscheduler.triggers.cron import CronTrigger
+@pytest.fixture
+def schedule_clock(monkeypatch):
+    class Clock(datetime):
+        current: datetime
 
-    mgr, db, runner = setup
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz) if tz else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr(scheduler, "datetime", Clock)
+    monkeypatch.setattr(apscheduler_base, "datetime", Clock)
+    return Clock
+
+
+@pytest.mark.parametrize(
+    "now, seconds, expected",
+    [
+        pytest.param("2026-03-08T09:30:00+00:00", 7200, "2026-03-08T04:30:00-07:00", id="spring-forward"),
+        pytest.param("2026-11-01T08:45:00+00:00", 1800, "2026-11-01T01:15:00-08:00", id="fall-back"),
+        pytest.param("2026-01-10T09:30:00+00:00", 60, "2026-01-10T01:31:00-08:00", id="ordinary-day"),
+    ],
+)
+async def test_interval_first_fire_uses_elapsed_seconds(setup, schedule_clock, monkeypatch, now, seconds, expected):
+    _, db, runner = setup
+    schedule_clock.current = datetime.fromisoformat(now)
+    agent = await db.get_system_agent()
+    await save_schedule(
+        db, schedule_id="elapsed", agent_id=agent["id"], name="elapsed", prompt="check",
+        created_at=now, interval_seconds=seconds, timezone="America/Los_Angeles",
+    )
+
+    await runner.initialize(paused=True)
+
+    assert runner.next_run_at("elapsed") == expected
+
+    # Observe the interval timer in isolation from the maintenance jobs.
+    runner._scheduler.remove_job("__metrics_retention__")
+    runner._scheduler.remove_job("__wiki_text_retention__")
+    delay = asyncio.get_running_loop().create_future()
+    monkeypatch.setattr(runner._scheduler, "_start_timer", delay.set_result)
+    runner.start()
+    assert await asyncio.wait_for(delay, timeout=3) == seconds
+
+
+async def test_calendar_schedules_use_their_own_zones(setup, schedule_clock, monkeypatch):
+    _, db, runner = setup
+    schedule_clock.current = datetime.fromisoformat("2026-03-08T07:30:00+00:00")
+    monkeypatch.setattr(apscheduler_cron, "get_localzone", lambda: ZoneInfo("America/New_York"))
     agent = await db.get_system_agent()
     await save_schedule(db,
         schedule_id="cron1",
@@ -602,12 +651,50 @@ async def test_cron_schedule_registers_cron_trigger(setup):
         timezone="America/Los_Angeles",
         recurrence_label="Every day at 9:00 AM",
     )
-    row = (await db.load_schedules())[0]
-    await runner.reconcile(row["id"])
+    await runner.initialize(paused=True)
 
-    job = runner._scheduler.get_job("cron1")
-    assert job is not None
-    assert isinstance(job.trigger, CronTrigger)
+    assert runner.next_run_at("cron1") == "2026-03-08T09:00:00-07:00"
+    assert runner.next_run_at("__metrics_retention__") == "2026-03-08T04:00:00-04:00"
+    assert runner.next_run_at("__wiki_text_retention__") == "2026-03-08T04:15:00-04:00"
+
+
+@pytest.mark.parametrize(
+    "cron, first, following",
+    [
+        pytest.param("* * * * *", "2026-11-01T01:00:00-08:00", "2026-11-01T01:01:00-08:00", id="every-minute"),
+        pytest.param("30 1 * * *", "2026-11-01T01:30:00-08:00", "2026-11-02T01:30:00-08:00", id="daily"),
+    ],
+)
+async def test_cron_registers_and_advances_through_fall_back(setup, schedule_clock, monkeypatch, cron, first, following):
+    _, db, runner = setup
+    schedule_clock.current = datetime.fromisoformat("2026-11-01T08:59:59.500+00:00")
+    agent = await db.get_system_agent()
+    await save_schedule(
+        db, schedule_id="fall-back", agent_id=agent["id"], name="fall back", prompt="check",
+        created_at=schedule_clock.current.isoformat(), cron=cron, timezone="America/Los_Angeles",
+    )
+
+    await runner.initialize(paused=True)
+    assert runner.next_run_at("fall-back") == first
+
+    get_next_fire_time = apscheduler_cron.CronTrigger.get_next_fire_time
+
+    def check_progress(trigger, previous, now):
+        result = get_next_fire_time(trigger, previous, now)
+        if previous is not None and result is not None:
+            assert result.astimezone(UTC) > previous.astimezone(UTC)
+        return result
+
+    submitted = []
+    monkeypatch.setattr(apscheduler_cron.CronTrigger, "get_next_fire_time", check_progress)
+    monkeypatch.setattr(runner._executor, "submit_job", lambda job, times: submitted.extend(times))
+    schedule_clock.current = datetime.fromisoformat(first).astimezone(UTC)
+    runner.start()
+    # Run the due-job pass synchronously so regressions fail without waiting for a timer.
+    runner._scheduler._process_jobs()
+
+    assert [time.isoformat() for time in submitted] == [first]
+    assert runner.next_run_at("fall-back") == following
 
 
 @pytest.mark.asyncio

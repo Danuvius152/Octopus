@@ -77,9 +77,11 @@ Phone / Browser
 
 Python 3.12 is the declared minimum. Octopus requires FastAPI 0.133.0 or later
 and Starlette 1.7.0 or later for attachment request limits and malformed upload
-responses. The recommended constraints below target CPython 3.14.4 on Linux
-x86_64. If you use a different Python version or platform, resolve and verify
-its own snapshot using the [environment guide](docs/local-wsl.md#环境重建).
+responses. Octopus requires APScheduler 3.11.3 or later for correct scheduling
+across daylight saving transitions. The recommended constraints below target
+CPython 3.14.4 on Linux x86_64. If you use a different Python version or
+platform, resolve and verify its own snapshot using the
+[environment guide](docs/local-wsl.md#环境重建).
 
 ```bash
 # Clone and set up
