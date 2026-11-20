@@ -1,8 +1,9 @@
 """Submitted session operations, separate from the effective execution context."""
 
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 OperationKind = Literal["message", "compact"]
 
@@ -50,6 +51,35 @@ class CompactResult(BaseModel):
     native_command: NativeCompactCommand | None = None
 
 
+class HandoffScopeClause(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: Annotated[str, StringConstraints(min_length=1)]
+    scope: Literal["batch", "next"]
+    start: int | None = Field(default=None, ge=0, strict=True, description="Zero-based Unicode character offset in message")
+    hold: bool = Field(default=False, strict=True, description="Quote naming an operation to defer under an applicable restriction")
+
+
+HandoffHumanScope = dict[str, tuple[HandoffScopeClause, ...]]
+_handoff_scope = TypeAdapter(HandoffHumanScope)
+
+
+@dataclass(frozen=True)
+class SavedHandoffSelection:
+    clauses: tuple[HandoffScopeClause, ...]
+    next_expired: bool
+
+
+def handoff_human_scope(payload: dict[str, Any]) -> HandoffHumanScope:
+    """An empty selection closes the update with the ticket that received it."""
+    decisions: HandoffHumanScope = dict.fromkeys(payload.get("answered_progress_request_ids", ()), ())
+    decisions.update(_handoff_scope.validate_python(payload.get("handoff_human_scope", {})))
+    if any(not request_id.strip() or any(not clause.text.strip() for clause in clauses)
+           for request_id, clauses in decisions.items()):
+        raise ValueError("Ticket handoff has an empty human input ID or scope clause")
+    return decisions
+
+
 def decode_payload(value: dict[str, Any]) -> dict[str, Any]:
     """Normalize legacy flat messages only at the retained-input boundary.
 
@@ -65,6 +95,15 @@ def decode_payload(value: dict[str, Any]) -> dict[str, Any]:
         operation = MessageOperation(
             kind="message", content=value["content"], attachment_ids=value["attachment_ids"], wiki_mode=value.get("wiki_mode"),
         )
+    if "ticket_batch_candidate_for" in value or "finish_ticket_batch_for" in value:
+        batch = value.get("ticket_batch_candidate_for")
+        if (value.get("source") != "human" or operation.kind != "message"
+                or not isinstance(batch, str) or not batch.strip() or value.get("finish_ticket_batch_for", batch) != batch):
+            raise ValueError("The ticket acceptance limit has no valid original human binding")
+    if "finish_ticket_batch_instruction_id" in value:
+        instruction_id = value["finish_ticket_batch_instruction_id"]
+        if "finish_ticket_batch_for" not in value or not isinstance(instruction_id, str) or not instruction_id.strip():
+            raise ValueError("The adopted ticket input has no valid instruction binding")
     if value.get("source") == "handoff":
         if (operation.kind != "message" or operation.attachment_ids or value.get("recovery_of_client_id")
                 or value.get("handoff_backend") not in {"codex", "claude-code"}
@@ -79,5 +118,6 @@ def decode_payload(value: dict[str, Any]) -> dict[str, Any]:
                 or any(not isinstance(request_id, str) or not request_id.strip() for request_id in progress)
                 or len(set(progress)) != len(progress)):
             raise ValueError("Ticket handoff contains invalid answered progress input IDs")
+        handoff_human_scope(value)
     return {**{key: item for key, item in value.items() if key not in {"content", "attachment_ids", "wiki_mode"}},
             "operation": operation.model_dump()}

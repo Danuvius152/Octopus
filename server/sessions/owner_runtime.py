@@ -115,6 +115,23 @@ class RegisterTicketBatch:
 
 
 @dataclass(frozen=True)
+class FinishTicketBatch:
+    scope: McpScope
+
+
+@dataclass(frozen=True)
+class LimitTicketBatch:
+    scope: McpScope
+    message: str
+
+
+@dataclass(frozen=True)
+class CommitBatchReturn:
+    request_id: str
+    attempt_id: str
+
+
+@dataclass(frozen=True)
 class Resume:
     resume_queue: bool = True
 
@@ -244,7 +261,8 @@ class IdlePublication:
 
 RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | ReadContext | UpdateConfiguration | CloseWork | RetireProcess | RetireHeldProcess
                   | CloseExecution | ReleaseApplication | ReserveFork | OwnForkProcess | ReleaseArchive | AutoArchive | FinishAutoArchive
-                  | IdleEvent | CorrelatedControl | RecoveryDismissed | RegisterTicketBatch)
+                  | IdleEvent | CorrelatedControl | RecoveryDismissed | RegisterTicketBatch | FinishTicketBatch | LimitTicketBatch
+                  | CommitBatchReturn)
 
 
 @dataclass(frozen=True)
@@ -359,6 +377,7 @@ class Execution:
     turn: _Turn | None = None
     attempt: _Attempt | None = None
     prepared: _PreparedRun | None = None
+    deferred_return_input: _PreparedInput | None = None
     preparation_diagnostic: PreparationDiagnostic | None = None
     reader: RuntimeReader | None = None
     activity: _Activity | None = None
@@ -384,6 +403,11 @@ class Execution:
         detail = backend.format_exception(error) if backend is not None else exception_diagnostic(error)
         credential = self.prepared.credential if self.prepared is not None else diagnostic.credential if diagnostic is not None else None
         return diagnostic_text(detail, secrets=(settings.auth_token, credential.secret if credential else ""))
+
+    def has_unwritten_batch_return(self) -> bool:
+        return self.request.batch_return and (
+            self.phase in {"claim", "input"} or self.deferred_return_input is not None
+        )
 
 
 @dataclass
@@ -515,7 +539,16 @@ class OwnerRuntime:
                 return await manager._save_session_configuration(session.id, command.fields, command.user_id)
         if isinstance(command, Submit):
             return await self._submit(command)
-        if isinstance(command, RegisterTicketBatch):
+        if isinstance(command, LimitTicketBatch):
+            return await self._limit_ticket_batch(command)
+        if isinstance(command, CommitBatchReturn):
+            execution = self.current
+            if (execution is None or execution.request.request_id != command.request_id
+                    or execution.settlement.attempt_id != command.attempt_id):
+                raise SessionAdmissionClosed("The original ticket return no longer has input authority")
+            await self._commit_batch_return(execution)
+            return None
+        if isinstance(command, (RegisterTicketBatch, FinishTicketBatch)):
             from ..knowledge import capture
 
             parent = capture(session, command.scope, prompt="")
@@ -525,9 +558,17 @@ class OwnerRuntime:
                     or self.current.interrupted or session._dispatch_paused
                     or origin.session_id != session.id or origin.user_id != session.user_id
                     or await database.handoff_human_executions(session.id, origin.request_id) is None):
-                raise ValueError("Register the batch from its current human authorization in the main chat")
+                raise ValueError("Control the batch from its current human authorization in the main chat")
+            if isinstance(command, FinishTicketBatch):
+                if await database.stop_ticket_batch(session.id, origin.request_id, only_finishing=True):
+                    session._ticket_batch_request_id = None
+                    await self._withdraw_batch_work(withdraw_returns=True)
+                    self.changed()
+                elif await database.ticket_batch_state(session.id, origin.request_id) != "stopped":
+                    raise ValueError("The user has not limited this batch to acceptance of the current ticket")
+                return {"state": "stopped", "original_request_id": origin.request_id}
             if not await database.register_ticket_batch(session.id, origin.request_id):
-                raise ValueError("Resume the stopped ticket batch with a new human request")
+                raise ValueError("The ticket batch is finishing or stopped. Further tickets require a new human request")
             session._ticket_batch_request_id = origin.request_id
             return {"state": "registered", "original_request_id": origin.request_id}
         if isinstance(command, RecoveryDismissed):
@@ -547,7 +588,14 @@ class OwnerRuntime:
             retain = not (self.current is not None
                           and (self.current.request.source == "handoff" or self.current.request.batch_return))
             self._clear_replaced_ticket_batch()
-            batch_request_id = session._ticket_batch_request_id if command.cause == "user" else None
+            batch_request_id = None
+            if command.cause == "user":
+                batch_request_id = session._ticket_batch_request_id
+                if batch_request_id is None and self.current is not None:
+                    batch_request_id = self.current.request.ticket_batch_candidate_for
+                if batch_request_id is None:
+                    batch_request_id = next((item.ticket_batch_candidate_for for item in reversed(session._pending_queue)
+                                             if item.ticket_batch_candidate_for is not None), None)
             interrupted = await self._interrupt(command.cause, retain_unstarted=retain, batch_request_id=batch_request_id)
             await self._withdraw_batch_work(withdraw_returns=True)
             for compact_pending in tuple(session._pending_queue):
@@ -775,11 +823,61 @@ class OwnerRuntime:
         return bool(request.operation == "message" and request.question_session_id and request.question_id and request.knowledge_context is not None
                     and request.knowledge_context.interaction_policy == "unattended")
 
+    async def _limit_ticket_batch(self, command: LimitTicketBatch) -> dict[str, str]:
+        from ..knowledge import capture
+        from ..wiki.tasks import tasks
+        from .client_submissions import confirmed_execution
+        from .handoff import FINISH_TICKET_INSTRUCTIONS, updated_batch_context
+
+        session, manager, execution = self.owner.session, self.owner.manager, self.current
+        caller = capture(session, command.scope, prompt="")
+        if (execution is None or execution.interrupted or execution.request.operation != "message"
+                or caller.reference.request_id != execution.request.request_id or session._dispatch_paused
+                or caller.context.origin.session_id != session.id
+                or session._steer_queue or self.steer is not None):
+            raise ValueError("Wait for the current human input to settle before limiting the ticket batch")
+        request = execution.request
+        database = manager.input_database()
+        original_id = request.ticket_batch_candidate_for or caller.context.origin.request_id
+        human = await confirmed_execution(database, session.id, request.request_id, require_terminal=False)
+        if human is None:
+            raise ValueError("The current human input has unconfirmed delivery")
+        adopt = request.ticket_batch_candidate_for is not None
+        input_id = next((edit.reference.request_id for _, edit in reversed(human.steers)
+                         if command.message == edit.context.trusted_request), None)
+        if input_id is None and human.primary is not None and command.message == request.prompt:
+            input_id = request.request_id
+        if input_id is None:
+            raise ValueError("The scope instruction must match the current human input verbatim")
+        await database.limit_ticket_batch(session.id, original_id, request.request_id, input_id, adopt_input=adopt)
+        session._ticket_batch_request_id = original_id
+        execution.human_message_claimed = False
+        await self._withdraw_batch_work(withdraw_returns=False)
+        if adopt:
+            # Keep the recorded new human turn intact. Subsequent work it starts
+            # belongs to the ticket whose scope the new input just narrowed.
+            session._steer_open = False
+            root = await database.get_submission_for_request(session.id, original_id)
+            original = saved_context(session.id, root) if root else None
+            updated = await updated_batch_context(
+                manager, session, original, live_request=request.request_id,
+            ) if original else None
+            if updated is not None:
+                limits = updated.maintenance.restrict(caller.context.maintenance)
+                mode = "read" if caller.context.mode == "read" or not limits.may_submit else updated.mode
+                updated = replace(updated, maintenance=limits, mode=mode)
+                session._run.knowledge_context, session._run.wiki_mode = updated, mode
+                if (token := session._run.wiki_task_id) and (task := tasks.active.get(token)):
+                    tasks.active[token] = replace(task, request=updated.trusted_request, knowledge=updated, mode=mode)
+        self.changed()
+        return {"state": "finishing", "original_request_id": original_id, "instructions": FINISH_TICKET_INSTRUCTIONS}
+
     async def _submit(self, command: Submit) -> SubmissionReceipt:
         from ..knowledge import for_entry
         from ..mcp_identity import work_is_open
         from ..session_operations import CompactOperation, MessageOperation
         from .client_submissions import input_digest
+        from .handoff import TICKET_BATCH_RETURN_STATES
 
         session, manager, request = self.owner.session, self.owner.manager, command.request
         database = manager.input_database()
@@ -821,7 +919,7 @@ class OwnerRuntime:
             raise SessionAdmissionBusy(f"Session {session.id} is busy (forking or archiving)")
         if request.source == "handoff":
             from ..knowledge import capture
-            from .handoff import resolve_answered_progress
+            from .handoff import resolve_handoff_human_scope
 
             if command.handoff is None or request.operation != "message":
                 raise ValueError("A handoff needs its original execution scope")
@@ -830,7 +928,10 @@ class OwnerRuntime:
             if self.current is None or self.current.request.request_id != parent.reference.request_id:
                 raise ValueError("The original ticket execution has ended")
             origin = parent.context.origin
-            if origin.session_id != session.id or await database.ticket_batch_state(session.id, origin.request_id) != "registered":
+            batch_state = await database.ticket_batch_state(session.id, origin.request_id) if origin.session_id == session.id else None
+            if batch_state == "finishing":
+                raise ValueError("The user has limited this batch to acceptance of the current ticket")
+            if batch_state != "registered":
                 raise ValueError("Register the authorized ticket batch before requesting handoff")
             previous = await database.conflicting_handoff(
                 session.id, origin.request_id, parent.reference.request_id, session.claude_session_id,
@@ -846,25 +947,28 @@ class OwnerRuntime:
                 raise ValueError("The ticket batch's human authorization has changed or is unconfirmed")
             request.knowledge_context = parent.context
             request.work_id = parent.work_id
-            answered = await resolve_answered_progress(manager, session, parent, carriers, pointers.answered_progress_questions)
+            decisions = await resolve_handoff_human_scope(manager, session, parent, carriers, pointers)
             payload.update(handoff_from=parent.reference.request_id, previous_native_id=session.claude_session_id,
-                           handoff_backend=session.backend, answered_progress_request_ids=answered)
+                           handoff_backend=session.backend,
+                           handoff_human_scope={key: [clause.model_dump(exclude_defaults=True) for clause in clauses]
+                                                for key, clauses in decisions.items()})
         if command.return_parent is not None:
             assert request.operation == "message"
             parent_binding = command.return_parent
             if not await database.request_in_model_history(session.id, parent_binding.reference.request_id,
                                                            parent_binding.captured_after_seq):
                 raise SessionAdmissionClosed("The calling ticket has handed off its model context")
-            switching = (self.current is not None and self.current.request.source == "handoff"
-                         and self.current.phase in {"claim", "input"})
+            switching = self.current is not None and self.current.request.source == "handoff"
             if switching or any(item.source == "handoff" for item in session._pending_queue):
                 raise SessionAdmissionBusy("The calling ticket has a pending model context handoff")
             origin = parent_binding.context.origin
+            if origin.session_id == session.id and await database.ticket_input_has_joined_batch(session.id, origin.request_id):
+                raise SessionAdmissionClosed("The original input joined a ticket batch")
             batch = await database.ticket_batch_state(session.id, origin.request_id) if origin.session_id == session.id else None
             if batch is not None:
                 from .handoff import updated_batch_context
 
-                if batch != "registered" or session._dispatch_paused:
+                if batch not in TICKET_BATCH_RETURN_STATES or session._dispatch_paused:
                     raise SessionAdmissionClosed("The calling ticket batch is paused")
                 if self.current is not None or session._pending_queue:
                     raise SessionAdmissionBusy("Wait for the calling ticket batch's current inputs to settle")
@@ -945,6 +1049,10 @@ class OwnerRuntime:
                 and not any(item.source == "human" and (not session._dispatch_paused or item.priority)
                             for item in session._pending_queue)
                 and len(session._steer_queue) + int(self.steer is not None and self.steer.write is not None) < _MAX_PENDING_STEERS)
+        if (human_message and not steering and not supersedes_handoff and not session._dispatch_paused
+                and session._ticket_batch_request_id is not None):
+            request.ticket_batch_candidate_for = session._ticket_batch_request_id
+            payload["ticket_batch_candidate_for"] = request.ticket_batch_candidate_for
         # An accepted input owns its notification too. At most the current
         # handoff can wait outside the publisher's budget; a slow subscriber
         # must not create a full queue snapshot on every pending request.
@@ -978,6 +1086,10 @@ class OwnerRuntime:
         if request.operation == "message":
             assert request.knowledge_context is not None
             payload.update(trusted_request=request.trusted_request, knowledge=encode(request.knowledge_context))
+        superseded_handoff = None
+        if (supersedes_handoff and self.current is not None and session._ticket_batch_request_id is not None
+                and not session._dispatch_paused):
+            superseded_handoff = (self.current.request.request_id, session._ticket_batch_request_id)
         created, row = await database.admit_client_submission(
             session.id, client_id, digest, request.request_id, payload=payload,
             receipt={"accepted": True, "disposition": disposition}, recovery_of=command.recovery_of,
@@ -985,9 +1097,13 @@ class OwnerRuntime:
             new_session={key: getattr(session, key) for key in (
                 "id", "name", "working_dir", "created_at", "credential_id", "agent_id", "origin", "backend", "user_id",
             )} if new_session else None,
+            superseded_handoff=superseded_handoff,
         )
         if not created:
             return self._existing_input(row, digest, pointers)
+        restored_handoff_history = row.get("restored_handoff_history")
+        if restored_handoff_history is not None:
+            request.ticket_batch_candidate_for = row["payload"]["ticket_batch_candidate_for"]
         if new_session:
             manager.sessions[session.id] = session
         if queued:
@@ -999,12 +1115,16 @@ class OwnerRuntime:
             session._pending_queue.append(self._pending_input(request))
         receipt = manager._new_receipt(session, request, disposition)
         if human_message:
-            if not steering:
+            candidate = request.ticket_batch_candidate_for is not None
+            replaces_batch = not steering and not candidate
+            if replaces_batch:
                 session._ticket_batch_request_id = None
-            await self._withdraw_batch_work(withdraw_returns=not steering)
-            if supersedes_handoff or (
-                    not steering and self.current is not None and self.current.request.batch_return):
-                await self._interrupt("user")
+            await self._withdraw_batch_work(withdraw_returns=replaces_batch)
+            if candidate and self.current is not None and self.current.request.batch_return:
+                if self.current.has_unwritten_batch_return():
+                    await self._interrupt("user", retain_unstarted=True)
+            elif supersedes_handoff or (replaces_batch and self.current is not None and self.current.request.batch_return):
+                await self._interrupt("user", restored_handoff_history=restored_handoff_history)
         if request.delivery_id:
             session._delivery_receipts[request.delivery_id] = receipt
         self.changed()
@@ -1021,7 +1141,7 @@ class OwnerRuntime:
     def _pending_input(request: SessionRequest) -> PendingInput:
         return PendingInput(request.request_id, request.source, request.summary, request.work_id,
                             request.priority, request.order, request.queued_event, operation=request.operation,
-                            batch_return=request.batch_return)
+                            batch_return=request.batch_return, ticket_batch_candidate_for=request.ticket_batch_candidate_for)
 
     async def _steer_configuration_matches(self, session: Session, agent: dict[str, Any] | None) -> bool:
         execution = self.current
@@ -1143,12 +1263,13 @@ class OwnerRuntime:
         database = self.owner.manager.db
         assert database is not None
         try:
-            await database.record_terminal(
+            restored_history = await database.record_terminal(
                 request_id=settlement.request_id, session_id=session.id,
                 seq=settlement.seq, role=stored.role.value, type=stored.type,
                 content=stored.content, is_error=stored.is_error,
                 session_id_ref=stored.session_id, cost=stored.cost,
                 created_at=stored.created_at,
+                restore_unsent_handoff=execution.request.source == "handoff",
                 **({"tool_input": stored.tool_input} if stored.tool_input is not None else {}),
             )
         except ValueError as error:
@@ -1164,15 +1285,24 @@ class OwnerRuntime:
             return event
         # Original commit acknowledgement precedes projection and publication.
         settlement.recording_state = "committed"
+        if restored_history is not None:
+            self._restore_handoff_history(execution, restored_history)
         session.restore_message_state(*await database.message_sequence_state(session.id))
         execution.frames.append(deepcopy(settlement.event))
         self.owner.wake()
         return settlement.event
 
+    def _restore_handoff_history(self, execution: Execution, native_id: str) -> None:
+        session = self.owner.session
+        if session.claude_session_id != native_id:
+            session.claude_session_id, session.context_state = native_id, None
+            self.context_changed()
+        execution.input_changed.set()
+
     async def _interrupt(
         self, cause: Literal["user", "shutdown"], *, retain_unstarted: bool = False,
         code: str | None = None, message: str | None = None,
-        batch_request_id: str | None = None,
+        batch_request_id: str | None = None, restored_handoff_history: str | None = None,
     ) -> bool:
         session, execution = self.owner.session, self.current
         session._steer_open = False
@@ -1197,6 +1327,14 @@ class OwnerRuntime:
                     if backend.native_end_reason == "process_ended":
                         backend.native_end_reason = "service_shutdown" if cause == "shutdown" else "user_stop"
                     backend.retire()
+            if execution.request.source == "handoff":
+                database = self.owner.manager.input_database()
+                reason = "shutdown" if cause == "shutdown" else "withdrawn"
+                if restored_handoff_history is None:
+                    restored_handoff_history = await database.withdraw_unsent_handoff(session.id, execution.request.request_id, reason)
+                if restored_handoff_history is not None:
+                    self._restore_handoff_history(execution, restored_handoff_history)
+                    execution.request.started = False
         if batch_request_id is not None:
             await self.owner.manager.input_database().stop_ticket_batch(session.id, batch_request_id)
             session._ticket_batch_request_id = None
@@ -1209,7 +1347,11 @@ class OwnerRuntime:
         if was_interrupted:
             self.changed()
             return True
-        if not execution.request.started and retain_unstarted and execution.request.operation == "message":
+        before_return_input = execution.has_unwritten_batch_return()
+        if retain_unstarted and execution.request.operation == "message" and (not execution.request.started or before_return_input):
+            # A pending scope decision can retain a return whose input has not
+            # reached transcript recording or any native write.
+            execution.request.started = False
             execution.request.priority = False
             session._pending_queue.append(self._pending_input(execution.request))
             session._pending_queue.sort(key=lambda request: request.order)
@@ -1734,8 +1876,14 @@ class OwnerRuntime:
         )
 
     async def _input_ready(self, execution: Execution, prepared: _PreparedInput) -> None:
-        from ..knowledge import encode, render
+        from ..knowledge import render
         from ..wiki.tasks import command_prompt, tasks
+        from .handoff import (
+            FINISH_TICKET_INSTRUCTIONS,
+            TICKET_BATCH_CANDIDATE_INSTRUCTIONS,
+            TICKET_BATCH_RETURN_STATES,
+            updated_batch_context,
+        )
 
         session, manager, request = self.owner.session, self.owner.manager, execution.request
         if request.operation == "compact":
@@ -1748,36 +1896,42 @@ class OwnerRuntime:
             return
         knowledge = request.knowledge_context
         assert knowledge is not None
+        batch_state = None
+        if request.batch_return:
+            batch_state = await manager.input_database().ticket_batch_state(session.id, knowledge.origin.request_id)
+            updated = await updated_batch_context(manager, session, knowledge) if batch_state in TICKET_BATCH_RETURN_STATES else None
+            if updated is None:
+                request.started = False
+                await self._interrupt("user")
+                return
+            request.knowledge_context = knowledge = updated
         mode = tasks.mode_for(session, knowledge.mode, request_id=request.request_id)
         assignment = tasks.assignments.get(session.id)
         worker = assignment and assignment.get("assigned_request_id") in {None, request.request_id}
         if mode == "maintain" and not knowledge.maintenance.may_submit and not worker:
             mode = "read"
-        message = MessageContent(role=MessageRole.user, type="text", content=request.prompt,
-                                 attachments=list(prepared.attachments), tool_input={"request_context": {
-                                     "request_id": request.request_id, "source": request.source,
-                                     "work_id": request.work_id, "knowledge": json.loads(encode(knowledge)),
-                                 }})
-        if request.source == "handoff" and message.tool_input is not None:
-            message.tool_input["handoff_id"] = request.delivery_id
-        seq = await manager._persist_message(session, message, git_head=prepared.git_head,
-            git_status_clean=prepared.git_clean, git_ignored_baseline=prepared.git_ignored_baseline)
+        if request.batch_return:
+            # A pending human scope decision can still take priority while
+            # preparation runs. Publish at the original business-write boundary.
+            execution.deferred_return_input = prepared
+        else:
+            await self._record_message_input(execution, prepared)
+        self._bind_message_context(request, mode)
         execution.phase = "prepare"
-        if request.source == "handoff":
-            session.claude_session_id = None
-            session.context_state = None
-            self.context_changed()
-        session._run.knowledge_context, session._run.wiki_mode = knowledge, mode
-        session._run.wiki_task_id = tasks.open(session, mode, knowledge.trusted_request,
-                                              request_id=request.request_id, knowledge=knowledge) if mode in {"auto", "read", "maintain"} else None
-        event: dict[str, Any] = {"type": "user_message", "session_id": session.id, "content": request.prompt, "tool_input": message.tool_input}
-        if prepared.attachments:
-            event["attachments"] = [item.model_dump() for item in prepared.attachments]
-        execution.frames.append(manager._tag_persisted(event, seq, message))
         self.notify_status(SessionStatus.running)
         prompt = command_prompt(request.prompt, mode)
+        scope_message = ""
+        if request.ticket_batch_candidate_for and prompt != request.prompt:
+            scope_message = (
+                "\n\nThe exact human message for scope confirmation follows as a JSON string.\n"
+                + json.dumps(request.prompt, ensure_ascii=False)
+            )
         if knowledge.origin.request_id != request.request_id:
             prompt = render(knowledge) + "\n\n" + prompt
+        if request.ticket_batch_candidate_for:
+            prompt = TICKET_BATCH_CANDIDATE_INSTRUCTIONS + scope_message + "\n\n" + prompt
+        if batch_state == "finishing":
+            prompt = FINISH_TICKET_INSTRUCTIONS + "\n\n" + prompt
         prompt = _augment_prompt_with_attachments(prompt, list(prepared.paths))
         configured = capture_configuration(session)
         if await self._overall_expired(execution):
@@ -1786,6 +1940,53 @@ class OwnerRuntime:
         execution.operation = self.task(self._prepare_run(configured, prompt, diagnostic, request_id=request.request_id),
                                         f"request-prepare-{request.request_id}")
         self.owner.wake()
+
+    def _bind_message_context(self, request: QueuedPrompt, mode: str | None) -> None:
+        from ..wiki.tasks import tasks
+
+        session, knowledge = self.owner.session, request.knowledge_context
+        assert knowledge is not None
+        session._run.knowledge_context, session._run.wiki_mode = knowledge, mode
+        session._run.wiki_task_id = tasks.open(session, mode, knowledge.trusted_request,
+                                              request_id=request.request_id, knowledge=knowledge) if mode in {"auto", "read", "maintain"} else None
+
+    async def _commit_batch_return(self, execution: Execution) -> None:
+        from ..mcp_identity import work_is_open
+
+        if self.current is not execution or execution.interrupted or not work_is_open(execution.request.work_id):
+            raise SessionAdmissionClosed("The original ticket return no longer has input authority")
+        if execution.deferred_return_input is not None:
+            await self._record_message_input(execution, execution.deferred_return_input)
+            execution.deferred_return_input = None
+            self.owner.wake()
+
+    async def _record_message_input(self, execution: Execution, prepared: _PreparedInput) -> None:
+        from ..knowledge import encode
+
+        session, manager, request = self.owner.session, self.owner.manager, execution.request
+        assert isinstance(request, QueuedPrompt) and request.knowledge_context is not None
+        knowledge = request.knowledge_context
+        message = MessageContent(role=MessageRole.user, type="text", content=request.prompt,
+                                 attachments=list(prepared.attachments), tool_input={"request_context": {
+                                     "request_id": request.request_id, "source": request.source,
+                                     "work_id": request.work_id, "knowledge": json.loads(encode(knowledge)),
+                                 }})
+        assert message.tool_input is not None
+        if request.source == "handoff":
+            message.tool_input["handoff_id"] = request.delivery_id
+            message.tool_input["request_context"]["handoff_scope_verified"] = True
+        if request.batch_return:
+            message.tool_input["request_context"]["batch_return"] = True
+        seq = await manager._persist_message(session, message, git_head=prepared.git_head,
+            git_status_clean=prepared.git_clean, git_ignored_baseline=prepared.git_ignored_baseline)
+        if request.source == "handoff":
+            session.claude_session_id = None
+            session.context_state = None
+            self.context_changed()
+        event: dict[str, Any] = {"type": "user_message", "session_id": session.id, "content": request.prompt, "tool_input": message.tool_input}
+        if prepared.attachments:
+            event["attachments"] = [item.model_dump() for item in prepared.attachments]
+        execution.frames.append(manager._tag_persisted(event, seq, message))
 
     async def _prepare_run(self, configured: Session, prompt: str, diagnostic: PreparationDiagnostic,
                            *, request_id: str, compact: bool = False) -> _PreparedRun:
@@ -1798,9 +1999,13 @@ class OwnerRuntime:
             except ValueError as error:
                 raise HarnessPreparationError(str(error), error_code="replay_installation_unknown") from error
             if configured.fork_needs_replay:
+                from .handoff import recheck_replay_scope
+
                 cutoff = configured.fork_after_seq if configured.fork_after_seq is not None else -1
                 copied = await database.load_messages(configured.id, max_seq=cutoff)
-                prompt = fork_helpers.wrap_for_fork_replay(prompt, [MessageContent(**row) for row in copied])
+                replay = await recheck_replay_scope(database, [MessageContent(**row) for row in copied],
+                                                    user_id=configured.user_id)
+                prompt = fork_helpers.wrap_for_fork_replay(prompt, replay)
         configured, agent = await manager.capture_request_configuration(configured)
         harness = get_harness(configured.backend)
         try:
@@ -1880,6 +2085,8 @@ class OwnerRuntime:
     ) -> None:
         if await self._overall_expired(execution):
             return
+        if execution.deferred_return_input is not None and not isinstance(backend, HarnessRun):
+            await self._commit_batch_return(execution)
         session = self.owner.session
         if execution.turn is None:
             execution.turn = _Turn(
@@ -1920,8 +2127,11 @@ class OwnerRuntime:
             input_changed, wake = execution.input_changed, self.owner.wake
             request_id, history_attempt_id = execution.request.request_id, attempt.attempt_id
             backend_name = backend.profile.backend
+            return_input = CommitBatchReturn(request_id, history_attempt_id) if execution.deferred_return_input is not None else None
 
             async def record_input(evidence):
+                if return_input is not None and evidence.kind == "start" and evidence.state == "unknown":
+                    await self.owner.call_runtime(return_input)
                 await database.record_native_input(session.id, evidence.input_id, evidence,
                                                    process_group=backend.process_group_id)
                 # Report a committed read-model change to the original Owner.
@@ -1931,16 +2141,22 @@ class OwnerRuntime:
 
             backend.bind_input_recorder(record_input)
             generation = self.owner.manager._dispatch_generation
+            record_history_effect = session.fork_needs_replay or (
+                execution.request.source == "handoff" and backend_name == "claude-code")
 
             async def record_history(native_id: str | None, may_have_run: bool) -> None:
+                if return_input is not None and native_id is None and may_have_run:
+                    await self.owner.call_runtime(return_input)
+                if not record_history_effect:
+                    return
                 await database.record_input_history(session.id, request_id, history_attempt_id,
                     generation, backend_name, native_id, may_have_run)
                 input_changed.set()
                 wake()
 
             backend.bind_input_history_recorder(
-                record_history if session.fork_needs_replay or (
-                    execution.request.source == "handoff" and backend_name == "claude-code") else None)
+                record_history if record_history_effect or (return_input is not None and not backend.profile.native_input_evidence)
+                else None)
             backend.bind_questions(self.owner.wake)
         observation = session._request_observations.get(execution.request.request_id)
         if observation is not None:

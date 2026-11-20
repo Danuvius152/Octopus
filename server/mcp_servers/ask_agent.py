@@ -66,7 +66,13 @@ if str(_REPO_ROOT) not in sys.path:
 import httpx  # noqa: E402
 from mcp.server.fastmcp import Context, FastMCP
 
-from ..sessions.handoff import HandoffPointers, begin_ticket_batch, ticket_handoff
+from ..sessions.handoff import (
+    HandoffPointers,
+    begin_ticket_batch,
+    finish_ticket_batch,
+    limit_ticket_batch,
+    ticket_handoff,
+)
 from . import _host  # noqa: E402
 
 if TYPE_CHECKING:
@@ -105,16 +111,56 @@ async def begin_batch(ctx: Context) -> dict[str, str]:
     return await begin_ticket_batch(manager, scope)
 
 
+@mcp.tool(name="finish_ticket_batch")
+async def finish_batch(ctx: Context) -> dict[str, str]:
+    """Close a batch that the user limited to acceptance of the current ticket.
+
+    Call after the current ticket has passed its checks and independent review
+    and you have recorded acceptance. Then report the outcome to the user.
+    Further tickets require new human authorization.
+    """
+    manager, scope = _ticket_runtime(ctx)
+    return await finish_ticket_batch(manager, scope)
+
+
+@mcp.tool(name="limit_ticket_batch")
+async def limit_batch(message: str, ctx: Context) -> dict[str, str]:
+    """Apply a human instruction to finish acceptance of this ticket and stop.
+
+    Pass the exact current human message before acting on it. This applies an
+    instruction to keep this ticket's pending review while closing the batch to
+    later tickets. A different task or a question about scope is separate work.
+    Use finish_ticket_batch after recording the current ticket's acceptance.
+    """
+    manager, scope = _ticket_runtime(ctx)
+    return await limit_ticket_batch(manager, scope, message)
+
+
 @mcp.tool(name="handoff")
 async def handoff(handoff_id: str, ctx: Context, pointers: HandoffPointers | None = None) -> dict[str, Any]:
     """Continue an authorized ticket batch in fresh model history in this same chat.
 
     After the ticket's checks and its own independent review pass, record a stable
     handoff_id, then supply the spec, accepted_ticket, candidate and next_work pointers.
-    In pointers.answered_progress_questions include the exact, complete text of
-    standalone progress questions from this ticket that you have already answered.
-    Carry forward messages containing task changes, constraints, authorization or
-    stop instructions. Keep messages whose purpose or answer is uncertain.
+    Human updates default to this ticket. Leave ticket-specific instructions,
+    discussion, and requirements whose scope is unclear in this ticket without
+    asking the user. In pointers.human_scope include only updates that clearly
+    apply beyond this ticket. Supply the exact original message and the exact
+    clauses in carry with scope="next" or scope="batch" as applicable. Determine
+    which parts apply together from the whole message. Keep dependent conditions,
+    negation and exceptions together with the requirement. Carry a standalone leading
+    /wiki command only when its source requirement also applies. For repeated text,
+    use start to give the zero-based Unicode character offset in message. Correct
+    rejected excerpts in this ticket and retry the same unregistered ID.
+    When a clearly applicable restriction cannot be separated from other text,
+    use hold=true and quote the original wording that names the operation to
+    defer. Continue the other authorized work. Wider authority requires explicit
+    user authorization. Use the ticket record for dependencies and acceptance evidence.
+    If registration returns human_scope_corrections, use the confirmed message and
+    request_id from each item, and reselect the complete clauses and scopes for
+    the receiving ticket from the confirmed original. Earlier labels describe
+    the old selection. Leave unclear or expired clauses in their original ticket.
+    Keep the request_id and message even if carry is empty.
     End the current turn after registration. To check progress or reconcile a lost
     receipt, pass only the same ID. In the new Claude execution this waits briefly
     for the matching native record. Only started confirms the new history received input.

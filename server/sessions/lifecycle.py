@@ -40,6 +40,7 @@ from .base import (
     _session_from_row,
     resolve_working_dir,
 )
+from .handoff import TICKET_BATCH_RETURN_STATES
 from .owner import SessionOwner, SessionOwnerUnavailable
 from .owner_runtime import (
     AutoArchive,
@@ -966,6 +967,7 @@ class LifecycleMixin(SessionManagerBase):
         match = rows[0] if rows else None
         if match is None:
             raise SessionAdmissionClosed(f"Archived session {session_id} not found")
+        await self.db.verify_ticket_acceptance_limits(session_id)
         message_state = match["message_count"], match["next_message_seq"], match["duplicate_seqs"]
         if returning is not None:
             await self.require_active_agent(match["agent_id"])
@@ -975,7 +977,7 @@ class LifecycleMixin(SessionManagerBase):
             origin = binding.context.origin
             if origin.session_id == session_id:
                 batch = await self.db.ticket_batch_state(session_id, origin.request_id)
-                if batch is not None and (batch != "registered"
+                if batch is not None and (batch not in TICKET_BATCH_RETURN_STATES
                         or await self.db.handoff_human_executions(session_id, origin.request_id) is None):
                     raise SessionAdmissionClosed("The calling ticket batch is paused or its human authorization has changed")
             # Recheck the process-local owner after the storage reads as well.
@@ -1019,6 +1021,9 @@ class LifecycleMixin(SessionManagerBase):
         row = await self.input_database().get_session_binding(session_id)
         if row is None or row["user_id"] != reference.user_id:
             return ReturnRefused("destination_unavailable")
+        if (context.origin.session_id == session_id
+                and await self.input_database().ticket_input_has_joined_batch(session_id, context.origin.request_id)):
+            return ReturnRefused("admission_closed", SessionAdmissionClosed("The original input joined a ticket batch"))
         if not await self.input_database().request_in_model_history(session_id, reference.request_id, binding.captured_after_seq):
             return ReturnRefused("admission_closed", SessionAdmissionClosed("The calling ticket has handed off its model context"))
         await self.require_active_agent(row["agent_id"])

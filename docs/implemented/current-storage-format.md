@@ -213,19 +213,35 @@ evidence, not invocation authority, and missing native/call identities remain
 unknown. `needs_input` uses the existing question-closure reason and resolution;
 Wiki reads that original request's saved closure without a new domain status.
 
-A [ticket batch](input-reliability.md#ticket-handoffs) records registration and
-Stop on the original human input and marks its adopted automatic returns in their
-input payloads. A handoff stores its stable ID,
-parent request, previous native history and confirmed new native ID in the
-existing input payload. `answered_progress_request_ids` is an optional array of
-unique nonempty IDs of confirmed human steers. Older handoffs can omit the
-array. Current reads and publication use the same format check. Continuations
-inherit these IDs from earlier handoffs after the fresh native input is
-confirmed. The handoff's user-role message carries its source and
-human context in `tool_input.request_context`. Copies preserve this replay
-boundary. Independent task return bindings record the message sequence at
-capture. Older bindings use their original request's message when a boundary
-exists. These fields use the existing input, message and task backup scope.
+A [ticket batch](input-reliability.md#ticket-handoffs) records its state on the
+original human input and marks its adopted automatic returns in their input
+payloads. A separate human input can record `ticket_batch_candidate_for`. The
+same transaction that limits the batch records the confirmed human input ID
+on the batch and, when adopting the separate input, sets `finish_ticket_batch_for`
+on that input. A handoff stores its stable ID, parent request, previous native
+history and confirmed new native ID in its input payload. `handoff_human_scope`
+records exact clauses and their scopes by confirmed input ID. New selections
+store each original Unicode character offset. A hold stores a quote naming the
+operation to defer and uses the same scope. An empty selection closes an update
+with no applicable cross-ticket clause. Later phases inherit these selections
+after the new native input is confirmed. Older entries can omit the offset.
+The Owner checks ownership and exact offsets against the confirmed input and
+applies the selected scope at the receiving boundary. Earlier selections
+without validated offsets are returned for reselection from the full original.
+Corrections take effect on confirmation of the new handoff. The legacy
+`answered_progress_request_ids` array represents whole-message omissions.
+An optional `presented_request` in `KnowledgeContext` carries the resulting
+prompt text. `trusted_request` retains the verified text. Older records without
+that field use their saved `trusted_request` for the prompt. The handoff's
+user-role message carries its source and context in `tool_input.request_context`.
+New handoffs mark the checked scope snapshot with `handoff_scope_verified`.
+Replay checks older selections using confirmed inputs and decisions through that
+handoff. Copies preserve the boundary and its snapshot. A copy can identify a
+root-only legacy presentation by matching the original input's stored identity
+and exact request. Independent
+task return bindings record the message sequence at capture. Older bindings
+use their original request's message when a boundary exists. These fields use
+the existing input, message and task backup scope.
 
 These additions change no tables, format markers or collection roots. Complete
 JSON preservation retains them; text-only projections cannot reconstruct them.

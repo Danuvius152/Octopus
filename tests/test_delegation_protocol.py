@@ -98,7 +98,11 @@ async def test_reply_without_final_reference_keeps_associated_fragment_policy(pr
                 {"type": "text", "text": "  first "}, {"type": "text", "text": "second\n"}]}},
             {"type": "result", "subtype": "success", "is_error": False, "session_id": "legacy-thread"},
         ]
-    code = "import json\n" + "\n".join(f"print(json.dumps({frame!r}), flush=True)" for frame in frames)
+    code = "import json\n"
+    if backend == "claude-code":
+        # The stream-input peer must receive the opening request before replying.
+        code += "import sys\nassert sys.stdin.readline()\n"
+    code += "\n".join(f"print(json.dumps({frame!r}), flush=True)" for frame in frames)
 
     def argv(context):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}

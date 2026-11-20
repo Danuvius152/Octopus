@@ -41,7 +41,7 @@ def saved_context(session_id: str, row: dict[str, Any]) -> KnowledgeContext | No
             or context.mode == "read" and context.maintenance.may_submit):
         return None
     # Owned background work retains its original caller's origin; a direct
-    # human input owns its new origin rather than borrowing another request.
+    # human input owns its own recorded context, including a batch amendment.
     if payload.get("source") == "human" and (
             context.origin.session_id != session_id or context.origin.request_id != row["request_id"]):
         return None
@@ -52,7 +52,41 @@ def saved_context(session_id: str, row: dict[str, Any]) -> KnowledgeContext | No
 class ConfirmedExecution:
     original: KnowledgeContext
     effective: KnowledgeContext
+    primary: tuple[int, AdmittedRequest] | None
     steers: list[tuple[int, AdmittedRequest]]
+    adopted_for: str | None
+
+
+def confirmed_human_input(session_id: str, user_id: str | None, row: dict[str, Any],
+                          *, steered: bool) -> tuple[int, AdmittedRequest] | None:
+    """Bind a human submission to the matching user message in its execution."""
+    from ..knowledge import AdmittedRequest, RequestRef, decode_context
+
+    payload, receipt = row["payload"], row["receipt"]
+    if (not isinstance(payload, dict) or payload.get("source") != "human"
+            or not isinstance(receipt, dict) or receipt.get("accepted") is not True
+            or receipt.get("disposition") != ("steered" if steered else "accepted")):
+        return None
+    if row["delivery_state"] not in ({"confirmed"} if steered else {"none", "confirmed"}):
+        return None
+    entries = row["native_inputs"]
+    if entries:
+        kind = "steer" if steered else "start"
+        if row["delivery_state"] != "confirmed" or any(item["state"] == "unknown" for item in entries) or not any(
+                item["state"] == "accepted" and item["kind"] == kind and item["input_id"] == row["request_id"] for item in entries):
+            return None
+    context = saved_context(session_id, row)
+    metadata = row["tool_input"]
+    request = metadata.get("request_context") if isinstance(metadata, dict) else None
+    if (context is None or context.origin.user_id != user_id or not isinstance(request, dict)
+            or request.get("request_id") != row["request_id"] or request.get("source") != "human"
+            or request.get("work_id") != payload.get("work_id") or payload["operation"]["kind"] != "message"
+            or row["content"] != payload["operation"]["content"] or not isinstance(row["seq"], int)
+            or context.trusted_request != row["content"]):
+        return None
+    if not steered and decode_context(json.dumps(request.get("knowledge"))) != context:
+        return None
+    return row["seq"], AdmittedRequest(RequestRef(session_id, row["request_id"], user_id), context, payload.get("work_id"))
 
 
 async def execution_context(database: Database, session_id: str, original_row: dict[str, Any]) -> KnowledgeContext | None:
@@ -68,12 +102,17 @@ async def confirmed_execution(database: Database, session_id: str, request_id: s
     the live carrier to resolve message identity. Both read the same persisted
     delivery acknowledgments and verify the execution owner and message order.
     """
-    from ..knowledge import AdmittedRequest, RequestRef, decode_context, revise
-
     try:
         snapshot = await database.execution_context_inputs(session_id, request_id)
-        if snapshot is None:
-            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return confirmed_execution_from_inputs(session_id, snapshot, require_terminal=require_terminal) if snapshot is not None else None
+
+
+def confirmed_execution_from_inputs(session_id: str, snapshot: dict[str, Any], *, require_terminal: bool) -> ConfirmedExecution | None:
+    from ..knowledge import decode_context, revise
+
+    try:
         original, owner = snapshot["original"], snapshot["owner"]
         if not isinstance(original["payload"], dict):
             return None
@@ -83,6 +122,8 @@ async def confirmed_execution(database: Database, session_id: str, request_id: s
                 or original["execution_owner"] != original["request_id"]):
             return None
         base = context
+        primary_row = snapshot["primary"]
+        primary = confirmed_human_input(session_id, owner, primary_row, steered=False) if primary_row is not None else None
         seen = set()
         steers: list[tuple[int, AdmittedRequest]] = []
         for inline in snapshot["inputs"]:
@@ -97,24 +138,17 @@ async def confirmed_execution(database: Database, session_id: str, request_id: s
             if delivery != "confirmed" or inline["request_id"] in seen:
                 return None
             seen.add(inline["request_id"])
-            edit = saved_context(session_id, inline)
-            metadata = inline["tool_input"]
-            request = metadata.get("request_context") if isinstance(metadata, dict) else None
-            if (edit is None or edit.origin.user_id != owner or not isinstance(request, dict)
-                    or request.get("request_id") != inline["request_id"] or request.get("source") != "human"
-                    or request.get("work_id") != payload.get("work_id")
-                    or inline["content"] != payload["operation"]["content"] or not isinstance(inline["seq"], int)):
+            member = confirmed_human_input(session_id, owner, inline, steered=True)
+            if member is None:
                 return None
-            merged = decode_context(json.dumps(request.get("knowledge")))
-            admitted = AdmittedRequest(
-                RequestRef(session_id, inline["request_id"], owner), edit, payload.get("work_id"),
-            )
-            expected = revise(context, admitted, {"prompt": edit.trusted_request}, human=True)
+            _, admitted = member
+            merged = decode_context(json.dumps(inline["tool_input"]["request_context"].get("knowledge")))
+            expected = revise(context, admitted, {"prompt": admitted.context.trusted_request}, human=True)
             if merged is None or merged != expected:
                 return None
             context = merged
-            steers.append((inline["seq"], admitted))
-        return ConfirmedExecution(base, context, steers)
+            steers.append(member)
+        return ConfirmedExecution(base, context, primary, steers, original["payload"].get("finish_ticket_batch_for"))
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -157,6 +191,7 @@ async def load_pending_input(manager: SessionManager, session_id: str, pending: 
         delivery_id=payload["delivery_id"], work_id=payload["work_id"], order=payload["order"],
         question_session_id=payload["question_session_id"], question_id=payload["question_id"],
         batch_return=payload.get("batch_return", False),
+        ticket_batch_candidate_for=payload.get("ticket_batch_candidate_for"),
     )
 
 

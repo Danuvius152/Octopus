@@ -11,7 +11,7 @@ import pytest
 from server.agent_manager import AgentManager
 from server.harness import get_harness
 from server.mcp_identity import scope_is_live, verify
-from server.sessions.handoff import begin_ticket_batch
+from server.sessions.handoff import begin_ticket_batch, limit_ticket_batch
 from server.wiki import registry
 from tests.harness_profiles import process_profile, session_turn_argv
 from tests.test_delegation_work import work_runtime as work_runtime
@@ -28,9 +28,10 @@ async def controlled_runtime(work_runtime, monkeypatch, tmp_path):
         starts.put_nowait(context)
         code = "import json,time\nfrom pathlib import Path\n"
         code += f"print(json.dumps({{'type':'thread.started','thread_id':{uuid.uuid4().hex!r}}}),flush=True)\n"
-        gate = re.search(r"\bGATE:(\w+)\b", context.prompt)
-        if gate:
-            code += f"while not Path({str(tmp_path / gate[1])!r}).exists(): time.sleep(.01)\n"
+        gates = re.findall(r"\bGATE:(\w+)\b", context.prompt)
+        if gates:
+            # Inherited authorization precedes the direct prompt.
+            code += f"while not Path({str(tmp_path / gates[-1])!r}).exists(): time.sleep(.01)\n"
         code += "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'reply'}}),flush=True)\n"
         code += "print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)\n"
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
@@ -143,7 +144,7 @@ async def test_terminal_return_uses_its_direct_contract_until_a_registered_batch
     assert returned["request_id"] != context["origin"]["request_id"]
 
 
-@pytest.mark.parametrize("control", ["ordinary", "stopped", "superseded"])
+@pytest.mark.parametrize("control", ["ordinary", "finishing", "stopped", "superseded"])
 async def test_archived_batch_return_never_wakes_a_closed_parent(controlled_runtime, tmp_path, control):
     manager, delegations, parent, starts = controlled_runtime
     parent = await new_parent(manager, parent)
@@ -157,6 +158,13 @@ async def test_archived_batch_return_never_wakes_a_closed_parent(controlled_runt
     await asyncio.wait_for(starts.get(), 5)
     (tmp_path / "root").touch()
     assert (await original.wait()).outcome.status == "success"
+    if control == "finishing":
+        text = "Pasemos la revisión de este ticket y después damos por terminado el lote.\nGATE:finish"
+        finish = await manager.start_message(parent.id, text)
+        scope = await live_scope(await asyncio.wait_for(starts.get(), 5))
+        assert (await limit_ticket_batch(manager, scope, text))["state"] == "finishing"
+        (tmp_path / "finish").touch()
+        assert (await finish.wait()).outcome.status == "success"
     if control == "stopped":
         await manager.interrupt(parent.id)
     if control == "superseded":
@@ -182,9 +190,12 @@ async def test_archived_batch_return_never_wakes_a_closed_parent(controlled_runt
         assert child.state == "completed"
         assert any(row["content"] == "reply" for row in await manager.db.load_messages(child.delegation_id))
         binding = await manager.db.get_session_binding(parent.id)
-        if control == "ordinary":
+        if control in {"ordinary", "finishing"}:
             assert not binding["archived"] and reopened == [parent.id]
-            assert "[agent-reply:Worker" in (await asyncio.wait_for(starts.get(), 5)).prompt
+            prompt = (await asyncio.wait_for(starts.get(), 5)).prompt
+            assert "[agent-reply:Worker" in prompt
+            if control == "finishing":
+                assert "acceptance of the current ticket" in prompt
             await manager.await_session_execution(parent.id, timeout=5)
         else:
             assert binding["archived"] and manager.get_session(parent.id) is None and not reopened

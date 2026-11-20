@@ -32,7 +32,7 @@ from .applications import (
     retain_application_session_owner,
 )
 from .base import DatabaseBase
-from .client_submissions import INDEPENDENT_HUMAN_INPUT
+from .client_submissions import INDEPENDENT_HUMAN_INPUT, _withdraw_unsent_handoff
 from .transaction import Transaction
 
 
@@ -41,7 +41,14 @@ class MessageExportError(ValueError):
 
 
 _HANDOFF_INPUT = ("role='user' AND type='text' AND CASE WHEN json_valid(tool_input) "
-                  "THEN json_extract(tool_input,'$.request_context.source')='handoff' ELSE 0 END")
+                  "THEN json_extract(tool_input,'$.request_context.source')='handoff' "
+                  "AND json_extract(tool_input,'$.handoff_withdrawn') IS NOT 1 ELSE 0 END "
+                  # A recorded prompt can still be withdrawn before business delivery.
+                  "AND NOT EXISTS(SELECT 1 FROM client_submissions h WHERE h.session_id=messages.session_id "
+                  "AND h.request_id=CASE WHEN json_valid(messages.tool_input) "
+                  "THEN json_extract(messages.tool_input,'$.request_context.request_id') END "
+                  "AND h.execution_state='running' AND h.delivery_state='none' "
+                  "AND json_extract(h.payload,'$.fresh_native_id') IS NULL)")
 
 _MESSAGE_COLUMNS = (
     "seq, role, type, content, tool_name, tool_input, tool_use_id, "
@@ -56,7 +63,7 @@ _SESSION_COLUMNS = (
 ).split()
 
 _SESSION_PROJECTION = ",".join(f"s.{column}" for column in _SESSION_COLUMNS) + (
-    ", (SELECT CASE WHEN json_extract(i.payload,'$.ticket_batch')='registered' THEN i.request_id END "
+    ", (SELECT CASE WHEN json_extract(i.payload,'$.ticket_batch') IN ('registered','finishing') THEN i.request_id END "
     f"FROM client_submissions i WHERE i.session_id=s.id AND {INDEPENDENT_HUMAN_INPUT} "
     "ORDER BY i.rowid DESC LIMIT 1)"
 )
@@ -779,11 +786,13 @@ class SessionsMixin(DatabaseBase):
                     raise ValueError("request record conflict")
             else:
                 if context.get("source") == "handoff":
-                    await self._begin_handoff_history(tx, message["session_id"], request_id, context)
+                    await self._begin_handoff_history(tx, message["session_id"], request_id)
+                if context.get("source") == "handoff" or context.get("batch_return") is True:
+                    await self._record_batch_input_context(tx, message["session_id"], request_id, context)
                 await self._append_message(tx, **message)
 
     @staticmethod
-    async def _begin_handoff_history(tx: Transaction, session_id: str, request_id: str, context: dict) -> None:
+    async def _begin_handoff_history(tx: Transaction, session_id: str, request_id: str) -> None:
         """The first input and its replay boundary become visible with the native detach."""
         row = await tx.fetch_one(
             "SELECT json_extract(payload,'$.previous_native_id'),json_extract(payload,'$.handoff_backend') "
@@ -796,16 +805,22 @@ class SessionsMixin(DatabaseBase):
                                    (session_id, row[0], row[1]))
         if updated.rowcount != 1:
             raise ValueError("The original native history changed before handoff")
+
+    @staticmethod
+    async def _record_batch_input_context(tx: Transaction, session_id: str, request_id: str, context: dict) -> None:
         from ..knowledge import decode_context
 
         encoded = json.dumps(context["knowledge"], ensure_ascii=False)
         knowledge = decode_context(encoded)
         if knowledge is None:
-            raise ValueError("The handoff has no verified execution context")
-        await tx.execute(
+            raise ValueError("The ticket batch input has no verified execution context")
+        updated = await tx.execute(
             "UPDATE client_submissions SET payload=json_set(payload,'$.knowledge',?,'$.trusted_request',?) "
-            "WHERE session_id=? AND request_id=?",
+            "WHERE session_id=? AND request_id=? AND execution_state='running' AND execution_owner=request_id "
+            "AND (json_extract(payload,'$.source')='handoff' OR json_extract(payload,'$.batch_return')=1)",
             (encoded, knowledge.trusted_request, session_id, request_id))
+        if updated.rowcount != 1:
+            raise ValueError("The ticket batch input has no original execution binding")
 
     async def request_in_model_history(self, session_id: str, request_id: str, captured_after_seq: int | None) -> bool:
         """A detached task retains its source record across its caller's history boundary."""
@@ -823,10 +838,11 @@ class SessionsMixin(DatabaseBase):
                 (session_id, request_id))
             return original is not None and original[0] >= boundary[0]
 
-    async def record_terminal(self, *, request_id: str, **message: Any) -> None:
+    async def record_terminal(self, *, request_id: str, restore_unsent_handoff: bool = False, **message: Any) -> str | None:
         """Record one chosen outcome under its unique request identity."""
         async with self.transaction(write=True) as tx:
             session_id = message["session_id"]
+            restored_history = None
             cursor = await tx.execute(
                 "SELECT seq, role, type, content, created_at, is_error, session_id_ref, cost, tool_input "
                 "FROM messages WHERE session_id = ? AND terminal_request_id = ?",
@@ -847,6 +863,9 @@ class SessionsMixin(DatabaseBase):
                 if not matches(row):
                     raise ValueError("terminal record conflict")
             else:
+                if restore_unsent_handoff:
+                    reason = message["content"].get("code") or "withdrawn"
+                    restored_history = await _withdraw_unsent_handoff(tx, session_id, request_id, reason)
                 await self._append_message(tx, **message, terminal_request_id=request_id)
             # This request's ordinary input and terminal are one committed
             # fact. Notification and resource retirement cannot split them.
@@ -858,6 +877,7 @@ class SessionsMixin(DatabaseBase):
                 "AND (execution_owner IS NULL OR execution_owner=?)",
                 (request_id, message["created_at"], session_id, request_id, request_id),
             )
+            return restored_history
 
     async def get_session_owner(self, session_id: str) -> str | None:
         """Resolve an event's owner even after its session leaves the live map."""

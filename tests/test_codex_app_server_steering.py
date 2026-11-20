@@ -178,12 +178,12 @@ async def test_lost_ack_only_accepts_correlated_native_evidence(native_runtime, 
     assert len((tmp_path / "native-steers.jsonl").read_text().splitlines()) == 1
 
 
-@pytest.mark.parametrize(("proof", "replace_batch"), [("accepted", False), ("rejected", False), ("rejected", True)])
-async def test_stop_late_ack_updates_original_without_replaying(native_runtime, tmp_path, monkeypatch, proof, replace_batch):
+@pytest.mark.parametrize(("proof", "scope_candidate"), [("accepted", False), ("rejected", False), ("rejected", True)])
+async def test_stop_late_ack_updates_original_without_replaying(native_runtime, tmp_path, monkeypatch, proof, scope_candidate):
     from server.sessions.owner_runtime import OwnerRuntime
 
     manager, database, session, mode, starts, events = native_runtime
-    if replace_batch:
+    if scope_candidate:
         mode[0] = "control_output"
         enrolled = await manager.start_message(session.id, "Implement the approved tickets")
         await native_tests.until(lambda: any(frame.get("method") == "turn/start" for frame in native_tests.wire_frames(tmp_path)))
@@ -207,6 +207,9 @@ async def test_stop_late_ack_updates_original_without_replaying(native_runtime, 
     monkeypatch.setattr(database, "stop_ticket_batch", record_batch_stop)
     mode[0] = "steer_late_" + proof
     root = await active_root(native_runtime, tmp_path)
+    if scope_candidate:
+        row = await database.get_submission_for_request(session.id, root["request_id"])
+        assert row["payload"]["ticket_batch_candidate_for"] == enrolled.request_id
     owner_before_steer, release_owner = asyncio.Event(), asyncio.Event()
     consume = OwnerRuntime._consume_runtime
 
@@ -242,14 +245,16 @@ async def test_stop_late_ack_updates_original_without_replaying(native_runtime, 
     saved = await submission_status(manager, session.id, "late")
     assert saved["request_id"] == reply["request_id"]
     evidence = saved["execution"]["native_inputs"][0]
-    assert evidence["state"] == proof and evidence["target_turn_id"] == ("turn-2" if replace_batch else "turn-1")
+    assert evidence["state"] == proof and evidence["target_turn_id"] == ("turn-2" if scope_candidate else "turn-1")
     assert saved.get("outcome", {}).get("status", "interrupted") == "interrupted"
     assert (await database.get_committed_terminal(session.id, root["request_id"]))["status"] == "interrupted"
     assert not manager.dispatch_snapshot(session.id)["items"] and manager.dispatch_snapshot(session.id)["paused"]
-    assert not batch_stops
-    if replace_batch:
-        assert await database.ticket_batch_state(session.id, enrolled.request_id) == "registered"
-    assert len(starts) == (2 if replace_batch else 1)
+    if scope_candidate:
+        assert batch_stops == [(session.id, enrolled.request_id)]
+        assert await database.ticket_batch_state(session.id, enrolled.request_id) == "stopped"
+    else:
+        assert not batch_stops
+    assert len(starts) == (2 if scope_candidate else 1)
 
 
 @pytest.mark.parametrize("stop_at", ["before_claim", "claim_receipt_pending", "preparing", "native"])

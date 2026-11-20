@@ -389,15 +389,19 @@ def _trunc(text: Any, cap: int = _REPLAY_LINE_CAP) -> str:
 
 
 def _handoff_context(message: MessageContent) -> dict[str, Any] | None:
-    context = (message.tool_input or {}).get("request_context")
+    metadata = message.tool_input or {}
+    context = metadata.get("request_context")
     if (message.role == MessageRole.user and message.type == "text"
-            and isinstance(context, dict) and context.get("source") == "handoff"):
+            and isinstance(context, dict) and context.get("source") == "handoff"
+            and metadata.get("handoff_withdrawn") is not True):
         return context
     return None
 
 
 def _replay_kind(message: MessageContent) -> str | None:
     if message.type == "text" and message.role in (MessageRole.user, MessageRole.assistant):
+        if (message.tool_input or {}).get("handoff_withdrawn") is True:
+            return None
         return message.role.value
     if message.type in ("native_subagent", "tool_use", "tool_result"):
         return message.type
@@ -429,7 +433,9 @@ def render_replay_history(parent_messages: list[MessageContent]) -> str:
             if handoff:
                 scope = decode_context(json.dumps(handoff.get("knowledge")))
                 if scope:
-                    lines.append(f"[seq {seq}] human scope at handoff: {json.dumps(scope.trusted_request, ensure_ascii=False)}")
+                    lines.append(f"[seq {seq}] human scope at handoff: {json.dumps(scope.model_request, ensure_ascii=False)}")
+                elif handoff.get("replay_scope_unconfirmed") is True:
+                    lines.append(f"[seq {seq}] Confirm the original ticket restrictions before work that depends on them.")
                 lines.append(f"[seq {seq}] ticket handoff{observed}: {m.content}")
             else:
                 lines.append(f"[seq {seq}] user{observed}: {_trunc(m.content)}")
@@ -451,12 +457,17 @@ def render_replay_history(parent_messages: list[MessageContent]) -> str:
     return "\n".join(lines)
 
 
-def _model_history(messages: list[MessageContent]) -> list[MessageContent]:
-    """A copied prefix keeps the history boundary visible at its rewind point."""
+def last_handoff_index(messages: list[MessageContent]) -> int | None:
     for index in range(len(messages) - 1, -1, -1):
         if _handoff_context(messages[index]):
-            return messages[index:]
-    return messages
+            return index
+    return None
+
+
+def _model_history(messages: list[MessageContent]) -> list[MessageContent]:
+    """A copied prefix keeps the history boundary visible at its rewind point."""
+    index = last_handoff_index(messages)
+    return messages if index is None else messages[index:]
 
 
 def build_lost_history_replay(prompt: str, messages: list[MessageContent]) -> tuple[str, int, int]:

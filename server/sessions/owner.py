@@ -27,6 +27,7 @@ from .owner_runtime import (
     Execution,
     IdleEvent,
     IdlePublication,
+    LimitTicketBatch,
     OwnerRuntime,
     RuntimeCommand,
     Submit,
@@ -191,7 +192,11 @@ class SessionOwner:
                 len(json.dumps((command.data, command.source.details()), ensure_ascii=True).encode("ascii")) + 128
                 if isinstance(command, CorrelatedControl) else 128)
         if isinstance(command, Submit) and command.handoff:
-            size += sum(len(text.encode("utf-8")) for text in command.handoff[1].answered_progress_questions)
+            pointers = command.handoff[1]
+            size += len(pointers.model_dump_json(include={"answered_progress_questions", "human_scope"},
+                                                 exclude_defaults=True).encode("utf-8"))
+        if isinstance(command, LimitTicketBatch):
+            size += len(command.message.encode("utf-8"))
         ordinary = isinstance(command, Submit)
         if ordinary:
             if len(self._commands) >= 256 or (self._commands and self._command_bytes + size > 1024 * 1024):

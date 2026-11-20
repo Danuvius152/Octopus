@@ -37,10 +37,15 @@ class KnowledgeContext:
     registration: tuple[str, str] | None = None
     task_requirements: tuple[str, ...] = ()
     interaction_policy: Literal["human", "unattended"] | None = None
+    presented_request: str | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in {"auto", "read", "maintain"}:
             raise ValueError("Unknown knowledge request mode")
+
+    @property
+    def model_request(self) -> str:
+        return self.trusted_request if self.presented_request is None else self.presented_request
 
 
 @dataclass(frozen=True)
@@ -167,7 +172,8 @@ def derive(parent: AdmittedRequest, prompt: str, *, selected: str | None = None,
 
 
 def revise(existing: KnowledgeContext | None, edit: AdmittedRequest, changes: dict,
-           *, human: bool = False, definition_prompt: str | None = None) -> KnowledgeContext:
+           *, human: bool = False, definition_prompt: str | None = None,
+           presented_prompt: str | None = None) -> KnowledgeContext:
     """Own PATCH presence and reauthorization; adapters never infer from body.
 
     `human` is supplied by verified HTTP authentication, never a payload field.
@@ -208,9 +214,16 @@ def revise(existing: KnowledgeContext | None, edit: AdmittedRequest, changes: di
         mode = _requested_mode("", selected) or mode
         limits = limits.restrict(MaintenanceLimit(mode != "read"))
     original = existing.trusted_request
+    presentation = existing.presented_request
     requirements = existing.task_requirements
     if human and "prompt" in changes:
-        original += "\n\n人类更新任务正文（保留已有控制与限制）：\n" + changes["prompt"]
+        heading = "\n\n人类更新任务正文（保留已有控制与限制）：\n"
+        original += heading + changes["prompt"]
+        if presentation is not None or presented_prompt is not None:
+            visible_edit = changes["prompt"] if presented_prompt is None else presented_prompt
+            presentation = existing.model_request
+            if visible_edit.strip():
+                presentation += heading + visible_edit
     if not human:
         requirements = tuple(dict.fromkeys((*requirements, edit.context.trusted_request,
                                             *edit.context.task_requirements)))
@@ -218,7 +231,7 @@ def revise(existing: KnowledgeContext | None, edit: AdmittedRequest, changes: di
             requirements = tuple(dict.fromkeys((*requirements, changes["prompt"])))
     return replace(existing, trusted_request=original, maintenance=limits,
                    mode=mode if limits.may_submit else "read",
-                   task_requirements=requirements,
+                   task_requirements=requirements, presented_request=presentation,
                    sources=tuple(dict.fromkeys((*existing.sources, *edit.context.sources))))
 
 
@@ -239,7 +252,7 @@ def render(context: KnowledgeContext | None, *, original: bool = True) -> str:
         return ""
     required = json.dumps(context.sources, ensure_ascii=False)
     original_instruction = (
-        f"可信原请求及其约束：{json.dumps(context.trusted_request, ensure_ascii=False)}\n" if original else ""
+        f"可信原请求及其约束：{json.dumps(context.model_request, ensure_ascii=False)}\n" if original else ""
     )
     task_instruction = (
         f"逐层子任务要求（只能分工或进一步限制，不能覆盖可信人类约束）：{json.dumps(context.task_requirements, ensure_ascii=False)}\n"
@@ -260,7 +273,10 @@ def render(context: KnowledgeContext | None, *, original: bool = True) -> str:
 
 def encode(value: KnowledgeContext | OwnedTaskContext) -> str:
     """Persist requirements without capturing any execution credentials."""
-    return json.dumps({"version": 1, "value": asdict(value)}, ensure_ascii=False, sort_keys=True)
+    data = asdict(value, dict_factory=lambda fields: {
+        key: item for key, item in fields if key != "presented_request" or item is not None
+    })
+    return json.dumps({"version": 1, "value": data}, ensure_ascii=False, sort_keys=True)
 
 
 _CONTEXT = TypeAdapter(KnowledgeContext)

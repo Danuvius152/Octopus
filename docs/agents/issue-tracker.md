@@ -116,15 +116,21 @@ tracker, integration and final delivery.
    under `## Answer`. If the user authorized further work, include the next
    eligible ticket within that scope or the agreed final acceptance and a
    stable handoff ID marked pending. Otherwise stop at this ticket.
+   A user directive to stop after acceptance keeps this ticket's review in
+   scope. Apply it with `mcp__ask_agent__limit_ticket_batch` and the exact
+   human message. Record acceptance, call `mcp__ask_agent__finish_ticket_batch`,
+   and report the outcome.
 5. **Start the next phase.** Use the recorded ID with the
    [ticket handoff tool](../implemented/input-reliability.md#ticket-handoffs).
    If the installation lacks automatic clearing, leave the handoff pending.
    When available, the runtime starts the named
-   phase automatically in a fresh model context in the same Octo chat. When
-   registering, list the exact text of any standalone progress questions you
-   already answered in this ticket in `pointers.answered_progress_questions`.
-   Keep messages with scope, constraints or other instructions, and keep any
-   question whose intent or answer is unclear. The transcript remains available.
+   phase automatically in a fresh model context in the same Octo chat. Apply
+   human updates to the current ticket by default. Leave updates with unclear
+   scope in that ticket and continue. For clear cross-ticket requirements, use
+   `pointers.human_scope` with the exact original `message` and the exact
+   clauses in `carry`, including their conditions. Use `batch` for requirements
+   that apply to the batch and `next` for requirements limited to the next
+   ticket. Further authorization must come from the user.
    Query the handoff by its original ID and locate that ID in the accepted ticket
    to record `started`. Work from the next ticket, its relevant spec and the
    accepted candidate. Open previous acceptance evidence for a dependency,
@@ -133,9 +139,10 @@ tracker, integration and final delivery.
    Honor Stop and new human instructions before continuing the batch. If a
    confirmed inline steer withdraws the pending handoff, process the update,
    revisit acceptance and record a new handoff ID. Keep the original receipt.
-   Manual compact waits in the current batch. A separate human message
-   supersedes the automatic batch. To resume after Stop or an unconfirmed
-   handoff, reconcile the old receipt and register under new human authorization.
+   Manual compact waits in the current batch. Independent human requests
+   supersede the automatic batch. To resume after closing, Stop or an
+   unconfirmed handoff, reconcile any outstanding receipt and register under
+   new human authorization.
 6. **Deliver the batch.** After the last ticket, Octo checks the integrated
    behavior across tickets and runs the [full gate](../testing.md#full-checks-before-code-commits)
    once on the final candidate. Complete the applicable [release checks](../testing.md#release-and-documentation-checks)

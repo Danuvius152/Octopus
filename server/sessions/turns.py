@@ -383,7 +383,7 @@ class TurnsMixin(SessionManagerBase):
                 continue
             if item.operation == "compact":
                 return i
-            if first is None:
+            if first is None or (item.ticket_batch_candidate_for and session._pending_queue[first].batch_return):
                 first = i
         return first
 
@@ -1150,9 +1150,12 @@ class TurnsMixin(SessionManagerBase):
         omitted = 0
         recovery_prompt = attempt.prompt
         if self.db:
+            from .handoff import recheck_replay_scope
+
             history = [
                 MessageContent(**m) for m in await self.db.load_messages(session.id)
             ]
+            history = await recheck_replay_scope(self.db, history, user_id=session.user_id)
             recovery_prompt, replayed, omitted = fork_helpers.build_lost_history_replay(attempt.prompt, history)
         return _Decision.again(
             recovery_prompt,

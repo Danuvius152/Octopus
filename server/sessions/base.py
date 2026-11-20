@@ -215,6 +215,7 @@ class RequestIdentity:
     question_session_id: str | None = None
     question_id: str | None = None
     batch_return: bool = False
+    ticket_batch_candidate_for: str | None = None
     queued_event: dict[str, Any] | None = field(default=None, repr=False)
 
 
@@ -266,6 +267,7 @@ class PendingInput:
     queued_event: dict[str, Any] | None = field(default=None, repr=False)
     operation: OperationKind = "message"
     batch_return: bool = False
+    ticket_batch_candidate_for: str | None = None
 
     @property
     def started(self) -> bool:
@@ -857,6 +859,7 @@ class SessionManagerBase:
         self._active_browser_restorations.clear()
         self._restore_previous_writers_retired = previous_writers_retired
         self._retired_dispatch_generations = frozenset()
+        await db.verify_ticket_acceptance_limits()
         previous_generations = await db.recover_client_submissions()
         # Only the verified startup boundary can prove retirement of these
         # pre-existing generations. Current work always retains its Owner and

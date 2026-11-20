@@ -311,7 +311,10 @@ class ForkingMixin(SessionManagerBase):
             except CredentialBindingError as error:
                 raise ForkError(str(error), reason="fork_credential_unavailable", status_code=400) from error
             try:
-                harness.validate_replay(config, fork_helpers.wrap_for_fork_replay("x" * 4096, copied),
+                from .handoff import recheck_replay_scope
+
+                replay = await recheck_replay_scope(self.db, copied, user_id=source.user_id)
+                harness.validate_replay(config, fork_helpers.wrap_for_fork_replay("x" * 4096, replay),
                                         source.working_dir, credential)
             except ValueError as error:
                 raise ForkError(

@@ -9,13 +9,21 @@ import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from ..mcp_identity import McpScope, require_live_scope, scope_is_live
+from ..session_operations import (
+    HandoffHumanScope,
+    HandoffScopeClause,
+    SavedHandoffSelection,
+    handoff_human_scope,
+)
 from .base import TICKET_BATCH_ORIGINS, QueuedPrompt
 
 if TYPE_CHECKING:
-    from ..knowledge import AdmittedRequest, KnowledgeContext
+    from ..database import Database
+    from ..knowledge import AdmittedRequest, KnowledgeContext, RequestRef
+    from ..models import MessageContent
     from . import SessionManager
     from .base import Session
 
@@ -23,6 +31,37 @@ if TYPE_CHECKING:
 Pointer = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1024)]
 ProgressQuestion = Annotated[str, StringConstraints(min_length=1)]
 _CLAUDE_FIRST_INPUT_WAIT_SECONDS = 3.0
+TICKET_BATCH_RETURN_STATES = frozenset({"registered", "finishing"})
+FINISH_TICKET_INSTRUCTIONS = (
+    "The user has limited this batch to acceptance of the current ticket. Complete that ticket's checks and review, "
+    "including any necessary corrections. After recording acceptance, call mcp__ask_agent__finish_ticket_batch "
+    "and report the outcome. Do not start another ticket or batch acceptance."
+)
+TICKET_BATCH_CANDIDATE_INSTRUCTIONS = (
+    "Read the human message below before continuing. If it directs you to complete acceptance of the current "
+    "ticket and stop the batch, call mcp__ask_agent__limit_ticket_batch with the exact human message. "
+    "A separate task is a new request."
+)
+
+
+class HumanScopeSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    message: ProgressQuestion
+    carry: tuple[HandoffScopeClause, ...]
+    request_id: str | None = Field(default=None, min_length=1, description="Confirmed message ID supplied for a scope correction")
+
+
+class _ScopeCorrection(ValueError):
+    def __init__(self, selections: list[HumanScopeSelection]) -> None:
+        super().__init__("Correct the previously carried excerpts from the confirmed originals and retry this handoff")
+        self.selections = selections
+
+
+_SCOPE_INSTRUCTIONS = {
+    "batch": "",
+    "next": "这条要求只适用于当前票。\n",
+}
 
 
 class HandoffPointers(BaseModel):
@@ -33,6 +72,7 @@ class HandoffPointers(BaseModel):
     candidate: Pointer
     next_work: Pointer
     answered_progress_questions: tuple[ProgressQuestion, ...] = ()
+    human_scope: tuple[HumanScopeSelection, ...] = ()
 
     def prompt(self, handoff_id: str) -> str:
         return (f"[ticket-handoff {handoff_id}] Query the handoff tool once with this ID and no pointers. "
@@ -40,7 +80,7 @@ class HandoffPointers(BaseModel):
                 "Start from next_work, the relevant part of spec, and the fixed candidate. "
                 "Consult earlier acceptance evidence for a dependency, check reuse, recovery, or final acceptance. "
                 "If the receipt is unconfirmed, leave the handoff pending.\n"
-                + self.model_dump_json(exclude={"answered_progress_questions"}))
+                + self.model_dump_json(exclude={"answered_progress_questions", "human_scope"}))
 
     def digest(self) -> str:
         """Idempotency binds the submitted material, independently of prompt wording."""
@@ -49,7 +89,7 @@ class HandoffPointers(BaseModel):
 
     def matches_legacy(self, payload: dict[str, Any] | None) -> bool:
         if (not payload or payload["source"] != "handoff" or "answered_progress_request_ids" in payload
-                or self.answered_progress_questions):
+                or "handoff_human_scope" in payload or self.answered_progress_questions or self.human_scope):
             return False
         # Original submissions ended with the four JSON pointers.
         try:
@@ -58,27 +98,113 @@ class HandoffPointers(BaseModel):
             return False
 
 
-async def resolve_answered_progress(manager: SessionManager, chat: Session, parent: AdmittedRequest,
-                                    carriers: list[str], questions: tuple[str, ...]) -> list[str]:
+def _ordered_scope_clauses(text: str, clauses: tuple[HandoffScopeClause, ...]) -> tuple[HandoffScopeClause, ...]:
+    spans = [_locate_scope_clause(text, clause) for clause in clauses]
+    end = 0
+    ordered = []
+    for start, stop, clause in sorted(spans, key=lambda span: span[0]):
+        if start < end:
+            raise ValueError("Carried clauses must not overlap")
+        ordered.append(clause)
+        end = stop
+    return tuple(ordered)
+
+
+def _locate_scope_clause(text: str, clause: HandoffScopeClause) -> tuple[int, int, HandoffScopeClause]:
+    if not clause.text.strip():
+        raise ValueError("Carried clauses require nonempty original text")
+    start = clause.start
+    if start is None:
+        start = text.find(clause.text)
+        if start < 0 or start != text.rfind(clause.text):
+            raise ValueError("Each carried clause must occur exactly once in its original human update "
+                             "unless its start offset identifies an exact occurrence")
+        clause = clause.model_copy(update={"start": start})
+    if not text.startswith(clause.text, start):
+        raise ValueError("The carried clause must match the original human update at the given start offset")
+    return start, start + len(clause.text), clause
+
+
+def _applicable_scope(text: str, selection: SavedHandoffSelection) -> tuple[HandoffScopeClause, ...] | None:
+    # Selections saved by the old writer have no validated offsets. Octo must
+    # revisit the entire original before any of those excerpts can carry again.
+    if any(clause.start is None for clause in selection.clauses):
+        return None
+    try:
+        clauses = _ordered_scope_clauses(text, selection.clauses)
+    except ValueError:
+        return None
+    return tuple(clause for clause in clauses if clause.scope == "batch" or not selection.next_expired)
+
+
+def _scope_projection(clauses: tuple[HandoffScopeClause, ...], seq: int) -> str:
+    return "\n".join(_SCOPE_INSTRUCTIONS[clause.scope] + (
+        f"原聊天消息 #{seq} 中有一项适用限制。暂缓执行引用中指明的操作，继续其余已授权工作。\n"
+        f"须暂缓的操作（原文引用）\n{json.dumps(clause.text, ensure_ascii=False)}"
+        if clause.hold else clause.text
+    ) for clause in clauses)
+
+
+async def _confirmed_batch_inputs(db: Database, origin: RequestRef,
+                                  carriers: list[str], *, live_request: str | None = None, finishing: bool = False,
+                                  ) -> tuple[KnowledgeContext, list[tuple[int, AdmittedRequest]]] | None:
     from .client_submissions import confirmed_execution
 
-    if not questions:
-        return []
-    db = manager.input_database()
-    matches: dict[str, list[str]] = {question: [] for question in questions}
+    original = None
+    steers: list[tuple[int, AdmittedRequest]] = []
     for carrier in carriers:
-        if not await db.request_in_model_history(chat.id, carrier, None):
-            continue
-        confirmed = await confirmed_execution(db, chat.id, carrier, require_terminal=carrier != parent.reference.request_id)
-        if confirmed is None or confirmed.original.origin != parent.context.origin:
-            raise ValueError("The ticket batch has unconfirmed human input")
-        for _, edit in confirmed.steers:
-            text = edit.context.trusted_request
-            if text in matches:
-                matches[text].append(edit.reference.request_id)
-    if any(len(found) != 1 for found in matches.values()):
-        raise ValueError("Each answered progress question must exactly match one confirmed human steer in this ticket")
-    return [found[0] for found in matches.values()]
+        confirmed = await confirmed_execution(db, origin.session_id, carrier,
+                                              require_terminal=not finishing and carrier != live_request)
+        if confirmed is None:
+            return None
+        if confirmed.adopted_for == origin.request_id and confirmed.primary is not None:
+            steers.append(confirmed.primary)
+        elif confirmed.original.origin != origin:
+            return None
+        if carrier == origin.request_id:
+            original = confirmed.original
+        steers.extend(confirmed.steers)
+    if original is None:
+        return None
+    return original, sorted(steers, key=lambda member: member[0])
+
+
+async def resolve_handoff_human_scope(manager: SessionManager, chat: Session, parent: AdmittedRequest,
+                                      carriers: list[str], pointers: HandoffPointers) -> HandoffHumanScope:
+    db = manager.input_database()
+    origin = parent.context.origin
+    confirmed = await _confirmed_batch_inputs(db, origin, carriers, live_request=parent.reference.request_id)
+    if confirmed is None or confirmed[0].registration != parent.context.registration:
+        raise ValueError("The ticket batch has unconfirmed human input")
+    earlier = await db.saved_handoff_human_scope(chat.id, origin.request_id, advancing=True)
+    pending: dict[str, str] = {}
+    repairs: list[HumanScopeSelection] = []
+    for _, edit in confirmed[1]:
+        input_id, text = edit.reference.request_id, edit.context.trusted_request
+        prior = earlier.get(input_id)
+        if prior is None:
+            pending[input_id] = text
+        elif _applicable_scope(text, prior) is None:
+            pending[input_id] = text
+            repairs.append(HumanScopeSelection(request_id=input_id, message=text, carry=prior.clauses))
+    # If the same text was submitted repeatedly, cite its latest confirmed occurrence.
+    latest = {text: request_id for request_id, text in pending.items()}
+    decisions: HandoffHumanScope = {}
+    for selection in pointers.human_scope:
+        request_id = selection.request_id or latest.get(selection.message)
+        if request_id is None or pending.get(request_id) != selection.message or request_id in decisions:
+            raise ValueError("Each carried update must match an unreviewed, confirmed human message")
+        decisions[request_id] = _ordered_scope_clauses(selection.message, selection.carry)
+    corrections = [repair for repair in repairs if repair.request_id not in decisions]
+    if corrections:
+        raise _ScopeCorrection(corrections)
+    for question in dict.fromkeys(pointers.answered_progress_questions):
+        matching = [request_id for request_id, text in pending.items() if text == question
+                    and request_id not in earlier
+                    and await db.request_in_model_history(chat.id, request_id, None)]
+        if len(matching) != 1 or decisions.get(matching[0]):
+            raise ValueError("Each answered progress question must exactly match one confirmed human steer in this ticket")
+    return dict.fromkeys(pending, ()) | decisions
 
 
 async def continuation_context(manager: SessionManager, chat: Session, request_id: str) -> KnowledgeContext | None:
@@ -94,49 +220,133 @@ async def continuation_context(manager: SessionManager, chat: Session, request_i
     if parent is None or (parent["terminal"] or {}).get("status") != "success":
         return None
     closed = await confirmed_execution(db, chat.id, parent["request_id"])
-    if closed is None:
+    if closed is None or await db.ticket_batch_state(chat.id, closed.original.origin.request_id) != "registered":
         return None
     return await updated_batch_context(
-        manager, chat, closed.effective, frozenset(payload.get("answered_progress_request_ids", ())),
+        manager, chat, closed.effective, handoff_human_scope(payload),
     )
 
 
 async def updated_batch_context(manager: SessionManager, chat: Session, context: KnowledgeContext,
-                                answered_progress: frozenset[str] = frozenset()) -> KnowledgeContext | None:
-    from ..knowledge import revise
-    from .client_submissions import confirmed_execution
-
+                                new_scope: HandoffHumanScope | None = None, *,
+                                live_request: str | None = None) -> KnowledgeContext | None:
     if context.origin.session_id != chat.id or context.origin.user_id != chat.user_id:
         return None
     db = manager.input_database()
     carriers = await db.handoff_human_executions(chat.id, context.origin.request_id)
     if carriers is None:
         return None
-    authority = None
-    steers: list[tuple[int, AdmittedRequest]] = []
-    for carrier in carriers:
-        confirmed = await confirmed_execution(db, chat.id, carrier)
-        if confirmed is None or confirmed.original.origin != context.origin:
-            return None
-        if carrier == context.origin.request_id:
-            authority = confirmed.original
-        steers.extend(confirmed.steers)
+    finishing = new_scope is None and await db.ticket_batch_state(chat.id, context.origin.request_id) == "finishing"
+    confirmed = await _confirmed_batch_inputs(db, context.origin, carriers, live_request=live_request, finishing=finishing)
     # Start from the verified human request to avoid duplicating edits that
     # the parent or a previous handoff already includes.
-    if authority is None or authority.registration != context.registration:
+    if confirmed is None or confirmed[0].registration != context.registration:
         return None
-    earlier_answered = await db.answered_handoff_progress_ids(chat.id, context.origin.request_id)
-    answered = earlier_answered | answered_progress
+    decisions = await db.saved_handoff_human_scope(chat.id, context.origin.request_id, advancing=new_scope is not None)
+    if new_scope is not None:
+        decisions.update({request_id: SavedHandoffSelection(clauses, next_expired=False)
+                          for request_id, clauses in new_scope.items()})
+    return _project_batch_context(context, confirmed, decisions, finishing=finishing)
+
+
+def _project_batch_context(context: KnowledgeContext, confirmed: tuple[KnowledgeContext, list[tuple[int, AdmittedRequest]]],
+                           decisions: dict[str, SavedHandoffSelection], *, finishing: bool = False) -> KnowledgeContext:
+    from ..knowledge import revise
+
+    authority, steers = confirmed
     mode = "read" if authority.mode == "read" else context.mode
-    for _, edit in sorted(steers, key=lambda member: member[0]):
-        # A presentation omission does not change the edit's structured requirements.
-        changes = {} if edit.reference.request_id in answered else {"prompt": edit.context.trusted_request}
-        authority = revise(authority, edit, changes, human=True)
+    sources = dict.fromkeys(authority.sources)
+    for seq, edit in steers:
+        text = edit.context.trusted_request
+        selection = decisions.get(edit.reference.request_id)
+        clauses: tuple[HandoffScopeClause, ...] | None = ()
+        presentation = None
+        if selection is not None:
+            clauses = _applicable_scope(text, selection)
+            if clauses is None:
+                presentation = f"请核对原聊天消息 #{seq} 中未确认的限制，暂缓相关操作，继续其余已授权工作。"
+            else:
+                presentation = _scope_projection(clauses, seq)
+        # Source commands are admitted from the leading text of a human input.
+        if selection is None or any(not clause.hold and clause.start is not None and not text[:clause.start].strip()
+                                    for clause in clauses or ()):
+            sources.update(dict.fromkeys(edit.context.sources))
+        if finishing and (presentation is None or presentation):
+            authority = replace(authority, maintenance=authority.maintenance.restrict(edit.context.maintenance))
+            if edit.context.mode == "read":
+                mode = "read"
+        authority = revise(authority, edit, {"prompt": text}, human=True, presented_prompt=presentation)
     limits = authority.maintenance.restrict(context.maintenance)
     if mode == "maintain" and not limits.may_submit:
         mode = "read"
-    return replace(context, trusted_request=authority.trusted_request, maintenance=limits, mode=mode,
-                   sources=tuple(dict.fromkeys((*authority.sources, *context.sources))))
+    return replace(context, trusted_request=authority.trusted_request, presented_request=authority.presented_request,
+                   maintenance=limits, mode=mode, sources=tuple(sources))
+
+
+async def recheck_replay_scope(db: Database, messages: list[MessageContent], *,
+                               user_id: str | None) -> list[MessageContent]:
+    """Reproject a legacy handoff at the boundary it originally received."""
+    from ..fork_helpers import last_handoff_index
+    from ..knowledge import decode_context, encode
+
+    index = last_handoff_index(messages)
+    if index is None:
+        return messages
+    message = messages[index]
+    assert message.tool_input is not None
+    metadata = message.tool_input["request_context"]
+    snapshot = decode_context(json.dumps(metadata.get("knowledge")))
+    if snapshot is None or metadata.get("handoff_scope_verified") is True:
+        return messages
+    request_id = metadata.get("request_id")
+    projected = None
+    if snapshot.origin.user_id == user_id:
+        if isinstance(request_id, str):
+            projected = await _legacy_replay_scope(db, message, snapshot, request_id)
+        if projected is None and (snapshot.presented_request is None or _matches_copied_batch_request(messages, snapshot)):
+            return messages
+    if projected is None:
+        replay_context = metadata | {"knowledge": None, "replay_scope_unconfirmed": True}
+    else:
+        replay_context = metadata | {"knowledge": json.loads(encode(projected))}
+    replay_metadata = message.tool_input | {"request_context": replay_context}
+    return [*messages[:index], message.model_copy(update={"tool_input": replay_metadata}), *messages[index + 1:]]
+
+
+def _matches_copied_batch_request(messages: list[MessageContent], snapshot: KnowledgeContext) -> bool:
+    from ..knowledge import decode_context
+    from ..models import MessageRole
+
+    for message in messages:
+        metadata = (message.tool_input or {}).get("request_context")
+        if (message.role != MessageRole.user or message.type != "text" or not isinstance(metadata, dict)
+                or metadata.get("source") != "human" or metadata.get("request_id") != snapshot.origin.request_id):
+            continue
+        original = decode_context(json.dumps(metadata.get("knowledge")))
+        if original and original.origin == snapshot.origin and original.registration == snapshot.registration:
+            return snapshot.presented_request == original.trusted_request
+    return False
+
+
+async def _legacy_replay_scope(db: Database, message: MessageContent, snapshot: KnowledgeContext,
+                               request_id: str) -> KnowledgeContext | None:
+    from .client_submissions import saved_context
+
+    origin = snapshot.origin
+    row = await db.get_submission_for_request(origin.session_id, request_id)
+    payload = row["payload"] if row else None
+    if (row is None or not payload or payload.get("source") != "handoff" or not payload.get("fresh_native_id")
+            or payload["operation"]["content"] != message.content or saved_context(origin.session_id, row) != snapshot):
+        return None
+    carriers = await db.handoff_human_executions(origin.session_id, origin.request_id, before_handoff=request_id)
+    if carriers is None:
+        return None
+    confirmed = await _confirmed_batch_inputs(db, origin, carriers)
+    if confirmed is None or confirmed[0].registration != snapshot.registration:
+        return None
+    decisions = await db.saved_handoff_human_scope(origin.session_id, origin.request_id, through_handoff=request_id)
+    projected = _project_batch_context(snapshot, confirmed, decisions)
+    return projected if projected.trusted_request == snapshot.trusted_request else None
 
 
 def handoff_receipt(row: dict[str, Any], handoff_id: str) -> dict[str, Any]:
@@ -153,6 +363,8 @@ def handoff_receipt(row: dict[str, Any], handoff_id: str) -> dict[str, Any]:
         state = "registered"
     elif state == "running":
         state = "starting"
+    elif state == "withdrawn" and (row["terminal"] or {}).get("status") == "failed":
+        state = "failed"
     elif state == "done":
         state = "failed" if row["delivery_state"] == "none" else "unknown"
     return {"handoff_id": handoff_id, "request_id": row["request_id"], "state": state,
@@ -174,6 +386,20 @@ async def begin_ticket_batch(manager: SessionManager, scope: McpScope) -> dict[s
     return await manager._session_owner(session).call_runtime(RegisterTicketBatch(scope))
 
 
+async def finish_ticket_batch(manager: SessionManager, scope: McpScope) -> dict[str, str]:
+    from .owner_runtime import FinishTicketBatch
+
+    session = _main_chat(manager, scope)
+    return await manager._session_owner(session).call_runtime(FinishTicketBatch(scope))
+
+
+async def limit_ticket_batch(manager: SessionManager, scope: McpScope, message: str) -> dict[str, str]:
+    from .owner_runtime import LimitTicketBatch
+
+    session = _main_chat(manager, scope)
+    return await manager._session_owner(session).call_runtime(LimitTicketBatch(scope, message))
+
+
 async def ticket_handoff(manager: SessionManager, scope: McpScope, handoff_id: str,
                          pointers: HandoffPointers | None = None) -> dict[str, Any]:
     """Passing only the original ID reads its receipt and never schedules work."""
@@ -185,7 +411,11 @@ async def ticket_handoff(manager: SessionManager, scope: McpScope, handoff_id: s
     client_id = f"handoff:{handoff_id}"
     if pointers is not None:
         request = QueuedPrompt(pointers.prompt(handoff_id), [], source="handoff", delivery_id=handoff_id)
-        receipt = await manager._session_owner(session).call_runtime(Submit(request, handoff=(scope, pointers)))
+        try:
+            receipt = await manager._session_owner(session).call_runtime(Submit(request, handoff=(scope, pointers)))
+        except _ScopeCorrection as correction:
+            return {"handoff_id": handoff_id, "state": "unregistered", "reason": str(correction),
+                    "human_scope_corrections": [item.model_dump(exclude_defaults=True) for item in correction.selections]}
         if not receipt.accepted:
             raise ValueError("The original chat is closed to handoff")
     db = manager.input_database()

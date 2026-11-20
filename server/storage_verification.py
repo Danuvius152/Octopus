@@ -64,6 +64,10 @@ def _verify_main_facts(db: sqlite3.Connection) -> None:
     from pydantic import ValidationError
 
     from .context_models import ContextState
+    from .db.client_submissions import (
+        TICKET_ACCEPTANCE_EVIDENCE,
+        verify_ticket_acceptance_evidence,
+    )
     from .delegations import _PersistedRound
     from .fork_helpers import decode_ignored_baseline
     from .session_operations import decode_payload
@@ -109,6 +113,7 @@ def _verify_main_facts(db: sqlite3.Connection) -> None:
                     raise ValueError("A possibly executed compaction cannot be withdrawn")
     except (ValueError, TypeError):
         raise RuntimeError("Primary database contains invalid current native input evidence") from None
+    verify_ticket_acceptance_evidence(db.execute(TICKET_ACCEPTANCE_EVIDENCE, (None, None)))
 
 
 def verify_wiki(db: sqlite3.Connection, registration: dict) -> int:
