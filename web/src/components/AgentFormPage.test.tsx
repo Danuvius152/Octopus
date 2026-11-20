@@ -554,7 +554,7 @@ describe("AgentFormPage", () => {
     expect(patches).toHaveBeenCalledOnce();
   });
 
-  it("shows the current binding from a completed preparation without sending another write", async () => {
+  it.each([false, true])("shows the current binding from a completed preparation without a write (enabled=%s)", async enabled => {
     let preparations = 0;
     const connectorWrites = vi.fn();
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
@@ -562,7 +562,7 @@ describe("AgentFormPage", () => {
         if (++preparations === 1) throw new TypeError("Response lost");
         return json({
           operation_id: "completed", reserved: false,
-          settlement: { disposition: "applied", enabled: false },
+          settlement: { disposition: "applied", enabled },
         });
       }
       if (init?.method === "PATCH") return connectorWrites();
@@ -572,10 +572,12 @@ describe("AgentFormPage", () => {
     showConnectorInstallations("first");
     const checkbox = screen.getByRole("checkbox", { name: /first/ });
     await waitFor(() => expect(checkbox).toBeEnabled());
+    expect(checkbox).not.toBeChecked();
     await act(async () => fireEvent.click(checkbox));
+    expect(checkbox).not.toBeChecked();
     await act(async () => fireEvent.click(checkbox));
     expect(screen.getByText("Previous update confirmed.")).toBeVisible();
-    expect(checkbox).not.toBeChecked();
+    expect(checkbox).toHaveProperty("checked", enabled);
     expect(checkbox).toBeEnabled();
     expect(connectorWrites).not.toHaveBeenCalled();
   });

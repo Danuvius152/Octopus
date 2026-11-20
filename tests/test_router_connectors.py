@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from jsonschema import Draft202012Validator
 
 from server import connector_manager as connector_manager_mod
 from server.agent_manager import AgentManager
@@ -980,6 +981,20 @@ async def test_mark_needs_reconnect_route(client):
 
 
 # --- agent-scoped enablement ----------------------------------------------
+
+
+def test_agent_connector_patch_schema_distinguishes_legacy_and_prepared_requests():
+    schema = app.openapi()
+    patch = schema["paths"]["/api/agents/{agent_id}/connectors/{installation_id}"]["patch"]
+    body = patch["requestBody"]["content"]["application/json"]["schema"]
+    request = Draft202012Validator({**body, "components": schema["components"]})
+    prepared = {"operation_id": str(uuid4()), "intent_id": str(uuid4())}
+
+    assert request.is_valid({"enabled": True, "legacy_metadata": {"ignored": True}})
+    assert request.is_valid(prepared)
+    assert not request.is_valid({**prepared, "enabled": True})
+    assert not request.is_valid({"enabled": True, "operation_id": None})
+    assert not request.is_valid({"operation_id": prepared["operation_id"]})
 
 
 async def _reserve_binding(client, binding, enabled, *, intent_id=None):

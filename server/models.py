@@ -998,6 +998,9 @@ class SetAgentConnectorsRequest(BaseModel):
 
 
 class ToggleAgentConnectorRequest(BaseModel):
+    # An operation ID selects the prepared request, even if its value is null.
+    model_config = ConfigDict(json_schema_extra={"allOf": [{"properties": {"operation_id": False}}]})
+
     enabled: bool
 
     @model_validator(mode="before")

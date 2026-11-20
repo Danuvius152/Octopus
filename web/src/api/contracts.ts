@@ -6617,6 +6617,8 @@ export interface components {
         ToggleAgentConnectorRequest: {
             /** Enabled */
             enabled: boolean;
+        } & {
+            operation_id?: never;
         };
         /**
          * ToolPolicySupport
