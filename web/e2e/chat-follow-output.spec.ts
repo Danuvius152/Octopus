@@ -72,6 +72,14 @@ function holdAnimationFrames(page: Page) {
   });
 }
 
+async function revealWithHeldFrames(scroller: Locator, gate: Awaited<ReturnType<typeof holdAnimationFrames>>) {
+  for (let frame = 0; frame < 24; frame++) {
+    await gate.evaluate((queued) => queued.flush());
+    if (await scroller.evaluate((element) => getComputedStyle(element).visibility === "visible")) return true;
+  }
+  return false;
+}
+
 function controlledTouch(scroller: Locator) {
   return scroller.evaluateHandle((viewport) => ({
     viewport,
@@ -93,14 +101,24 @@ function holdNativeScroll(scroller: Locator) {
   });
 }
 
-async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [], beforeSelect?: () => Promise<void>,
+interface ChatSnapshot {
+  messages: Message[];
+  next_message_seq: number;
+  oldest_loaded_seq: number | null;
+  has_more_messages: boolean;
+}
+
+async function openChat(page: Page, history: number | ChatSnapshot = 40, pending: PendingQuestion[] = [], beforeSelect?: () => Promise<void>,
   content = (index: number) => `Saved row ${index + 1}`) {
   const session = { id: "follow-output", agent_id: "follow-agent", name: "Following output", backend: "codex",
     status: "running", archived: false, working_dir: "/tmp", created_at: "2026-11-12T00:00:00Z" };
-  const messages: Message[] = Array.from({ length: count }, (_, index) => ({
-    role: "assistant", type: "text", seq: index + 1, content: content(index),
-  }));
-  let snapshot = { messages, next_message_seq: count ? count + 1 : 0, oldest_loaded_seq: count ? 1 : null, has_more_messages: false };
+  const count = typeof history === "number" ? history : history.messages.length;
+  let snapshot: ChatSnapshot = typeof history === "number" ? {
+    messages: Array.from({ length: count }, (_, index) => ({
+      role: "assistant", type: "text", seq: index + 1, content: content(index),
+    })),
+    next_message_seq: count ? count + 1 : 0, oldest_loaded_seq: count ? 1 : null, has_more_messages: false,
+  } : history;
   const pages: Route[] = [];
   const submissions: Array<{ content: string; client_request_id: string }> = [];
   let socket!: WebSocketRoute;
@@ -144,7 +162,7 @@ async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [],
   const settle = () => scroller.evaluate(async () => {
     for (let frame = 0; frame < 24; frame++) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   });
-  if (!beforeSelect) {
+  if (!beforeSelect && typeof history === "number") {
     await expect(scroller.getByText(`Saved row ${count}`, { exact: true })).toBeVisible();
     await expect.poll(gap).toBeLessThanOrEqual(2);
   }
@@ -156,6 +174,57 @@ async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [],
   };
   return { scroller, gap, send, settle, output, session, pages, replaceOnReconnect, submissions };
 }
+
+const snoozedQuestionEvent = (seq: number): Message => ({ role: "system", type: "question_snoozed", seq,
+  tool_use_id: `optional-question-${seq}`, content: "Automatic question expiry paused while you answer.",
+  tool_input: { deadline: null, snoozed: true } });
+
+test("hidden question events leave history readable on first reveal, paging and reconnect", async ({ page }) => {
+  const row = (seq: number): Message => ({ role: "assistant", type: "text", seq, content: `Saved row ${seq}` });
+  const messages = Array.from({ length: 60 }, (_, index) => {
+    const seq = index + 100;
+    return seq === 100 || seq === 138 || seq >= 140 ? snoozedQuestionEvent(seq) : row(seq);
+  });
+  let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
+  const { scroller, pages, replaceOnReconnect } = await openChat(page, {
+    messages, next_message_seq: 160, oldest_loaded_seq: 100, has_more_messages: true,
+  }, [], async () => { gate = await holdAnimationFrames(page); });
+  try {
+    await expect(scroller).toBeAttached();
+    expect(await scroller.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
+    expect(await revealWithHeldFrames(scroller, gate)).toBe(true);
+    await expect(scroller.getByText("Saved row 139", { exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(scroller.locator('[data-message-key="message:138"], [data-message-key="message:159"]')).toHaveCount(0);
+  } finally { await gate.evaluate((queued) => queued.release()); await gate.dispose(); }
+
+  await scroller.press("Home");
+  await expect.poll(() => pages.length).toBe(1);
+  expect(new URL(pages[0].request().url()).searchParams.get("before_seq")).toBe("100");
+  const recentStart = scroller.getByText("Saved row 101", { exact: true });
+  await expect(recentStart).toBeInViewport();
+  const listHeight = () => scroller.evaluate((element) => element.scrollHeight);
+  const readingOffset = () => recentStart.evaluate((element) =>
+    element.getBoundingClientRect().top - element.closest(".chat-messages")!.getBoundingClientRect().top);
+  const beforePageHeight = await listHeight();
+  const beforePageOffset = await readingOffset();
+  await pages[0].fulfill({ json: {
+    messages: [snoozedQuestionEvent(80), ...Array.from({ length: 19 }, (_, index) => row(81 + index))],
+    oldest_loaded_seq: 80, has_more_messages: false,
+  } });
+  await expect.poll(listHeight).toBeGreaterThan(beforePageHeight + 100);
+  await expect(recentStart).toBeInViewport();
+  await expect.poll(async () => Math.abs(await readingOffset() - beforePageOffset)).toBeLessThanOrEqual(2);
+
+  replaceOnReconnect({ messages: [...messages, row(160), snoozedQuestionEvent(161)],
+    next_message_seq: 162, oldest_loaded_seq: 100, has_more_messages: true });
+  await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
+  await expect(scroller.getByText("Saved row 160", { exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(scroller.locator('[data-message-key="message:161"]')).toHaveCount(0);
+  await scroller.press("Home");
+  await expect(scroller.getByText("Saved row 81", { exact: true })).toBeInViewport();
+  await expect(scroller.locator('[data-message-key="message:80"]')).toHaveCount(0);
+  expect(pages).toHaveLength(1);
+});
 
 for (const native of [false, true]) {
 for (const selected of [false, true]) {
@@ -245,10 +314,15 @@ for (const selected of [false, true]) {
 }
 }
 
-for (const count of [0, 40]) {
-test(`a static tall Footer completes first presentation with ${count ? "saved history" : "no displayed rows"}`, async ({ page }) => {
+for (const opening of ["no displayed rows", "hidden question history", "saved history"]) {
+test(`a static tall Footer completes first presentation with ${opening}`, async ({ page }) => {
+  const hasDisplayedRows = opening === "saved history";
+  const history = opening === "hidden question history" ? {
+    messages: [snoozedQuestionEvent(40), snoozedQuestionEvent(41)],
+    next_message_seq: 42, oldest_loaded_seq: 40, has_more_messages: false,
+  } : hasDisplayedRows ? 40 : 0;
   let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
-  const { scroller, gap, send, settle } = await openChat(page, count, [], async () => {
+  const { scroller, gap, send, settle } = await openChat(page, history, [], async () => {
     gate = await holdAnimationFrames(page);
   });
   try {
@@ -256,7 +330,7 @@ test(`a static tall Footer completes first presentation with ${count ? "saved hi
     send({ type: "assistant_delta", content: "Static output\n\n".repeat(80) + "### Static Footer final marker" });
     await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
     let beforeCorrection: number | undefined;
-    if (!count) {
+    if (!hasDisplayedRows) {
       const nearTail = await scroller.evaluate((viewport) => {
         const footer = viewport.querySelector<HTMLElement>("[data-chat-footer]")!.parentElement!;
         const text = footer.querySelector<HTMLElement>(".msg-streaming-text")!;
@@ -274,20 +348,15 @@ test(`a static tall Footer completes first presentation with ${count ? "saved hi
       expect(nearTail.footerOverhang).toBeGreaterThan(1);
       beforeCorrection = nearTail.top;
     }
-    let revealed = false;
-    for (let frame = 0; frame < 24; frame++) {
-      await gate.evaluate((queued) => queued.flush());
-      revealed = await scroller.evaluate((element) => getComputedStyle(element).visibility === "visible");
-      if (revealed) break;
-    }
-    expect(revealed, "the last output does not require another token or an idle interval").toBe(true);
+    expect(await revealWithHeldFrames(scroller, gate), "the last output does not require another token or an idle interval").toBe(true);
     expect(await page.locator("[data-chat-timeout]").count()).toBe(0);
     if (beforeCorrection !== undefined) {
       expect(await scroller.evaluate((viewport) => viewport.scrollTop)).toBeGreaterThan(beforeCorrection);
     }
     expect(await gap()).toBeLessThanOrEqual(1);
     await expectFooterMarkerInViewport(scroller);
-    if (count) {
+    if (!hasDisplayedRows) await expect(scroller.locator("[data-message-key]")).toHaveCount(0);
+    if (hasDisplayedRows) {
       // Let Chromium deliver the first upward wheel with the reveal's
       // positioning callback still queued. Late output arrives in that gap.
       expect(await gate.evaluate((queued) => queued.count())).toBeGreaterThan(0);

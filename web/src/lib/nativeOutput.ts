@@ -143,6 +143,9 @@ export function nativeChatMessages(messages: Message[], snapshots: SubagentRun[]
   }
   const visible: Message[] = [];
   for (const message of messages) {
+    // Snoozing updates the pending question. Its event stays in the history
+    // for transcript continuity.
+    if (message.type === "question_snoozed") continue;
     if (message.type === "native_subagent") {
       const key = message.tool_input?.card_id;
       if (typeof key !== "string" || cards.has(key)) continue;

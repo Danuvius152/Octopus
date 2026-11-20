@@ -1,6 +1,6 @@
 import { beforeEach, expect, test } from "vitest";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { useSessionStore } from "../stores/sessionStore";
+import { useSessionStore, type Message } from "../stores/sessionStore";
 import { nativeAnswer, nativeCardState, nativeChatMessages, nativeDetailAnchor } from "./nativeOutput";
 import { projectToolCall } from "./toolIdentity";
 import { applyTranscript } from "./transcript";
@@ -25,6 +25,49 @@ test("hidden root reasoning has no chat rows while transcript sequences and chil
   ]);
   expect(stored).toEqual(messages);
   expect(useSessionStore.getState().lastAppliedSeq.s).toBe(11);
+});
+
+test("snooze events retain their history identities across paging and replay without taking up chat rows", () => {
+  const sessionId = "question-history";
+  const snoozed = (seq: number, id: string): Message => ({ role: "system", type: "question_snoozed",
+    seq, tool_use_id: id, content: "Automatic question expiry paused while you answer.",
+    tool_input: { deadline: null, snoozed: true } });
+  const recent: Message[] = [
+    { role: "assistant", type: "question_request", seq: 10, tool_use_id: "current" },
+    snoozed(11, "current"),
+  ];
+  const snapshot = { messages: recent, next_message_seq: 12, oldest_loaded_seq: 10, has_more_messages: true };
+  applyTranscript(sessionId, snapshot);
+  const window = useSessionStore.getState().messageWindows[sessionId];
+  expect(useSessionStore.getState().prependMessages(sessionId, [
+    snoozed(7, "previous"),
+    { role: "user", type: "question_answer", seq: 8, tool_use_id: "previous", content: "Previous answer" },
+    { role: "system", type: "question_closed", seq: 9, tool_use_id: "closed", content: "Previous closure" },
+  ], 7, false, { window, beforeSeq: 10 })).toEqual({ state: "merged", added: 3 });
+
+  const event = { type: "question_snoozed", session_id: sessionId, seq: 13,
+    question_id: "next", deadline: null, snoozed: true };
+  handleWsMessage(event);
+  const live = useSessionStore.getState();
+  expect(live.messages[sessionId].at(-1)).toMatchObject({ type: "question_snoozed", seq: 13, tool_use_id: "next" });
+  expect(live.lastAppliedSeq[sessionId]).toBe(11);
+  applyTranscript(sessionId, { ...snapshot, next_message_seq: 14, messages: [
+    ...recent,
+    { role: "assistant", type: "text", seq: 12, content: "Latest readable message" },
+    snoozed(13, "next"),
+  ] });
+  handleWsMessage(event);
+  const state = useSessionStore.getState();
+  const stored = state.messages[sessionId];
+  expect(nativeChatMessages(stored).map(({ seq }) => seq)).toEqual([8, 9, 10, 12]);
+  expect(stored.map(({ seq }) => seq)).toEqual([7, 8, 9, 10, 11, 12, 13]);
+  expect(stored.filter(({ type }) => type === "question_snoozed")).toEqual([
+    snoozed(7, "previous"), snoozed(11, "current"), snoozed(13, "next"),
+  ]);
+  expect(state.messageWindows[sessionId]).toBe(window);
+  expect(state.oldestSeq[sessionId]).toBe(7);
+  expect(state.lastAppliedSeq[sessionId]).toBe(13);
+  expect(state.hasMoreMessages[sessionId]).toBe(false);
 });
 
 test("a tool-only historical window exposes a saved child reference without inventing completion", () => {
