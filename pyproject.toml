@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Personal agent platform for Claude Code and Codex"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
-    "starlette>=0.46.2",
+    "fastapi>=0.133.0",
+    "starlette>=1.7.0",
     "uvicorn[standard]>=0.34",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
