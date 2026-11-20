@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -24,7 +25,7 @@ from server.mcp_identity import mint
 from server.routers import agents as agents_router
 from server.routers import auth as auth_router
 from server.session_manager import session_manager
-from server.users import UserManager, token_digest
+from server.users import UserError, UserManager, token_digest
 
 
 @pytest.fixture
@@ -46,7 +47,7 @@ async def client(tmp_path, monkeypatch):
     agents_router.set_manager(AgentManager(db))
     users = UserManager(db)
     deps.set_user_manager(users)
-    auth_router._FAILURES.clear()
+    monkeypatch.setattr(auth_router, "_login_throttle", auth_router._LoginThrottle())
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -415,6 +416,146 @@ async def test_a_wrong_password_is_401_and_eventually_429(client):
     assert right.status_code == 429
 
 
+async def test_login_budget_counts_in_flight_attempts_per_username_and_address(client, monkeypatch):
+    c, users, _db = client
+    entered: asyncio.Queue[None] = asyncio.Queue()
+    release = asyncio.Event()
+
+    async def reject_login(username, password):
+        if password == "wait-for-verification":
+            entered.put_nowait(None)
+            await release.wait()
+        raise UserError("Wrong username or password", status_code=401)
+
+    monkeypatch.setattr(users, "authenticate", reject_login)
+    pending = [asyncio.create_task(c.post("/api/auth/login", json={
+        "username": "archer", "password": "wait-for-verification",
+    })) for _ in range(8)]
+    try:
+        async with asyncio.timeout(2):
+            for _ in pending:
+                await entered.get()
+            probe = {"username": " ARCHER ", "password": "wrong"}
+            blocked = await c.post("/api/auth/login", json=probe)
+            assert blocked.status_code == 429
+            assert blocked.json() == {"detail": "Too many attempts — wait a few minutes and try again"}
+            other_name = await c.post("/api/auth/login", json={**probe, "username": "other"})
+            assert other_name.status_code == 401
+            transport = ASGITransport(app=app, client=("127.0.0.2", 123))
+            async with AsyncClient(transport=transport, base_url="http://test") as other_client:
+                other_address = await other_client.post("/api/auth/login", json=probe)
+            assert other_address.status_code == 401
+            release.set()
+            assert [response.status_code for response in await asyncio.gather(*pending)] == [401] * 8
+            assert (await c.post("/api/auth/login", json=probe)).status_code == 429
+    finally:
+        release.set()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def test_login_budget_success_and_cancellation_preserve_other_reservations(client, monkeypatch):
+    c, users, _db = client
+    await users.create_user(username="archer", password="password1")
+    authenticate = users.authenticate
+    entered: asyncio.Queue[None] = asyncio.Queue()
+    finish_success, finish_failures = asyncio.Event(), asyncio.Event()
+
+    async def validate(username, password):
+        if password == "password1":
+            entered.put_nowait(None)
+            await finish_success.wait()
+            return await authenticate(username, password)
+        if password == "wait-for-verification":
+            entered.put_nowait(None)
+            await finish_failures.wait()
+        raise UserError("Wrong username or password", status_code=401)
+
+    async def sign_in(password):
+        return await c.post("/api/auth/login", json={"username": "archer", "password": password})
+
+    monkeypatch.setattr(users, "authenticate", validate)
+    assert (await sign_in("wrong")).status_code == 401
+    success = asyncio.create_task(sign_in("password1"))
+    failures = [asyncio.create_task(sign_in("wait-for-verification")) for _ in range(6)]
+    try:
+        async with asyncio.timeout(2):
+            for _ in range(7):
+                await entered.get()
+            assert (await sign_in("wrong")).status_code == 429
+
+            finish_success.set()
+            assert (await success).status_code == 200
+            # Six verifications remain in flight and the previous failure was cleared.
+            for _ in range(2):
+                assert (await sign_in("wrong")).status_code == 401
+            assert (await sign_in("wrong")).status_code == 429
+
+            failures[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await failures[0]
+            assert (await sign_in("wrong")).status_code == 401
+            assert (await sign_in("wrong")).status_code == 429
+
+            finish_failures.set()
+            assert [response.status_code for response in await asyncio.gather(*failures[1:])] == [401] * 5
+            assert (await sign_in("wrong")).status_code == 429
+    finally:
+        finish_success.set()
+        finish_failures.set()
+        await asyncio.gather(success, *failures, return_exceptions=True)
+
+
+async def test_login_budget_expires_on_schedule_and_reclaims_idle_keys(client, monkeypatch):
+    c, users, _db = client
+    now = 1_000.0
+    monkeypatch.setattr(auth_router, "time", SimpleNamespace(monotonic=lambda: now))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def reject_login(username, password):
+        if password == "wait-for-verification":
+            entered.set()
+            await release.wait()
+        raise UserError("Wrong username or password", status_code=401)
+
+    async def sign_in(username, password="wrong"):
+        return await c.post("/api/auth/login", json={"username": username, "password": password})
+
+    monkeypatch.setattr(users, "authenticate", reject_login)
+    for _ in range(8):
+        assert (await sign_in("idle")).status_code == 401
+    assert (await sign_in("mixed")).status_code == 401
+
+    pending = asyncio.create_task(sign_in("archer", "wait-for-verification"))
+    try:
+        async with asyncio.timeout(2):
+            await entered.wait()
+            for _ in range(7):
+                assert (await sign_in("archer")).status_code == 401
+            now = 1_299.999
+            assert (await sign_in("idle")).status_code == 429
+            assert (await sign_in("archer")).status_code == 429
+            assert (await sign_in("mixed")).status_code == 401
+
+            now = 1_300.0
+            assert (await sign_in("other")).status_code == 401
+            # Reclamation concerns the cache's lifetime, which HTTP status alone cannot show.
+            assert "idle@127.0.0.1" not in auth_router._login_throttle._attempts
+            for _ in range(7):
+                assert (await sign_in("archer")).status_code == 401
+            assert (await sign_in("archer")).status_code == 429
+
+            release.set()
+            assert (await pending).status_code == 401
+            assert (await sign_in("archer")).status_code == 429
+
+            for _ in range(7):
+                assert (await sign_in("mixed")).status_code == 401
+            assert (await sign_in("mixed")).status_code == 429
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_a_successful_login_clears_the_count(client):
     c, users, _db = client
@@ -467,13 +608,22 @@ async def test_login_rechecks_password_proof_when_committing_token(client, monke
         assert response.status_code == 401
         assert "token" not in response.json()
         assert await db.list_tokens(user["id"]) == []
-        assert [len(attempts) for attempts in auth_router._FAILURES.values()] == [2]
         if change == "disable":
             await users.set_disabled(user["id"], False)
             assert await db.list_tokens(user["id"]) == []
     finally:
         release.set()
         await asyncio.gather(pending, return_exceptions=True)
+
+    async def reject_login(username, password):
+        raise UserError("Wrong username or password", status_code=401)
+
+    monkeypatch.setattr(users, "authenticate", reject_login)
+    bad_credentials = {"username": "archer", "password": "wrong"}
+    # The initial bad password and the rejected proof both spent a failure.
+    for _ in range(6):
+        assert (await c.post("/api/auth/login", json=bad_credentials)).status_code == 401
+    assert (await c.post("/api/auth/login", json=bad_credentials)).status_code == 429
 
 
 @pytest.mark.asyncio

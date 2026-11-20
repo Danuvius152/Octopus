@@ -10,6 +10,9 @@ from __future__ import annotations
 import hmac
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -41,43 +44,76 @@ from ..models import (
     WorkspaceInfo,
     WorkspaceSequenceRequest,
 )
-from ..users import UserError
+from ..users import UserError, normalize_username
 from ..workspace_edits import workspace_info
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-
-
-
-
-
 def _throttle_key(username: str, request: Request) -> str:
     client = request.client.host if request.client else "?"
-    return f"{username.strip().lower()}@{client}"
+    return f"{normalize_username(username)}@{client}"
 
 
-# Failed logins, per username-and-address. In memory on purpose: a password is
-# guessable in a way the old 256-bit token never was, so the login route needs
-# a cost that rises — and a counter that resets when the server restarts is
-# both enough against online guessing and one fewer table to reason about. It
-# is not a defence against a distributed attempt, which is what a rate limit in
-# front of the process is for.
-_FAILURES: dict[str, list[float]] = {}
 _WINDOW_SECONDS = 300.0
 _MAX_FAILURES = 8
 
 
-def _too_many_failures(key: str) -> bool:
-    now = time.monotonic()
-    recent = [t for t in _FAILURES.get(key, []) if now - t < _WINDOW_SECONDS]
-    _FAILURES[key] = recent
-    return len(recent) >= _MAX_FAILURES
+@dataclass
+class _LoginAttempts:
+    failures: list[float] = field(default_factory=list)
+    in_flight: int = 0
 
 
-def _record_failure(key: str) -> None:
-    _FAILURES.setdefault(key, []).append(time.monotonic())
+class _LoginThrottle:
+    """Process-local failure budget owned by the login route's event loop."""
+
+    def __init__(self) -> None:
+        self._attempts: dict[str, _LoginAttempts] = {}
+        self._next_sweep = float("-inf")
+
+    def _reclaim_expired(self, now: float) -> None:
+        if now < self._next_sweep:
+            return
+        self._next_sweep = now + _WINDOW_SECONDS
+        # Idle entries only exist while they retain at least one failure.
+        expired = [
+            key for key, attempts in self._attempts.items()
+            if not attempts.in_flight and now - attempts.failures[-1] >= _WINDOW_SECONDS
+        ]
+        for key in expired:
+            del self._attempts[key]
+
+    @contextmanager
+    def attempt(self, key: str) -> Iterator[None]:
+        now = time.monotonic()
+        self._reclaim_expired(now)
+        attempts = self._attempts.setdefault(key, _LoginAttempts())
+        attempts.failures = [t for t in attempts.failures if now - t < _WINDOW_SECONDS]
+        if len(attempts.failures) + attempts.in_flight >= _MAX_FAILURES:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Too many attempts — wait a few minutes and try again",
+            )
+
+        # Admission and settlement have no await points. Only validation and
+        # token issuance run while this request holds a reservation.
+        attempts.in_flight += 1
+        try:
+            yield
+        except UserError:
+            attempts.failures.append(time.monotonic())
+            raise
+        else:
+            attempts.failures.clear()
+        finally:
+            attempts.in_flight -= 1
+            if not attempts.in_flight and not attempts.failures:
+                del self._attempts[key]
+
+
+_login_throttle = _LoginThrottle()
 
 
 @router.get("/state", response_model=AuthStateResponse)
@@ -118,19 +154,12 @@ async def login(req: LoginRequest, request: Request, users: UserMgr) -> LoginRes
     The password is never a bearer: it is spent here, once, for a token that
     can be revoked without changing it.
     """
-    key = _throttle_key(req.username, request)
-    if _too_many_failures(key):
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            "Too many attempts — wait a few minutes and try again",
-        )
     try:
-        user, token = await users.login(req.username, req.password)
+        with _login_throttle.attempt(_throttle_key(req.username, request)):
+            user, token = await users.login(req.username, req.password)
     except UserError as e:
-        _record_failure(key)
         raise HTTPException(e.status_code, e.message) from e
 
-    _FAILURES.pop(key, None)
     logger.info("login: %s", user["username"])
     return LoginResponse(
         token=token,
