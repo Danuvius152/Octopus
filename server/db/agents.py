@@ -50,35 +50,8 @@ async def _require_connector_binding_scope(
         raise ValueError("connector installation not found")
 
 
-async def _set_agent_connector(
-    tx: Transaction, agent_id: str, installation_id: str, enabled: bool,
-) -> None:
-    if enabled:
-        await tx.execute(
-            "INSERT OR IGNORE INTO agent_connectors (agent_id, installation_id) VALUES (?, ?)",
-            (agent_id, installation_id),
-        )
-    else:
-        await tx.execute(
-            "DELETE FROM agent_connectors WHERE agent_id = ? AND installation_id = ?",
-            (agent_id, installation_id),
-        )
-
-
-async def _agent_connector_ids(tx: Transaction, agent_id: str) -> list[str]:
-    rows = await tx.fetch_all(
-        "SELECT installation_id FROM agent_connectors WHERE agent_id = ?", (agent_id,),
-    )
-    return [row[0] for row in rows]
-
-
 class AgentsMixin(DatabaseBase):
     # --- agent-scoped enablement join -------------------------------------
-
-    async def set_agent_connector(self, agent_id: str, installation_id: str, enabled: bool) -> None:
-        """Toggle one connector for one agent (presence in the join = on)."""
-        async with self.transaction(write=True) as tx:
-            await _set_agent_connector(tx, agent_id, installation_id, enabled)
 
     async def read_owned_agent_connector(
         self, agent_id: str, installation_id: str, user_id: str | None,
@@ -96,17 +69,24 @@ class AgentsMixin(DatabaseBase):
     ) -> None:
         async with self.transaction(write=True) as tx:
             await _require_connector_binding_scope(tx, agent_id, installation_id, user_id)
-            await _set_agent_connector(tx, agent_id, installation_id, enabled)
-
-    async def get_agent_connector_ids(self, agent_id: str) -> list[str]:
-        """Installation ids enabled for an agent."""
-        async with self.transaction(write=False) as tx:
-            return await _agent_connector_ids(tx, agent_id)
+            if enabled:
+                await tx.execute(
+                    "INSERT OR IGNORE INTO agent_connectors (agent_id, installation_id) VALUES (?, ?)",
+                    (agent_id, installation_id),
+                )
+            else:
+                await tx.execute(
+                    "DELETE FROM agent_connectors WHERE agent_id = ? AND installation_id = ?",
+                    (agent_id, installation_id),
+                )
 
     async def list_owned_agent_connectors(self, agent_id: str, user_id: str | None) -> list[str]:
         async with self.transaction(write=False) as tx:
             await _require_connector_agent(tx, agent_id, user_id)
-            return await _agent_connector_ids(tx, agent_id)
+            rows = await tx.fetch_all(
+                "SELECT installation_id FROM agent_connectors WHERE agent_id = ?", (agent_id,),
+            )
+            return [row[0] for row in rows]
 
     async def replace_agent_connectors(
         self, agent_id: str, installation_ids: list[str], user_id: str | None,

@@ -554,6 +554,32 @@ describe("AgentFormPage", () => {
     expect(patches).toHaveBeenCalledOnce();
   });
 
+  it("shows the current binding from a completed preparation without sending another write", async () => {
+    let preparations = 0;
+    const connectorWrites = vi.fn();
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/operations")) {
+        if (++preparations === 1) throw new TypeError("Response lost");
+        return json({
+          operation_id: "completed", reserved: false,
+          settlement: { disposition: "applied", enabled: false },
+        });
+      }
+      if (init?.method === "PATCH") return connectorWrites();
+      return emptyRead(url);
+    });
+    mount("ag1");
+    showConnectorInstallations("first");
+    const checkbox = screen.getByRole("checkbox", { name: /first/ });
+    await waitFor(() => expect(checkbox).toBeEnabled());
+    await act(async () => fireEvent.click(checkbox));
+    await act(async () => fireEvent.click(checkbox));
+    expect(screen.getByText("Previous update confirmed.")).toBeVisible();
+    expect(checkbox).not.toBeChecked();
+    expect(checkbox).toBeEnabled();
+    expect(connectorWrites).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])("does not send a prepared write after Save takes the form (Save still pending=%s)", async (pending) => {
     const reserve = deferred<Response>(), save = deferred<Response>();
     const connectorWrites = vi.fn(() => new Response(null, { status: 204 }));
@@ -659,9 +685,12 @@ describe("AgentFormPage", () => {
     await act(async () => fireEvent.click(checkbox));
     const reservation = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/ag1/connectors/github/operations"));
     expect(reservation?.[1]?.method).toBe("POST");
-    expect(JSON.parse(reservation?.[1]?.body as string)).toEqual({ enabled: !enabled, intent_id: expect.any(String) });
+    const intent = JSON.parse(reservation?.[1]?.body as string);
+    expect(intent).toEqual({ enabled: !enabled, intent_id: expect.any(String) });
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/ag1/connectors/github"),
-      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ operation_id: "confirmed" }) }));
+      expect.objectContaining({
+        method: "PATCH", body: JSON.stringify({ operation_id: "confirmed", intent_id: intent.intent_id }),
+      }));
   });
 
   it("retries a failed binding read in the same form after Save unfreezes it", async () => {
@@ -786,7 +815,7 @@ describe("AgentFormPage", () => {
     await waitFor(() => expect(patches).toBe(2));
     await waitFor(() => expect(checkbox).not.toBeChecked());
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/api/agents/ag1/connectors/installation"),
-      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ operation_id: "write-2" }) }));
+      expect.objectContaining({ method: "PATCH", body: expect.stringContaining('"operation_id":"write-2"') }));
     await act(async () => { await connectorInstallations.disconnect("installation"); });
     expect(screen.queryByRole("checkbox", { name: /GitHub account/ })).toBeNull();
   });

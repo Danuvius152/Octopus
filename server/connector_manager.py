@@ -48,8 +48,8 @@ _BINDING_OPERATION_LIMIT_PER_ACCOUNT = 4096
 logger = logging.getLogger(__name__)
 
 
-class ConnectorBindingOperationRetired(ConnectorError):
-    """The presented operation cannot start or repeat its effect."""
+class ConnectorBindingOperationUnavailable(ConnectorError):
+    """The presented intent cannot submit the binding operation."""
 
 
 class ConnectorBindingOperationsFull(ConnectorError):
@@ -58,6 +58,7 @@ class ConnectorBindingOperationsFull(ConnectorError):
 
 type BindingDisposition = Literal["applied", "retired"]
 type BindingSettlement = BindingDisposition | Literal["unavailable"]
+type BindingReservationStatus = BindingDisposition | Literal["reserved", "busy"]
 
 
 @dataclass(frozen=True)
@@ -665,36 +666,46 @@ class ConnectorManager:
     async def reserve_agent_connector(
         self, agent_id: str, installation_id: str, enabled: bool, intent_id: uuid.UUID,
         user_id: str | None,
-    ) -> tuple[uuid.UUID, bool]:
+    ) -> tuple[uuid.UUID, BindingReservationStatus, bool]:
         scope = _BindingScope(agent_id, installation_id, user_id)
         async with self._binding_lock:
-            await self._binding_enabled(scope)
+            current = await self._binding_enabled(scope)
             self._prune_binding_operations()
             account_operations = 0
+            pending_id = None
             for oid, op in self._binding_operations.items():
                 if op.scope.user_id != user_id:
                     continue
                 account_operations += 1
-                if op.scope == scope and op.disposition is None:
-                    # A lost preparation response can be retried without granting another intent the write ID.
-                    return oid, op.intent_id == intent_id and op.enabled == enabled
+                if op.scope != scope:
+                    continue
+                if op.intent_id == intent_id:
+                    if op.enabled != enabled:
+                        raise ConnectorError("Connector binding intent already has a different value")
+                    return oid, op.disposition or "reserved", current
+                if op.disposition is None:
+                    pending_id = oid
+            if pending_id is not None:
+                return pending_id, "busy", current
             if account_operations >= _BINDING_OPERATION_LIMIT_PER_ACCOUNT:
                 raise ConnectorBindingOperationsFull("Connector binding operations are busy")
             operation_id = uuid.uuid4()
             self._binding_operations[operation_id] = _BindingOperation(
                 scope, intent_id, enabled, time.monotonic() + _BINDING_OPERATION_SECONDS,
             )
-            return operation_id, True
+            return operation_id, "reserved", current
 
     async def apply_agent_connector(
-        self, agent_id: str, installation_id: str, operation_id: uuid.UUID, user_id: str | None,
+        self, agent_id: str, installation_id: str, operation_id: uuid.UUID,
+        intent_id: uuid.UUID, user_id: str | None,
     ) -> None:
         scope = _BindingScope(agent_id, installation_id, user_id)
         async with self._binding_lock:
             self._prune_binding_operations()
             operation = self._binding_operations.get(operation_id)
-            if operation is None or operation.scope != scope or operation.disposition == "retired":
-                raise ConnectorBindingOperationRetired("Connector binding operation is retired")
+            if (operation is None or operation.scope != scope or operation.intent_id != intent_id
+                or operation.disposition == "retired"):
+                raise ConnectorBindingOperationUnavailable("Connector binding operation is unavailable for this intent")
             if operation.disposition == "applied":
                 await self._binding_enabled(scope)
                 return

@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .config import settings
 from .context_models import ContextState
@@ -998,12 +998,20 @@ class SetAgentConnectorsRequest(BaseModel):
 
 
 class ToggleAgentConnectorRequest(BaseModel):
+    enabled: bool
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_request(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "operation_id" in data:
+            raise ValueError("An operation ID requires the Connector operation request")
+        return data
+
+
+class ReserveAgentConnectorRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool
-
-
-class ReserveAgentConnectorRequest(ToggleAgentConnectorRequest):
     intent_id: UUID
 
 
@@ -1011,16 +1019,18 @@ class ApplyAgentConnectorRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     operation_id: UUID
-
-
-class AgentConnectorReservation(BaseModel):
-    operation_id: UUID
-    reserved: bool
+    intent_id: UUID
 
 
 class AgentConnectorSettlement(BaseModel):
     disposition: Literal["applied", "retired", "unavailable"]
     enabled: bool
+
+
+class AgentConnectorReservation(BaseModel):
+    operation_id: UUID
+    reserved: bool
+    settlement: AgentConnectorSettlement | None = None
 
 
 # Notifiers

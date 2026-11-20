@@ -11,6 +11,7 @@ import pytest
 
 from server.crypto import decrypt, encrypt
 from server.database import Database
+from server.users import UserManager
 
 
 @pytest.fixture
@@ -25,9 +26,15 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-async def _make_agent(db: Database, agent_id: str, name: str) -> None:
+@pytest.fixture
+async def binding_owner(db):
+    owner = await UserManager(db).create_user(username="binding-owner", password="test-binding-owner")
+    return owner["id"]
+
+
+async def _make_agent(db: Database, agent_id: str, name: str, user_id: str) -> None:
     now = _now()
-    await db.save_agent(agent_id=agent_id, name=name, created_at=now, updated_at=now)
+    await db.save_agent(agent_id=agent_id, name=name, created_at=now, updated_at=now, user_id=user_id)
 
 
 async def _make_installation(
@@ -40,6 +47,7 @@ async def _make_installation(
     secret: str = "tok-abc",
     scopes: list[str] | None = None,
     enable_by_default: bool = False,
+    user_id: str | None = None,
 ) -> None:
     await db.save_connector_installation(
         installation_id=installation_id,
@@ -52,6 +60,7 @@ async def _make_installation(
         scopes=scopes if scopes is not None else ["repo"],
         enable_by_default=enable_by_default,
         token_expires_at=None,
+        user_id=user_id,
     )
 
 
@@ -189,32 +198,32 @@ async def test_delete_installation_cascades_secret(db):
 
 
 @pytest.mark.asyncio
-async def test_agent_connector_enable_disable(db):
-    await _make_agent(db, "a-1", "Researcher")
-    await _make_installation(db, "i-1")
-    assert await db.get_agent_connector_ids("a-1") == []
+async def test_agent_connector_enable_disable(db, binding_owner):
+    await _make_agent(db, "a-1", "Researcher", binding_owner)
+    await _make_installation(db, "i-1", user_id=binding_owner)
+    assert await db.list_owned_agent_connectors("a-1", binding_owner) == []
 
-    await db.set_agent_connector("a-1", "i-1", True)
-    assert await db.get_agent_connector_ids("a-1") == ["i-1"]
+    await db.set_owned_agent_connector("a-1", "i-1", True, binding_owner)
+    assert await db.list_owned_agent_connectors("a-1", binding_owner) == ["i-1"]
     # Idempotent enable.
-    await db.set_agent_connector("a-1", "i-1", True)
-    assert await db.get_agent_connector_ids("a-1") == ["i-1"]
+    await db.set_owned_agent_connector("a-1", "i-1", True, binding_owner)
+    assert await db.list_owned_agent_connectors("a-1", binding_owner) == ["i-1"]
 
-    await db.set_agent_connector("a-1", "i-1", False)
-    assert await db.get_agent_connector_ids("a-1") == []
+    await db.set_owned_agent_connector("a-1", "i-1", False, binding_owner)
+    assert await db.list_owned_agent_connectors("a-1", binding_owner) == []
     # Idempotent disable.
-    await db.set_agent_connector("a-1", "i-1", False)
-    assert await db.get_agent_connector_ids("a-1") == []
+    await db.set_owned_agent_connector("a-1", "i-1", False, binding_owner)
+    assert await db.list_owned_agent_connectors("a-1", binding_owner) == []
 
 
 @pytest.mark.asyncio
-async def test_enabled_connectors_for_agent_join(db):
-    await _make_agent(db, "a-1", "Researcher")
+async def test_enabled_connectors_for_agent_join(db, binding_owner):
+    await _make_agent(db, "a-1", "Researcher", binding_owner)
     await _make_installation(db, "i-1", kind="github", label="octocat",
-                             external_account_id="1")
+                             external_account_id="1", user_id=binding_owner)
     await _make_installation(db, "i-2", kind="gmail", label="me@x.com",
-                             external_account_id="me@x.com")
-    await db.set_agent_connector("a-1", "i-1", True)
+                             external_account_id="me@x.com", user_id=binding_owner)
+    await db.set_owned_agent_connector("a-1", "i-1", True, binding_owner)
 
     enabled = await db.get_enabled_connectors_for_agent("a-1")
     assert [e["id"] for e in enabled] == ["i-1"]
@@ -223,29 +232,29 @@ async def test_enabled_connectors_for_agent_join(db):
 
 
 @pytest.mark.asyncio
-async def test_join_isolated_per_agent(db):
-    await _make_agent(db, "a-1", "A")
-    await _make_agent(db, "a-2", "B")
-    await _make_installation(db, "i-1")
-    await db.set_agent_connector("a-1", "i-1", True)
-    assert await db.get_agent_connector_ids("a-1") == ["i-1"]
-    assert await db.get_agent_connector_ids("a-2") == []
+async def test_join_isolated_per_agent(db, binding_owner):
+    await _make_agent(db, "a-1", "A", binding_owner)
+    await _make_agent(db, "a-2", "B", binding_owner)
+    await _make_installation(db, "i-1", user_id=binding_owner)
+    await db.set_owned_agent_connector("a-1", "i-1", True, binding_owner)
+    assert await db.list_owned_agent_connectors("a-1", binding_owner) == ["i-1"]
+    assert await db.list_owned_agent_connectors("a-2", binding_owner) == []
 
 
 @pytest.mark.asyncio
-async def test_delete_installation_drops_agent_links(db):
-    await _make_agent(db, "a-1", "A")
-    await _make_installation(db, "i-1")
-    await db.set_agent_connector("a-1", "i-1", True)
+async def test_delete_installation_drops_agent_links(db, binding_owner):
+    await _make_agent(db, "a-1", "A", binding_owner)
+    await _make_installation(db, "i-1", user_id=binding_owner)
+    await db.set_owned_agent_connector("a-1", "i-1", True, binding_owner)
     await db.delete_connector_installation("i-1")
-    assert await db.get_agent_connector_ids("a-1") == []
+    assert await db.list_owned_agent_connectors("a-1", binding_owner) == []
 
 
 @pytest.mark.asyncio
-async def test_delete_agent_drops_connector_links(db):
-    await _make_agent(db, "a-1", "A")
-    await _make_installation(db, "i-1")
-    await db.set_agent_connector("a-1", "i-1", True)
+async def test_delete_agent_drops_connector_links(db, binding_owner):
+    await _make_agent(db, "a-1", "A", binding_owner)
+    await _make_installation(db, "i-1", user_id=binding_owner)
+    await db.set_owned_agent_connector("a-1", "i-1", True, binding_owner)
     await db.delete_agent("a-1")
     # The installation survives; only the link is gone.
     assert await db.get_connector_installation("i-1") is not None

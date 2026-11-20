@@ -221,6 +221,9 @@ export async function reserveAgentConnector(
   if (!reservation || typeof reservation.operation_id !== "string" || typeof reservation.reserved !== "boolean") {
     throw new Error("Invalid Connector operation reservation");
   }
+  if (reservation.settlement != null && (reservation.reserved || !isBindingSettlement(reservation.settlement))) {
+    throw new Error("Invalid Connector operation reservation");
+  }
   return reservation;
 }
 
@@ -229,13 +232,14 @@ export async function applyAgentConnector(
   agentId: string,
   installationId: string,
   operationId: string,
+  intentId: string,
 ): Promise<"applied" | "rejected" | "unknown"> {
   try {
     const response = await fetch(agentConnectorUrl(agentId, installationId), {
       method: "PATCH",
       headers: authHeaders(token),
       signal: AbortSignal.timeout(30_000),
-      body: JSON.stringify({ operation_id: operationId }),
+      body: JSON.stringify({ operation_id: operationId, intent_id: intentId }),
     });
     if (response.status === 204) return "applied";
     if ([400, 401, 403, 404, 422].includes(response.status)) return "rejected";
@@ -258,9 +262,11 @@ export async function settleAgentConnector(
       signal: AbortSignal.timeout(30_000),
     }),
   );
-  if (!settlement || typeof settlement.enabled !== "boolean"
-    || !["applied", "retired", "unavailable"].includes(settlement.disposition)) {
-    throw new Error("Invalid Connector operation settlement");
-  }
+  if (!isBindingSettlement(settlement)) throw new Error("Invalid Connector operation settlement");
   return settlement;
+}
+
+function isBindingSettlement(settlement: AgentConnectorSettlement | null): boolean {
+  return !!settlement && typeof settlement.enabled === "boolean"
+    && ["applied", "retired", "unavailable"].includes(settlement.disposition);
 }

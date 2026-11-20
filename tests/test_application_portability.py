@@ -47,7 +47,7 @@ async def test_current_github_account_archive_preserves_installation_grant_and_a
             auth_type="oauth", external_account_id="91001", scopes=["repo"], enable_by_default=True,
             secret_encrypted=encrypt(json.dumps({"access_token": "original-account-grant", "refresh_token": None,
                 "expires_at_epoch": 0, "scopes": ["repo"]}), key), created_at="original-time", user_id=owner["id"])
-        await database.set_agent_connector(agent["id"], "github-original", True)
+        await database.set_owned_agent_connector(agent["id"], "github-original", True, owner["id"])
         original = await database.get_connector_installation("github-original", owner["id"])
         await database.save_session("excluded-chat", "Source conversation", str(working), "time", user_id=owner["id"])
     finally:

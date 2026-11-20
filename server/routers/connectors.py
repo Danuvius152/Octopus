@@ -23,8 +23,8 @@ from fastapi.responses import HTMLResponse
 from ..auth import verify_token
 from ..config import settings
 from ..connector_manager import (
-    ConnectorBindingOperationRetired,
     ConnectorBindingOperationsFull,
+    ConnectorBindingOperationUnavailable,
     ConnectorError,
     ConnectorManager,
 )
@@ -474,17 +474,19 @@ async def toggle_agent_connector(
     mgr = _require_manager()
     try:
         if isinstance(req, ApplyAgentConnectorRequest):
-            await mgr.apply_agent_connector(agent_id, installation_id, req.operation_id, user_id)
+            await mgr.apply_agent_connector(agent_id, installation_id, req.operation_id, req.intent_id, user_id)
         else:
             await mgr.set_agent_connector(agent_id, installation_id, req.enabled, user_id)
-    except ConnectorBindingOperationRetired as error:
+    except ConnectorBindingOperationUnavailable as error:
         raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
     except ConnectorError as e:
         raise _http_error(e)
 
 
 @agent_router.post(
-    "/{agent_id}/connectors/{installation_id}/operations", response_model=AgentConnectorReservation,
+    "/{agent_id}/connectors/{installation_id}/operations",
+    response_model=AgentConnectorReservation,
+    response_model_exclude_none=True,
 )
 async def reserve_agent_connector(
     agent_id: str,
@@ -494,14 +496,20 @@ async def reserve_agent_connector(
     _: str = Depends(verify_token),
 ):
     try:
-        operation_id, reserved = await _require_manager().reserve_agent_connector(
+        operation_id, disposition, enabled = await _require_manager().reserve_agent_connector(
             agent_id, installation_id, req.enabled, req.intent_id, user_id,
         )
     except ConnectorBindingOperationsFull as error:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
     except ConnectorError as error:
         raise _http_error(error)
-    return AgentConnectorReservation(operation_id=operation_id, reserved=reserved)
+    settlement = (
+        AgentConnectorSettlement(disposition=disposition, enabled=enabled)
+        if disposition == "applied" or disposition == "retired" else None
+    )
+    return AgentConnectorReservation(
+        operation_id=operation_id, reserved=disposition == "reserved", settlement=settlement,
+    )
 
 
 @agent_router.post(

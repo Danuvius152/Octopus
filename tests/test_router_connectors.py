@@ -990,23 +990,84 @@ async def _reserve_binding(client, binding, enabled, *, intent_id=None):
     return response.json()
 
 
+async def _apply_binding(client, binding, operation_id, intent_id):
+    return await client.patch(binding, json={"operation_id": operation_id, "intent_id": intent_id})
+
+
+async def test_retry_of_retired_agent_binding_intent_returns_original_receipt(client):
+    installation, _ = await _install(client)
+    agent_id = await _new_agent(client)
+    selection = f"/api/agents/{agent_id}/connectors"
+    binding = f"{selection}/{installation['id']}"
+    intent_id = str(uuid4())
+    original = await _reserve_binding(client, binding, True, intent_id=intent_id)
+    assert (await client.patch(binding, json={"enabled": False})).status_code == 204
+    retry = await _reserve_binding(client, binding, True, intent_id=intent_id)
+    assert retry == {
+        "operation_id": original["operation_id"], "reserved": False,
+        "settlement": {"disposition": "retired", "enabled": False},
+    }
+    assert (await client.get(selection)).json() == {"installation_ids": [], "pending_operations": {}}
+
+
+async def test_late_preparation_replays_original_receipt_after_opposite_binding_write(client):
+    installation, _ = await _install(client)
+    agent_id = await _new_agent(client)
+    selection = f"/api/agents/{agent_id}/connectors"
+    binding = f"{selection}/{installation['id']}"
+    original_intent, reversal_intent = str(uuid4()), str(uuid4())
+    original = await _reserve_binding(client, binding, True, intent_id=original_intent)
+    assert (await _apply_binding(client, binding, original["operation_id"], original_intent)).status_code == 204
+    reversal = await _reserve_binding(client, binding, False, intent_id=reversal_intent)
+    assert (await _apply_binding(client, binding, reversal["operation_id"], reversal_intent)).status_code == 204
+    retry = await _reserve_binding(client, binding, True, intent_id=original_intent)
+    assert retry == {
+        "operation_id": original["operation_id"], "reserved": False,
+        "settlement": {"disposition": "applied", "enabled": False},
+    }
+    assert (await client.get(selection)).json() == {"installation_ids": [], "pending_operations": {}}
+
+
+async def test_conflicting_agent_binding_intent_can_check_but_cannot_submit_another_intent(client):
+    installation, _ = await _install(client)
+    agent_id = await _new_agent(client)
+    selection = f"/api/agents/{agent_id}/connectors"
+    binding = f"{selection}/{installation['id']}"
+    original_intent, other_intent = str(uuid4()), str(uuid4())
+    original = await _reserve_binding(client, binding, True, intent_id=original_intent)
+    operation_id = original["operation_id"]
+    changed_intent = await client.post(f"{binding}/operations", json={"enabled": False, "intent_id": original_intent})
+    assert changed_intent.status_code == 400
+    assert await _reserve_binding(client, binding, False, intent_id=other_intent) == {
+        "operation_id": operation_id, "reserved": False,
+    }
+    assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 422
+    assert (await _apply_binding(client, binding, operation_id, other_intent)).status_code == 409
+    assert (await client.get(selection)).json() == {
+        "installation_ids": [], "pending_operations": {installation["id"]: operation_id},
+    }
+    receipt = await client.post(f"{binding}/operations/{operation_id}/settle")
+    assert receipt.json() == {"disposition": "retired", "enabled": False}
+
+
 async def test_agent_binding_settlement_retires_a_delayed_write_before_reversal(client):
     installation, _ = await _install(client)
     agent_id = await _new_agent(client)
     selection = f"/api/agents/{agent_id}/connectors"
     binding = f"{selection}/{installation['id']}"
 
-    async def reserve(enabled):
-        reservation = await _reserve_binding(client, binding, enabled)
+    async def reserve(enabled, intent_id):
+        reservation = await _reserve_binding(client, binding, enabled, intent_id=intent_id)
         assert reservation["reserved"] is True
         return reservation["operation_id"]
 
-    original = await reserve(True)
+    original_intent, reversal_intent = str(uuid4()), str(uuid4())
+    original = await reserve(True, original_intent)
     release = asyncio.Event()
 
     async def delayed_write():
         await release.wait()
-        return await client.patch(binding, json={"operation_id": original})
+        return await _apply_binding(client, binding, original, original_intent)
 
     delayed = asyncio.create_task(delayed_write())
     try:
@@ -1015,8 +1076,8 @@ async def test_agent_binding_settlement_retires_a_delayed_write_before_reversal(
         assert observed["pending_operations"] == {installation["id"]: original}
         receipt = await client.post(f"{binding}/operations/{original}/settle")
         assert receipt.json() == {"disposition": "retired", "enabled": False}
-        reversal = await reserve(False)
-        assert (await client.patch(binding, json={"operation_id": reversal})).status_code == 204
+        reversal = await reserve(False, reversal_intent)
+        assert (await _apply_binding(client, binding, reversal, reversal_intent)).status_code == 204
     finally:
         release.set()
         late = await delayed
@@ -1029,7 +1090,8 @@ async def test_agent_binding_settlement_keeps_the_receipt_when_commit_waiter_is_
     installation, _ = await _install(client)
     agent_id = await _new_agent(client)
     binding = f"/api/agents/{agent_id}/connectors/{installation['id']}"
-    operation_id = (await _reserve_binding(client, binding, True))["operation_id"]
+    intent_id = str(uuid4())
+    operation_id = (await _reserve_binding(client, binding, True, intent_id=intent_id))["operation_id"]
 
     db = connectors_mod._require_manager().db
     commit = db.conn.commit
@@ -1046,7 +1108,7 @@ async def test_agent_binding_settlement_keeps_the_receipt_when_commit_waiter_is_
 
     with monkeypatch.context() as patch:
         patch.setattr(db.conn, "commit", hold_write_commit)
-        pending = asyncio.create_task(client.patch(binding, json={"operation_id": operation_id}))
+        pending = asyncio.create_task(_apply_binding(client, binding, operation_id, intent_id))
         try:
             await asyncio.wait_for(committed.wait(), 5)
         finally:
@@ -1058,7 +1120,7 @@ async def test_agent_binding_settlement_keeps_the_receipt_when_commit_waiter_is_
     check = f"{binding}/operations/{operation_id}/settle"
     assert (await client.post(check)).json() == {"disposition": "applied", "enabled": True}
     assert (await client.patch(binding, json={"enabled": False})).status_code == 204
-    assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 204
+    assert (await _apply_binding(client, binding, operation_id, intent_id)).status_code == 204
     assert (await client.post(check)).json() == {"disposition": "applied", "enabled": False}
 
 
@@ -1074,7 +1136,9 @@ async def test_agent_binding_reservation_survives_late_prepare_and_retires_at_th
     assert first["reserved"] is True
     assert await _reserve_binding(client, binding, True, intent_id=intent_id) == first
     assert await _reserve_binding(client, binding, False) == {"operation_id": operation_id, "reserved": False}
-    assert (await client.patch(binding, json={"operation_id": operation_id, "enabled": True})).status_code == 422
+    assert (await client.patch(binding, json={
+        "operation_id": operation_id, "intent_id": intent_id, "enabled": True,
+    })).status_code == 422
 
     if retirement == "patch":
         assert (await client.patch(binding, json={"enabled": False})).status_code == 204
@@ -1082,7 +1146,7 @@ async def test_agent_binding_reservation_survives_late_prepare_and_retires_at_th
         assert (await client.put(selection, json={"installation_ids": []})).status_code == 200
     else:
         connectors_mod.set_manager(ConnectorManager(connectors_mod._require_manager().db))
-    assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 409
+    assert (await _apply_binding(client, binding, operation_id, intent_id)).status_code == 409
     assert (await client.post(f"{binding}/operations/{operation_id}/settle")).json() == {
         "disposition": "unavailable" if retirement == "new_manager" else "retired", "enabled": False,
     }
@@ -1093,7 +1157,8 @@ async def test_agent_binding_receipts_are_scoped_to_the_original_account_agent_a
     agent_id = await _new_agent(client)
     other_agent_id = await _new_agent(client, "Second Agent")
     binding = f"/api/agents/{agent_id}/connectors/{installation['id']}"
-    operation_id = (await _reserve_binding(client, binding, True))["operation_id"]
+    intent_id = str(uuid4())
+    operation_id = (await _reserve_binding(client, binding, True, intent_id=intent_id))["operation_id"]
     check = f"{binding}/operations/{operation_id}/settle"
 
     db = connectors_mod._require_manager().db
@@ -1103,7 +1168,7 @@ async def test_agent_binding_receipts_are_scoped_to_the_original_account_agent_a
         "disposition": "unavailable", "enabled": False,
     }
     assert (await client.post(check.replace(installation["id"], "different"))).status_code == 404
-    assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 204
+    assert (await _apply_binding(client, binding, operation_id, intent_id)).status_code == 204
     assert (await client.post(check)).json() == {"disposition": "applied", "enabled": True}
 
 
@@ -1115,14 +1180,15 @@ async def test_agent_binding_expired_operation_id_cannot_be_used(client, monkeyp
     agent_id = await _new_agent(client)
     selection = f"/api/agents/{agent_id}/connectors"
     binding = f"{selection}/{installation['id']}"
-    operation_id = (await _reserve_binding(client, binding, True))["operation_id"]
+    intent_id = str(uuid4())
+    operation_id = (await _reserve_binding(client, binding, True, intent_id=intent_id))["operation_id"]
     if applied:
         monkeypatch.setattr(connector_manager_mod, "_BINDING_OPERATION_SECONDS", 0)
-        assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 204
+        assert (await _apply_binding(client, binding, operation_id, intent_id)).status_code == 204
     assert (await client.get(selection)).json() == {
         "installation_ids": [installation["id"]] if applied else [], "pending_operations": {},
     }
-    assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 409
+    assert (await _apply_binding(client, binding, operation_id, intent_id)).status_code == 409
     assert (await client.post(f"{binding}/operations/{operation_id}/settle")).json() == {
         "disposition": "unavailable", "enabled": applied,
     }
@@ -1138,7 +1204,7 @@ async def test_agent_enable_disable_and_replace(client):
 
     t = await client.patch(
         f"/api/agents/{agent_id}/connectors/{inst['id']}",
-        json={"enabled": True},
+        json={"enabled": True, "legacy_metadata": {"ignored": True}},
         headers=client.headers,
     )
     assert t.status_code == 204

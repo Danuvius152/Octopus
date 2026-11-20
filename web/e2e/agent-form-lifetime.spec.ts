@@ -67,7 +67,7 @@ test("reopening an Agent cancels its first read and lets a delayed Connector wri
   let holdOpeningRead = true;
   const openingReads: BrowserRequest[] = [];
   const selected = new Set<string>();
-  const pending = new Map<string, { operation_id: string; enabled: boolean }>();
+  const pending = new Map<string, { operation_id: string; intent_id: string; enabled: boolean }>();
   let nextId = 0;
   const bindingsPath = `**/api/agents/${agent.id}/connectors`;
   await stubConnectorCatalog(page, ["first", "second"]);
@@ -86,7 +86,8 @@ test("reopening an Agent cancels its first read and lets a delayed Connector wri
   });
   await page.route(`${bindingsPath}/*/operations`, async (route) => {
     const id = new URL(route.request().url()).pathname.split("/").at(-2)!;
-    const op = { operation_id: `write-${++nextId}`, enabled: route.request().postDataJSON().enabled };
+    const { enabled, intent_id } = route.request().postDataJSON();
+    const op = { operation_id: `write-${++nextId}`, intent_id, enabled };
     pending.set(id, op);
     await route.fulfill({ json: { operation_id: op.operation_id, reserved: true } });
   });
@@ -97,10 +98,12 @@ test("reopening an Agent cancels its first read and lets a delayed Connector wri
   });
   await page.route(`${bindingsPath}/*`, async (route) => {
     const id = new URL(route.request().url()).pathname.split("/").at(-1)!;
-    const operationId = route.request().postDataJSON().operation_id;
+    const { operation_id: operationId, intent_id: intentId } = route.request().postDataJSON();
     if (operationId === "write-1") await firstWrite;
     const op = pending.get(id);
-    if (!op || op.operation_id !== operationId) return route.fulfill({ status: 409 });
+    if (!op || op.operation_id !== operationId || !op.intent_id || op.intent_id !== intentId) {
+      return route.fulfill({ status: 409 });
+    }
     if (op.enabled) selected.add(id);
     else selected.delete(id);
     pending.delete(id);

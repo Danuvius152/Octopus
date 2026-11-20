@@ -3149,6 +3149,7 @@ export interface components {
             operation_id: string;
             /** Reserved */
             reserved: boolean;
+            settlement?: components["schemas"]["AgentConnectorSettlement"] | null;
         };
         /** AgentConnectorSettlement */
         AgentConnectorSettlement: {
@@ -3625,6 +3626,11 @@ export interface components {
              * Format: uuid
              */
             operation_id: string;
+            /**
+             * Intent Id
+             * Format: uuid
+             */
+            intent_id: string;
         };
         /**
          * AttachmentMetadata

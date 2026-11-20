@@ -408,6 +408,11 @@ function AgentFormInstance({
         return;
       }
       const operationId = reservation.operation_id;
+      if (reservation.settlement) {
+        const { disposition, enabled: current } = reservation.settlement;
+        publishBinding(installationId, { status: disposition }, current);
+        return;
+      }
       if (!reservation.reserved) {
         publishBinding(installationId, { status: "unknown", operationId });
         return;
@@ -422,7 +427,7 @@ function AgentFormInstance({
         return;
       }
       publishBinding(installationId, { status: "writing", enabled });
-      const result = await applyAgentConnector(token, agentId, installationId, operationId);
+      const result = await applyAgentConnector(token, agentId, installationId, operationId, intentId);
       if (result === "applied") publishBinding(installationId, undefined, enabled);
       else if (result === "rejected") publishBinding(installationId, { status: "rejected" });
       else publishBinding(installationId, { status: "unknown", operationId });
