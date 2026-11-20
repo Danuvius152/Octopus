@@ -776,7 +776,7 @@ it.each([
   expect(browser.writes).toEqual([]);
 });
 
-it.each(["touch", "pen"] as const)("keeps downward %s reading across a window change without reviving follow", (source) => {
+it.each(["touch", "pen"] as const)("keeps the reading anchor when an old downward %s contact outlives its window", (source) => {
   const browser = timedOutViewport();
   browser.viewport.scrollTop = 200;
   const moveAnchor = moveReadingAnchor(browser.viewport);
@@ -795,8 +795,143 @@ it.each(["touch", "pen"] as const)("keeps downward %s reading across a window ch
   browser.grow(100);
   act(() => useSessionStore.getState().appendStreamingText("cold", "Output after window change"));
   browser.settle();
-  expect(browser.viewport.scrollTop).toBe(1000);
-  expect(browser.writes).toEqual([]);
+  expect(browser.viewport.scrollTop).toBe(280);
+  expect(browser.writes).toHaveLength(1);
+});
+
+it("uses a touch's only top report when it supersedes a queued history correction", async () => {
+  const browser = timedOutViewport();
+  const { viewport } = browser;
+  viewport.scrollTop = 200;
+  const moveAnchor = moveReadingAnchor(viewport);
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  act(replaceReadingWindow);
+  moveAnchor(80);
+  const reads = observeEarlierPages();
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(500)] });
+  viewport.scrollTop = 0;
+  fireEvent.scroll(viewport);
+  await act(async () => fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(500)] }));
+  browser.settle();
+  expect(viewport.scrollTop).toBe(0);
+  expect(reads).toEqual([expect.stringContaining("before_seq=49")]);
+});
+
+it.each(["scroll report", "positioning frame"] as const)("lets a touch's late return win over a queued history correction at the %s", (delivery) => {
+  const browser = timedOutViewport();
+  const { viewport } = browser;
+  viewport.scrollTop = 200;
+  moveReadingAnchor(viewport);
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  act(replaceReadingWindow);
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(300)] });
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(300)] });
+  viewport.scrollTop = 1000;
+  if (delivery === "scroll report") fireEvent.scroll(viewport);
+  else browser.frame();
+  browser.grow(100);
+  act(() => useSessionStore.getState().appendStreamingText("cold", "Output after late touch return"));
+  browser.settle();
+  expect(viewport.scrollTop).toBe(1100);
+});
+
+it("lets history correction finish after a downward touch release with no movement", () => {
+  const browser = timedOutViewport();
+  const { viewport } = browser;
+  viewport.scrollTop = 200;
+  const moveAnchor = moveReadingAnchor(viewport);
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  act(replaceReadingWindow);
+  moveAnchor(80);
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(300)] });
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(300)] });
+  browser.settle();
+  expect(viewport.scrollTop).toBe(280);
+  browser.grow(100);
+  act(() => useSessionStore.getState().appendStreamingText("cold", "Output after the stationary release"));
+  browser.settle();
+  expect(viewport.scrollTop).toBe(280);
+});
+
+it.each(["only measures", "writes a quantized no-op"] as const)("keeps released downward navigation through a history frame that %s", (frame) => {
+  const browser = timedOutViewport();
+  const { viewport } = browser;
+  viewport.scrollTop = 200;
+  const move = moveReadingAnchor(viewport);
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  act(replaceReadingWindow);
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(300)] });
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(300)] });
+  const targets: number[] = [];
+  if (frame === "writes a quantized no-op") {
+    let physicalTop = viewport.scrollTop;
+    Object.defineProperty(viewport, "scrollTop", { get: () => physicalTop, set: (target: number) => {
+      targets.push(target);
+      physicalTop = Math.round(target / 4) * 4;
+    } });
+    move(1.1);
+  }
+  browser.frame();
+  browser.frame();
+  expect(viewport.scrollTop).toBe(200);
+  if (frame === "writes a quantized no-op") expect(targets[0]).toBeCloseTo(201.1);
+  viewport.scrollTop = 1000;
+  fireEvent.scroll(viewport);
+  browser.grow(100);
+  act(() => useSessionStore.getState().appendStreamingText("cold", "Output after a measured frame"));
+  browser.settle();
+  expect(viewport.scrollTop).toBe(1100);
+});
+
+it.each([["before", "reading"], ["after", "reading"], ["after", "following"]] as const)(
+  "keeps touch %s the same-window history merge with %s intent", async (delivery, intent) => {
+  const browser = timedOutViewport();
+  const { viewport } = browser;
+  viewport.scrollTop = 320;
+  const moveAnchor = moveReadingAnchor(viewport);
+  moveAnchor(150);
+  const page = deferred<Record<string, unknown>>();
+  const fetch = vi.fn(async () => ({ ok: true, json: () => page.promise }));
+  vi.stubGlobal("fetch", fetch);
+  const sessions = useSessionStore.getState().sessions;
+  act(() => {
+    useSessionStore.setState({ token: "viewport-test", connected: true, hasMoreMessages: { cold: true } });
+    useSessionStore.setState({ sessions });
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Load earlier messages" }));
+  expect(fetch).toHaveBeenCalledWith(expect.stringContaining("before_seq=50"), expect.anything());
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss positioning notice" }));
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  const returns = intent === "following";
+  const y = returns ? 300 : 500;
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(y)] });
+  viewport.scrollTop = returns ? 1000 : 145;
+  if (delivery === "before") fireEvent.scroll(viewport);
+  await act(async () => page.resolve({
+    messages: [{ role: "assistant", type: "text", seq: 49, content: "Earlier history" }],
+    oldest_loaded_seq: 49, has_more_messages: false,
+  }));
+  expect(screen.getByText("Earlier history")).toBeVisible();
+  if (delivery === "after") fireEvent.scroll(viewport);
+  moveAnchor(120);
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(y)] });
+  if (returns) {
+    browser.grow(100);
+    act(() => useSessionStore.getState().appendStreamingText("cold", "Output after history merge and touch return"));
+  }
+  browser.settle();
+  expect(viewport.scrollTop).toBe(returns ? 1100 : 145);
+  if (returns) expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+  else expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
 });
 
 it.each([
@@ -956,6 +1091,7 @@ it.each(["pointerup", "pointercancel"] as const)("preserves a downward wheel in 
 it.each(["pointerup", "pointercancel"] as const)("only finishes a pointer's own downward navigation on %s", (end) => {
   const browser = timedOutViewport();
   browser.viewport.scrollTop = 900;
+  fireEvent.keyDown(browser.viewport, { key: "PageUp" });
   fireEvent.scroll(browser.viewport);
   chatPointer(browser.viewport, "pointerdown", "touch");
   chatPointer(browser.viewport, "pointermove", "touch", 300);
@@ -966,6 +1102,23 @@ it.each(["pointerup", "pointercancel"] as const)("only finishes a pointer's own 
   act(() => useSessionStore.getState().appendStreamingText("cold", "Output after a pointer's own downward motion"));
   browser.settle();
   expect(browser.viewport.scrollTop).toBe(end === "pointerup" ? 1080 : 1000);
+});
+
+it("does not apply a cancelled wheel from a retired window to current output", () => {
+  const browser = timedOutViewport();
+  act(() => useSessionStore.getState().appendStreamingText("cold", "Follow the initial return"));
+  browser.settle();
+  expect(browser.viewport.scrollTop).toBe(1000);
+  browser.viewport.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    act(replaceReadingWindow);
+  }, { once: true });
+  expect(fireEvent.wheel(browser.viewport, { deltaY: -120 })).toBe(false);
+  act(() => vi.advanceTimersByTime(0));
+  browser.grow(80);
+  act(() => useSessionStore.getState().appendStreamingText("cold", "Output for the current window"));
+  browser.settle();
+  expect(browser.viewport.scrollTop).toBe(1080);
 });
 
 it("honors an explicit Jump requested while a scrollbar contact is still held", () => {

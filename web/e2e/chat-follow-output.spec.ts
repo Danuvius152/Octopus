@@ -72,6 +72,27 @@ function holdAnimationFrames(page: Page) {
   });
 }
 
+function controlledTouch(scroller: Locator) {
+  return scroller.evaluateHandle((viewport) => ({
+    viewport,
+    emit(type: "touchstart" | "touchmove" | "touchend", clientY: number) {
+      const point = new Touch({ identifier: 71, target: viewport, clientX: 400, clientY });
+      viewport.dispatchEvent(new TouchEvent(type, { bubbles: true,
+        touches: type === "touchend" ? [] : [point], changedTouches: [point] }));
+    },
+  }));
+}
+
+function holdNativeScroll(scroller: Locator) {
+  return scroller.evaluateHandle((viewport) => {
+    const suppress = (event: Event) => {
+      if (event.target === viewport && event.isTrusted) event.stopImmediatePropagation();
+    };
+    document.addEventListener("scroll", suppress, true);
+    return { release: () => document.removeEventListener("scroll", suppress, true) };
+  });
+}
+
 async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [], beforeSelect?: () => Promise<void>,
   content = (index: number) => `Saved row ${index + 1}`) {
   const session = { id: "follow-output", agent_id: "follow-agent", name: "Following output", backend: "codex",
@@ -1275,6 +1296,556 @@ test("Home offers a return when layout grows before the first scroll notificatio
   await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
 });
 
+for (const intent of ["following", "reading"] as const) {
+  test(`a cancelled native wheel preserves ${intent} through new output`, async ({ page }) => {
+    const { scroller, gap, send, settle } = await openChat(page);
+    await scroller.hover();
+    if (intent === "reading") {
+      await page.mouse.wheel(0, -350);
+      await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+      // A layout/application write can reach bottom without restoring reading intent.
+      await scroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await settle();
+      await expect.poll(gap).toBeLessThanOrEqual(2);
+    }
+    const before = await scroller.evaluate((element) => {
+      element.addEventListener("wheel", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        element.dataset.wheelResult = `${event.isTrusted}/${event.defaultPrevented}`;
+      }, { once: true, passive: false });
+      return element.scrollTop;
+    });
+    await page.mouse.wheel(0, intent === "following" ? -120 : 120);
+    await expect(scroller).toHaveAttribute("data-wheel-result", "true/true");
+    send({ type: "assistant_delta", content: ("New lines of output.\n").repeat(24) + "Static Footer final marker" });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+    await settle();
+    if (intent === "following") {
+      await expectFooterMarkerInViewport(scroller);
+      await expect.poll(gap).toBeLessThanOrEqual(2);
+    } else {
+      expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - before)).toBeLessThanOrEqual(2);
+      expect(await gap()).toBeGreaterThan(100);
+    }
+  });
+}
+
+test("touch and pen direction without main-list movement preserve the readable tail", async ({ page }) => {
+  const { scroller, send, settle } = await openChat(page);
+  const movement = await scroller.evaluate((element) => {
+    const before = element.scrollTop;
+    const tap = (clientY: number) => new Touch({ identifier: 71, target: element, clientX: 400, clientY });
+    const touch = (type: string, next: Touch, touches = [next]) => {
+      element.dispatchEvent(new TouchEvent(type, { bubbles: true, touches, changedTouches: [next] }));
+    };
+    touch("touchstart", tap(400));
+    touch("touchmove", tap(405));
+    touch("touchend", tap(405), []);
+    for (const [type, clientY] of [["pointerdown", 400], ["pointermove", 405], ["pointercancel", 405]] as const) {
+      element.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 7, pointerType: "pen", isPrimary: true, clientY }));
+    }
+    return element.scrollTop - before;
+  });
+  expect(movement).toBe(0);
+  send({ type: "assistant_delta", content: ("New output after contact.\n").repeat(24) + "Static Footer final marker" });
+  await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+  await settle();
+  await expectFooterMarkerInViewport(scroller);
+});
+
+for (const source of ["touch", "pen"] as const) {
+  test(`a zero-movement ${source} release does not borrow a queued scroll into the bottom`, async ({ page }) => {
+    const { scroller, gap, send, settle } = await openChat(page);
+    await scroller.hover();
+    await page.mouse.wheel(0, -350);
+    await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+    await settle();
+    const parked = await scroller.evaluate((element, input) => {
+      // The application's write precedes contact, but its scroll event follows it.
+      element.scrollTop = element.scrollHeight;
+      const top = element.scrollTop;
+      if (input === "touch") {
+        for (const [type, clientY] of [["touchstart", 400], ["touchmove", 395], ["touchend", 395]] as const) {
+          const point = new Touch({ identifier: 71, target: element, clientX: 400, clientY });
+          element.dispatchEvent(new TouchEvent(type, { bubbles: true,
+            touches: type === "touchend" ? [] : [point], changedTouches: [point] }));
+        }
+      } else {
+        for (const [type, clientY] of [["pointerdown", 400], ["pointermove", 395], ["pointerup", 395]] as const) {
+          element.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 7, pointerType: "pen", isPrimary: true, clientY }));
+        }
+      }
+      return top;
+    }, source);
+    await settle();
+    send({ type: "assistant_delta", content: ("The reading position stays here.\n").repeat(24) });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("The reading position stays here.");
+    await settle();
+    expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - parked)).toBeLessThanOrEqual(2);
+    expect(await gap()).toBeGreaterThan(100);
+  });
+}
+
+for (const scenario of ["following", "reading", "layout clamp"] as const) {
+  const title = scenario === "layout clamp"
+    ? "a touch preserves following when a layout clamp restores the original range"
+    : `touch direction preserves ${scenario} intent when another source moved the list`;
+  test(title, async ({ page }) => {
+    const { scroller, gap, send, settle } = await openChat(page);
+    if (scenario === "reading") {
+      await scroller.hover();
+      await page.mouse.wheel(0, -350);
+      await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+    }
+    if (scenario === "layout clamp") {
+      await scroller.evaluate((viewport) => {
+        viewport.style.overflowAnchor = "none";
+        const spacer = document.createElement("div");
+        spacer.dataset.touchLayoutSpacer = "";
+        spacer.style.height = "120px";
+        viewport.querySelector("[data-viewport-type]")!.append(spacer);
+        viewport.scrollTop = viewport.scrollHeight;
+      });
+      await settle();
+      await expect.poll(gap).toBeLessThanOrEqual(2);
+    }
+    const touch = await controlledTouch(scroller);
+    let movement: { before: number; after: number; rangeRestored: boolean };
+    try {
+      movement = await touch.evaluate(({ viewport, emit }, scenario) => {
+        const before = viewport.scrollTop;
+        const maximum = viewport.scrollHeight - viewport.clientHeight;
+        emit("touchstart", 400);
+        if (scenario === "layout clamp") {
+          emit("touchmove", 405);
+          const spacer = viewport.querySelector<HTMLElement>("[data-touch-layout-spacer]")!;
+          spacer.style.height = "0px";
+          const after = viewport.scrollTop;
+          spacer.style.height = "120px";
+          viewport.dispatchEvent(new Event("scroll"));
+          emit("touchend", 405);
+          return { before, after, rangeRestored: maximum === viewport.scrollHeight - viewport.clientHeight };
+        }
+        viewport.scrollTop = scenario === "reading" ? maximum : before - 120;
+        viewport.dispatchEvent(new Event("scroll"));
+        const y = scenario === "reading" ? 395 : 405;
+        emit("touchmove", y);
+        emit("touchend", y);
+        return { before, after: viewport.scrollTop, rangeRestored: true };
+      }, scenario);
+    } finally { await touch.dispose(); }
+    expect(movement.rangeRestored).toBe(true);
+    expect(Math.abs(movement.before - movement.after)).toBeGreaterThan(60);
+    send({ type: "assistant_delta", content: ("New output after the touch.\n").repeat(24) + "Static Footer final marker" });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+    await settle();
+    if (scenario === "reading") {
+      expect(Math.abs(await scroller.evaluate((viewport) => viewport.scrollTop) - movement.after)).toBeLessThanOrEqual(2);
+      expect(await gap()).toBeGreaterThan(100);
+    } else {
+      await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
+      await expectFooterMarkerInViewport(scroller);
+    }
+  });
+}
+
+for (const boundary of ["top before the next move", "hidden text change", "a reversal before scroll reports", "3px from bottom"] as const) {
+  test(`touch navigation survives ${boundary}`, async ({ page }) => {
+    const { scroller, gap, send, settle } = await openChat(page);
+    const down = boundary === "3px from bottom";
+    if (down) {
+      await scroller.hover();
+      await page.mouse.wheel(0, -350);
+      await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+      await settle();
+    }
+    const touch = await controlledTouch(scroller);
+    try {
+      const movement = await touch.evaluate(({ viewport, emit }, boundary) => {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        const body = document.createElement("div");
+        if (boundary === "hidden text change") {
+          summary.textContent = "Visible summary";
+          details.append(summary, body);
+          viewport.append(details);
+        }
+        const maximum = viewport.scrollHeight - viewport.clientHeight;
+        if (boundary === "3px from bottom") viewport.scrollTop = maximum - 3;
+        const from = viewport.scrollTop;
+        emit("touchstart", 400);
+        if (boundary === "3px from bottom") {
+          emit("touchmove", 395);
+          emit("touchend", 395);
+          viewport.scrollTop = maximum;
+          viewport.dispatchEvent(new Event("scroll"));
+        } else {
+          emit("touchmove", 425);
+          if (boundary === "top before the next move") {
+            viewport.scrollTop = 0;
+            emit("touchmove", 450);
+          } else if (boundary === "a reversal before scroll reports") {
+            viewport.scrollTop -= 280;
+            emit("touchmove", 395);
+            viewport.scrollTop += 40;
+          } else {
+            viewport.scrollTop -= 240;
+            body.textContent = "A hidden text update alongside an actual scroll";
+          }
+          viewport.dispatchEvent(new Event("scroll"));
+          emit("touchend", 450);
+        }
+        return { from, to: viewport.scrollTop, range: viewport.scrollHeight - viewport.clientHeight };
+      }, boundary);
+      if (down) expect(movement.to - movement.from).toBe(3);
+      else {
+        expect(movement.from - movement.to).toBeGreaterThan(100);
+        await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+      }
+      send({ type: "assistant_delta", content: ("New text after the touch.\n").repeat(24) + "Static Footer final marker" });
+      await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+      await settle();
+      if (down) await expectFooterMarkerInViewport(scroller);
+      else {
+        expect(await gap()).toBeGreaterThan(200);
+        if (boundary === "top before the next move") await expect(scroller.getByText("Saved row 1", { exact: true })).toBeInViewport();
+      }
+    } finally { await touch.dispose(); }
+  });
+}
+
+test("touch navigation survives physical progress past the rounded range under CSS zoom", async ({ page }) => {
+  const { scroller, send, settle } = await openChat(page);
+  await scroller.hover();
+  await page.mouse.wheel(0, -350);
+  await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+  await scroller.evaluate((viewport) => { viewport.style.zoom = "2"; });
+  await settle();
+  const touch = await controlledTouch(scroller);
+  try {
+    const movement = await touch.evaluate(({ viewport, emit }) => {
+      const spacer = document.createElement("div");
+      viewport.querySelector("[data-viewport-type]")!.append(spacer);
+      for (let step = 0; step < 16; step++) {
+        spacer.style.height = `${12 + step * 0.25}px`;
+        const range = viewport.scrollHeight - viewport.clientHeight;
+        viewport.scrollTop = viewport.scrollHeight;
+        const physical = viewport.scrollTop;
+        if (physical <= range) continue;
+        viewport.scrollTop = range;
+        if (viewport.scrollTop !== range) continue;
+        emit("touchstart", 400);
+        emit("touchmove", 390);
+        emit("touchend", 390);
+        viewport.scrollTop = physical;
+        viewport.dispatchEvent(new Event("scroll"));
+        return { from: range, to: viewport.scrollTop, rangeAfter: viewport.scrollHeight - viewport.clientHeight };
+      }
+      return null;
+    });
+    expect(movement).not.toBeNull();
+    expect(movement!.rangeAfter).toBe(movement!.from);
+    expect(movement!.to - movement!.from).toBeGreaterThan(0);
+    expect(movement!.to - movement!.from).toBeLessThanOrEqual(1);
+    send({ type: "assistant_delta", content: ("New text after the zoomed return.\n").repeat(24) + "Static Footer final marker" });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+    await expectFooterMarkerInViewport(scroller);
+  } finally { await touch.dispose(); }
+});
+
+for (const source of ["root text", "native item"] as const) {
+  test(`touch reading survives a same-line ${source} update before the scroll report`, async ({ page }) => {
+    const { scroller, gap, send, settle } = await openChat(page);
+    const runtime = source === "native item" ? { runtime_metadata: identity("root", "root-item") } : {};
+    const preview = scroller.getByTestId("streaming-text");
+    send({ type: "assistant_delta", content: "Short line", ...runtime });
+    await expect(preview.getByText("Short line", { exact: true })).toBeVisible();
+    await expect.poll(gap).toBeLessThanOrEqual(2);
+    await settle();
+    const touch = await controlledTouch(scroller);
+    const scrollGate = await holdNativeScroll(scroller);
+    try {
+      const old = await touch.evaluate(({ viewport, emit }) => {
+        emit("touchstart", 400);
+        emit("touchmove", 450);
+        const before = viewport.scrollTop;
+        viewport.scrollTop = before - 160;
+        return { before, top: viewport.scrollTop, range: viewport.scrollHeight - viewport.clientHeight };
+      });
+      expect(old.before - old.top).toBeGreaterThan(100);
+      send({ type: "assistant_delta", content: "!", ...runtime });
+      await expect(preview.getByText("Short line!", { exact: true })).toBeVisible();
+      const updated = await touch.evaluate(({ viewport, emit }) => {
+        const state = { top: viewport.scrollTop, range: viewport.scrollHeight - viewport.clientHeight };
+        viewport.dispatchEvent(new Event("scroll"));
+        emit("touchend", 450);
+        return state;
+      });
+      expect(updated).toEqual({ top: old.top, range: old.range });
+      await scrollGate.evaluate((gate) => gate.release());
+      await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+      await settle();
+      const parked = await scroller.evaluate((viewport) => viewport.scrollTop);
+      send({ type: "assistant_delta", content: "\n" + "Additional output.\n".repeat(24), ...runtime });
+      await expect(preview).toContainText("Additional output.");
+      await settle();
+      expect(Math.abs(await scroller.evaluate((viewport) => viewport.scrollTop) - parked)).toBeLessThanOrEqual(2);
+      expect(await gap()).toBeGreaterThan(200);
+    } finally {
+      await scrollGate.evaluate((gate) => gate.release());
+      await scrollGate.dispose();
+      await touch.dispose();
+    }
+  });
+}
+
+for (const publication of ["running", "idle", "subagent card"] as const) {
+  test(`touch reading survives ${publication} publication before the scroll report`, async ({ page }) => {
+    const { scroller, gap, send, settle } = await openChat(page);
+    const loading = scroller.locator(".msg-loading");
+    const description = scroller.locator(".subagent-description");
+    const card = { type: "subagent", task_id: "legacy-task", tool_call_id: "legacy-tool", name: "Helper", status: "running" };
+    if (publication === "running") {
+      send({ type: "status", status: "idle" });
+      await expect(loading).toHaveCount(0);
+    } else if (publication === "subagent card") {
+      send({ type: "tool_use", seq: 41, tool: "Task", input: { description: "Inspect the issue" },
+        runtime_metadata: { request_id: "request", attempt_id: "attempt", tool_call_id: "legacy-tool" } });
+      send({ ...card, description: "Working" });
+      await expect(description).toHaveText("Working");
+    }
+    await settle();
+    const touch = await controlledTouch(scroller);
+    const scrollGate = await holdNativeScroll(scroller);
+    try {
+      const movement = await touch.evaluate(({ viewport, emit }) => {
+        const before = viewport.scrollTop;
+        emit("touchstart", 400);
+        emit("touchmove", 450);
+        viewport.scrollTop = before - 120;
+        return { before, top: viewport.scrollTop, range: viewport.scrollHeight - viewport.clientHeight };
+      });
+      expect(movement.before - movement.top).toBe(120);
+      if (publication === "subagent card") {
+        send({ ...card, description: "Working!" });
+        await expect(description).toHaveText("Working!");
+      } else {
+        send({ type: "status", status: publication });
+        await expect(loading).toHaveCount(publication === "running" ? 1 : 0);
+      }
+      const after = await touch.evaluate(({ viewport, emit }) => {
+        const sample = { top: viewport.scrollTop, range: viewport.scrollHeight - viewport.clientHeight };
+        viewport.dispatchEvent(new Event("scroll"));
+        emit("touchend", 450);
+        return sample;
+      });
+      expect(after.top).toBe(movement.top);
+      if (publication === "subagent card") expect(Math.abs(after.range - movement.range)).toBeLessThanOrEqual(2);
+      else expect(after.range).not.toBe(movement.range);
+      await scrollGate.evaluate((gate) => gate.release());
+      await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+      await settle();
+      const parked = await scroller.evaluate((viewport) => viewport.scrollTop);
+      if (publication === "idle") send({ type: "status", status: "running" });
+      send({ type: "assistant_delta", content: ("Output after the state update.\n").repeat(24) });
+      await expect(scroller.getByTestId("streaming-text")).toContainText("Output after the state update.");
+      await settle();
+      expect(Math.abs(await scroller.evaluate((viewport) => viewport.scrollTop) - parked)).toBeLessThanOrEqual(2);
+      expect(await gap()).toBeGreaterThan(200);
+    } finally {
+      await scrollGate.evaluate((gate) => gate.release());
+      await scrollGate.dispose();
+      await touch.dispose();
+    }
+  });
+}
+
+test("touch reading survives a stationary range change before the next scroll", async ({ page }) => {
+  const { scroller, gap, send, session, settle } = await openChat(page);
+  const touch = await controlledTouch(scroller);
+  try {
+    const result = await touch.evaluate(async ({ viewport, emit }, sessionId) => {
+      // Use the production event handler synchronously to keep the publication
+      // and following movement in the same browser task.
+      const modulePath = "/src/hooks/useWebSocket.ts";
+      const { handleWsMessage }: typeof import("../src/hooks/useWebSocket") = await import(modulePath);
+      const before = viewport.scrollTop;
+      const range = viewport.scrollHeight - viewport.clientHeight;
+      emit("touchstart", 400);
+      emit("touchmove", 450);
+      // This parent is outside the observed scroll subtree. ResizeObserver
+      // can only report after this task, after the store publication and move.
+      viewport.parentElement!.style.maxHeight = `${viewport.clientHeight - 80}px`;
+      const resized = { top: viewport.scrollTop, range: viewport.scrollHeight - viewport.clientHeight };
+      handleWsMessage({ type: "status", status: "idle", session_id: sessionId });
+      viewport.scrollTop -= 120;
+      viewport.dispatchEvent(new Event("scroll"));
+      emit("touchend", 450);
+      return { before, range, resized, after: viewport.scrollTop };
+    }, session.id);
+    expect(result.resized.top).toBe(result.before);
+    expect(result.resized.range - result.range).toBeGreaterThan(40);
+    expect(result.before - result.after).toBe(120);
+    await expect(scroller.locator(".msg-loading")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+    await settle();
+    const parked = await scroller.evaluate((viewport) => viewport.scrollTop);
+    send({ type: "status", status: "running" });
+    send({ type: "assistant_delta", content: "Output after the resized touch.\n".repeat(24) });
+    await expect(scroller.getByTestId("streaming-text")).toContainText("Output after the resized touch.");
+    await settle();
+    expect(Math.abs(await scroller.evaluate((viewport) => viewport.scrollTop) - parked)).toBeLessThanOrEqual(2);
+    expect(await gap()).toBeGreaterThan(200);
+  } finally { await touch.dispose(); }
+});
+
+for (const notification of ["before", "after"] as const) {
+test(`touch reading survives a scroll reported ${notification} history page merge`, async ({ page }) => {
+  const { scroller, settle, pages, replaceOnReconnect } = await openChat(page);
+  const row = (seq: number): Message => ({ role: "assistant", type: "text", seq, content: `History ${seq}` });
+  replaceOnReconnect({ messages: Array.from({ length: 40 }, (_, index) => row(index + 200)),
+    next_message_seq: 240, oldest_loaded_seq: 200, has_more_messages: true });
+  await expect(scroller.getByText("History 239", { exact: true })).toBeInViewport();
+  await scroller.evaluate((viewport) => {
+    viewport.style.overflowAnchor = "none";
+    viewport.scrollTop = 320;
+  });
+  await settle();
+  await scroller.getByRole("button", { name: "Load earlier messages" }).evaluate((button) => (button as HTMLButtonElement).click());
+  await expect.poll(() => pages.length).toBe(1);
+  await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
+  const touch = await controlledTouch(scroller);
+  const scrollGate = await holdNativeScroll(scroller);
+  try {
+    const moved = await touch.evaluate(({ viewport, emit }, notification) => {
+      const before = viewport.scrollTop;
+      emit("touchstart", 400);
+      emit("touchmove", 500);
+      viewport.scrollTop = 145;
+      if (notification === "before") viewport.dispatchEvent(new Event("scroll"));
+      return before - viewport.scrollTop;
+    }, notification);
+    expect(moved).toBeGreaterThan(100);
+    await pages[0].fulfill({ json: { messages: Array.from({ length: 15 }, (_, index) => row(index + 185)),
+      oldest_loaded_seq: 185, has_more_messages: false } });
+    await expect(scroller.getByRole("button", { name: /Load earlier|Loading earlier/ })).toHaveCount(0);
+    await settle();
+    const readingTop = await touch.evaluate(({ viewport, emit }, notification) => {
+      const top = viewport.scrollTop;
+      if (notification === "after") viewport.dispatchEvent(new Event("scroll"));
+      emit("touchend", 500);
+      return top;
+    }, notification);
+    await scrollGate.evaluate((gate) => gate.release());
+    await settle();
+    expect(Math.abs(await scroller.evaluate((viewport) => viewport.scrollTop) - readingTop)).toBeLessThanOrEqual(2);
+    await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+  } finally {
+    await scrollGate.evaluate((gate) => gate.release());
+    await scrollGate.dispose();
+    await touch.dispose();
+  }
+});
+}
+
+for (const destination of ["top", "tail", "tail after measurement", "tail after a quantized correction"] as const) {
+  test(`touch navigation to the ${destination} takes over a queued replacement window correction`, async ({ page }) => {
+    const { scroller, gap, send, settle, pages, replaceOnReconnect } = await openChat(page);
+    const row = (seq: number, content = `History ${seq}`): Message => ({ role: "assistant", type: "text", seq, content });
+    replaceOnReconnect({ messages: Array.from({ length: 40 }, (_, index) => row(index + 200)),
+      next_message_seq: 240, oldest_loaded_seq: 200, has_more_messages: false });
+    await expect(scroller.getByText("History 239", { exact: true })).toBeInViewport();
+    await scroller.hover();
+    await page.mouse.wheel(0, -350);
+    await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+    await settle();
+    const readingSeq = await scroller.evaluate((viewport) => {
+      const top = viewport.getBoundingClientRect().top;
+      const rows = [...viewport.querySelectorAll<HTMLElement>("[data-message-key]")];
+      return Number(rows.find((element) => element.getBoundingClientRect().top >= top)!.dataset.messageKey!.split(":")[1]);
+    });
+    const gate = await holdAnimationFrames(page);
+    const touch = await controlledTouch(scroller);
+    try {
+      const quantized = destination === "tail after a quantized correction";
+      const measured = destination === "tail after measurement" || quantized;
+      const oldest = measured ? 200 : 190;
+      // Removing a row after the reading anchor replaces the window without
+      // shifting that anchor. Its positioning frame should only measure.
+      replaceOnReconnect({ messages: Array.from({ length: measured ? 39 : 50 }, (_, index) => {
+        const seq = index + oldest;
+        return row(seq, seq === readingSeq ? "Replacement reading anchor" : undefined);
+      }), next_message_seq: 240, oldest_loaded_seq: oldest, has_more_messages: true });
+      await expect(scroller.getByText("Replacement reading anchor", { exact: true })).toBeVisible();
+      expect(await gate.evaluate((frames) => frames.count())).toBeGreaterThan(0);
+      const positionWrites = quantized ? await scroller.evaluateHandle((viewport) => {
+        const bounds = viewport.getBoundingClientRect();
+        for (const row of viewport.querySelectorAll<HTMLElement>("[data-message-key]")) {
+          const rect = row.getBoundingClientRect();
+          if (rect.bottom > bounds.top && rect.top < bounds.bottom) row.style.translate = "0 1.25px";
+        }
+        const native = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop")!;
+        const targets: number[] = [];
+        const observe = () => Object.defineProperty(viewport, "scrollTop", { configurable: true,
+          get: () => native.get!.call(viewport) as number,
+          set: (target: number) => {
+            targets.push(target);
+            const actual = native.get!.call(viewport) as number;
+            native.set!.call(viewport, actual + Math.round((target - actual) / 4) * 4);
+          },
+        });
+        return { observe, targets: () => targets, release: () => Reflect.deleteProperty(viewport, "scrollTop") };
+      }) : null;
+      const before = await touch.evaluate(({ viewport, emit }, destination) => {
+        const before = viewport.scrollTop;
+        emit("touchstart", 400);
+        const y = destination === "top" ? 500 : 300;
+        emit("touchmove", y);
+        if (destination !== "top") emit("touchend", y);
+        return before;
+      }, destination);
+      if (measured) {
+        try {
+          await positionWrites?.evaluate((writes) => { writes.observe(); });
+          await gate.evaluate((frames) => { frames.flush(); frames.flush(); });
+          expect(Math.abs(await scroller.evaluate((viewport) => viewport.scrollTop) - before)).toBeLessThanOrEqual(1);
+          if (positionWrites) {
+            expect((await positionWrites.evaluate((writes) => writes.targets())).some((target) => Math.abs(target - before) > 1)).toBe(true);
+          }
+        } finally {
+          await positionWrites?.evaluate((writes) => { writes.release(); });
+          await positionWrites?.dispose();
+        }
+      }
+      const moved = await touch.evaluate(({ viewport, emit }, { before, destination }) => {
+        viewport.scrollTop = destination === "top" ? 0 : viewport.scrollHeight;
+        viewport.dispatchEvent(new Event("scroll"));
+        if (destination === "top") emit("touchend", 500);
+        return Math.abs(viewport.scrollTop - before);
+      }, { before, destination });
+      expect(moved).toBeGreaterThan(40);
+      await gate.evaluate((frames) => frames.release());
+      if (destination === "top") {
+        await expect.poll(() => pages.length).toBe(1);
+        expect(new URL(pages[0].request().url()).searchParams.get("before_seq")).toBe("190");
+        await pages[0].fulfill({ json: { messages: [], oldest_loaded_seq: 190, has_more_messages: false } });
+        await expect(scroller.getByText("History 190", { exact: true })).toBeInViewport();
+      } else {
+        send({ type: "assistant_delta", content: ("New output after late touch arrival.\n").repeat(24) + "Static Footer final marker" });
+        await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+        await expectFooterMarkerInViewport(scroller);
+        await expect.poll(gap).toBeLessThanOrEqual(2);
+        expect(pages).toHaveLength(0);
+      }
+    } finally {
+      await touch.dispose();
+      await gate.evaluate((frames) => frames.release());
+      await gate.dispose();
+    }
+  });
+}
+
 for (const input of ["cancelled wheel", "stationary thumb"] as const) {
 test(`a ${input} and restored layout range do not offer a jump`, async ({ page }) => {
   const { scroller, gap, settle } = await openChat(page);
@@ -1321,7 +1892,7 @@ test(`a ${input} and restored layout range do not offer a jump`, async ({ page }
     if (input === "cancelled wheel") expect(movement.cancelled).toBe(true);
     expect(movement.restored).toBe(movement.height);
     expect(movement.before - movement.clamped).toBeGreaterThan(80);
-    await expect.poll(gap).toBeGreaterThan(60);
+    if (input === "stationary thumb") await expect.poll(gap).toBeGreaterThan(60);
     await settle();
     await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
   } finally {

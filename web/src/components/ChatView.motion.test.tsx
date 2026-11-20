@@ -129,7 +129,10 @@ function motionViewport(bottomRemainder = 0, revealGrowth = 0, stopAtReveal = fa
       viewport.scrollTop = Math.min(viewport.scrollTop, Math.max(0, height - viewportHeight - bottomRemainder));
       if (deliverResize) notify();
     },
-    resize: (next: number) => { viewportHeight = next; notify(); },
+    resize: (next: number, deliverResize = true) => {
+      viewportHeight = next;
+      if (deliverResize) notify();
+    },
     afterScroll: (callback?: () => void) => { afterScroll = callback; },
     takeFrames: () => { const batch = [...queued.values()]; queued.clear(); return batch; },
     unmount: () => view.unmount(),
@@ -275,14 +278,34 @@ it("takes an intermediate step on a short frame under browser zoom", () => {
 
 it.each([0, 0.5])("keeps following after a downward wheel at a %spx bottom remainder", (remainder) => {
   const motion = motionViewport(remainder);
-  fireEvent.wheel(motion.viewport, { deltaY: 100 });
+  fireEvent.wheel(motion.viewport, { deltaY: 100, cancelable: false });
   motion.grow(100);
   for (let index = 0; index < 30; index++) motion.tick(16);
   expect(motion.viewport.scrollTop).toBe(700 - remainder);
   expect(motion.pending()).toBe(0);
 });
 
-it.each(["wheel", "End"])("resumes reading clamped to bottom on explicit %s without extra displacement", (input) => {
+it("stops the queued write during a cancelled wheel and then follows new output", async () => {
+  const motion = motionViewport();
+  motion.grow(100);
+  const frames = motion.takeFrames();
+  expect(frames.length).toBeGreaterThan(0);
+  motion.viewport.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    // A descendant listener runs after capture but before the default is decided.
+    motion.tick(16);
+    for (const frame of frames) frame(motion.now() + 16);
+  }, { once: true });
+  expect(fireEvent.wheel(motion.viewport, { deltaY: -100 })).toBe(false);
+  expect(motion.writes).toHaveLength(0);
+  await act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  motion.grow(100);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(motion.viewport.scrollTop).toBe(800);
+  expect(motion.pending()).toBe(0);
+});
+
+it.each(["wheel", "End"])("resumes reading clamped to bottom on explicit %s without extra displacement", async (input) => {
   const motion = motionViewport(0.5);
   fireEvent.keyDown(motion.viewport, { key: "PageUp" });
   motion.viewport.scrollTop = 400;
@@ -291,9 +314,14 @@ it.each(["wheel", "End"])("resumes reading clamped to bottom on explicit %s with
   expect(motion.viewport.scrollTop).toBe(399.5);
   motion.tick(16);
   expect(motion.writes).toHaveLength(0);
-  if (input === "wheel") fireEvent.wheel(motion.viewport, { deltaY: 100 });
-  else fireEvent.keyDown(motion.viewport, { key: "End" });
-  motion.grow(100);
+  if (input === "wheel") {
+    fireEvent.wheel(motion.viewport, { deltaY: 100 });
+    motion.grow(100);
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  } else {
+    fireEvent.keyDown(motion.viewport, { key: "End" });
+    motion.grow(100);
+  }
   for (let index = 0; index < 30; index++) motion.tick(16);
   expect(motion.viewport.scrollTop).toBe(499.5);
   expect(motion.pending()).toBe(0);
@@ -378,13 +406,323 @@ it("pauses output for the whole touch contact and resumes only after its qualifi
   expect(motion.pending()).toBe(0);
 });
 
+it.each(["touch", "pen"] as const)("preserves following after %s direction without main-list displacement", (source) => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  const pen = (type: string, clientY: number) => {
+    const event = new MouseEvent(type, { bubbles: true, clientY });
+    Object.defineProperties(event, { pointerId: { value: 7 }, pointerType: { value: "pen" }, isPrimary: { value: true } });
+    fireEvent(viewport, event);
+  };
+  if (source === "touch") {
+    fireEvent.touchStart(viewport, { touches: [touch(400)] });
+    fireEvent.touchMove(viewport, { touches: [touch(405)] });
+    motion.grow(80);
+    fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(405)] });
+  } else {
+    pen("pointerdown", 400);
+    pen("pointermove", 405);
+    motion.grow(80);
+    pen("pointercancel", 405);
+  }
+  expect(motion.writes).toHaveLength(0);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(viewport.scrollTop).toBe(680);
+  expect(motion.pending()).toBe(0);
+});
+
+it("keeps reading after a downward touch direction at the bottom with no main-list displacement", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(395)] });
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(395)] });
+  motion.grow(100);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(viewport.scrollTop).toBe(600);
+  expect(motion.writes).toHaveLength(0);
+});
+
+it("does not credit a touch with displacement made before contact but reported after it", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  viewport.scrollTop = 500;
+  fireEvent.scroll(viewport);
+  viewport.scrollTop = 600;
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(395)] });
+  fireEvent.scroll(viewport);
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(395)] });
+  motion.grow(100);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(viewport.scrollTop).toBe(600);
+  expect(motion.writes).toHaveLength(0);
+});
+
+it.each(["following", "reading"] as const)("ignores a scroll reported before touch direction while %s", (intent) => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  if (intent === "reading") {
+    fireEvent.keyDown(viewport, { key: "PageUp" });
+    viewport.scrollTop = 550;
+    fireEvent.scroll(viewport);
+  }
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  viewport.scrollTop = intent === "reading" ? 600 : 550;
+  fireEvent.scroll(viewport);
+  const y = intent === "reading" ? 395 : 405;
+  fireEvent.touchMove(viewport, { touches: [touch(y)] });
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(y)] });
+  motion.grow(200);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  if (intent === "following") {
+    expect(viewport.scrollTop).toBe(800);
+    expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+  } else expect(viewport.scrollTop).toBeLessThan(750);
+});
+
+it("does not adopt an unrelated upward scroll after the touch is released", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(405)] });
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(405)] });
+  viewport.scrollTop = 550;
+  fireEvent.scroll(viewport);
+  motion.grow(200);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(viewport.scrollTop).toBe(800);
+  expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+});
+
+it("does not credit a layout clamp when the original range returns before the scroll report", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(405)] });
+  // Two layout writes in the same task. The browser reports only the final
+  // range and the offset left behind when the first write clamped it.
+  viewport.style.minHeight = "1px";
+  motion.grow(-40, false);
+  viewport.style.minHeight = "";
+  motion.grow(40, false);
+  expect(viewport.scrollTop).toBe(560);
+  // Publish unrelated state before the delayed scroll report as well.
+  act(() => useSessionStore.setState({ agents: [] }));
+  fireEvent.scroll(viewport);
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(405)] });
+  motion.grow(200);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(viewport.scrollTop).toBe(800);
+  expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+});
+
+it.each(["reaches top before the next move", "overlaps a hidden text change before scroll", "releases within bottom tolerance"] as const)(
+  "retains real touch navigation when it %s", (scenario) => {
+    const motion = motionViewport();
+    const { viewport } = motion;
+    const touch = (clientY: number) => ({ identifier: 7, clientY });
+    const down = scenario === "releases within bottom tolerance";
+    if (down) {
+      fireEvent.keyDown(viewport, { key: "PageUp" });
+      viewport.scrollTop = 597;
+      fireEvent.scroll(viewport);
+    }
+    const hidden = document.createElement("span");
+    hidden.hidden = true;
+    viewport.append(hidden);
+    fireEvent.touchStart(viewport, { touches: [touch(400)] });
+    fireEvent.touchMove(viewport, { touches: [touch(down ? 395 : 425)] });
+    if (down) {
+      fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(395)] });
+      viewport.scrollTop = 600;
+      fireEvent.scroll(viewport);
+    } else {
+      viewport.scrollTop = scenario === "reaches top before the next move" ? 0 : 550;
+      if (scenario === "reaches top before the next move") {
+        fireEvent.touchMove(viewport, { touches: [touch(450)] });
+      } else hidden.textContent = "Different hidden text";
+      fireEvent.scroll(viewport);
+      fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(450)] });
+    }
+    motion.grow(200);
+    for (let frame = 0; frame < 30; frame++) motion.tick(16);
+    if (down) expect(viewport.scrollTop).toBe(800);
+    else {
+      expect(viewport.scrollTop).toBeLessThan(750);
+      expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+    }
+  },
+);
+
+it("keeps reading when the transcript clamps to bottom after a partial downward touch", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  viewport.scrollTop = 580;
+  fireEvent.scroll(viewport);
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(380)] });
+  viewport.scrollTop = 590;
+  fireEvent.scroll(viewport);
+  motion.grow(-15);
+  fireEvent.scroll(viewport);
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(380)] });
+  expect(viewport.scrollTop).toBe(585);
+  motion.grow(300);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  // Virtual row measurements can compensate the offset while the tail grows.
+  expect(viewport.scrollTop).toBeLessThan(785);
+});
+
+it("commits an upward touch displacement reported only after the direction reverses", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(425)] });
+  viewport.scrollTop = 550;
+  fireEvent.touchMove(viewport, { touches: [touch(405)] });
+  viewport.scrollTop = 570;
+  fireEvent.scroll(viewport);
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(405)] });
+  motion.grow(200);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(viewport.scrollTop).toBeLessThan(750);
+  expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+});
+
+it("commits touch movement made before a same-line Footer update and reported after it", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  act(() => useSessionStore.setState({ sessions: [{ ...session, status: "running" }],
+    streamingText: { [session.id]: { content: "Short line" } } }));
+  expect(screen.getByText("Short line")).toBeVisible();
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(450)] });
+  const range = viewport.scrollHeight - viewport.clientHeight;
+  viewport.scrollTop = 540;
+  act(() => useSessionStore.getState().appendStreamingText(session.id, "!"));
+  expect(screen.getByText("Short line!")).toBeVisible();
+  expect(viewport.scrollHeight - viewport.clientHeight).toBe(range);
+  expect(viewport.scrollTop).toBe(540);
+  fireEvent.scroll(viewport);
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(450)] });
+  expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+  motion.grow(200);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  // Virtuoso can compensate for rows whose estimated heights change.
+  expect(viewport.scrollTop).toBeLessThan(700);
+});
+
+it("accepts a released touch's physical half-pixel progress past the rounded range", () => {
+  const motion = motionViewport(-0.5, 0, false, 0.5);
+  const { viewport } = motion;
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  viewport.scrollTop = 600;
+  fireEvent.scroll(viewport);
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(390)] });
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(390)] });
+  viewport.scrollTop = 600.5;
+  fireEvent.scroll(viewport);
+  motion.grow(200);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(viewport.scrollTop).toBeGreaterThanOrEqual(799);
+});
+
+it("offers Jump when successive native reports of the same touch move beyond bottom tolerance", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(425)] });
+  viewport.scrollTop = 598;
+  fireEvent.scroll(viewport);
+  expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+  viewport.scrollTop = 580;
+  fireEvent.scroll(viewport);
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(425)] });
+  expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+});
+
+it("preserves following when the Touch owner is cancelled after moving the main list", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(425)] });
+  viewport.scrollTop = 580;
+  fireEvent.scroll(viewport);
+  motion.grow(100);
+  motion.tick(16);
+  expect(motion.writes).toHaveLength(0);
+  fireEvent.touchCancel(viewport, { touches: [], changedTouches: [touch(425)] });
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(viewport.scrollTop).toBe(700);
+  expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+});
+
+it("recognizes a held touch's later upward scroll after the output changes the range", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(425)] });
+  motion.grow(100);
+  viewport.scrollTop = 580;
+  fireEvent.scroll(viewport);
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(425)] });
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+  expect(viewport.scrollTop).toBeLessThan(650);
+});
+
+it("recognizes a held touch after a stationary publication records a new scroll range", () => {
+  const motion = motionViewport();
+  const { viewport } = motion;
+  const touch = (clientY: number) => ({ identifier: 7, clientY });
+  fireEvent.touchStart(viewport, { touches: [touch(400)] });
+  fireEvent.touchMove(viewport, { touches: [touch(425)] });
+  motion.resize(500, false);
+  expect(viewport.scrollTop).toBe(600);
+  expect(viewport.scrollHeight - viewport.clientHeight).toBe(700);
+  act(() => useSessionStore.setState({ agents: [] }));
+  expect(viewport.scrollTop).toBe(600);
+
+  viewport.scrollTop = 550;
+  fireEvent.scroll(viewport);
+  fireEvent.touchEnd(viewport, { touches: [], changedTouches: [touch(425)] });
+  for (let frame = 0; frame < 12; frame++) motion.tick(16);
+  const parked = viewport.scrollTop;
+  motion.grow(200);
+  for (let frame = 0; frame < 30; frame++) motion.tick(16);
+  expect(viewport.scrollTop).toBe(parked);
+  expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+});
+
 it("ignores an unrelated changed touch before the qualified owner releases", () => {
   const motion = motionViewport();
   fireEvent.keyDown(motion.viewport, { key: "PageUp" });
+  motion.viewport.scrollTop = 500;
+  fireEvent.scroll(motion.viewport);
   const touch = { identifier: 7, clientY: 400 };
   fireEvent.touchStart(motion.viewport, { touches: [touch] });
   const moved = { ...touch, clientY: 300 };
   fireEvent.touchMove(motion.viewport, { touches: [moved] });
+  motion.viewport.scrollTop = 600;
+  fireEvent.scroll(motion.viewport);
   fireEvent.touchEnd(motion.viewport, { touches: [moved], changedTouches: [{ identifier: 8, clientY: 300 }] });
   fireEvent.touchEnd(motion.viewport, { touches: [], changedTouches: [moved] });
   motion.grow(100);
