@@ -56,6 +56,28 @@ async def rm(mgr, db):
     yield r
 
 
+@pytest.fixture
+async def research_api(rm, mgr, db, monkeypatch):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from server.deps import get_session_manager
+    from server.routers import research, sessions
+    from server.users import UserManager
+
+    app = FastAPI()
+    app.include_router(research.router)
+    app.include_router(sessions.router)
+    app.dependency_overrides[get_session_manager] = lambda: mgr
+    monkeypatch.setattr(research, "research_manager", rm)
+    monkeypatch.setattr("server.research.research_manager", rm)
+    owner = (await db.get_system_agent())["user_id"]
+    token = await UserManager(db).issue_token(owner)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
+                           headers={"Authorization": f"Bearer {token}"}) as client:
+        yield client
+
+
 async def _session(mgr, db, *, backend="claude-code"):
     agent = await db.get_system_agent()
     return await mgr.create_session(agent["id"], "S", backend=backend)
@@ -335,6 +357,112 @@ async def test_natural_drain_waits_for_report_processing_without_a_browser(rm, d
     assert "browser_confirmed_version" not in receipt
 
 
+@pytest.mark.parametrize("retirement", ["delete_claimed", "delete_finished", "work_closed", "work_retiring_send"])
+async def test_research_drain_follows_a_committed_late_receipt_into_its_send(
+    rm, mgr, db, research_api, monkeypatch, caplog, tmp_path, retirement,
+):
+    from server.mcp_identity import close_work
+    from server.models import TurnOutcome
+    from server.sessions.submission import RequestCompletion, SubmissionReceipt
+
+    session = await _session(mgr, db)
+    job_id, request_id, work_id = "late-research", "observed-report", f"work:{session.id}"
+    completion = asyncio.get_running_loop().create_future()
+    report = tmp_path / "report.md"
+    report.write_text("Original report")
+    await db.create_research_job(job_id, session.id, "Original report", "now")
+    await db.confirm_research_outcome(job_id, "completed", completed_at="now", report_path=str(report))
+    await rm._start_delivery_observer(job_id, session.id, work_id,
+                                      SubmissionReceipt("accepted", request_id, completion))
+    committed, return_commit = asyncio.Event(), asyncio.Event()
+    entered_retirement, finish_retirement = asyncio.Event(), asyncio.Event()
+    sending, finish_send = asyncio.Event(), asyncio.Event()
+    advance, retire = db.advance_research_delivery, rm.retire_session
+    observed = []
+
+    async def hold_committed_progress(research_id, input_id, stage, **kwargs):
+        result = await advance(research_id, input_id, stage, **kwargs)
+        if stage == "processing":
+            assert result["stage"] == "processing"
+            committed.set()
+            await return_commit.wait()
+        return result
+
+    async def hold_source_retirement(session_id):
+        if retirement == "delete_claimed":
+            entered_retirement.set()
+            await finish_retirement.wait()
+        await retire(session_id)
+
+    async def hold_late_send(event):
+        receipt = event.get("delivery_receipt")
+        if event["type"] == "research_delivery" and receipt and receipt["stage"] == "processing":
+            observed.append((event["research_id"], receipt["request_id"], receipt["version"]))
+            sending.set()
+            await finish_send.wait()
+            raise RuntimeError("late Research progress send failed")
+
+    monkeypatch.setattr(db, "advance_research_delivery", hold_committed_progress)
+    monkeypatch.setattr(rm, "retire_session", hold_source_retirement)
+    mgr.on_broadcast("late Research progress", hold_late_send, user_id=session.user_id, required=True)
+    progress = asyncio.create_task(
+        mgr._broadcast({"type": "dequeued", "session_id": session.id, "request_id": request_id}),
+    )
+    deletion = draining = None
+    try:
+        await asyncio.wait_for(committed.wait(), 3)
+        observer = rm._task(job_id, "delivery")
+        assert observer is not None
+        completion.set_result(RequestCompletion(request_id, request_id, "completed",
+            TurnOutcome(request_id=request_id, status="success"), "committed"))
+        await asyncio.wait_for(asyncio.shield(observer), 3)
+        assert job_id not in rm._jobs and request_id not in rm._delivery_jobs
+        assert not rm._publications.pending
+
+        if retirement == "work_closed":
+            close_work(work_id)
+            assert mgr.get_session(session.id) is session
+        elif retirement != "work_retiring_send":
+            deletion = asyncio.create_task(research_api.delete(f"/api/sessions/{session.id}"))
+            if retirement == "delete_claimed":
+                await asyncio.wait_for(entered_retirement.wait(), 3)
+                assert mgr.session_deleting(session.id)
+            else:
+                assert (await asyncio.wait_for(asyncio.shield(deletion), 3)).status_code == 204
+                assert await db.get_research_job(job_id) is None
+                assert mgr.get_session(session.id) is None
+
+        draining = asyncio.create_task(rm.wait_for_idle())
+        await asyncio.sleep(0)
+        drain_waited_for_callback = not draining.done() and bool(rm.drain_blockers())
+        return_commit.set()
+        await asyncio.wait_for(sending.wait(), 3)
+        if retirement == "work_retiring_send":
+            assert not progress.done()
+            close_work(work_id)
+            await asyncio.wait_for(rm.cancel_work(work_id), 3)
+            assert mgr.get_session(session.id) is session
+        await asyncio.wait_for(asyncio.shield(progress), 3)
+        assert drain_waited_for_callback
+        assert not draining.done() and rm.drain_blockers()
+        assert observed == [(job_id, request_id, 2)]
+        finish_send.set()
+        await asyncio.wait_for(draining, 3)
+        assert "late Research progress send failed" in caplog.text
+        finish_retirement.set()
+        if deletion is not None:
+            assert (await asyncio.wait_for(deletion, 3)).status_code == 204
+    finally:
+        return_commit.set()
+        finish_send.set()
+        finish_retirement.set()
+        if not completion.done():
+            completion.set_result(RequestCompletion(request_id, request_id, "unavailable"))
+        await asyncio.gather(*(task for task in (progress, deletion, draining) if task is not None), return_exceptions=True)
+        mgr.remove_broadcast("late Research progress")
+        await rm.shutdown()
+
+
 async def test_observer_shutdown_timeout_retains_original_cancellation_cleanup(rm, mgr, db, pending_report, monkeypatch):
     job, _ = pending_report
     cleaning, release = asyncio.Event(), asyncio.Event()
@@ -526,21 +654,147 @@ async def test_session_delete_retries_selected_research_failure(rm, mgr, db, mon
     assert events == [(job["id"], "failed", "Research was refused before any leaf started")]
 
 
-async def test_delete_finishes_the_original_cancel_after_its_ack_is_lost(rm, mgr, db, monkeypatch):
-    monkeypatch.setattr("server.research.research_manager", rm)
-    entered = asyncio.Event()
+@pytest.mark.parametrize("archived", [False, True], ids=["live", "archived"])
+async def test_first_cancel_notice_without_a_pipeline_can_delete_its_session(
+    rm, mgr, db, research_api, archived,
+):
+    session = await _session(mgr, db)
+    sid, job_id = session.id, "saved-job"
+    await db.create_research_job(job_id, sid, "Persisted job without a pipeline", "now")
+    if archived:
+        await mgr.archive_session(sid, replace=False)
+    deleted = asyncio.get_running_loop().create_future()
+    sending, finish_send = asyncio.Event(), asyncio.Event()
+
+    async def delete_from_notice(event):
+        if event["type"] == "research_failed" and event["research_id"] == job_id:
+            assert (await db.get_research_job(job_id))["status"] == "cancelled"
+            if archived:
+                removed = await mgr.delete_session(sid)
+            else:
+                response = await research_api.delete(f"/api/sessions/{sid}")
+                removed = response.status_code == 204
+            deleted.set_result(removed)
+
+    async def receive_after_delete(event):
+        if event["type"] == "research_failed" and event["research_id"] == job_id:
+            sending.set()
+            await finish_send.wait()
+
+    audience = None if archived else session.user_id
+    mgr.on_broadcast("delete from the first cancellation notice", delete_from_notice, user_id=audience, required=True)
+    mgr.on_broadcast("cancellation notice after deletion", receive_after_delete, user_id=session.user_id, required=True)
+    try:
+        response = await asyncio.wait_for(research_api.post(f"/api/sessions/{sid}/research/{job_id}/cancel"), 3)
+        assert response.status_code == 200 and response.json()["status"] == "cancelled"
+        assert await asyncio.wait_for(asyncio.shield(deleted), 3)
+        assert await db.get_research_job(job_id) is None
+        await asyncio.wait_for(sending.wait(), 3)
+        draining = asyncio.create_task(rm.wait_for_idle())
+        await asyncio.sleep(0)
+        assert not draining.done()
+        finish_send.set()
+        await asyncio.wait_for(draining, 3)
+    finally:
+        finish_send.set()
+        mgr.remove_broadcast("delete from the first cancellation notice")
+        mgr.remove_broadcast("cancellation notice after deletion")
+        await rm.shutdown()
+
+
+async def test_delete_after_research_insert_keeps_the_original_cancel_candidate(rm, mgr, db, research_api, monkeypatch):
+    session = await _session(mgr, db)
+    created = asyncio.get_running_loop().create_future()
+    finish_start = asyncio.Event()
+    entered_retirement, finish_retirement = asyncio.Event(), asyncio.Event()
+    create, confirm, delete = db.create_research_job, db.confirm_research_outcome, db.delete_session
+    retire, attempts = rm.retire_session, []
+
+    async def hold_after_insert(job_id, *args, **kwargs):
+        await create(job_id, *args, **kwargs)
+        created.set_result(job_id)
+        await finish_start.wait()
+
+    async def fail_original_write(job_id, status, **kwargs):
+        attempts.append((job_id, status, kwargs["completed_at"]))
+        if len(attempts) == 1:
+            raise OSError("Original cancellation write failed")
+        return await confirm(job_id, status, **kwargs)
+
+    async def hold_before_retirement(session_id):
+        entered_retirement.set()
+        await finish_retirement.wait()
+        await retire(session_id)
+
+    async def delete_after_original_cancellation(session_id):
+        job_id = created.result()
+        saved = await db.get_research_job(job_id)
+        assert (saved["status"], saved["completed_at"], saved["error"]) == ("cancelled", attempts[0][2], "cancelled by user")
+        await delete(session_id)
+
+    monkeypatch.setattr(db, "create_research_job", hold_after_insert)
+    monkeypatch.setattr(db, "confirm_research_outcome", fail_original_write)
+    monkeypatch.setattr(db, "delete_session", delete_after_original_cancellation)
+    monkeypatch.setattr(rm, "retire_session", hold_before_retirement)
+    session_url = f"/api/sessions/{session.id}"
+    starting = asyncio.create_task(research_api.post(f"{session_url}/research", json={"question": "Persist the original job"}))
+    deleting = None
+    try:
+        job_id = await asyncio.wait_for(asyncio.shield(created), 3)
+        with pytest.raises(OSError, match="Original cancellation write failed"):
+            await research_api.post(f"{session_url}/research/{job_id}/cancel")
+        deleting = asyncio.create_task(research_api.delete(session_url))
+        await asyncio.wait_for(entered_retirement.wait(), 3)
+        finish_start.set()
+        assert (await asyncio.wait_for(asyncio.shield(starting), 3)).status_code == 409
+        finish_retirement.set()
+        assert (await asyncio.wait_for(asyncio.shield(deleting), 3)).status_code == 204
+        assert attempts == [(job_id, "cancelled", attempts[0][2])] * 2
+    finally:
+        finish_start.set()
+        finish_retirement.set()
+        await asyncio.gather(*(task for task in (starting, deleting) if task is not None), return_exceptions=True)
+        await rm.shutdown()
+
+
+@pytest.mark.parametrize("ack_lost", [False, True], ids=["failed-write", "lost-ack"])
+@pytest.mark.parametrize(("retirement", "control_first"), [
+    ("session", False), ("work", False), ("session", True),
+], ids=["session-pipeline-first", "work-pipeline-first", "session-control-first"])
+async def test_retirement_finishes_the_original_failed_cancellation(
+    rm, mgr, db, research_api, monkeypatch, ack_lost, retirement, control_first,
+):
+    from server.mcp_identity import close_work
+
+    entered, retrying, allow_retry = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    allow_pipeline_exit = asyncio.Event()
+    if not control_first:
+        allow_pipeline_exit.set()
     confirm, attempts, events = db.confirm_research_outcome, [], []
+    failure = OSError("Original cancellation write failed")
+    original_timestamp = None
 
     async def pipeline(*args, **kwargs):
         entered.set()
-        await asyncio.Future()
+        try:
+            await asyncio.Future()
+        finally:
+            await allow_pipeline_exit.wait()
 
-    async def lose_first_ack(job_id, status, **kwargs):
-        decision = await confirm(job_id, status, **kwargs)
-        attempts.append((kwargs["completed_at"], decision[0]))
-        if len(attempts) == 1:
-            raise OSError("Lost original cancellation acknowledgement")
-        return decision
+    async def fail_first(job_id, status, **kwargs):
+        nonlocal original_timestamp
+        stamp = kwargs["completed_at"]
+        attempts.append((job_id, status, stamp))
+        if original_timestamp is None:
+            original_timestamp = stamp
+            if ack_lost:
+                await confirm(job_id, status, **kwargs)
+            raise failure
+        if stamp != original_timestamp:
+            raise OSError("Unexpected cancellation write from pipeline cleanup")
+        retrying.set()
+        await allow_retry.wait()
+        return await confirm(job_id, status, **kwargs)
 
     async def observe(event):
         if event["type"] == "research_failed":
@@ -548,17 +802,61 @@ async def test_delete_finishes_the_original_cancel_after_its_ack_is_lost(rm, mgr
 
     mgr.on_broadcast("original cancelled Research", observe)
     monkeypatch.setattr(rm_mod, "run_research", pipeline)
-    monkeypatch.setattr(db, "confirm_research_outcome", lose_first_ack)
+    monkeypatch.setattr(db, "confirm_research_outcome", fail_first)
     session = await _session(mgr, db)
     job = await rm.start(session.id, "Cancel the original job once")
+    job_id = job["id"]
+    original = rm._task(job_id)
+    cancel_url = f"/api/sessions/{session.id}/research/{job_id}/cancel"
     await asyncio.wait_for(entered.wait(), 3)
-    with pytest.raises(OSError, match="Lost original cancellation acknowledgement"):
-        await rm.cancel(job["id"])
-    assert (await db.get_research_job(job["id"]))["status"] == "cancelled"
-    assert await asyncio.wait_for(mgr.delete_session(session.id), 3)
-    await rm.shutdown()
-    assert attempts[0][1] and (attempts[0][0], False) in attempts[1:]
-    assert events == [(job["id"], "cancelled")]
+    for _ in range(2):
+        with pytest.raises(OSError) as error:
+            await research_api.post(cancel_url)
+        assert error.value is failure
+    assert attempts == [(job_id, "cancelled", original_timestamp)]
+    assert (await db.get_research_job(job_id))["status"] == ("cancelled" if ack_lost else "running")
+
+    if retirement == "work":
+        work_id = rm._jobs[job_id].work_id
+        close_work(work_id)
+        retiring = asyncio.create_task(rm.cancel_work(work_id))
+    else:
+        delete = db.delete_session
+
+        async def delete_after_recovery(sid):
+            saved = await db.get_research_job(job_id)
+            assert (saved["status"], saved["completed_at"]) == ("cancelled", original_timestamp)
+            await delete(sid)
+
+        monkeypatch.setattr(db, "delete_session", delete_after_recovery)
+        retiring = asyncio.create_task(research_api.delete(f"/api/sessions/{session.id}"))
+    try:
+        await asyncio.wait_for(retrying.wait(), 3)
+        if control_first:
+            control = rm._task(job_id, "control")
+            allow_retry.set()
+            await asyncio.wait_for(asyncio.shield(control), 3)
+            assert rm._task(job_id, "control") is None
+            assert not retiring.done() and not original.done()
+            allow_pipeline_exit.set()
+        else:
+            await asyncio.wait_for(asyncio.gather(original, return_exceptions=True), 3)
+            allow_retry.set()
+        response = await asyncio.wait_for(asyncio.shield(retiring), 3)
+        if retirement == "session":
+            assert response.status_code == 204
+        else:
+            saved = await db.get_research_job(job_id)
+            assert (saved["status"], saved["completed_at"]) == ("cancelled", original_timestamp)
+        await rm.shutdown()
+        assert attempts == [(job_id, "cancelled", original_timestamp)] * 2
+        assert events == [(job_id, "cancelled")]
+    finally:
+        allow_retry.set()
+        allow_pipeline_exit.set()
+        await asyncio.gather(retiring, return_exceptions=True)
+        mgr.remove_broadcast("original cancelled Research")
+        await asyncio.gather(rm.shutdown(), return_exceptions=True)
 
 
 async def test_session_delete_from_research_result_publication_observes_the_committed_receipt(rm, mgr, db, monkeypatch):

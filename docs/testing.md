@@ -340,6 +340,7 @@ boundaries to verification without maintaining a second per-file inventory.
 | Wiki HTTP lifecycle and effect recovery | [Wiki](implemented/wiki-development-summary.md#恢复与效果核验) | `test_wiki_test_runtime.py` and the changed operation's API/job tests |
 | Wiki byte refusal and stale projections | [Resource policy](implemented/wiki-development-summary.md#文档字节支持与资源拒绝) | `test_wiki_document_budget.py`, `test_wiki_search_resource_state.py` |
 | Return admission, original work and installation drain | [Returns](implemented/input-reliability.md#公共返回接管), [BG](implemented/background-tasks.md), [installation](implemented/installation-lifecycle.md) | `test_return_admission.py`, `test_installation_drain.py` |
+| Permanent deletion, source publication and question settlement | [Delegation](implemented/agent-collaboration.md#reply-delivery-the-original-request-completion), [Research](implemented/native-deep-research.md#researchmanager-async-job-like-bgdelegationsscheduler) | `test_work_publication.py`, `test_return_admission_lifecycle.py`, `test_research_manager.py`, `test_delegation_return_retry.py`, `test_unattended_parent_questions.py` |
 
 A controlled peer or browser fixture proves the boundary it actually exercises.
 It does not establish a new live-provider run, deployment, or arbitrary recursive

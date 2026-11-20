@@ -100,6 +100,88 @@ async def test_handoff_waits_for_an_admitted_lifecycle_operation_outside_its_sho
     assert response.status_code == 200
 
 
+async def test_handoff_recovers_the_original_question_receipt_after_child_delete(
+    installation, monkeypatch, short_process_shutdown,
+):
+    from server.agent_manager import AgentManager
+    from tests.harness_profiles import process_profile, session_turn_argv
+
+    running = installation
+    manager, parent = running.manager, running.session
+    delegations = main.delegation_manager
+    delegations.bind(manager, running.db)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    await AgentManager(running.db).create_agent(name="Worker", backend="codex", user_id=parent.user_id)
+    await manager.interrupt(parent.id)
+    started = asyncio.Event()
+    profile = get_harness("codex").profile
+
+    def argv(context):
+        started.set()
+        event = json.dumps({"type": "thread.started", "thread_id": "test"})
+        code = f"import time; print({event!r}, flush=True); time.sleep(30)"
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
+
+    harness = Harness(process_profile(profile, build_turn_argv=session_turn_argv(profile, argv),
+                                      prepare_resume=None, activity_observer=None))
+    monkeypatch.setitem(_REGISTRY, "codex", harness)
+    rec = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="Original child")
+    await asyncio.wait_for(started.wait(), 3)
+    failing, reading, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    lookup = manager.source_receipt
+    reads = []
+
+    async def observe(source, delivery_id, **kwargs):
+        if delivery_id.startswith("agent-question:"):
+            if not failing.is_set():
+                failing.set()
+                raise RuntimeError("Original question receipt read failed")
+            reads.append((source, delivery_id, kwargs["session_id"]))
+            reading.set()
+            await release.wait()
+        return await lookup(source, delivery_id, **kwargs)
+
+    monkeypatch.setattr(manager, "source_receipt", observe)
+    request = {"request_id": str(uuid4())}
+    try:
+        question_id = await manager.create_pending_question(rec.delegation_id, [{"question": "Original decision"}])
+        await asyncio.wait_for(failing.wait(), 3)
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await delegations.confirm_recording()
+        # Cancel owns the independent terminal return. Remove its queued
+        # input from the paused parent before isolating the receipt blocker.
+        await delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id)
+        terminal = await lookup("delegation", f"agent-terminal:{rec.work_id}", session_id=parent.id)
+        assert terminal is not None and await manager.cancel_request(parent.id, terminal[1].request_id)
+        assert await manager.delete_session(rec.delegation_id)
+        assert await running.db.get_session_binding(rec.delegation_id) is None
+        refused = await running.client.post("/api/installation/quiesce", json=request)
+        assert refused.status_code == 409
+        await asyncio.wait_for(reading.wait(), 2)
+        again = await running.client.post("/api/installation/quiesce", json=request)
+        assert again.status_code == 409
+        assert running.app.state.installation_owner.offline_request is None
+        release.set()
+        try:
+            async with asyncio.timeout(3):
+                while True:
+                    response = await running.client.post("/api/installation/quiesce", json=request)
+                    if response.status_code == 200:
+                        break
+                    assert response.status_code == 409
+                    await asyncio.sleep(0.01)
+        except TimeoutError:
+            pytest.fail(f"Quiesce still blocked after receipt recovery: {response.json()}")
+        assert response.json() == {"status": "stopping", **request}
+        assert reads == [("delegation", f"agent-question:{rec.work_id}:{question_id}", parent.id)]
+    finally:
+        release.set()
+        monkeypatch.setattr(manager, "source_receipt", lookup)
+        if manager.get_session(rec.delegation_id) is not None:
+            await manager.delete_session(rec.delegation_id)
+        await delegations.confirm_recording()
+
+
 async def test_handoff_observes_original_oauth_task_then_seals_login_admission(installation, monkeypatch):
     from server.harness.login import OAuthCompletion
     from server.oauth_credentials import OAuthCredentials

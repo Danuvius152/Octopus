@@ -129,47 +129,76 @@ class SessionPublisher:
             self._wake_owner()
 
 
+class WorkPublication:
+    """The notification handoff for one original work."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self._released: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def release(self) -> None:
+        if not self._released.done():
+            self._released.set_result(None)
+
+
 class WorkPublications:
     """Track ordered notifications that may outlive their resource writer."""
 
     def __init__(self) -> None:
-        self._tails: dict[str, tuple[asyncio.Task[None], asyncio.Future[None]]] = {}
+        self._tails: dict[WorkPublication, asyncio.Task[BaseException | None]] = {}
 
     @property
-    def pending(self) -> set[asyncio.Task[None]]:
+    def pending(self) -> set[asyncio.Task[BaseException | None]]:
         # Each last publication joins every predecessor for the same source.
-        return {task for task, _ in self._tails.values()}
+        return set(self._tails.values())
 
-    async def publish(self, key: str, send: Callable[[], Awaitable[None]], *, retiring: bool, required: bool = True) -> None:
-        tail = self._tails.get(key)
+    def create_scope(self, label: str) -> WorkPublication:
+        return WorkPublication(label)
+
+    def _finish(self, source: WorkPublication, done: asyncio.Task[BaseException | None]) -> None:
+        if self._tails[source] is done:
+            del self._tails[source]
+        if not done.cancelled():
+            done.exception()
+
+    async def publish(
+        self, source: WorkPublication, send: Callable[[], Awaitable[None]], *, required: bool = True,
+    ) -> None:
+        tail = self._tails.get(source)
         secrets = (settings.auth_token,)
-        released = tail[1] if tail else asyncio.get_running_loop().create_future()
+        label, released = source.label, source._released
         sending = withdrawn = False
 
-        async def deliver() -> None:
+        async def deliver() -> BaseException | None:
             nonlocal sending
-            if tail:
-                await asyncio.wait({tail[0]})
-            if not withdrawn:
-                sending = True
+            if tail is not None:
+                await asyncio.wait({tail})
+            if withdrawn:
+                return None
+            sending = True
+            caller = asyncio.current_task()
+            cancellations = caller.cancelling() if caller is not None else 0
+            try:
                 await send()
+            except (asyncio.CancelledError, Exception) as error:
+                if isinstance(error, asyncio.CancelledError) and caller is not None and caller.cancelling() > cancellations:
+                    raise
+                if required and not released.done():
+                    # Keep subscriber cancellation as a delivery result so
+                    # it remains distinguishable from cancellation of this task.
+                    return error
+                logger.error("Work publication failed key=%s\n%s", label,
+                             exception_diagnostic(error, secrets=secrets))
+            return None
 
-        task = asyncio.create_task(deliver(), name=f"work-publication-{key}")
-        self._tails[key] = (task, released)
+        task = asyncio.create_task(deliver(), name=f"work-publication-{label}")
+        self._tails[source] = task
+        task.add_done_callback(partial(self._finish, source))
+        # Pending registration owns the scope. Only the completion signals
+        # belong to the waiter, whose traceback can outlive the send.
+        del source
 
-        def finished(done: asyncio.Task[None]) -> None:
-            if self._tails[key][0] is done:
-                del self._tails[key]
-            if not done.cancelled():
-                error = done.exception()
-                if error is not None and (released.done() or not required):
-                    logger.error("Work publication failed key=%s\n%s", key,
-                                 exception_diagnostic(error, secrets=secrets))
-
-        task.add_done_callback(finished)
-        if retiring:
-            self.release(key)
-        milestones: set[asyncio.Future[None]] = {task, released}
+        milestones: set[asyncio.Future[Any]] = {task, released}
         try:
             await asyncio.wait(milestones, return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
@@ -179,14 +208,8 @@ class WorkPublications:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
             raise
-        if not released.done():
-            try:
-                task.result()
-            except Exception:
-                if required:
-                    raise
-
-    def release(self, key: str) -> None:
-        tail = self._tails.get(key)
-        if tail and not tail[1].done():
-            tail[1].set_result(None)
+        # A required send that failed before release keeps its original error,
+        # even if the producer and the handoff are both ready when it resumes.
+        if task.done() and (not task.cancelled() or not released.done()):
+            if (error := task.result()) is not None:
+                raise error

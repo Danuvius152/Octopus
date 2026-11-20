@@ -10,9 +10,141 @@ import pytest
 from server.harness import get_harness
 from server.mcp_identity import mint, verify
 from server.routers.questions import router
+from server.sessions.owner_questions import AttachQuestionParent, CaptureQuestion
 from tests.harness_profiles import process_profile
 from tests.test_delegation_restart_security import wait_live_scope
 from tests.test_delegation_work import work_runtime as work_runtime
+
+
+@pytest.mark.parametrize("binding", ["bound", "closed", "adapter-error", "deleted-parent"])
+async def test_unattended_question_broadcast_waits_for_original_child_binding(work_runtime, monkeypatch, binding):
+    manager, delegations, original_parent, starts = work_runtime
+    parent = await manager.create_session(
+        original_parent.agent_id, "Unattended parent", original_parent.working_dir, backend="codex",
+    )
+    manager.work_test_app.include_router(router)
+    if binding == "deleted-parent":
+        from server.routers.sessions import router as session_router
+
+        monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+        manager.work_test_app.include_router(session_router)
+    await manager.start_message(parent.id, "held scheduled parent", source="schedule")
+    caller = await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    rec = await delegations.start_delegation(
+        parent_session_id=parent.id, agent_name="Worker", request="held child", scope=caller,
+    )
+    child_scope = await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    child = manager.get_session(rec.delegation_id)
+    owner = manager._question_owner(child, internal=True)
+    call = owner.call_question
+    entering, release = asyncio.Event(), asyncio.Event()
+    drain_observed, resume_drain = asyncio.Event(), asyncio.Event()
+    wait = asyncio.wait
+    broadcast = asyncio.get_running_loop().create_future()
+    attachment = []
+    binding_results = []
+    binding_error = RuntimeError("Original child attachment adapter failed")
+    draining = None
+
+    async def pause_captured_drain(futures, *args, **kwargs):
+        result = await wait(futures, *args, **kwargs)
+        if binding == "adapter-error" and asyncio.current_task() is draining:
+            drain_observed.set()
+            await resume_drain.wait()
+        return result
+
+    async def hold_binding(command):
+        if isinstance(command, AttachQuestionParent):
+            attachment.append(command.receipt)
+            entering.set()
+            await release.wait()
+            if binding == "adapter-error":
+                raise binding_error
+            result = await call(command)
+            binding_results.append(result)
+            return result
+        return await call(command)
+
+    async def observe_broadcast(event):
+        if event.get("type") != "question_request" or event.get("session_id") != child.id or broadcast.done():
+            await delegations._on_broadcast(event)
+            return
+        try:
+            await delegations._on_broadcast(event)
+        except RuntimeError as error:
+            broadcast.set_result((event, error))
+            raise
+        broadcast.set_result((event, None))
+
+    monkeypatch.setattr(owner, "call_question", hold_binding)
+    monkeypatch.setattr(asyncio, "wait", pause_captured_drain)
+    manager.on_broadcast(delegations.BROADCAST_KEY, observe_broadcast, required=True)
+    token = mint(child.id, user_id=child_scope.user_id, run_lease_id=child_scope.run_lease_id, work_id=child_scope.work_id)
+    created = await manager.work_test_client.post(
+        f"/api/sessions/{child.id}/questions", headers={"Authorization": f"Bearer {token}"},
+        json={"questions": [{"question": "Which authorized destination?"}]},
+    )
+    assert created.status_code == 201
+    qid = created.json()["question_id"]
+    try:
+        await asyncio.wait_for(entering.wait(), 3)
+        receipt, = attachment
+        assert receipt.accepted and not receipt._completion.done()
+        await asyncio.wait_for(delegations.confirm_recording(return_session_id=parent.id), 1)
+        draining = asyncio.create_task(delegations.confirm_recording())
+        pending = await asyncio.wait_for(owner.call_question(CaptureQuestion(qid)), 1)
+        assert pending is not None and pending.answer_target == "parent" and pending.parent_receipt is None
+        assert manager.has_pending_question(child.id, qid)
+        _, unfinished = await asyncio.wait({broadcast, draining}, timeout=0.05)
+        assert unfinished == {broadcast, draining}
+        if binding == "closed":
+            assert await manager.close_pending_question(child.id, qid)
+        if binding == "deleted-parent":
+            queued = manager.dispatch_snapshot(parent.id)["items"]
+            assert [item["request_id"] for item in queued] == [receipt.request_id]
+            deleted = await asyncio.wait_for(manager.work_test_client.delete(f"/api/sessions/{parent.id}"), 3)
+            assert deleted.status_code == 204
+            assert await manager.db.get_session_binding(parent.id) is None
+            assert receipt._completion.done()
+            assert not broadcast.done() and not draining.done()
+        release.set()
+        event, error = await asyncio.wait_for(asyncio.shield(broadcast), 3)
+        if binding == "adapter-error":
+            assert error is binding_error
+            await asyncio.wait_for(drain_observed.wait(), 3)
+            # Reentry owns the same accepted parent input even if the child
+            # has since closed the question after its broadcast failed.
+            monkeypatch.setattr(owner, "call_question", call)
+            await manager._broadcast(event)
+            await delegations.confirm_recording()
+            resume_drain.set()
+            with pytest.raises(RuntimeError, match="cleanup failed") as failure:
+                await asyncio.wait_for(draining, 3)
+            assert failure.value.__cause__ is binding_error
+        else:
+            assert error is None
+            await asyncio.wait_for(draining, 3)
+            if binding == "bound":
+                assert pending.parent_receipt is receipt and manager.has_pending_question(child.id, qid)
+                await manager._broadcast(event)
+                assert attachment == [receipt] and binding_results == [True]
+            else:
+                assert attachment == [receipt] and binding_results == [False]
+                assert pending.parent_receipt is None and not manager.has_pending_question(child.id, qid)
+        if binding != "deleted-parent":
+            queued = manager.dispatch_snapshot(parent.id)["items"]
+            assert [item["request_id"] for item in queued] == [receipt.request_id]
+    finally:
+        release.set()
+        resume_drain.set()
+        if draining is not None:
+            await asyncio.gather(draining, return_exceptions=True)
+        monkeypatch.setattr(owner, "call_question", call)
+        # If this deliberate adapter error remained unretired, keep the test
+        # failure and let the fixture close its isolated database.
+        for task in tuple(delegations._commands):
+            if task.done() and not task.cancelled() and task.exception() is binding_error:
+                delegations._forget_command(task)
 
 
 @pytest.mark.parametrize("solvable", [True, False])

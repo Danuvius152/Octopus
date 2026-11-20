@@ -13,11 +13,12 @@ import pytest
 
 from server import session_manager as sm
 from server.database import Database
-from server.delegations import DelegationRunState, delegation_manager
+from server.delegations import DelegationRunState, _RoundPublication, delegation_manager
 from server.harness import BackendForkNotSupported, get_harness
 from server.harness.events import HarnessEvent
 from server.session_manager import ForkError, SessionManager
 from server.sessions import forking as sm_forking
+from server.sessions.publication import WorkPublication
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
@@ -315,6 +316,7 @@ async def test_fork_refused_active_delegation(manager):
     rec = DelegationRunState(
         delegation_id="child1", parent_session_id=parent.id,
         target_agent_id="a", target_agent_name="A", request="do",
+        work_id="fork-blocking-work", _publication=_RoundPublication(WorkPublication("fork-blocking-work")),
     )
     delegation_manager._records["child1"] = rec
     try:

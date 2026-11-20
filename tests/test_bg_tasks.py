@@ -753,6 +753,38 @@ async def test_slow_started_notification_does_not_extend_total_runtime(
     assert "finished" not in result.stdout
 
 
+async def test_shutdown_joins_the_completion_send_after_user_cancel(manager, db, tmp_path):
+    await _make_session_row(db, "s1", str(tmp_path))
+    completion_entered, finish_send = asyncio.Event(), asyncio.Event()
+    notices = []
+
+    async def broadcast(event):
+        if event["type"] == "bg_completed":
+            completion_entered.set()
+            await finish_send.wait()
+        notices.append(event["type"])
+
+    manager.bind(db, _noop_deliver, broadcast)
+    original = await manager.start_task(session_id="s1", command="exec sleep 60", working_dir=str(tmp_path))
+    shutdown = None
+    try:
+        assert await manager.cancel_task(original.id)
+        await asyncio.wait_for(completion_entered.wait(), 3)
+        record = await manager.get_task(original.id)
+        assert (record.status, record.stop_reason) == ("cancelled", "user_cancel")
+        shutdown = asyncio.create_task(manager.shutdown())
+        await asyncio.sleep(0)
+        assert not shutdown.done()
+        assert notices == ["bg_started"]
+        finish_send.set()
+        await asyncio.wait_for(shutdown, 3)
+        assert notices == ["bg_started", "bg_completed", "bg_delivery"]
+    finally:
+        finish_send.set()
+        if shutdown is not None:
+            await asyncio.gather(shutdown, return_exceptions=True)
+
+
 @pytest.mark.parametrize("cause, expected_status", [
     ("user_cancel", "cancelled"), ("server_shutdown", "interrupted"),
     ("external_signal", "interrupted"),

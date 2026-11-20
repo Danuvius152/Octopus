@@ -822,6 +822,58 @@ async def test_public_deletion_shares_retirement_of_a_late_background_group(back
         await asyncio.gather(*(task for task in (startup, first, second) if task is not None), return_exceptions=True)
 
 
+async def test_background_started_subscriber_can_delete_before_its_send_finishes(
+    background, runtime, monkeypatch, tmp_path,
+):
+    from server import bg_tasks
+
+    bg, session, _, broadcasts = background
+    manager, db, _, _, _, _ = runtime
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", bg)
+    pid_file = tmp_path / "background.pid"
+    delete_row = db.delete_session
+    before_delete = []
+    delete_response = asyncio.get_running_loop().create_future()
+    finish_send = asyncio.Event()
+
+    async def observe_row_deletion(session_id):
+        task, = await bg.list_tasks(session_id)
+        before_delete.append((task.status, task.stop_reason, process_alive(int(pid_file.read_text()))))
+        await delete_row(session_id)
+
+    monkeypatch.setattr(db, "delete_session", observe_row_deletion)
+    async with await session_client(manager, session) as client:
+        async def delete_from_started(event):
+            if event["type"] == "bg_started":
+                await wait_until(lambda: pid_file.exists() and bool(pid_file.read_text()))
+                response = await client.delete(f"/api/sessions/{session.id}")
+                delete_response.set_result(response.status_code)
+                await finish_send.wait()
+
+        manager.on_broadcast("bg-subscriber-delete", delete_from_started, required=True)
+        startup = asyncio.create_task(bg.start_task(
+            session_id=session.id, working_dir=str(tmp_path), command="echo $$ > background.pid; exec sleep 60",
+        ))
+        shutdown = None
+        try:
+            assert await asyncio.wait_for(delete_response, 5) == 204
+            await asyncio.wait_for(startup, 3)
+            assert before_delete == [("cancelled", "work_cancelled", False)]
+            assert await db.get_session_binding(session.id) is None
+            assert [event["type"] for event in broadcasts] == ["bg_started"]
+            shutdown = asyncio.create_task(bg.shutdown())
+            await asyncio.sleep(0)
+            assert not shutdown.done() and bg.drain_blockers()
+            finish_send.set()
+            await asyncio.wait_for(shutdown, 3)
+            assert [event["type"] for event in broadcasts][:2] == ["bg_started", "bg_completed"]
+            assert not bg.drain_blockers()
+        finally:
+            finish_send.set()
+            await asyncio.gather(startup, *([shutdown] if shutdown else []), return_exceptions=True)
+            manager.remove_broadcast("bg-subscriber-delete")
+
+
 async def test_public_delete_keeps_its_original_live_target(runtime, monkeypatch):
     manager, db, session, _, _, _ = runtime
     entered, release = asyncio.Event(), asyncio.Event()
