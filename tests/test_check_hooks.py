@@ -125,6 +125,7 @@ def pytest_checkout(tmp_path, hook_env):
     root = tmp_path / "moved pytest checkout"
     root.mkdir()
     env = {key: value for key, value in hook_env.items() if not key.startswith("PYTEST_")}
+    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = "1"
     git(root, env, "init", "-q")
     for path in (".gitignore", "lefthook.yml", "pyproject.toml", "scripts/check.sh",
                  "scripts/check_runner.py", "scripts/python_environment.py", "scripts/toolchain-env.sh"):

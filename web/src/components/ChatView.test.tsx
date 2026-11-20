@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ChatView } from "./ChatView";
 import { mockChatViewport } from "./chatViewport.test-support";
 import { VirtuosoMockContext } from "react-virtuoso";
@@ -45,32 +45,38 @@ it.each([[200, false], [400, false], [200, true], [400, true]] as const)(
     return Response.json({ models: [], reasoning_efforts: ["low", "high"], service_tiers: ["default", "fast"] });
   }));
   try {
-    setup();
+    renderChat();
     const open = () => fireEvent.click(screen.getByRole("button", { name: "Model, reasoning and speed settings" }));
+    const settings = () => within(screen.getByRole("dialog"));
     open();
-    fireEvent.change(screen.getByLabelText("Model name"), { target: { value: "old-model" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    const initial = settings();
+    fireEvent.change(initial.getByLabelText("Model name"), { target: { value: "old-model" } });
+    fireEvent.click(initial.getByRole("button", { name: "Save settings" }));
     expect(saves).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(initial.getByRole("button", { name: "Close" }));
     open();
-    expect(screen.getByLabelText("Model name")).toBeEnabled();
-    fireEvent.change(screen.getByLabelText("Model name"), { target: { value: "new-model" } });
-    if (newPending) fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    const draft = settings();
+    const model = draft.getByLabelText("Model name");
+    expect(model).toBeEnabled();
+    fireEvent.change(model, { target: { value: "new-model" } });
+    if (newPending) fireEvent.click(draft.getByRole("button", { name: "Save settings" }));
     await act(async () => saves[0].reply.resolve(status === 200
       ? Response.json({ ...selected, model: "old-model", reasoning_effort: "high" })
       : Response.json({ detail: "Old opening refusal" }, { status })));
     expect(useSessionStore.getState().sessions[0]).toMatchObject(status === 200
       ? { model: "old-model", reasoning_effort: "high" } : { model: "original-model", reasoning_effort: null });
-    expect(screen.getByLabelText("Model name")).toHaveValue("new-model");
-    expect(screen.getByLabelText("Reasoning effort")).toHaveValue("");
-    if (newPending) expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
-    else expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();
+    const current = settings();
+    expect(current.getByLabelText("Model name")).toHaveValue("new-model");
+    expect(current.getByLabelText("Reasoning effort")).toHaveValue("");
+    const save = current.getByRole("button", { name: "Save settings" });
+    if (newPending) expect(save).toBeDisabled();
+    else expect(save).toBeEnabled();
     expect(screen.queryByText("Old opening refusal")).toBeNull();
     expect(useSessionStore.getState().messages[session.id] ?? []).toEqual([]);
-    if (!newPending) fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    if (!newPending) fireEvent.click(save);
     expect(saves.map((save) => save.body)).toEqual([{ model: "old-model" }, { model: "new-model" }]);
     await act(async () => saves[1].reply.resolve(Response.json({ ...selected, model: "new-model", reasoning_effort: "high" })));
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(useSessionStore.getState().messages[session.id]).toEqual([expect.objectContaining({ type: "notice", content: expect.stringContaining("new-model") })]);
   } finally { vi.unstubAllGlobals(); }
 });
@@ -201,11 +207,16 @@ it("keeps the queue paused and reports a failed resume", async () => {
   vi.unstubAllGlobals();
 });
 
-function setup(send?: Parameters<typeof ChatView>[0]["sendMessage"]) {
+function renderChat(send?: Parameters<typeof ChatView>[0]["sendMessage"]) {
   const sendMessage = vi.fn(send);
   render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}><ChatView sendMessage={sendMessage} interrupt={vi.fn()}
     answerQuestion={vi.fn()}
     connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} /></VirtuosoMockContext.Provider>);
+  return sendMessage;
+}
+
+function setup(send?: Parameters<typeof ChatView>[0]["sendMessage"]) {
+  const sendMessage = renderChat(send);
   return {
     sendMessage,
     input: screen.getByRole("textbox"),

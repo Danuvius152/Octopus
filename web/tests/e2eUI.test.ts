@@ -58,35 +58,42 @@ function phases(stdout: string): Phase[] {
   return stdout.split("\n").filter(line => line.startsWith("UI_PROTOCOL ")).map(line => JSON.parse(line.slice(12)));
 }
 
-it("keeps the actual package UI entry on the same scoped runner", () => {
-  const child = runUI(["app.spec.ts"], "none", true);
-  expect(child.status, child.stderr || child.stdout).toBe(0);
-  expect(phases(child.stdout).map(({ scope, projects }) => [scope, projects])).toEqual([["main", ["chromium"]]]);
-}, 15_000);
-
-for (const [label, flags, host, port] of [
-  ["UI window", ["--ui"], undefined, undefined],
-  ["inline host and port", ["--ui-host=127.0.0.1", "--ui-port=0"], "127.0.0.1", 0],
-  ["separate host and port", ["--ui-host", "127.0.0.1", "--ui-port", "0"], "127.0.0.1", 0],
-  ["host alone", ["--ui-host=127.0.0.1"], "127.0.0.1", undefined],
-  ["port alone", ["--ui-port", "0"], undefined, 0],
-] as const) it(`collects before opening the native ${label} and confines each UI phase`, () => {
-  const child = runUI(["app.spec.ts", "connectors.spec.ts", "accounts.spec.ts", ...flags]);
+it("opens the package UI entry once per selected scope with only that scope's tests", () => {
+  const files = ["app.spec.ts", "connectors.spec.ts", "accounts.spec.ts"];
+  const child = runUI(files, "none", true);
   expect(child.status, child.stderr || child.stdout).toBe(0);
   const opened = phases(child.stdout);
   expect(opened.map(({ scope, projects }) => [scope, projects])).toEqual([
     ["main", ["chromium"]], ["main", ["installation"]], ["accounts", ["installation"]],
   ]);
   for (const phase of opened) {
-    expect(phase.options.args).toEqual(["app.spec.ts", "connectors.spec.ts", "accounts.spec.ts"]);
+    expect(phase.options.args).toEqual(files);
     expect(phase.options.project).toEqual(phase.projects);
     expect(phase.options.reporter).toBeUndefined();
-    expect(phase.options.host).toBe(host);
-    expect(phase.options.port).toBe(port);
+    expect(phase.options.host).toBeUndefined();
+    expect(phase.options.port).toBeUndefined();
     if (phase.projects[0] === "installation") expect(phase.workers).toBe(1);
   }
   expect(child.stdout.match(/no offline test execution was audited/g)).toHaveLength(3);
 }, 20_000);
+
+for (const [label, flags, host, port] of [
+  ["inline host and port", ["--ui-host=127.0.0.1", "--ui-port=0"], "127.0.0.1", 0],
+  ["separate host and port", ["--ui-host", "127.0.0.1", "--ui-port", "0"], "127.0.0.1", 0],
+  ["host alone", ["--ui-host=127.0.0.1"], "127.0.0.1", undefined],
+  ["port alone", ["--ui-port", "0"], undefined, 0],
+] as const) it(`preserves ${label} on the selected native UI project`, () => {
+  const child = runUI(["app.spec.ts", ...flags]);
+  expect(child.status, child.stderr || child.stdout).toBe(0);
+  const opened = phases(child.stdout);
+  expect(opened).toHaveLength(1);
+  expect(opened[0]).toMatchObject({ scope: "main", projects: ["chromium"] });
+  expect(opened[0].options.args).toEqual(["app.spec.ts"]);
+  expect(opened[0].options.project).toEqual(["chromium"]);
+  expect(opened[0].options.reporter).toBeUndefined();
+  expect(opened[0].options.host).toBe(host);
+  expect(opened[0].options.port).toBe(port);
+}, 15_000);
 
 it("preserves the UI option boundary after native variadic project selection", () => {
   const child = runUI(["--project", "chromium", "--ui-port", "0", "app.spec.ts", "connectors.spec.ts"]);

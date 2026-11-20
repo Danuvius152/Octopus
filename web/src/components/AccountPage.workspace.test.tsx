@@ -40,25 +40,25 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 async function mount() {
-  const view = render(<AccountPage />);
-  await screen.findByLabelText("Stop allowing /repo/a");
+  const view = await act(async () => render(<AccountPage />));
+  expect(screen.getByLabelText("Stop allowing /repo/a")).toBeEnabled();
   return view;
 }
 
 it("admits only one same-batch retry of the editing baseline", async () => {
   const original = fetch, pending = deferred<Response>();
-  heldLoads.push(pending);
   let openings = 0, body: Record<string, unknown>;
   vi.stubGlobal("fetch", vi.fn(async (url: unknown, init?: RequestInit) => {
     if (String(url).endsWith("/workspace-edits")) {
       body = JSON.parse(String(init?.body));
       if (++openings === 1) return Response.json({ detail: "Unavailable" }, { status: 503 });
+      heldLoads.push(pending);
       return pending.promise;
     }
     return original(url as RequestInfo, init);
   }));
-  render(<AccountPage />);
-  const retry = await screen.findByRole("button", { name: "Retry loading" });
+  await act(async () => { render(<AccountPage />); });
+  const retry = screen.getByRole("button", { name: "Retry loading" });
   act(() => { retry.click(); retry.click(); });
   expect(openings).toBe(2);
   await act(async () => pending.resolve(Response.json({ ...body!, service_generation: "workspace-service", sealed_through: 0,

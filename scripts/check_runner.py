@@ -137,7 +137,7 @@ def environment_identity(root: Path) -> dict[str, Any]:
     return {"python": python, "tools": tools, "frontend_dependencies": packages,
             "variables": {key: os.environ.get(key) for key in (
                 "CI", "LANG", "LC_ALL", "TZ", "PYTHONHASHSEED", "PLAYWRIGHT_HOST_PLATFORM_OVERRIDE",
-                *PYTEST_SELECTION_ENVIRONMENT, "NODE_OPTIONS")}}
+                *PYTEST_SELECTION_ENVIRONMENT, "PYTEST_XDIST_AUTO_NUM_WORKERS", "NODE_OPTIONS")}}
 
 
 def capture_inputs(root: Path, extra_files: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -483,7 +483,8 @@ def commit_gates(root: Path, e2e: bool) -> list[Gate]:
         Gate("mypy", "backend types (mypy)", (str(root / ".venv/bin/mypy"),), root, "configured mypy selection"),
         Gate("pytest", "backend unit (hermetic release selection)",
              (str(root / ".venv/bin/pytest"), "-c", "pyproject.toml", "tests/", "-m", HERMETIC_PYTEST_SELECTION,
-              "-n", "4", "--dist=loadfile", "--max-worker-restart=0", "-q"), root, backend, "pytest"),
+              "-n", "auto", "--maxprocesses", "8", "--dist=loadfile", "--max-worker-restart=0", "-q"),
+             root, backend, "pytest"),
         Gate("eslint", "frontend lint (eslint)", ("bun", "run", "lint"), root / "web", "ESLint configuration"),
         Gate("vitest", "frontend unit (vitest)", ("bun", "run", "test"), root / "web", "Vitest configuration", "vitest"),
         Gate("tsc", "typecheck (tsc -b)", ("bun", "run", "typecheck"), root / "web", "app, node and E2E TypeScript projects"),

@@ -57,18 +57,26 @@ async def bound(client, tmp_path, monkeypatch):
         manager.shutdown()
 
 
-def human_mutation(jobs, operation):
-    from tests.test_wiki_history import legacy_snapshot
-
+def human_mutations(jobs, operations):
     history = WikiHistory(jobs.store)
     path = "Library/note.md"
     original = jobs.store.path(path).read_bytes()
     changed = history.write(path, b"# Current\nCurrent editable words.\n", revision(original), "human", "prepare restore")
+    return {operation: mutation_request(operation, history, path, original, changed) for operation in operations}
+
+
+def human_mutation(jobs, operation):
+    return human_mutations(jobs, (operation,))[operation]
+
+
+def mutation_request(operation, history, path, original, changed):
     if operation == "document":
         return "PUT", {"path": path, "content": "# New\nAuthorized edit.\n", "expected_revision": changed["revision"], "reason": "Edit"}
     if operation == "restore":
         return "POST", {"change_id": changed["change_id"], "expected_revision": changed["revision"], "side": "before"}
     if operation == "snapshot/restore":
+        from tests.test_wiki_history import legacy_snapshot
+
         snapshot = legacy_snapshot(history, {path: original})
         return "POST", {"snapshot_id": snapshot["id"], "paths": [path], "expected_revisions": {path: changed["revision"]}}
     if operation == "publish":
@@ -79,7 +87,7 @@ def human_mutation(jobs, operation):
         return "POST", {"path": path, "expected_revision": changed["revision"],
                         "key_note": "Protected opening points.", "reason": "Organize"}
     if operation == "restructure":
-        blocks = WikiCuration(jobs.store).blocks(path)["blocks"]
+        blocks = WikiCuration(history.store).blocks(path)["blocks"]
         return "POST", {"path": path, "expected_revision": changed["revision"], "order": [part["id"] for part in blocks],
                         "additions": [{"before": len(blocks), "content": "Authorized structure addition.", "sources": []}],
                         "reason": "Restructure"}
@@ -257,13 +265,13 @@ async def test_original_app_admission_eligibility_survives_body_wait(bound, oper
 
 @pytest.mark.parametrize("keep_files", [False, True])
 @pytest.mark.parametrize("phase", ["complete", "retiring", "files"])
-@pytest.mark.parametrize("operation", CONTENT_OPERATIONS)
-async def test_app_deletion_rejects_unadmitted_body_without_wiki_effects(bound, monkeypatch, keep_files, phase, operation):
+async def test_app_deletion_rejects_unadmitted_body_without_wiki_effects(bound, monkeypatch, keep_files, phase):
     client, jobs, headers = bound
-    method, body = human_mutation(jobs, operation)
+    requests = human_mutations(jobs, CONTENT_OPERATIONS)
     before = mutation_evidence(jobs)
     registration = registry.config(jobs.user_id)
-    entered, release = asyncio.Event(), asyncio.Event()
+    entered = {operation: asyncio.Event() for operation in requests}
+    release = {operation: asyncio.Event() for operation in requests}
     deleting, finish_delete = asyncio.Event(), asyncio.Event()
     database = api.session_manager.db
     set_deletion = database.set_application_deletion
@@ -276,16 +284,21 @@ async def test_app_deletion_rejects_unadmitted_body_without_wiki_effects(bound, 
 
     monkeypatch.setattr(database, "set_application_deletion", hold_deletion)
 
-    async def delayed_body():
-        entered.set()
-        await release.wait()
+    async def delayed_body(operation, body):
+        entered[operation].set()
+        await release[operation].wait()
         yield json.dumps(body).encode()
 
-    pending = asyncio.create_task(client.request(method, f"/apps/parameters/wiki/{operation}",
-        headers={**headers, "Content-Type": "application/json"}, content=delayed_body()))
+    pending = {
+        operation: asyncio.create_task(client.request(
+            method, f"/apps/parameters/wiki/{operation}",
+            headers={**headers, "Content-Type": "application/json"}, content=delayed_body(operation, body),
+        ))
+        for operation, (method, body) in requests.items()
+    }
     deletion = None
     try:
-        await asyncio.wait_for(entered.wait(), 3)
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered.values())), 3)
         deletion = asyncio.create_task(client.delete("/api/applications/parameters", headers=client.headers,
                                                     params={"keep_files": str(keep_files).lower()}))
         if phase == "complete":
@@ -293,17 +306,23 @@ async def test_app_deletion_rejects_unadmitted_body_without_wiki_effects(bound, 
             assert deleted.status_code == 204, deleted.text
         else:
             await asyncio.wait_for(deleting.wait(), 3)
-        fresh = await client.request(method, f"/apps/parameters/wiki/{operation}", headers=headers, json=body)
-        assert fresh.status_code in {404, 409}, fresh.text
-        release.set()
-        response = await asyncio.wait_for(pending, 3)
-        assert response.status_code in {404, 409}, response.text
-        assert mutation_evidence(jobs) == before
-        assert registry.config(jobs.user_id) == registration
-    finally:
-        release.set()
+        for operation, (method, body) in requests.items():
+            fresh = await client.request(method, f"/apps/parameters/wiki/{operation}", headers=headers, json=body)
+            assert fresh.status_code in {404, 409}, (operation, fresh.text)
+            assert mutation_evidence(jobs) == before, operation
+            release[operation].set()
+            response = await asyncio.wait_for(pending[operation], 3)
+            assert response.status_code in {404, 409}, (operation, response.text)
+            assert mutation_evidence(jobs) == before, operation
+            assert registry.config(jobs.user_id) == registration, operation
         finish_delete.set()
-        await asyncio.gather(pending, *([deletion] if deletion else []), return_exceptions=True)
+        deleted = await asyncio.wait_for(deletion, 3)
+        assert deleted.status_code == 204, deleted.text
+    finally:
+        for event in release.values():
+            event.set()
+        finish_delete.set()
+        await asyncio.gather(*pending.values(), *([deletion] if deletion else []), return_exceptions=True)
 
 
 @pytest.mark.parametrize("operation", CONTENT_OPERATIONS)
@@ -725,30 +744,31 @@ async def test_shared_query_defaults_types_and_bounds_match_the_main_route(bound
 
 
 @pytest.mark.parametrize("operation", ["verify", "cancel", "retry"])
-@pytest.mark.parametrize("body,valid", [
-    ("", True), ("null", True), ("{}", True),
-    ('{"expected_attempt":0}', True), ('{"expected_attempt":true}', False),
-    ('{"expected_attempt":-1}', False), ('{"expected_attempt":"one"}', False),
-    ('{"unexpected":1}', False), ('{"operation_id":""}', False),
-    ('[]', False), ('false', False), ('"text"', False), ('{', False),
-])
-async def test_job_control_body_contract_matches_without_rejected_effects(bound, monkeypatch, operation, body, valid):
-    client, jobs, headers = bound
+async def test_job_control_body_contract_matches_without_rejected_effects(bound, monkeypatch, operation):
+    client, _, headers = bound
     calls = []
 
-    async def control(self, job_id, *args, **kwargs):
-        calls.append((job_id, kwargs))
+    def control(self, job_id, *args, **kwargs):
+        calls.append(job_id)
         return {"id": job_id}
 
-    if operation == "retry":
-        def retry(self, job_id, **kwargs):
-            calls.append((job_id, kwargs))
-            return {"id": job_id}
-        monkeypatch.setattr(WikiJobs, operation, retry)
-    else:
-        monkeypatch.setattr(WikiJobs, operation, control)
-    expected = 200 if valid and (operation != "verify" or body not in {"", "null"}) else 422
-    for base, auth in (("/api/wiki", client.headers), ("/apps/parameters/wiki", headers)):
-        response = await client.post(f"{base}/jobs/original/{operation}", headers={**auth, "Content-Type": "application/json"}, content=body)
-        assert response.status_code == expected, (base, body, response.text)
-    assert len(calls) == (2 if expected == 200 else 0)
+    async def async_control(self, job_id, *args, **kwargs):
+        return control(self, job_id, *args, **kwargs)
+
+    monkeypatch.setattr(WikiJobs, operation, control if operation == "retry" else async_control)
+    for body, valid in [
+        ("", True), ("null", True), ("{}", True),
+        ('{"expected_attempt":0}', True), ('{"expected_attempt":true}', False),
+        ('{"expected_attempt":-1}', False), ('{"expected_attempt":"one"}', False),
+        ('{"unexpected":1}', False), ('{"operation_id":""}', False),
+        ('[]', False), ('false', False), ('"text"', False), ('{', False),
+    ]:
+        expected = 200 if valid and (operation != "verify" or body not in {"", "null"}) else 422
+        expected_calls = ["original"] if expected == 200 else []
+        for base, auth in (("/api/wiki", client.headers), ("/apps/parameters/wiki", headers)):
+            calls.clear()
+            response = await client.post(
+                f"{base}/jobs/original/{operation}", headers={**auth, "Content-Type": "application/json"}, content=body,
+            )
+            assert response.status_code == expected, (base, body, response.text)
+            assert calls == expected_calls, (base, body, calls)
