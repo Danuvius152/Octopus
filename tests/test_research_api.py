@@ -108,6 +108,44 @@ async def test_completed_undelivered_report_remains_downloadable_by_its_account(
     assert (await client.get(url.replace("saved/report", "absent/report"))).status_code == 404
 
 
+async def test_delete_waits_for_the_original_research_pipeline(client, db, monkeypatch):
+    entered, retiring, release, exited = (asyncio.Event() for _ in range(4))
+
+    async def held_pipeline(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            retiring.set()
+            await release.wait()
+            exited.set()
+
+    monkeypatch.setattr(rm_mod, "run_research", held_pipeline)
+    session = await _session(client)
+    url = f"/api/sessions/{session['id']}"
+    response = await client.post(url + "/research", json={"question": "Retire the original pipeline"})
+    assert response.status_code == 201, response.text
+    job_id = response.json()["id"]
+    deletion = retirement = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        deletion = asyncio.create_task(client.delete(url))
+        retirement = asyncio.create_task(retiring.wait())
+        done, _ = await asyncio.wait({deletion, retirement}, timeout=3, return_when=asyncio.FIRST_COMPLETED)
+        assert retirement in done and not deletion.done(), "DELETE must join the original pipeline cleanup"
+        assert (await db.get_research_job(job_id))["session_id"] == session["id"]
+        release.set()
+        assert (await asyncio.wait_for(deletion, 3)).status_code == 204
+        assert exited.is_set()
+        assert (await client.get(url)).status_code == 404
+    finally:
+        release.set()
+        if retirement is not None:
+            retirement.cancel()
+        await asyncio.gather(*(task for task in (retirement, deletion) if task is not None), return_exceptions=True)
+        await research_manager.shutdown()
+
+
 @pytest.mark.parametrize("retirement", ["delete", "archive"])
 async def test_research_waiting_for_configuration_rejects_a_retired_session(client, db, monkeypatch, retirement):
     session = await _session(client)
@@ -137,7 +175,7 @@ async def test_research_waiting_for_configuration_rejects_a_retired_session(clie
         release.set()
     response = await asyncio.wait_for(pending, 2)
     assert response.status_code == 404, response.text
-    assert not research_manager._tasks
+    assert not research_manager.drain_blockers()
     async with db.transaction(write=False) as tx:
         assert await tx.fetch_one("SELECT id FROM research_jobs") is None
 

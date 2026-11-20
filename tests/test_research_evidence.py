@@ -48,7 +48,7 @@ async def evidence_runtime(native_runtime, monkeypatch):
 async def test_original_manager_commits_summary_and_reloads_it_with_the_same_job(evidence_runtime, request):
     manager, database, parent, research, events = evidence_runtime
     job = await research.start(parent.id, "Assess safety")
-    await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 3)
+    await asyncio.wait_for(asyncio.shield(research._task(job["id"])), 3)
     saved = await database.get_research_job(job["id"])
     assert saved["status"] == "completed"
     projection = await research.public_job(saved)
@@ -84,7 +84,7 @@ async def test_save_refusal_never_publishes_success(evidence_runtime, monkeypatc
 
     monkeypatch.setattr(builtins, "open", refused)
     job = await research.start(parent.id, "Do not publish unsaved evidence")
-    await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 3)
+    await asyncio.wait_for(asyncio.shield(research._task(job["id"])), 3)
     row = await database.get_research_job(job["id"])
     assert row["status"] == "failed" and "could not both be saved" in row["error"]
     assert not any(event["type"] == "research_completed" for event in events)
@@ -121,7 +121,7 @@ async def test_directory_refusal_after_leaves_finish_settles_as_save_failure(evi
     monkeypatch.setattr(orchestrator, "run_reason_leaf", reason)
     monkeypatch.setattr(os, "makedirs", refused)
     job = await research.start(parent.id, "Do not leave a job running after directory refusal")
-    await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 3)
+    await asyncio.wait_for(asyncio.shield(research._task(job["id"])), 3)
     row = await database.get_research_job(job["id"])
     assert leaves_finished and refusals
     assert row["status"] == "failed" and "could not both be saved" in row["error"]
@@ -140,7 +140,7 @@ async def test_synthesis_failure_preserves_the_summary_in_the_original_failure_a
 
     monkeypatch.setattr(orchestrator, "run_reason_leaf", reason)
     job = await research.start(parent.id, "Failed synthesis")
-    await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 3)
+    await asyncio.wait_for(asyncio.shield(research._task(job["id"])), 3)
     row = await database.get_research_job(job["id"])
     assert row["status"] == "failed" and row["error"] == "Report synthesis failed: synthesis refused"
     partial = json.loads((paths_for(parent.user_id).research / job["id"] / "synthesis-failure.json").read_text())
@@ -336,7 +336,7 @@ async def test_http_snapshots_read_bounded_owned_material_and_mark_unavailable(e
             return LeafResult(text='[{"claim":"Always reliable", "url":"https://claim.test"}]')
         monkeypatch.setattr(orchestrator, "run_web_leaf", checked_search)
     job = await research.start(parent.id, "Read original evidence")
-    await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 3)
+    await asyncio.wait_for(asyncio.shield(research._task(job["id"])), 3)
     summary = paths_for(parent.user_id).research / job["id"] / "evidence.json"
     payload = json.loads(summary.read_text())
     if damage == "missing":
@@ -387,7 +387,7 @@ async def test_session_deletion_retires_job_but_preserves_account_research_mater
 
     manager, database, parent, research, _ = evidence_runtime
     job = await research.start(parent.id, "Retained account materials")
-    await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 3)
+    await asyncio.wait_for(asyncio.shield(research._task(job["id"])), 3)
     row = await database.get_research_job(job["id"])
     summary = paths_for(parent.user_id).research / job["id"] / "evidence.json"
     original = summary.read_bytes()
@@ -480,7 +480,7 @@ async def test_account_transfer_preserves_material_without_restoring_jobs(tmp_pa
         session = await manager.create_session(agent["id"], "Source", str(working), backend="codex")
         await manager.interrupt(session.id)
         job = await research.start(session.id, "Preserve evidence")
-        await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 3)
+        await asyncio.wait_for(asyncio.shield(research._task(job["id"])), 3)
         row = await database.get_research_job(job["id"])
         files = [Path(row["report_path"]), paths_for(owner["id"]).research / job["id"] / "evidence.json"]
         contents = [path.read_bytes() for path in files]

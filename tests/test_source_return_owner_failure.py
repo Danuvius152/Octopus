@@ -42,7 +42,7 @@ async def test_research_retains_report_and_reports_failed_delivery_when_its_dest
         await asyncio.wait_for(started.wait(), 2)
         owner = await fail_destination_owner(manager, session, monkeypatch)
         release.set()
-        await asyncio.wait_for(asyncio.shield(research._tasks[job["id"]]), 2)
+        await asyncio.wait_for(asyncio.shield(research._task(job["id"])), 2)
         row = await db.get_research_job(job["id"])
         assert row["status"] == "completed" and row["injection_status"] == "failed"
         assert "owner is unavailable" in row["error"]

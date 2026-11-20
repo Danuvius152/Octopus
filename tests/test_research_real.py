@@ -114,7 +114,7 @@ async def test_real_codex_deep_research_end_to_end(tmp_path, monkeypatch):
             session.id,
             "What is the latest stable version of Python 3? Cite python.org.",
         )
-        await asyncio.wait_for(rm._tasks[row["id"]], timeout=360)
+        await asyncio.wait_for(rm._task(row["id"]), timeout=360)
 
         final = await db.get_research_job(row["id"])
         assert final["status"] == "completed", f"job did not complete: {final}"

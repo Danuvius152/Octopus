@@ -438,7 +438,7 @@ class Session:
     # set; the original owner installs and releases this lifecycle reservation.
     _forking: bool = field(default=False, repr=False)
     _run: ActiveRun = field(default_factory=ActiveRun, repr=False)
-    _deletion_task: asyncio.Task | None = field(default=None, repr=False)
+    _deletion_task: asyncio.Task[bool] | None = field(default=None, repr=False)
     _command_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict, repr=False)
     _questions: dict[str, PendingQuestion] = field(default_factory=dict, repr=False)
     _pending_queue: list[PendingInput] = field(default_factory=list, repr=False)
@@ -700,7 +700,9 @@ class SessionManagerBase:
     ) -> dict[str, Any]:
         raise NotImplementedError  # provided by a mixin
 
-    async def auto_archive_scheduled_session(self, session_id: str, *, expected_session: Session | None = None) -> bool:
+    async def auto_archive_scheduled_session(
+        self, session_id: str, *, expected_session: Session | None = None, release_notice: asyncio.Future[None] | None = None,
+    ) -> bool:
         raise NotImplementedError  # provided by a mixin
 
     async def _restore_task_return(
@@ -726,6 +728,7 @@ class SessionManagerBase:
     async def _archive_original(
         self, session: Session, *, replace: bool = False, successor: Session | None = None,
         only_request_id: str | None = None, automatic: bool = False,
+        release_notice: asyncio.Future[None] | None = None,
     ) -> tuple[bool, Session | None]:
         raise NotImplementedError  # provided by lifecycle
 
@@ -767,6 +770,8 @@ class SessionManagerBase:
         self._session_owners: dict[int, SessionOwner] = {}
         # Serialize archive/restoration without retaining historical sessions.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        # Archived sessions need their original audience even if a post-commit hook fails.
+        self._archived_deletions: dict[str, tuple[str, asyncio.Task[bool]]] = {}
         # Carry Stop and dispatch ordering to the next live owner in this
         # service generation. No input or execution is retained here.
         self._archived_dispatch: dict[str, tuple[bool, int, int]] = {}
@@ -836,6 +841,10 @@ class SessionManagerBase:
         self.db.health.require_healthy()
         return self.db
 
+    def session_deleting(self, session_id: str) -> bool:
+        session = self.sessions.get(session_id)
+        return session._deletion_task is not None if session is not None else session_id in self._archived_deletions
+
     async def _initialize_storage(self, db: Database, *, previous_writers_retired: bool) -> None:
         await self.join_browser_restorations()
         await self.drain_credential_refreshes()
@@ -847,6 +856,7 @@ class SessionManagerBase:
             # Lifespan binds a new runner after initialization. Retirement
             # must never query a runner that still owns an earlier database.
             self._schedule_runner = None
+            self._archived_deletions.clear()
         self._agent_lifecycle_lock = asyncio.Lock()
         self._closed_agents.clear()
         self._wiki_dispatch_locks.clear()

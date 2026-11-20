@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
 import httpx
@@ -98,6 +99,776 @@ async def assert_no_queued_messages(manager, session_id):
     else:
         assert next(row for row in await manager.db.load_sessions(include_archived=True)
                     if row["id"] == session_id)["archived"]
+
+
+@pytest.mark.parametrize("follow_up", [False, True], ids=["initial-refusal-archive", "follow-up-restore"])
+async def test_child_lifecycle_subscriber_can_delete_the_original_parent(work_runtime, monkeypatch, follow_up):
+    from server.mcp_identity import close_work
+    from server.routers import sessions as session_routes
+
+    manager, delegations, parent, starts = work_runtime
+    manager.work_test_app.include_router(session_routes.router)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    submit = manager.start_message
+    child_id = None
+    deleted = asyncio.get_running_loop().create_future()
+
+    async def refuse_initial(sid, *args, **kwargs):
+        nonlocal child_id
+        if sid != parent.id and kwargs.get("source") == "delegation":
+            child_id = sid
+            close_work(kwargs["work_id"])
+        return await submit(sid, *args, **kwargs)
+
+    async def delete_parent(event):
+        if ((event["type"] == "session_unarchived" and follow_up and event["session_id"] == child_id)
+                or (event["type"] == "session_archived" and not follow_up and event["old_session_id"] == child_id)):
+            try:
+                async with asyncio.timeout(3):
+                    response = await manager.work_test_client.delete(f"/api/sessions/{parent.id}")
+                deleted.set_result(response.status_code)
+            except Exception as error:
+                deleted.set_exception(error)
+
+    if follow_up:
+        previous = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="First round")
+        child_id = previous.delegation_id
+        await wait_state(delegations, child_id, "completed")
+        await delegations.confirm_recording()
+        await manager.archive_session(child_id, replace=False)
+        await asyncio.wait_for(starts.get(), 3)
+    else:
+        monkeypatch.setattr(manager, "start_message", refuse_initial)
+    manager.on_broadcast("delete parent during child lifecycle", delete_parent, required=True)
+    try:
+        if follow_up:
+            with pytest.raises(DelegationError, match="closed"):
+                await asyncio.wait_for(delegations.follow_up_delegation(
+                    parent_session_id=parent.id, delegation_id=child_id, request="Follow-up during restoration",
+                ), 5)
+        else:
+            rec = await asyncio.wait_for(delegations.start_delegation(
+                parent_session_id=parent.id, agent_name="Worker", request="Refuse the first input",
+            ), 5)
+            assert rec.state == "cancelled"
+        assert await asyncio.wait_for(deleted, 5) == 204
+        assert await manager.db.get_session_binding(parent.id) is None
+        assert (await manager.db.get_session_binding(child_id))["archived"]
+        assert starts.empty()
+    finally:
+        manager.remove_broadcast("delete parent during child lifecycle")
+
+
+@pytest.mark.parametrize("ack_lost", [False, True], ids=["before-commit", "after-commit"])
+@pytest.mark.parametrize("follow_up", [False, True], ids=["initial", "follow-up"])
+async def test_delete_settles_a_refused_rounds_original_receipt(work_runtime, monkeypatch, ack_lost, follow_up):
+    from server.mcp_identity import close_work
+    from server.routers.sessions import router as sessions_router
+
+    manager, delegations, parent, _ = work_runtime
+    db = manager.db
+    manager.work_test_app.include_router(sessions_router)
+    client = manager.work_test_client
+    url = f"/api/sessions/{parent.id}/delegations"
+    payload = {"agent_name": "Worker", "request": "Refuse the child input"}
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    if follow_up:
+        first = await client.post(url, json={"agent_name": "Worker", "request": "First round"})
+        assert first.status_code == 201
+        child_id = first.json()["delegation_id"]
+        await wait_state(delegations, child_id, "completed")
+        await delegations.confirm_recording()
+        url += f"/{child_id}/follow-up"
+        payload = {"request": "Refuse the follow-up input"}
+    compare, submit = db.compare_and_set_delegation_state, manager.start_message
+    writes, admissions = [], []
+
+    async def refuse_child(sid, *args, **kwargs):
+        if sid != parent.id and kwargs.get("source") == "delegation":
+            close_work(kwargs["work_id"])
+        if sid == parent.id and kwargs.get("source") == "delegation":
+            admissions.append(kwargs["delivery_id"])
+        return await submit(sid, *args, **kwargs)
+
+    async def fail_receipt_once(child_id, expected, snapshot, **kwargs):
+        if json.loads(snapshot)["terminal_disposition"] == "accepted":
+            writes.append((child_id, expected, snapshot))
+            if len(writes) == 1:
+                if ack_lost:
+                    assert await compare(child_id, expected, snapshot, **kwargs)
+                raise OSError("Original receipt write interrupted")
+        return await compare(child_id, expected, snapshot, **kwargs)
+
+    monkeypatch.setattr(manager, "start_message", refuse_child)
+    monkeypatch.setattr(db, "compare_and_set_delegation_state", fail_receipt_once)
+    with pytest.raises(OSError, match="Original receipt write interrupted"):
+        await client.post(url, json=payload)
+    rec = delegations.get_delegation(writes[0][0])
+    try:
+        receipt = await manager.source_receipt("delegation", f"agent-terminal:{rec.work_id}", session_id=parent.id)
+        assert receipt is not None and receipt[1].accepted
+        assert (await asyncio.wait_for(client.delete(f"/api/sessions/{parent.id}"), 4)).status_code == 204
+        assert len(writes) == 2 and writes[0] == writes[1]
+        assert admissions == [f"agent-terminal:{rec.work_id}"]
+        await delegations.confirm_recording()
+    finally:
+        if len(writes) == 1:
+            await delegations._command(delegations._inject_terminal(rec))
+
+
+async def test_delete_closes_every_delegated_lease_before_waiting_on_cleanup(work_runtime, monkeypatch):
+    from server.bg_tasks import BgTaskError
+    from server.mcp_identity import work_is_open
+    from server.research.manager import ResearchError, ResearchManager
+
+    manager, delegations, parent, starts = work_runtime
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    research = ResearchManager()
+    research.bind(manager, manager.db)
+    await AgentManager(manager.db).create_agent(name="Leaf", backend="codex", user_id=parent.user_id)
+    first = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held first")
+    await wait_live_scope(await starts.get())
+    second = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held second")
+    scope = await wait_live_scope(await starts.get())
+    leaf = await delegations.start_delegation(parent_session_id=second.delegation_id, agent_name="Leaf", request="held leaf", scope=scope)
+    await wait_live_scope(await starts.get())
+    close, close_work = manager._close_original_execution, manager.close_work
+    closing, release = asyncio.Event(), asyncio.Event()
+    failed = False
+
+    async def hold_owner(owner, command):
+        if owner.session is parent:
+            closing.set()
+            await release.wait()
+        return await close(owner, command)
+
+    async def first_cleanup(work_id):
+        nonlocal failed
+        if work_id == first.work_id and not failed:
+            failed = True
+            raise OSError("Original first round cleanup failed")
+        return await close_work(work_id)
+
+    monkeypatch.setattr(manager, "_close_original_execution", hold_owner)
+    monkeypatch.setattr(manager, "close_work", first_cleanup)
+    deleting = asyncio.create_task(manager.delete_session(parent.id))
+    try:
+        await asyncio.wait_for(closing.wait(), 3)
+        assert all(not work_is_open(rec.work_id) for rec in (first, second, leaf))
+        with pytest.raises(BgTaskError):
+            await manager.work_test_bg.start_task(session_id=second.delegation_id, command="true", working_dir=parent.working_dir, scope=scope)
+        with pytest.raises(ResearchError) as refused:
+            await research.start(second.delegation_id, "Late delegated research", scope=scope)
+        assert refused.value.status_code == 409
+        with pytest.raises(DelegationError) as refused_delegation:
+            await delegations.start_delegation(parent_session_id=second.delegation_id, agent_name="Leaf", request="Late child", scope=scope)
+        assert refused_delegation.value.status_code == 409
+        release.set()
+        with pytest.raises(OSError, match="Original first round cleanup failed"):
+            await asyncio.wait_for(deleting, 4)
+        assert await manager.delete_session(parent.id)
+    finally:
+        release.set()
+        await asyncio.gather(deleting, return_exceptions=True)
+        await research.shutdown()
+
+
+@pytest.mark.parametrize("notice_fails", [False, True])
+async def test_delete_captures_a_delegation_commit_already_in_flight(work_runtime, monkeypatch, notice_fails):
+    from server.mcp_identity import work_is_open
+
+    manager, delegations, parent, starts = work_runtime
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    committed, release = asyncio.Event(), asyncio.Event()
+    compare = manager.db.compare_and_set_delegation_state
+    leases_at_compensation = []
+    archived = asyncio.Event()
+
+    async def observe_archive(event):
+        if event["type"] == "session_archived":
+            archived.set()
+            if notice_fails:
+                raise OSError("Detached child archive notification failed")
+
+    async def hold_first_commit(child_id, expected, snapshot, **kwargs):
+        state = json.loads(snapshot)
+        if expected is None:
+            saved = await compare(child_id, expected, snapshot, **kwargs)
+            committed.set()
+            await release.wait()
+            return saved
+        if state["state"] == "cancelled":
+            leases_at_compensation.append(work_is_open(state["work_id"]))
+        return await compare(child_id, expected, snapshot, **kwargs)
+
+    monkeypatch.setattr(manager.db, "compare_and_set_delegation_state", hold_first_commit)
+    manager.on_broadcast("detached child archive", observe_archive, required=True)
+    starting = asyncio.create_task(delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="Late commit"))
+    deleting = None
+    try:
+        await asyncio.wait_for(committed.wait(), 3)
+        deleting = asyncio.create_task(manager.delete_session(parent.id))
+        async with asyncio.timeout(3):
+            while not manager.session_deleting(parent.id):
+                await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(DelegationError, match="closed"):
+            await starting
+        assert await asyncio.wait_for(deleting, 3)
+        await asyncio.wait_for(archived.wait(), 3)
+        assert leases_at_compensation and not any(leases_at_compensation)
+        assert starts.empty()
+    finally:
+        release.set()
+        manager.remove_broadcast("detached child archive")
+        await asyncio.gather(*(task for task in (starting, deleting) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.parametrize("control_fails", [False, True], ids=["blocked", "write-fails"])
+async def test_parent_delete_joins_the_childs_public_research_control(work_runtime, monkeypatch, control_fails):
+    from server.research import manager as research_module
+    from server.research.manager import ResearchManager
+    from server.routers import research as research_routes
+    from server.routers import sessions as session_routes
+
+    manager, delegations, parent, starts = work_runtime
+    db = manager.db
+    research = ResearchManager()
+    research.bind(manager, db)
+    manager.work_test_app.include_router(research_routes.router)
+    manager.work_test_app.include_router(session_routes.router)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    monkeypatch.setattr("server.delegations.research_manager", research)
+    monkeypatch.setattr(research_routes, "research_manager", research)
+    entered, stopping, control_sql, release = (asyncio.Event() for _ in range(4))
+    confirm = db.confirm_research_outcome
+
+    async def pipeline(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            stopping.set()
+
+    async def hold_control(*args, **kwargs):
+        if not control_sql.is_set():
+            control_sql.set()
+            await release.wait()
+            if control_fails:
+                raise OSError("Child cancellation write interrupted")
+        return await confirm(*args, **kwargs)
+
+    monkeypatch.setattr(research_module, "run_research", pipeline)
+    child = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held child Research")
+    scope = await wait_live_scope(await starts.get())
+    job = await research.start(child.delegation_id, "Control belongs to the original work", scope=scope)
+    await asyncio.wait_for(entered.wait(), 3)
+    monkeypatch.setattr(db, "confirm_research_outcome", hold_control)
+    path = f"/api/sessions/{child.delegation_id}/research/{job['id']}/cancel"
+    client = manager.work_test_client
+    cancelling = asyncio.create_task(client.post(path))
+    deleting = None
+    try:
+        await asyncio.wait_for(control_sql.wait(), 3)
+        deleting = asyncio.create_task(client.delete(f"/api/sessions/{parent.id}"))
+        await asyncio.wait_for(stopping.wait(), 3)
+        assert not deleting.done() and await db.get_session_binding(parent.id) is not None
+        release.set()
+        if control_fails:
+            for task in (cancelling, deleting):
+                with pytest.raises(OSError, match="Child cancellation write interrupted"):
+                    await asyncio.wait_for(task, 3)
+            assert await db.get_session_binding(parent.id) is not None
+            assert (await client.delete(f"/api/sessions/{parent.id}")).status_code == 204
+        else:
+            assert (await asyncio.wait_for(cancelling, 3)).status_code == 200
+            assert (await asyncio.wait_for(deleting, 3)).status_code == 204
+        assert (await db.get_research_job(job["id"]))["status"] == "cancelled"
+        assert (await client.post(path)).status_code == 409
+        assert not research.drain_blockers()
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (cancelling, deleting) if task is not None), return_exceptions=True)
+        await research.shutdown()
+
+
+@pytest.mark.parametrize("delegated", [False, True], ids=["session", "child-work"])
+async def test_parent_delete_prevents_research_leaf_spawn_during_authorization(work_runtime, monkeypatch, delegated):
+    from dataclasses import replace
+
+    from server.research.manager import ResearchManager
+    from server.routers.sessions import router as sessions_router
+
+    manager, delegations, parent, starts = work_runtime
+    research = ResearchManager()
+    db = manager.db
+    research.bind(manager, db)
+    monkeypatch.setattr("server.research.research_manager", research)
+    monkeypatch.setattr("server.delegations.research_manager", research)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    manager.work_test_app.include_router(sessions_router)
+    source, scope = parent, None
+    if delegated:
+        child = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held Research parent")
+        scope = await wait_live_scope(await starts.get())
+        source = manager.get_session(child.delegation_id)
+
+    preparing, authorizing, resume_leaf = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    claimed, resume_delete = asyncio.Event(), asyncio.Event()
+    launch = asyncio.get_running_loop().create_future()
+    authorize, close, spawn = db.require_run_authority, manager._close_original_execution, asyncio.create_subprocess_exec
+    harness = get_harness(source.backend)
+
+    def leaf_argv(ctx):
+        preparing.set()
+        return [sys.executable, "-c", "import time; time.sleep(10)"], {"cwd": ctx.working_dir}
+
+    async def hold_leaf(*args, **kwargs):
+        await authorize(*args, **kwargs)
+        if preparing.is_set():
+            authorizing.set()
+            await resume_leaf.wait()
+
+    async def hold_owner(*args, **kwargs):
+        claimed.set()
+        await resume_delete.wait()
+        return await close(*args, **kwargs)
+
+    async def observe_spawn(*args, **kwargs):
+        if preparing.is_set() and not launch.done():
+            launch.set_result(args)
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_oneshot_argv=leaf_argv))
+    monkeypatch.setattr(db, "require_run_authority", hold_leaf)
+    monkeypatch.setattr(manager, "_close_original_execution", hold_owner)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
+    job = await research.start(source.id, "A leaf awaiting authorization", scope=scope)
+    pipeline = research._task(job["id"])
+    deleting = None
+    try:
+        await asyncio.wait_for(authorizing.wait(), 3)
+        deleting = asyncio.create_task(manager.work_test_client.delete(f"/api/sessions/{parent.id}"))
+        await asyncio.wait_for(claimed.wait(), 3)
+        resume_leaf.set()
+        done, _ = await asyncio.wait({pipeline, launch}, timeout=3, return_when=asyncio.FIRST_COMPLETED)
+        assert launch not in done and pipeline in done
+        assert (await db.get_research_job(job["id"]))["status"] == "cancelled"
+    finally:
+        resume_leaf.set()
+        resume_delete.set()
+        if deleting is not None:
+            assert (await asyncio.wait_for(deleting, 5)).status_code == 204
+        await research.shutdown()
+
+
+async def test_child_owner_refuses_a_research_return_when_parent_closes_during_preparation(work_runtime, monkeypatch):
+    from server.research import manager as research_module
+    from server.research.manager import ResearchManager
+    from server.research.orchestrator import ResearchReport
+    from server.sessions import owner_runtime
+
+    manager, delegations, parent, starts = work_runtime
+    research = ResearchManager()
+    research.bind(manager, manager.db)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    monkeypatch.setattr("server.delegations.research_manager", research)
+    child = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held child")
+    scope = await wait_live_scope(await starts.get())
+    preparing, release = asyncio.Event(), asyncio.Event()
+    check = owner_runtime.require_retired_writers
+
+    async def hold_preparation(original_manager, sid):
+        await check(original_manager, sid)
+        if sid == child.delegation_id:
+            preparing.set()
+            await release.wait()
+
+    async def report(question, **kwargs):
+        return ResearchReport(question=question, report="Saved report", findings=[], sources=[], angles=[], claims_examined=0, cost=0)
+
+    monkeypatch.setattr(owner_runtime, "require_retired_writers", hold_preparation)
+    monkeypatch.setattr(research_module, "run_research", report)
+    job = await research.start(child.delegation_id, "Return through the surviving child Owner", scope=scope)
+    deleting = None
+    try:
+        await asyncio.wait_for(preparing.wait(), 3)
+        deleting = asyncio.create_task(manager.delete_session(parent.id))
+        async with asyncio.timeout(3):
+            while not manager.session_deleting(parent.id):
+                await asyncio.sleep(0)
+        release.set()
+        assert await asyncio.wait_for(deleting, 3)
+        assert (await manager.db.get_research_job(job["id"]))["injection_status"] == "failed"
+        assert await manager.db.get_source_submission("research", f"research:{job['id']}", session_id=child.delegation_id) is None
+    finally:
+        release.set()
+        if deleting is not None:
+            await asyncio.gather(deleting, return_exceptions=True)
+        await research.shutdown()
+
+
+async def test_parent_delete_confirms_the_original_committed_round_cancellation(work_runtime, monkeypatch):
+    manager, delegations, parent, starts = work_runtime
+    db = manager.db
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    child = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held child")
+    await wait_live_scope(await starts.get())
+    compare, attempts = db.compare_and_set_delegation_state, []
+
+    async def lose_first_ack(child_id, expected, snapshot, **kwargs):
+        saved = await compare(child_id, expected, snapshot, **kwargs)
+        state = json.loads(snapshot)
+        if state["state"] == "cancelled" and state["terminal_disposition"] is None:
+            attempts.append((expected, snapshot, saved))
+            if len(attempts) == 1:
+                raise OSError("Lost original round cancellation acknowledgement")
+        return saved
+
+    monkeypatch.setattr(db, "compare_and_set_delegation_state", lose_first_ack)
+    with pytest.raises(OSError, match="Lost original round cancellation acknowledgement"):
+        await delegations.cancel_delegation(child.delegation_id, reason="User stopped this exact round")
+    assert await asyncio.wait_for(manager.delete_session(parent.id), 4)
+    assert len(attempts) == 2 and attempts[0][:2] == attempts[1][:2]
+    assert [attempt[2] for attempt in attempts] == [True, False]
+    assert child.state == "cancelled" and child.error == "User stopped this exact round"
+
+
+async def test_parent_delete_retries_the_original_delegated_research_recording(work_runtime, monkeypatch):
+    from server.research import manager as research_module
+    from server.research.manager import ResearchManager
+
+    manager, delegations, parent, starts = work_runtime
+    db = manager.db
+    research = ResearchManager()
+    research.bind(manager, db)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    monkeypatch.setattr("server.delegations.research_manager", research)
+    monkeypatch.setattr("server.research.research_manager", research)
+    entered, retired = asyncio.Event(), asyncio.Event()
+    confirm = db.confirm_research_outcome
+    attempts = []
+
+    async def pipeline(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            retired.set()
+
+    async def fail_once(job_id, status, **kwargs):
+        if status == "cancelled":
+            attempts.append(job_id)
+            if len(attempts) == 1:
+                raise OSError("Transient delegated Research recording failure")
+        return await confirm(job_id, status, **kwargs)
+
+    monkeypatch.setattr(research_module, "run_research", pipeline)
+    monkeypatch.setattr(db, "confirm_research_outcome", fail_once)
+    rec = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held research owner")
+    scope = await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    try:
+        job = await research.start(rec.delegation_id, "Original delegated research", scope=scope)
+        await asyncio.wait_for(entered.wait(), 3)
+        with pytest.raises(OSError, match="Transient delegated Research recording failure"):
+            await asyncio.wait_for(manager.delete_session(parent.id), 5)
+        assert retired.is_set() and manager.get_session(parent.id) is parent
+        assert (await db.get_research_job(job["id"]))["status"] == "running"
+        assert await asyncio.wait_for(manager.delete_session(parent.id), 5)
+        assert attempts == [job["id"], job["id"]]
+        assert (await db.get_research_job(job["id"]))["status"] == "cancelled"
+        await delegations.confirm_recording()
+    finally:
+        await research.shutdown()
+
+
+@pytest.mark.parametrize("ack_lost", [False, True], ids=["before-commit", "after-commit"])
+async def test_parent_delete_finishes_recovered_child_research_delivery(work_runtime, monkeypatch, ack_lost):
+    from server.research import manager as research_module
+    from server.research.manager import ResearchManager
+    from server.research.orchestrator import ResearchReport
+
+    manager, delegations, parent, starts = work_runtime
+    db = manager.db
+    research = ResearchManager()
+    research.bind(manager, db)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    monkeypatch.setattr("server.delegations.research_manager", research)
+    confirm = db.confirm_research_outcome
+    attempts, returns = [], []
+    admit = manager.admit_return
+
+    async def pipeline(question, **kwargs):
+        return ResearchReport(question=question, report="Selected report",
+                              findings=[], sources=[], angles=[], claims_examined=0, cost=0)
+
+    async def fail_once(job_id, status, **kwargs):
+        attempts.append((job_id, status, kwargs))
+        if len(attempts) == 1:
+            if ack_lost:
+                await confirm(job_id, status, **kwargs)
+            raise OSError("Transient completed Research recording error")
+        return await confirm(job_id, status, **kwargs)
+
+    async def observe_return(target, **kwargs):
+        if target.source == "research":
+            returns.append(target.delivery_id)
+        return await admit(target, **kwargs)
+
+    monkeypatch.setattr(research_module, "run_research", pipeline)
+    monkeypatch.setattr(db, "confirm_research_outcome", fail_once)
+    monkeypatch.setattr(manager, "admit_return", observe_return)
+    rec = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held Research owner")
+    scope = await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    job = await research.start(rec.delegation_id, "Original completed report", scope=scope)
+    with pytest.raises(OSError, match="Transient completed Research recording error"):
+        await research.wait_for_idle()
+    assert await asyncio.wait_for(manager.delete_session(parent.id), 4)
+    await research.wait_for_idle()
+    assert await db.get_session_binding(rec.delegation_id) is not None
+    row = await db.get_research_job(job["id"])
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert row["status"] == "completed" and row["injection_status"] == "failed"
+    assert returns == [f"research:{job['id']}"]
+    assert await manager.source_receipt("research", returns[0], session_id=rec.delegation_id) is None
+    await research.shutdown()
+
+
+@pytest.mark.parametrize("write_fails", [False, True])
+async def test_parent_delete_settles_the_accepted_child_research_receipt(work_runtime, monkeypatch, write_fails):
+    from server.research import manager as research_module
+    from server.research.manager import ResearchManager
+    from server.research.orchestrator import ResearchReport
+    from server.routers import sessions as session_routes
+
+    manager, delegations, parent, starts = work_runtime
+    db = manager.db
+    manager.work_test_app.include_router(session_routes.router)
+    research = ResearchManager()
+    research.bind(manager, db)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    monkeypatch.setattr("server.delegations.research_manager", research)
+    queued, recording, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    advance, delete = db.advance_research_delivery, db.delete_session
+    writes = []
+
+    async def pipeline(question, **kwargs):
+        return ResearchReport(question=question, report="Selected report",
+                              findings=[], sources=[], angles=[], claims_examined=0, cost=0)
+
+    async def observe_delivery(event):
+        if event["type"] == "research_delivery" and event["delivery_receipt"]["stage"] == "queued":
+            queued.set()
+
+    async def hold_recording(job_id, request_id, stage, **kwargs):
+        if stage in {"failed", "unknown", "recording_unconfirmed"}:
+            writes.append((job_id, request_id, stage))
+            recording.set()
+            await release.wait()
+            if write_fails and len(writes) == 1:
+                raise OSError("Transient accepted Research receipt write failure")
+        return await advance(job_id, request_id, stage, **kwargs)
+
+    async def delete_after_receipt(session_id):
+        if session_id == parent.id:
+            row = await db.get_research_job(job["id"])
+            assert row["delivery_receipt"]["stage"] == "failed"
+        await delete(session_id)
+
+    async def delete_parent():
+        response = await manager.work_test_client.delete(f"/api/sessions/{parent.id}")
+        assert response.status_code == 204, response.text
+
+    monkeypatch.setattr(research_module, "run_research", pipeline)
+    monkeypatch.setattr(db, "advance_research_delivery", hold_recording)
+    monkeypatch.setattr(db, "delete_session", delete_after_receipt)
+    rec = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held Research owner")
+    scope = await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    manager.on_broadcast("observe original Research delivery", observe_delivery)
+    deletion = None
+    try:
+        job = await research.start(rec.delegation_id, "Original Research receipt", scope=scope)
+        await asyncio.wait_for(queued.wait(), 3)
+        original = await manager.source_receipt("research", f"research:{job['id']}", session_id=rec.delegation_id)
+        assert original is not None and original[1].accepted
+        if write_fails:
+            release.set()
+            assert await manager.cancel_request(rec.delegation_id, original[1].request_id)
+            with pytest.raises(OSError, match="Transient accepted Research receipt write failure"):
+                await asyncio.wait_for(research.wait_for_idle(), 3)
+            row = await db.get_research_job(job["id"])
+            assert row["delivery_receipt"]["stage"] == "queued"
+            await asyncio.wait_for(delete_parent(), 3)
+        else:
+            deletion = asyncio.create_task(delete_parent())
+            await asyncio.wait_for(recording.wait(), 3)
+            _, pending = await asyncio.wait({deletion}, timeout=0.1)
+            assert pending and await db.get_session_binding(parent.id) is not None
+            release.set()
+            await asyncio.wait_for(deletion, 3)
+        assert writes == [(job["id"], original[1].request_id, "failed")] * (2 if write_fails else 1)
+        assert await db.get_session_binding(rec.delegation_id) is not None
+        await research.shutdown()
+    finally:
+        release.set()
+        manager.remove_broadcast("observe original Research delivery")
+        if deletion is not None:
+            await asyncio.gather(deletion, return_exceptions=True)
+
+
+async def test_parent_delete_resumes_the_accepted_nested_delegation_write(work_runtime, monkeypatch):
+    from server.routers import sessions as session_routes
+
+    manager, delegations, parent, starts = work_runtime
+    db = manager.db
+    manager.work_test_app.include_router(session_routes.router)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    await AgentManager(db).create_agent(name="Nested Worker", backend="codex", user_id=parent.user_id)
+    child = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held child")
+    scope = await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    compare, admit = db.compare_and_set_delegation_state, manager.admit_return
+    writes, admissions = [], []
+    failed = asyncio.Event()
+
+    async def fail_once(*args, **kwargs):
+        state = json.loads(args[2])
+        if args[0] != child.delegation_id and state["terminal_disposition"] == "accepted":
+            writes.append(state["work_id"])
+            if len(writes) == 1:
+                failed.set()
+                raise OSError("Transient nested delegation receipt write failure")
+        return await compare(*args, **kwargs)
+
+    async def observe_admission(target, **kwargs):
+        if target.source == "delegation" and target.session_id == child.delegation_id:
+            admissions.append(target.delivery_id)
+        return await admit(target, **kwargs)
+
+    monkeypatch.setattr(db, "compare_and_set_delegation_state", fail_once)
+    monkeypatch.setattr(manager, "admit_return", observe_admission)
+    nested = await delegations.start_delegation(
+        parent_session_id=child.delegation_id, agent_name="Nested Worker", request="Complete a nested reply", scope=scope,
+    )
+    await asyncio.wait_for(failed.wait(), 3)
+    with pytest.raises(RuntimeError, match="Delegation command cleanup failed"):
+        await delegations.confirm_recording()
+    original = await manager.source_receipt("delegation", f"agent-terminal:{nested.work_id}", session_id=child.delegation_id)
+    assert original is not None and original[1].accepted
+    try:
+        response = await asyncio.wait_for(manager.work_test_client.delete(f"/api/sessions/{parent.id}"), 4)
+        assert response.status_code == 204, response.text
+        stored = json.loads(await db.load_delegation_state(
+            nested.delegation_id, parent_session_id=child.delegation_id, user_id=parent.user_id,
+        ))
+        assert stored["state"] == "completed" and stored["terminal_disposition"] == "accepted"
+        assert writes == [nested.work_id, nested.work_id]
+        assert admissions == [f"agent-terminal:{nested.work_id}"]
+        await delegations.confirm_recording()
+    finally:
+        if writes == [nested.work_id]:
+            await delegations._command(delegations._inject_terminal(nested))
+
+
+@pytest.mark.parametrize("prior_cancel", ["publishing", "failed"])
+async def test_parent_delete_joins_original_nested_delegation_cancellation(work_runtime, monkeypatch, prior_cancel):
+    from server.routers import sessions as session_routes
+
+    manager, delegations, parent, starts = work_runtime
+    db = manager.db
+    manager.work_test_app.include_router(session_routes.router)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    await AgentManager(db).create_agent(name="Nested Worker", backend="codex", user_id=parent.user_id)
+    child = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held child")
+    scope = await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    nested = await delegations.start_delegation(
+        parent_session_id=child.delegation_id, agent_name="Nested Worker", request="held nested", scope=scope,
+    )
+    await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+
+    async def delete_parent():
+        response = await asyncio.wait_for(manager.work_test_client.delete(f"/api/sessions/{parent.id}"), 3)
+        assert response.status_code == 204, response.text
+
+    if prior_cancel == "failed":
+        cancel = manager.work_test_bg.cancel_work
+        attempts = []
+
+        async def fail_once(work_id):
+            if work_id == nested.work_id:
+                attempts.append(work_id)
+                if len(attempts) == 1:
+                    raise OSError("Transient nested cancellation failure")
+            await cancel(work_id)
+
+        monkeypatch.setattr(manager.work_test_bg, "cancel_work", fail_once)
+        with pytest.raises(OSError, match="Transient nested cancellation failure"):
+            await delegations.cancel_delegation(nested.delegation_id, work_id=nested.work_id)
+        await delete_parent()
+        assert attempts == [nested.work_id, nested.work_id]
+    else:
+        deleted = asyncio.get_running_loop().create_future()
+
+        async def subscriber(event):
+            if event["type"] == "delegation_delivery" and event["session_id"] == child.delegation_id:
+                try:
+                    await delete_parent()
+                except Exception as error:
+                    deleted.set_exception(error)
+                else:
+                    deleted.set_result(None)
+
+        manager.on_broadcast("delete from nested delegation delivery", subscriber)
+        try:
+            await asyncio.wait_for(delegations.cancel_delegation(child.delegation_id), 5)
+            await asyncio.wait_for(deleted, 4)
+        finally:
+            manager.remove_broadcast("delete from nested delegation delivery")
+
+    await delegations.confirm_recording()
+    assert await db.get_session_binding(parent.id) is None
+    assert await db.get_session_binding(child.delegation_id) is not None
+    assert nested.state == "cancelled"
+    assert not manager.work_has_resources(child.work_id) and not manager.work_has_resources(nested.work_id)
+
+
+@pytest.mark.parametrize("delay", [False, True])
+async def test_parent_delete_owns_retirement_when_delegation_subscriber_fails(work_runtime, monkeypatch, caplog, delay):
+    from server.routers import sessions as session_routes
+
+    manager, delegations, parent, starts = work_runtime
+    manager.work_test_app.include_router(session_routes.router)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    raised, release = asyncio.Event(), asyncio.Event()
+    secret = "private-test-value"
+    monkeypatch.setattr("server.config.settings.auth_token", secret)
+
+    async def subscriber(event):
+        if event["type"] == "delegation_delivery" and event["session_id"] == parent.id:
+            if delay:
+                await release.wait()
+            raised.set()
+            try:
+                raise OSError("Original subscriber error")
+            except OSError as cause:
+                raise ValueError(f"Required delegation notification failed ({secret})") from cause
+
+    manager.on_broadcast("required failing delegation delivery", subscriber, required=True)
+    try:
+        rec = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held child")
+        await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+        response = await asyncio.wait_for(manager.work_test_client.delete(f"/api/sessions/{parent.id}"), 3)
+        assert response.status_code == 204, response.text
+        release.set()
+        await asyncio.wait_for(raised.wait(), 3)
+        await delegations.confirm_recording()
+        assert "OSError: Original subscriber error" in caplog.text
+        assert "ValueError: Required delegation notification failed ([redacted])" in caplog.text
+        assert secret not in caplog.text
+        assert rec.to_public_dict()["terminal_disposition"] == "closed"
+        assert await manager.db.get_session_binding(parent.id) is None
+    finally:
+        release.set()
+        manager.remove_broadcast("required failing delegation delivery")
 
 
 async def test_application_delete_retires_direct_and_completed_delegated_writers_only(work_runtime, monkeypatch, tmp_path):

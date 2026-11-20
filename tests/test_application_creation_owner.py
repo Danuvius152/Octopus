@@ -1067,6 +1067,27 @@ async def test_successful_empty_proof_joins_the_original_shared_deletion(creatio
         await asyncio.gather(*(task for task in (deleting, cleanup) if task is not None), return_exceptions=True)
 
 
+async def test_empty_application_cleanup_retries_failed_deletion(creation, monkeypatch, tmp_path):
+    runtime, _, builder = creation
+    manager, database, _, _, _, _ = runtime
+    await database.save_application(app_id="empty-retry", name="Empty cleanup", app_dir=str(tmp_path),
+        created_at="now", updated_at="now", agent_id=builder["id"], user_id=builder["user_id"])
+    session = await manager.create_session(builder["id"], working_dir=str(tmp_path),
+                                           origin="application", app_id="empty-retry")
+
+    async def unavailable(session_id):
+        raise OSError("session storage unavailable")
+
+    with monkeypatch.context() as outage:
+        outage.setattr(database, "delete_session", unavailable)
+        with pytest.raises(OSError, match="session storage unavailable"):
+            await manager.delete_session(session.id, only_empty_application="empty-retry")
+
+    assert await database.get_session_binding(session.id) is not None
+    assert await manager.delete_session(session.id, only_empty_application="empty-retry")
+    assert await database.get_session_binding(session.id) is None
+
+
 @pytest.mark.parametrize("boundary", ["before-row", "after-row", "after-session", "before-input", "after-input"])
 async def test_waiter_cancellation_does_not_cancel_original_creation(creation, monkeypatch, tmp_path, boundary):
     runtime, apps, builder = creation

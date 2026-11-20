@@ -94,7 +94,7 @@ async def test_research_owner_retries_admission_without_rerunning_the_report_or_
     research.bind(manager, db)
     try:
         job = await research.start(session.id, "Original research")
-        await asyncio.wait_for(research._tasks[job["id"]], 5)
+        await asyncio.wait_for(research._task(job["id"]), 5)
         row = await db.get_research_job(job["id"])
         assert row["status"] == "completed" and row["injection_status"] == "delivered"
         assert reports == ["one report"]

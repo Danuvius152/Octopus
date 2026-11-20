@@ -692,6 +692,319 @@ async def test_detail_response_is_404_if_session_deleted_during_history_read(run
     assert response.status_code == 404
 
 
+@pytest.mark.parametrize("queued", [False, True], ids=["row-awaiting-return", "spawn-queued"])
+async def test_delete_prevents_background_spawn_after_its_row_is_created(background, runtime, monkeypatch, tmp_path, queued):
+    from server import bg_tasks
+
+    bg, session, _, _ = background
+    manager, db, _, _, _, _ = runtime
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", bg)
+    persisted, resume_start = asyncio.Event(), asyncio.Event()
+    request_ready, admit_delete = asyncio.Event(), asyncio.Event()
+    claimed, resume_delete = asyncio.Event(), asyncio.Event()
+    create, close, delete = db.create_bg_task, manager._close_original_execution, manager.delete_session
+    spawn = asyncio.create_subprocess_exec
+    launches = []
+
+    async def hold_row(**kwargs):
+        await create(**kwargs)
+        persisted.set()
+        await resume_start.wait()
+        if queued:
+            # Queue the waiting DELETE ahead of the OS launch coroutine.
+            admit_delete.set()
+
+    async def hold_request(*args, **kwargs):
+        request_ready.set()
+        await admit_delete.wait()
+        return await delete(*args, **kwargs)
+
+    async def hold_owner(*args, **kwargs):
+        claimed.set()
+        await resume_delete.wait()
+        return await close(*args, **kwargs)
+
+    async def observe_spawn(*args, **kwargs):
+        launches.append(args)
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(db, "create_bg_task", hold_row)
+    monkeypatch.setattr(manager, "delete_session", hold_request)
+    monkeypatch.setattr(manager, "_close_original_execution", hold_owner)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
+    async with await session_client(manager, session) as client:
+        startup = asyncio.create_task(bg.start_task(session_id=session.id, working_dir=str(tmp_path), command="true"))
+        await asyncio.wait_for(persisted.wait(), 3)
+        deleting = asyncio.create_task(client.delete(f"/api/sessions/{session.id}"))
+        try:
+            await asyncio.wait_for(request_ready.wait(), 3)
+            if queued:
+                resume_start.set()
+            else:
+                admit_delete.set()
+            await asyncio.wait_for(claimed.wait(), 3)
+            resume_start.set()
+            result, = await asyncio.wait_for(asyncio.gather(startup, return_exceptions=True), 3)
+            assert launches == []
+            assert isinstance(result, bg_tasks.BgTaskError)
+            row, = await db.list_bg_tasks_for_session(session.id)
+            assert row["status"] == "cancelled" and row["stop_reason"] == "work_cancelled"
+        finally:
+            admit_delete.set()
+            resume_start.set()
+            resume_delete.set()
+            await asyncio.gather(startup, deleting, return_exceptions=True)
+        assert deleting.result().status_code == 204
+
+
+async def test_public_deletion_shares_retirement_of_a_late_background_group(background, runtime, monkeypatch, tmp_path):
+    from server import bg_tasks
+
+    bg, session, _, _ = background
+    manager, db, _, _, _, _ = runtime
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", bg)
+    spawned, release_spawn = gate_background_spawn(monkeypatch)
+    retiring, second_requested = asyncio.Event(), asyncio.Event()
+    retire, delete_row = bg.retire_session, db.delete_session
+    request_delete = manager.delete_session
+    deletions = []
+    requests = 0
+
+    async def observed_retire(session_id):
+        retiring.set()
+        await retire(session_id)
+
+    async def counted_delete(session_id):
+        deletions.append(session_id)
+        await delete_row(session_id)
+
+    async def observe_request(session_id, **kwargs):
+        nonlocal requests
+        requests += 1
+        if requests == 2:
+            second_requested.set()
+        return await request_delete(session_id, **kwargs)
+
+    monkeypatch.setattr(bg, "retire_session", observed_retire)
+    monkeypatch.setattr(db, "delete_session", counted_delete)
+    monkeypatch.setattr(manager, "delete_session", observe_request)
+    group_file, child_file = tmp_path / "group.pid", tmp_path / "group-member.pid"
+    child = f"import os,time; open({str(child_file)!r},'w').write(str(os.getpid())); time.sleep(60)"
+    parent = (f"import os,subprocess,sys; open({str(group_file)!r},'w').write(str(os.getpid())); "
+              f"subprocess.Popen([sys.executable,'-c',{child!r}]).wait()")
+    startup = asyncio.create_task(bg.start_task(session_id=session.id, working_dir=str(tmp_path),
+        command="exec " + shlex.join([sys.executable, "-c", parent])))
+    first = second = None
+    try:
+        await asyncio.wait_for(spawned.wait(), 3)
+        await wait_until(lambda: child_file.exists() and bool(child_file.read_text()))
+        group, child_pid = int(group_file.read_text()), int(child_file.read_text())
+        assert os.getpgid(child_pid) == group
+        async with await session_client(manager, session) as client:
+            url = f"/api/sessions/{session.id}"
+            first = asyncio.create_task(client.delete(url))
+            await asyncio.wait_for(retiring.wait(), 3)
+            assert process_alive(group) and process_alive(child_pid)
+            assert await db.get_session_binding(session.id) is not None
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            second = asyncio.create_task(client.delete(url))
+            await asyncio.wait_for(second_requested.wait(), 3)
+            assert not second.done() and not deletions
+            release_spawn.set()
+            assert (await asyncio.wait_for(second, 5)).status_code == 204
+            assert deletions == [session.id]
+            assert not process_alive(group) and not process_alive(child_pid)
+            assert await bg.list_tasks(session.id) == []
+    finally:
+        release_spawn.set()
+        await asyncio.gather(*(task for task in (startup, first, second) if task is not None), return_exceptions=True)
+
+
+async def test_public_delete_keeps_its_original_live_target(runtime, monkeypatch):
+    manager, db, session, _, _, _ = runtime
+    entered, release = asyncio.Event(), asyncio.Event()
+    delete = manager.delete_session
+
+    async def held_delete(session_id, **kwargs):
+        entered.set()
+        await release.wait()
+        return await delete(session_id, **kwargs)
+
+    monkeypatch.setattr(manager, "delete_session", held_delete)
+    async with await session_client(manager, session) as client:
+        deleting = asyncio.create_task(client.delete(f"/api/sessions/{session.id}"))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            await manager.archive_session(session.id, replace=False)
+            release.set()
+            assert (await asyncio.wait_for(deleting, 3)).status_code == 404
+            assert (await db.get_session_binding(session.id))["archived"]
+        finally:
+            release.set()
+            await asyncio.gather(deleting, return_exceptions=True)
+
+
+async def test_delete_retries_background_settlement_after_confirmed_process_exit(background, runtime, monkeypatch, tmp_path):
+    from server import bg_tasks
+
+    bg, session, delivered, _ = background
+    manager, db, _, _, _, _ = runtime
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", bg)
+    pid_file = tmp_path / "original-bg.pid"
+    command = f"import os,time; open({str(pid_file)!r},'w').write(str(os.getpid())); time.sleep(60)"
+    record = await bg.start_task(session_id=session.id, working_dir=str(tmp_path),
+        command="exec " + shlex.join([sys.executable, "-c", command]))
+    await wait_until(lambda: pid_file.exists() and bool(pid_file.read_text()))
+    pid = int(pid_file.read_text())
+    update = db.update_bg_task
+
+    async def refused_update(task_id, **changes):
+        if task_id == record.id and "completed_at" in changes:
+            raise OSError("Transient background recording failure")
+        await update(task_id, **changes)
+
+    monkeypatch.setattr(db, "update_bg_task", refused_update)
+    try:
+        with pytest.raises(OSError, match="Transient background recording failure"):
+            await asyncio.wait_for(manager.delete_session(session.id), 5)
+        assert not process_alive(pid)
+        assert manager.get_session(session.id) is session
+        assert (await bg.get_task(record.id)).session_id == session.id
+        assert delivered == []
+    finally:
+        monkeypatch.setattr(db, "update_bg_task", update)
+    assert await asyncio.wait_for(manager.delete_session(session.id), 5)
+    assert len(delivered) == 1 and delivered[0].id == record.id and delivered[0].status == "cancelled"
+    assert await db.get_session_binding(session.id) is None
+
+
+@pytest.mark.parametrize("kind", ["bg_started", "bg_completed", "bg_delivery"])
+async def test_background_subscriber_can_delete_the_original_session(background, runtime, monkeypatch, tmp_path, kind, caplog):
+    from server import bg_tasks
+
+    bg, session, delivered, broadcasts = background
+    manager, db, _, _, _, _ = runtime
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", bg)
+    deleted = asyncio.get_running_loop().create_future()
+    secret = "private-background-credential"
+    monkeypatch.setattr("server.config.settings.auth_token", secret)
+
+    async def subscriber(event):
+        if event["type"] == kind and event["session_id"] == session.id:
+            try:
+                deleted.set_result(await asyncio.wait_for(manager.delete_session(session.id), 3))
+            except Exception as error:
+                deleted.set_exception(error)
+            raise ValueError(f"Background projection failed ({secret})")
+
+    manager.on_broadcast("delete from original background event", subscriber, required=True)
+    try:
+        record = await bg.start_task(session_id=session.id, working_dir=str(tmp_path), command="true")
+        assert await asyncio.wait_for(deleted, 4)
+        assert await db.get_session_binding(session.id) is None
+        assert [result.id for result in delivered] == [record.id]
+        await bg.shutdown()
+        assert [event["type"] for event in broadcasts] == ["bg_started", "bg_completed", "bg_delivery"]
+        assert "Background projection failed ([redacted])" in caplog.text and secret not in caplog.text
+    finally:
+        manager.remove_broadcast("delete from original background event")
+
+
+async def test_delete_retries_aborted_background_start_after_confirmed_exit(background, runtime, monkeypatch, tmp_path):
+    from server import bg_tasks
+
+    bg, session, _, _ = background
+    manager, db, _, _, _, _ = runtime
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", bg)
+    spawned, release_spawn = gate_background_spawn(monkeypatch)
+    entered = asyncio.Event()
+    retire, update = bg.retire_session, db.update_bg_task
+    attempts = []
+    pid_file = tmp_path / "aborted-start.pid"
+
+    async def observe_retirement(session_id):
+        entered.set()
+        await retire(session_id)
+
+    async def fail_once(task_id, **fields):
+        if "completed_at" in fields:
+            attempts.append((task_id, fields.copy()))
+            if len(attempts) == 1:
+                raise OSError("Transient aborted launch write failure")
+        await update(task_id, **fields)
+
+    monkeypatch.setattr(bg, "retire_session", observe_retirement)
+    monkeypatch.setattr(db, "update_bg_task", fail_once)
+    startup = asyncio.create_task(bg.start_task(session_id=session.id, working_dir=str(tmp_path),
+        command=f"echo $$ > {shlex.quote(str(pid_file))}"))
+    deleting = None
+    try:
+        await asyncio.wait_for(spawned.wait(), 3)
+        await wait_until(lambda: pid_file.exists() and bool(pid_file.read_text()))
+        pid = int(pid_file.read_text())
+        startup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await startup
+        deleting = asyncio.create_task(manager.delete_session(session.id))
+        await asyncio.wait_for(entered.wait(), 3)
+        release_spawn.set()
+        with pytest.raises(OSError, match="Transient aborted launch write failure"):
+            await asyncio.wait_for(deleting, 3)
+        assert not process_alive(pid)
+        assert manager.get_session(session.id) is session
+        original, = await bg.list_tasks(session.id)
+        assert original.id == attempts[0][0]
+        assert await asyncio.wait_for(manager.delete_session(session.id), 3)
+        assert len(attempts) == 2 and attempts[0] == attempts[1]
+    finally:
+        release_spawn.set()
+        await asyncio.gather(*(task for task in (startup, deleting) if task is not None), return_exceptions=True)
+
+
+async def test_research_start_revalidates_the_model_lease_after_configuration(runtime, monkeypatch):
+    from server.research import manager as research_module
+    from server.research.manager import ResearchError, ResearchManager
+
+    manager, db, session, _, starts, _ = runtime
+    research = ResearchManager()
+    research.bind(manager, db)
+    entered, release = asyncio.Event(), asyncio.Event()
+    capture = manager.capture_request_configuration
+
+    async def hold_configuration(context):
+        result = await capture(context)
+        entered.set()
+        await release.wait()
+        return result
+
+    async def forbidden_pipeline(*args, **kwargs):
+        pytest.fail("A retired model scope cannot start Research")
+
+    await manager.start_message(session.id, "held original Research caller")
+    context = await asyncio.wait_for(starts.get(), 3)
+    token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
+    scope = verify(token)
+    assert scope is not None and scope.run_lease_id is not None
+    await wait_until(lambda: scope_is_live(scope))
+    monkeypatch.setattr(manager, "capture_request_configuration", hold_configuration)
+    monkeypatch.setattr(research_module, "run_research", forbidden_pipeline)
+    starting = asyncio.create_task(research.start(session.id, "Late Research", scope=scope))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        revoke_run(scope.run_lease_id)
+        assert manager.get_session(session.id) is session
+        release.set()
+        with pytest.raises(ResearchError, match="Model run is no longer active"):
+            await asyncio.wait_for(starting, 3)
+        assert await db.list_research_jobs_for_session(session.id) == []
+    finally:
+        release.set()
+        await asyncio.gather(starting, return_exceptions=True)
+        await research.shutdown()
+
+
 async def test_auto_archive_preserves_stop_and_new_return_during_database_write(runtime, monkeypatch):
     manager, database, parent, _, starts, events = runtime
     session = await manager.create_session(parent.agent_id, "Transient", parent.working_dir, origin="schedule", backend="codex")

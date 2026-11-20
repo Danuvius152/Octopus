@@ -164,11 +164,11 @@ async def test_followup_retires_old_question_writer_only_after_confirmed_takeove
                     await prepare_release.wait()
                 return await get_agent(agent_id)
 
-            async def pause_archive(session_id, *, expected_session):
+            async def pause_archive(session_id, *, expected_session, **kwargs):
                 assert expected_session is manager.get_session(session_id)
                 archive_entered.set()
                 await archive_release.wait()
-                return await auto_archive(session_id, expected_session=expected_session)
+                return await auto_archive(session_id, expected_session=expected_session, **kwargs)
 
             async def pause_second_admission(session_id, prompt, **kwargs):
                 if session_id == first.delegation_id:
@@ -251,6 +251,7 @@ async def test_deletion_closes_only_recording_at_the_missing_target(
     work_runtime, monkeypatch, tmp_path, deleted,
 ):
     manager, delegations, parent, starts = work_runtime
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
     rec = await delegations.start_delegation(
         parent_session_id=parent.id, agent_name='Worker', request='controlled original round',
     )

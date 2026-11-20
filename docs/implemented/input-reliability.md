@@ -269,8 +269,18 @@ outcome／recording_state 不因附带此信息改变，也不授予 hook 或完
 原 Manager 接管。已确认资源退出后，应用历史退休与后代附件物化先于数据库删除；
 发布订阅者可以发起删除，原 publisher 继续由外部排空，不形成自身等待。
 
-live 与已归档会话的删除均由 Manager 的原生命周期捕获删除前账户 audience，
-先退休原 writer，再确认 DB 删除与 registry 移除，最后广播最小 `session_deleted`。
+公开永久删除以验权时捕获的 live 对象为准。内部删除也可捕获归档绑定。
+Manager 在原生命周期锁下登记单一删除责任，封闭新工作、恢复和新返回接管，
+重复调用者共享原操作。BG、Research 和委派的负责人在锁外确认执行退出并结算
+持久记录及原回执。观察者断开时，原删除继续。失败保留会话归属供重试，原返回
+接管继续优先核对已确认回执。普通归档保留独立工作及其结果。
+
+独立任务回传恢复会话后，Manager 接手 `session_unarchived` 通知。委派启动期间
+的子会话归档和恢复也由 Manager 发布。父工作退役时，启动命令可以在状态提交和
+通知交接后继续清理。浏览器恢复仍等待本次通知处理结束，服务关停会排空已交接的通知。
+
+资源结算后，Manager 确认 DB 删除与 registry 移除，再向捕获的账户广播最小
+`session_deleted`。源通知由各自的 publisher 排空，允许通知订阅者等待永久删除。
 失败不生产成功通知；通知不从已删行反查归属，也不提供持久重放或 exactly-once。
 发送侧的逐帧资格与删除后页面清理分别归
 [账户与 WebSocket](multi-tenancy.md#websocket-delivery)和

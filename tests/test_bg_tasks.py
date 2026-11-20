@@ -538,6 +538,11 @@ async def test_closed_work_drains_running_process_after_startup_cleanup_fails(db
         release_delivery.set()
         with pytest.raises(RuntimeError, match="startup compensation recording failed"):
             await asyncio.wait_for(stopping, 3)
+        with pytest.raises(RuntimeError, match="shutdown incomplete"):
+            await manager.shutdown()
+        assert manager.drain_blockers()
+        retained = await manager.get_task(startup_id)
+        assert retained is not None and retained.status == "running"
     finally:
         release_handle.set()
         release_delivery.set()
@@ -546,11 +551,12 @@ async def test_closed_work_drains_running_process_after_startup_cleanup_fails(db
             delivery_waiter.cancel()
         await asyncio.gather(startup, *[task for task in (stopping, delivery_waiter) if task is not None],
                              return_exceptions=True)
-        # The failed durable acknowledgement keeps its original cleanup owner;
-        # all OS resources must nevertheless have been reaped before returning.
-        with pytest.raises(RuntimeError, match="shutdown incomplete"):
-            await manager.shutdown()
-        assert all(process.returncode is not None for process in processes)
+        await manager.shutdown()
+    assert not manager.drain_blockers()
+    final = await manager.get_task(startup_id)
+    assert final is not None
+    assert (final.status, final.stop_reason) == ("cancelled", "work_cancelled")
+    assert len(processes) == 2 and all(process.returncode is not None for process in processes)
 
 
 async def test_shutdown_retains_background_process_until_exit_is_confirmed(manager, db, tmp_path, monkeypatch):

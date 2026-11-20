@@ -845,7 +845,12 @@ class ForkingMixin(SessionManagerBase):
             return
         from ..attachments import blit_attachment
 
-        owner_id = await self.db.get_session_owner(session_id)
+        binding = await self.db.get_session_binding(session_id)
+        if binding is None:
+            # The original delete committed after materializing these files.
+            # A retry may still owe the post-commit hooks.
+            return
+        owner_id = binding["user_id"]
         if owner_id is None:
             raise ValueError("The session has no attachment owner")
         for fork_id in descendants:

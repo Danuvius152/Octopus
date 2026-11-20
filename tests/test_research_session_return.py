@@ -74,7 +74,7 @@ async def test_new_research_return_restores_original_session_and_stop(returning_
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "Original")
     job = await research.start(session.id, "Keep the original caller")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     await asyncio.wait_for(started.wait(), 2)
     for _ in range(4):
         await manager.interrupt(session.id)
@@ -107,7 +107,7 @@ async def test_research_waiting_for_slot_keeps_configuration_after_archive(retur
     session = await manager.create_session(agent["id"], "Waiting")
     research._job_sem = asyncio.Semaphore(0)
     job = await research.start(session.id, "Waiting for a slot")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     await manager.archive_session(session.id, replace=False)
     assert not started.is_set()
     release.set()
@@ -129,7 +129,7 @@ async def test_scheduled_session_archives_then_processes_report_and_archives_aga
 
     manager.on_broadcast("archive-evidence", archived)
     job = await research.start(session.id, "Scheduled research")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     await asyncio.wait_for(started.wait(), 2)
     primary = await manager.start_message(session.id, "Primary turn")
     await primary.wait()
@@ -156,9 +156,9 @@ async def test_archive_revokes_queued_report_and_only_new_report_wakes_session(r
     session = await manager.create_session(agent["id"], "Two reports")
     await manager.interrupt(session.id)
     first = await research.start(session.id, "first")
-    first_task = research._tasks[first["id"]]
+    first_task = research._task(first["id"])
     second = await research.start(session.id, "second")
-    second_task = research._tasks[second["id"]]
+    second_task = research._task(second["id"])
     gates["first"].set()
     await first_task
     old_delivery = (await db.get_research_job(first["id"]))["delivery_receipt"]
@@ -184,7 +184,7 @@ async def test_simultaneous_reports_share_one_session_and_duplicate_keeps_receip
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "Concurrent reports")
     jobs = [await research.start(session.id, question) for question in ("one", "two")]
-    tasks = [research._tasks[job["id"]] for job in jobs]
+    tasks = [research._task(job["id"]) for job in jobs]
     await asyncio.wait_for(started.wait(), 2)
     await manager.archive_session(session.id, replace=False)
     release.set()
@@ -216,7 +216,7 @@ async def test_revoked_account_retains_report_without_waking_session(returning_r
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "Revoked")
     job = await research.start(session.id, "Retain evidence")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     await asyncio.wait_for(started.wait(), 2)
     await manager.archive_session(session.id, replace=False)
     await db.update_user_field(session.user_id, disabled_at="2026-10-27T00:00:00+00:00")
@@ -248,7 +248,7 @@ async def test_new_return_can_finish_while_old_archive_notice_is_delayed(returni
     manager.on_broadcast("delayed-archive-observer", slow_archive)
     manager.on_broadcast("browser-projection", browser, session.user_id)
     job = await research.start(session.id, "Return across publication")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     await asyncio.wait_for(started.wait(), 2)
     archiving = asyncio.create_task(manager.archive_session(session.id, replace=False))
     try:
@@ -352,7 +352,7 @@ async def test_permanent_transcript_rejection_retains_report_and_never_retries_a
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "Damaged transcript")
     job = await research.start(session.id, "Keep the completed report")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     await started.wait()
     await manager.archive_session(session.id, replace=False)
     async with db.transaction(write=True) as tx:
@@ -410,7 +410,7 @@ async def test_report_lost_ack_reconciles_original_input_without_repeating_resea
     monkeypatch.setattr(manager, "start_message", lost_ack)
     monkeypatch.setattr(manager, "source_receipt", original_receipt)
     job = await research.start(session.id, "Reconcile the report")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     await started.wait()
     release.set()
     await asyncio.wait_for(asyncio.shield(task), 2)
@@ -446,7 +446,7 @@ async def test_unconfirmed_report_is_not_overwritten_by_later_refusal_or_restart
 
     monkeypatch.setattr(manager, "start_message", unknown)
     job = await research.start(session.id, "Preserve uncertainty")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     await started.wait()
     release.set()
     await asyncio.wait_for(task, 2)
@@ -466,7 +466,7 @@ async def test_real_fork_reservation_delays_report_using_its_original_delivery_i
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "Fork reservation")
     job = await research.start(session.id, "Wait for the original lifecycle")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     await started.wait()
     owner = manager._session_owner(session)
     await owner.call_runtime(ReserveFork(True))

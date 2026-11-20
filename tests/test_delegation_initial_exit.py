@@ -597,9 +597,13 @@ async def test_initial_exit_settles_the_original_terminal_observation_before_wit
         await asyncio.gather(starting, *([cancelling] if cancelling is not None else []), return_exceptions=True)
 
 
-async def test_deleting_the_parent_does_not_withdraw_an_adopted_initial_child(notification_runtime, file_check):
+@pytest.mark.parametrize("cleanup_failure", [None, "delete", "cancel"])
+async def test_deleting_the_parent_retires_the_adopted_initial_child(
+    notification_runtime, file_check, monkeypatch, cleanup_failure,
+):
     runtime = notification_runtime
     file_check.enabled = False
+    monkeypatch.setattr("server.delegations.delegation_manager", runtime.delegations)
     rec = await runtime.delegations.start_delegation(
         parent_session_id=runtime.parent.id, agent_name="Notification worker", request="Keep the adopted original input",
     )
@@ -607,12 +611,29 @@ async def test_deleting_the_parent_does_not_withdraw_an_adopted_initial_child(no
     original = next(receipt for sid, work, receipt in runtime.receipts
                     if sid == rec.delegation_id and work == rec.work_id)
     assert original.accepted and runtime.manager.work_has_resources(rec.work_id)
+    if cleanup_failure:
+        close_work = runtime.manager.close_work
+
+        async def refuse_first_close(work_id):
+            assert work_id == rec.work_id
+            raise OSError("Transient delegation cleanup failure")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(runtime.manager, "close_work", refuse_first_close)
+            with pytest.raises(OSError, match="Transient delegation cleanup failure"):
+                if cleanup_failure == "cancel":
+                    await runtime.delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id)
+                else:
+                    await runtime.manager.delete_session(runtime.parent.id)
+        assert runtime.manager.get_session(runtime.parent.id) is runtime.parent
+        assert runtime.manager.close_work == close_work
     assert await runtime.manager.delete_session(runtime.parent.id)
     assert runtime.delegations.get_delegation(rec.delegation_id) is rec
-    assert rec.state == "running" and work_is_open(rec.work_id)
+    assert rec.state == "cancelled" and not work_is_open(rec.work_id)
     assert runtime.manager.get_session(rec.delegation_id) is not None
-    await release_model(runtime, rec)
+    assert not runtime.manager.work_has_resources(rec.work_id)
     completion = await asyncio.wait_for(original.wait(), 2)
-    assert completion.outcome.status == "success"
+    assert original.accepted and completion.input_request_id == original.request_id
+    assert completion.outcome.status == "interrupted"
     await runtime.delegations.confirm_recording()
-    assert rec.state != "cancelled" and len(runtime.starts) == 1
+    assert len(runtime.starts) == 1

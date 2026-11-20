@@ -166,6 +166,9 @@ and a later job sees the new defaults. These are execution selections, not a
 cached authorization grant or a promise that every provider supports each value.
 Every leaf spawn rechecks current account, credential and execution authority;
 revocation ends the original job rather than switching it to another credential.
+After those checks return, the leaf checks the job's original session and work
+again. A permanent deletion claim or a closed parent round cancels the job
+before the harness submits the next OS process.
 After configuration waiting, admission rechecks shutdown synchronously before
 registering the task. Configuration capture rejects a missing or closed target
 and checks that the same target remains after Agent loading; Research maps that typed
@@ -228,30 +231,43 @@ SessionManager admission, SQLite receipts and a controlled report generator in
 `test_research_session_return.py` and `test_research_return_admission.py`, with source-failure coverage in
 `test_research_manager.py` and `test_source_return_owner_failure.py`.
 
-Pipeline owners and report-delivery observers share one task registry and one
-registration entry. Cancellation controls have a separate retained registry so
-shutdown cannot interrupt their transaction or notification by signalling them
-as pipelines. `wait_for_idle()` joins all these phases without closing admission;
-a completed report alone does not mean its follow-up receipt has settled. Done
-callbacks release only the registration they still own. Observation failures
-remain visible to draining and shutdown instead of disappearing after logging.
-Shutdown closes admission, captures both registries once and cancels each
-live pipeline/delivery owner at most once, leaving cancellation controls to finish.
-A shared deadline bounds their join. A timeout preserves that snapshot for a later join,
-including cancellation cleanup still writing an unknown delivery result. Observers
-handed off by a shielded original pipeline during shutdown join that
-same snapshot and settle unknown without replaying the accepted request. Request
-to job/session routing and exact-version browser confirmation remain separate
-facts; neither is another execution owner or a prerequisite for business delivery.
-An ordinary missing-job refusal preserves its caller's error without poisoning
-shutdown; an unexpected control failure or cancellation remains visible as
-unconfirmed cleanup. `test_research_manager.py` exercises real UPDATE/COMMIT
-barriers, repeated cancellation, shutdown/rejoin and original subprocess exit.
+Each job owns its pipeline, cancellation control and accepted-report observer
+under the original session and work ID. Done callbacks release their own
+registration. Failed cleanup stays registered. `wait_for_idle()` joins
+these writers and their notifications while admission stays open.
+Shutdown closes admission, signals each live pipeline and delivery observer
+once, and lets admitted cancellation controls finish their transactions.
+Drain includes observers handed off by an exiting pipeline and shares one
+deadline across all writers. A timed-out drain can rejoin the original tasks.
+A delivery observer handed off during shutdown records the accepted request's
+remaining uncertainty. The browser confirms the exact receipt version separately.
+A missing job returns its ordinary cancellation error. Unexpected control
+failure or cancellation remains visible to shutdown.
+
+Session deletion and delegated-work cancellation join admitted controls and
+pipelines. After execution stops,
+they settle receipts, including observers handed off during retirement.
+The original work ID also gates new cancellation controls in a surviving conversation.
+
+When storage recovers, the selected terminal write keeps its original outcome
+and timestamp. A matching committed row confirms a lost acknowledgement.
+Confirming a recovered report resumes its receipt-first return. A temporary
+source-read failure before submission resumes that same observation. An already
+refused return finishes its row update, material notice keyed by
+`research:{job_id}`, and status notification under the same job.
+After execution retires, an observer can read the original committed receipt
+while the Session publisher is still delivering its notification.
+
+Research publishes progress and result notifications in job order. The final
+progress notification is published after the pipeline selects its report for
+settlement. Retirement can hand pending notification I/O to the publication
+owner while joining durable outcomes and receipts. Service drain still joins
+those publications. Subscribers can await deletion of the originating session.
 
 Before any leaf starts, an `OSError` from preparing the per-job directory or its
 scratch cwd becomes the existing `ResearchError`. The original guarded terminal
 transaction settles failed, or preserves cancellation if it won first. After
-confirmed settlement the normal task/context registration retires; idle, drain
+confirmed settlement the pipeline registration retires; idle, drain
 and shutdown do not retain an exceptional owner for a job that spawned no leaf.
 Only those directory operations have this classification. An unexpected pipeline
 exception, uncertain database commit or genuine leaf retirement failure keeps

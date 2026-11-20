@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections import deque
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
@@ -11,8 +12,12 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+from ..config import settings
+from ..diagnostics import exception_diagnostic
+
 _MAX_PUBLICATIONS = 256
 _MAX_PUBLICATION_BYTES = 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 @dataclass(eq=False)
@@ -122,3 +127,66 @@ class SessionPublisher:
             else:
                 publication.delivered = True
             self._wake_owner()
+
+
+class WorkPublications:
+    """Track ordered notifications that may outlive their resource writer."""
+
+    def __init__(self) -> None:
+        self._tails: dict[str, tuple[asyncio.Task[None], asyncio.Future[None]]] = {}
+
+    @property
+    def pending(self) -> set[asyncio.Task[None]]:
+        # Each last publication joins every predecessor for the same source.
+        return {task for task, _ in self._tails.values()}
+
+    async def publish(self, key: str, send: Callable[[], Awaitable[None]], *, retiring: bool, required: bool = True) -> None:
+        tail = self._tails.get(key)
+        secrets = (settings.auth_token,)
+        released = tail[1] if tail else asyncio.get_running_loop().create_future()
+        sending = withdrawn = False
+
+        async def deliver() -> None:
+            nonlocal sending
+            if tail:
+                await asyncio.wait({tail[0]})
+            if not withdrawn:
+                sending = True
+                await send()
+
+        task = asyncio.create_task(deliver(), name=f"work-publication-{key}")
+        self._tails[key] = (task, released)
+
+        def finished(done: asyncio.Task[None]) -> None:
+            if self._tails[key][0] is done:
+                del self._tails[key]
+            if not done.cancelled():
+                error = done.exception()
+                if error is not None and (released.done() or not required):
+                    logger.error("Work publication failed key=%s\n%s", key,
+                                 exception_diagnostic(error, secrets=secrets))
+
+        task.add_done_callback(finished)
+        if retiring:
+            self.release(key)
+        milestones: set[asyncio.Future[None]] = {task, released}
+        try:
+            await asyncio.wait(milestones, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            if not released.done():
+                withdrawn = True
+                if sending:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            raise
+        if not released.done():
+            try:
+                task.result()
+            except Exception:
+                if required:
+                    raise
+
+    def release(self, key: str) -> None:
+        tail = self._tails.get(key)
+        if tail and not tail[1].done():
+            tail[1].set_result(None)

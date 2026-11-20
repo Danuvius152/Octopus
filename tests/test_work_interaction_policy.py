@@ -247,7 +247,7 @@ async def test_actual_async_returns_inherit_the_original_human_policy(returning_
         job = await research.start(session.id, "Human research")
         await asyncio.wait_for(started.wait(), 2)
         release.set()
-        await asyncio.wait_for(research._tasks[job["id"]], 3)
+        await asyncio.wait_for(research._task(job["id"]), 3)
         await AgentManager(database).create_agent(name="Policy child", user_id=session.user_id)
         rec = await delegations.start_delegation(parent_session_id=session.id, agent_name="Policy child", request="Human child work")
         async with asyncio.timeout(3):

@@ -374,10 +374,10 @@ async def test_f16_failed_synthesis_is_failed_and_retains_gathered_evidence(
         row = await rm.start(session.id, "A research question")
         if failure == "retirement_failure":
             with pytest.raises(RuntimeError, match="retirement remains unconfirmed"):
-                await rm._tasks[row["id"]]
-            assert row["id"] in rm._tasks and row["id"] in rm._contexts
+                await rm._task(row["id"])
+            assert rm._task(row["id"]) is not None
         else:
-            await rm._tasks[row["id"]]
+            await rm._task(row["id"])
         saved = await db.get_research_job(row["id"])
         assert saved["status"] == "failed" and saved["phase"] == "synthesize"
         assert ("retirement remains unconfirmed" if failure == "retirement_failure" else "Report synthesis failed") in saved["error"]

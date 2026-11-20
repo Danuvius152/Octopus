@@ -36,9 +36,9 @@ async def _background(manager, rec, context, path):
     )
     assert response.status_code == 201, response.text
     async with asyncio.timeout(5):
-        while not path.exists():
+        while not path.exists() or not (pid := path.read_text()):
             await asyncio.sleep(.01)
-    return response.json()["id"], int(path.read_text())
+    return response.json()["id"], int(pid)
 
 
 async def test_branch_loses_authority_before_first_cancellation_save(

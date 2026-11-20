@@ -33,7 +33,7 @@ async def test_unconfirmed_report_recovers_original_receipt_after_owner_failure_
     monkeypatch.setattr(manager, "start_message", lose_ack)
     monkeypatch.setattr(manager, "source_receipt", observe)
     job = await research.start(session.id, "One original report")
-    task = research._tasks[job["id"]]
+    task = research._task(job["id"])
     release.set()
     await asyncio.wait_for(asyncio.shield(task), 3)
     saved = await db.get_research_job(job["id"])

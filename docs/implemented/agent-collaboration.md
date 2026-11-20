@@ -172,6 +172,11 @@ A delegation child session keeps the ordinary session retention policy:
   and relationship replacement. Existing refusal/question-writer tests retain
   previous-round ownership when continuation is refused.
 
+  When a child receipt explicitly refuses an initial or follow-up input and the
+  cancellation has committed, the original work round settles its terminal return.
+  Once required setup cleanup finishes, parent deletion can resume a failed receipt
+  write on that round without submitting a second return.
+
   Once every owned reply and related input is processed, the last successful
   carrier can be the final candidate without an extra synthesis call. The seal
   rejects further delegated responsibility/input for that work. Parent failure
@@ -293,9 +298,11 @@ explicit `reply_unavailable` error to the still-open caller, so a nested parent
 can finish without invented reply text or child replay. Normal deletion does
 not turn command/database drain into an invariant failure. The database's
 session-deletion entry notifies the round owner synchronously after confirmed
-commit. Parent deletion leaves the independent child writable: its pending
-notice failures still block drain until recorded or their own target retires,
-and new valid questions retain a stopped-return notice and remain answerable.
+commit. Permanent parent deletion joins the exact round's original work and
+parent return handoff. A surviving child owns its question notice after the
+parent receipt or refusal is known. Its pending notice failures still block
+service drain until recorded or its own target retires. New valid questions
+retain a stopped-return notice and remain answerable.
 A refused deletion or an unrelated session deletion closes neither writer.
 This retires only finished diagnostic commands; in-flight
 callbacks and processes retain their original retirement owners.
@@ -408,6 +415,21 @@ and retires their captured session, BG and Research
 resources before reporting cancellation. A completed answer stays completed
 while its residual work retires; a later follow-up's independent work is not
 cancelled. Cancelling the HTTP waiter does not withdraw this owned command.
+Parent deletion and independent cancellation share one retirement command
+per captured round. Each command retires that round's resources and joins
+its nested cancellations before relaying to its caller. It also settles the
+round's accepted Research receipts after its original execution exits.
+Permanent deletion closes every existing child and descendant work ID before
+waiting for the parent Owner. A round that commits during closure inherits its
+parent's closed lease at registration. Deletion joins those startup commands
+and captures their committed rounds before retiring execution. After a proven
+initial refusal and archival, the round owns its original terminal receipt.
+A cancellation retains its selected reason and timestamp. A lost acknowledgement
+for either that cancellation or a terminal receipt can be confirmed against
+the exact persisted snapshot for the same relationship.
+Parent deletion releases notification waits for the captured branch, including
+notifications destined for surviving conversations. The original publisher
+records delivery errors and remains part of service drain.
 An ordinary relationship/CAS refusal is reported after all captured resources
 are cleaned; physical storage uncertainty retains the fail-stop boundary.
 Stable work identity and terminal disposition protect one parent injection.

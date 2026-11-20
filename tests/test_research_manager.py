@@ -80,7 +80,7 @@ async def test_unclassified_delivery_error_preserves_original_exception_and_comp
     monkeypatch.setattr(mgr, "start_message", reject)
     job = await rm.start(session.id, "Preserve the original exception")
     with pytest.raises(type(failure)) as caught:
-        await asyncio.wait_for(asyncio.shield(rm._tasks[job["id"]]), 2)
+        await asyncio.wait_for(asyncio.shield(rm._task(job["id"])), 2)
     assert caught.value is failure
     row = await db.get_research_job(job["id"])
     assert row["status"] == "completed"
@@ -102,11 +102,11 @@ async def test_unavailable_binding_finishes_job_and_does_not_poison_shutdown(rm,
 
     monkeypatch.setattr(rm_mod, "run_research", forbidden_pipeline)
     job = await rm.start(session.id, "A rejected research job")
-    await rm._tasks[job["id"]]
+    await rm._task(job["id"])
     row = await db.get_research_job(job["id"])
     assert row["status"] == "failed"
     assert "unavailable" in row["error"]
-    assert job["id"] not in rm._contexts
+    assert rm._task(job["id"]) is None
     await rm.shutdown()
 
 
@@ -134,10 +134,10 @@ async def test_oversized_configuration_finishes_research_and_releases_owner(rm, 
     monkeypatch.setitem(_REGISTRY, session.backend, Harness(replace(profile,
         build_turn_argv=oversized_turn, build_oneshot_argv=oversized_oneshot, activity_observer=None)))
     job = await rm.start(session.id, "A refused research configuration")
-    await rm._tasks[job["id"]]
+    await rm._task(job["id"])
     row = await db.get_research_job(job["id"])
     assert row["status"] == "failed" and "bytes" in row["error"]
-    assert job["id"] not in rm._contexts
+    assert rm._task(job["id"]) is None
     assert not spawned
     await rm.shutdown()
 
@@ -159,7 +159,7 @@ async def test_closed_work_cancellation_joins_research_cleanup(rm, mgr, db, monk
     session = await _session(mgr, db)
     job = await rm.start(session.id, "Retire this research")
     await asyncio.wait_for(started.wait(), 3)
-    work_id = rm._contexts[job["id"]].return_binding.work_id
+    work_id = rm._jobs[job["id"]].work_id
     close_work(work_id)
     stopping = asyncio.create_task(rm.cancel_work(work_id))
     try:
@@ -292,7 +292,7 @@ async def pending_report(rm, mgr, db, monkeypatch):
     monkeypatch.setattr(mgr, "start_message", accept)
     session = await _session(mgr, db)
     job = await rm.start(session.id, "Wait for report processing")
-    await rm._tasks[job["id"]]  # Establish that the primary pipeline has ended.
+    await rm._task(job["id"])  # Establish that the primary pipeline has ended.
     yield job, completion
 
 
@@ -426,6 +426,334 @@ async def test_shutdown_joins_observer_created_by_original_pipeline_cleanup(rm, 
         await rm.wait_for_idle()
 
 
+async def test_session_delete_joins_research_observer_registered_during_retirement(rm, mgr, db, monkeypatch):
+    monkeypatch.setattr("server.research.research_manager", rm)
+    accepted, resume_pipeline, observing, finish_observation = (asyncio.Event() for _ in range(4))
+    retiring, settled = asyncio.Event(), asyncio.Event()
+    advance, retire, delete = db.advance_research_delivery, rm.retire_session, db.delete_session
+
+    async def pipeline(*args, **kwargs):
+        return _fake_report()
+
+    async def hold_delivery(job_id, request_id, stage, **kwargs):
+        if stage == "queued":
+            result = await advance(job_id, request_id, stage, **kwargs)
+            accepted.set()
+            await resume_pipeline.wait()
+            return result
+        if stage in {"failed", "unknown"}:
+            observing.set()
+            await finish_observation.wait()
+            result = await advance(job_id, request_id, stage, **kwargs)
+            settled.set()
+            return result
+        return await advance(job_id, request_id, stage, **kwargs)
+
+    async def observe_retirement(session_id):
+        retiring.set()
+        await retire(session_id)
+
+    async def delete_after_settlement(session_id):
+        assert settled.is_set(), "The original receipt must settle before its row is deleted"
+        await delete(session_id)
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(db, "advance_research_delivery", hold_delivery)
+    monkeypatch.setattr(rm, "retire_session", observe_retirement)
+    monkeypatch.setattr(db, "delete_session", delete_after_settlement)
+    session = await _session(mgr, db)
+    await mgr.interrupt(session.id)
+    job = await rm.start(session.id, "Settle the accepted report during deletion")
+    deletion = None
+    try:
+        await asyncio.wait_for(accepted.wait(), 3)
+        deletion = asyncio.create_task(mgr.delete_session(session.id))
+        await asyncio.wait_for(retiring.wait(), 3)
+        assert not observing.is_set()
+        resume_pipeline.set()
+        await asyncio.wait_for(observing.wait(), 3)
+        assert not deletion.done()
+        row = await db.get_research_job(job["id"])
+        assert row["status"] == "completed" and row["delivery_receipt"]["stage"] == "queued"
+        finish_observation.set()
+        assert await asyncio.wait_for(deletion, 3)
+        assert await db.get_research_job(job["id"]) is None
+        assert Path(row["report_path"]).is_file()
+    finally:
+        resume_pipeline.set()
+        finish_observation.set()
+        if deletion is not None:
+            await asyncio.gather(deletion, return_exceptions=True)
+        await rm.shutdown()
+
+
+@pytest.mark.parametrize("ack_lost", [False, True], ids=["before-commit", "after-commit"])
+async def test_session_delete_retries_selected_research_failure(rm, mgr, db, monkeypatch, ack_lost):
+    monkeypatch.setattr("server.research.research_manager", rm)
+    confirm = db.confirm_research_outcome
+    attempts = []
+    events = []
+
+    async def observe(event):
+        if event["type"] == "research_failed":
+            events.append((event["research_id"], event["status"], event["error"]))
+
+    mgr.on_broadcast("original Research failure", observe)
+
+    async def pipeline(*args, **kwargs):
+        raise rm_mod.ResearchError("Research was refused before any leaf started")
+
+    async def fail_once(job_id, status, **kwargs):
+        attempts.append((job_id, status, kwargs))
+        if len(attempts) == 1:
+            if ack_lost:
+                await confirm(job_id, status, **kwargs)
+            raise OSError("Transient Research failure recording error")
+        return await confirm(job_id, status, **kwargs)
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(db, "confirm_research_outcome", fail_once)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "Record the selected Research failure")
+    with pytest.raises(OSError, match="Transient Research failure recording error"):
+        await rm.wait_for_idle()
+    assert (await db.get_research_job(job["id"]))["status"] == ("failed" if ack_lost else "running")
+    assert await asyncio.wait_for(mgr.delete_session(session.id), 3)
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert attempts[0][:2] == (job["id"], "failed")
+    assert await db.get_research_job(job["id"]) is None
+    await rm.shutdown()
+    assert events == [(job["id"], "failed", "Research was refused before any leaf started")]
+
+
+async def test_delete_finishes_the_original_cancel_after_its_ack_is_lost(rm, mgr, db, monkeypatch):
+    monkeypatch.setattr("server.research.research_manager", rm)
+    entered = asyncio.Event()
+    confirm, attempts, events = db.confirm_research_outcome, [], []
+
+    async def pipeline(*args, **kwargs):
+        entered.set()
+        await asyncio.Future()
+
+    async def lose_first_ack(job_id, status, **kwargs):
+        decision = await confirm(job_id, status, **kwargs)
+        attempts.append((kwargs["completed_at"], decision[0]))
+        if len(attempts) == 1:
+            raise OSError("Lost original cancellation acknowledgement")
+        return decision
+
+    async def observe(event):
+        if event["type"] == "research_failed":
+            events.append((event["research_id"], event["status"]))
+
+    mgr.on_broadcast("original cancelled Research", observe)
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(db, "confirm_research_outcome", lose_first_ack)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "Cancel the original job once")
+    await asyncio.wait_for(entered.wait(), 3)
+    with pytest.raises(OSError, match="Lost original cancellation acknowledgement"):
+        await rm.cancel(job["id"])
+    assert (await db.get_research_job(job["id"]))["status"] == "cancelled"
+    assert await asyncio.wait_for(mgr.delete_session(session.id), 3)
+    await rm.shutdown()
+    assert attempts[0][1] and (attempts[0][0], False) in attempts[1:]
+    assert events == [(job["id"], "cancelled")]
+
+
+async def test_session_delete_from_research_result_publication_observes_the_committed_receipt(rm, mgr, db, monkeypatch):
+    monkeypatch.setattr("server.research.research_manager", rm)
+    _completed_research_cli(monkeypatch)
+    session = await _session(mgr, db)
+    registered = asyncio.Event()
+    deleted = asyncio.get_running_loop().create_future()
+    observe, delete = rm._observe_delivery, db.delete_session
+    terminal_at_delete = []
+
+    async def pipeline(*args, **kwargs):
+        return _fake_report()
+
+    async def original_observation(delivery, receipt):
+        registered.set()
+        await observe(delivery, receipt)
+
+    async def capture_delete(session_id):
+        row, = await db.list_research_jobs_for_session(session_id)
+        terminal_at_delete.append(row["delivery_receipt"]["stage"])
+        await delete(session_id)
+
+    async def delete_from_publication(event):
+        if event.get("type") == "result" and event.get("session_id") == session.id:
+            try:
+                async with asyncio.timeout(3):
+                    await registered.wait()
+                    removed = await mgr.delete_session(session.id)
+            except Exception as error:
+                deleted.set_exception(error)
+            else:
+                deleted.set_result(removed)
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(rm, "_observe_delivery", original_observation)
+    monkeypatch.setattr(db, "delete_session", capture_delete)
+    mgr.on_broadcast("delete from original research result", delete_from_publication)
+    try:
+        await rm.start(session.id, "Delete from the result subscriber")
+        assert await asyncio.wait_for(deleted, 5)
+        assert terminal_at_delete == ["processed"]
+    finally:
+        mgr.remove_broadcast("delete from original research result")
+        await rm.shutdown()
+
+
+@pytest.mark.parametrize("read_number", [1, 2], ids=["source-identity", "body-preparation"])
+async def test_delete_resumes_a_report_after_a_pre_admission_read_timeout(rm, mgr, db, monkeypatch, read_number):
+    monkeypatch.setattr("server.research.research_manager", rm)
+    session = await _session(mgr, db)
+    get_job = db.get_research_job
+    completed, reads, settled = [], [], []
+
+    async def report(*args, **kwargs):
+        return _fake_report()
+
+    async def observe(event):
+        if event["type"] == "research_completed":
+            completed.append(event["research_id"])
+        if event["type"] == "research_delivery" and event["injection_status"] == "failed":
+            settled.append(event["research_id"])
+
+    async def timeout_before_admission(job_id):
+        if job_id in completed:
+            reads.append(job_id)
+            if len(reads) == read_number:
+                raise TimeoutError("Original source read timed out")
+        return await get_job(job_id)
+
+    mgr.on_broadcast("completed report awaiting admission", observe)
+    monkeypatch.setattr(rm_mod, "run_research", report)
+    monkeypatch.setattr(db, "get_research_job", timeout_before_admission)
+    job = await rm.start(session.id, "Retain the selected report across a pre-admission read failure")
+    with pytest.raises(TimeoutError, match="Original source read timed out"):
+        await rm.wait_for_idle()
+    assert (await get_job(job["id"]))["status"] == "completed"
+    assert await db.get_source_submission("research", f"research:{job['id']}", session_id=session.id) is None
+    assert await asyncio.wait_for(mgr.delete_session(session.id), 3)
+    await rm.wait_for_idle()
+    assert completed == settled == [job["id"]]
+
+
+async def test_research_completed_subscriber_can_delete_the_session(rm, mgr, db, monkeypatch, caplog):
+    monkeypatch.setattr("server.research.research_manager", rm)
+    session = await _session(mgr, db)
+    deleted = asyncio.get_running_loop().create_future()
+    secret = "private-research-credential"
+    monkeypatch.setattr("server.config.settings.auth_token", secret)
+
+    async def pipeline(*args, **kwargs):
+        return _fake_report()
+
+    async def subscriber(event):
+        if event["type"] == "research_completed" and event["session_id"] == session.id:
+            try:
+                deleted.set_result(await asyncio.wait_for(mgr.delete_session(session.id), 3))
+            except Exception as error:
+                deleted.set_exception(error)
+            raise ValueError(f"Research projection failed ({secret})")
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    mgr.on_broadcast("delete completed research", subscriber, required=True)
+    try:
+        await rm.start(session.id, "An independent completed report")
+        assert await asyncio.wait_for(deleted, 4)
+        assert await db.get_session_binding(session.id) is None
+        await rm.wait_for_idle()
+        assert "Research projection failed ([redacted])" in caplog.text and secret not in caplog.text
+    finally:
+        mgr.remove_broadcast("delete completed research")
+        await rm.shutdown()
+
+
+@pytest.mark.parametrize("fault", ["write", "mailbox", "notice-ack"])
+async def test_research_delivery_refusal_write_reenters_the_original_record_on_delete(rm, mgr, db, monkeypatch, fault):
+    from server.sessions.runtime_types import SessionMailboxFull
+    from server.sessions.submission import ReturnRefused
+
+    monkeypatch.setattr("server.research.research_manager", rm)
+    session = await _session(mgr, db)
+    returning, release = asyncio.Event(), asyncio.Event()
+    attempts, events, retained = [], [], []
+    update = db.update_research_job
+    retain, delete = mgr.retain_result_notice, db.delete_session
+
+    async def pipeline(*args, **kwargs):
+        return _fake_report()
+
+    async def refused(target, **kwargs):
+        returning.set()
+        await release.wait()
+        return ReturnRefused("admission_closed")
+
+    async def fail_once(job_id, **fields):
+        if fields.get("injection_status") == "failed":
+            attempts.append((job_id, fields.copy()))
+            if len(attempts) == 1 and fault == "write":
+                raise OSError("Transient delivery refusal write failure")
+        await update(job_id, **fields)
+
+    async def retained_notice(sid, delivery_id, content):
+        if len(attempts) == 1 and fault == "mailbox":
+            raise SessionMailboxFull("Original notice mailbox full")
+        saved = await retain(sid, delivery_id, content)
+        if len(attempts) == 1 and fault == "notice-ack":
+            raise OSError("Lost material notice acknowledgement")
+        return saved
+
+    async def capture_delete(sid):
+        retained.append(await db.has_delivery_notice(sid, f"research:{job['id']}"))
+        await delete(sid)
+
+    async def observe(event):
+        if event["type"] in {"research_delivery", "delivery_notice"}:
+            events.append(event)
+
+    mgr.on_broadcast("visible Research refusal", observe)
+    monkeypatch.setattr(mgr, "retain_result_notice", retained_notice)
+    monkeypatch.setattr(db, "delete_session", capture_delete)
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(mgr, "admit_return", refused)
+    monkeypatch.setattr(db, "update_research_job", fail_once)
+    job = await rm.start(session.id, "Settle the original report refusal")
+    original = rm._task(job["id"])
+    deleting = None
+    try:
+        await asyncio.wait_for(returning.wait(), 3)
+        deleting = asyncio.create_task(mgr.delete_session(session.id))
+        async with asyncio.timeout(3):
+            while not original.cancelling():
+                await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(SessionMailboxFull if fault == "mailbox" else OSError,
+                           match={"mailbox": "mailbox full", "write": "write failure", "notice-ack": "notice acknowledgement"}[fault]):
+            await asyncio.wait_for(deleting, 3)
+        row = await db.get_research_job(job["id"])
+        assert row["status"] == "completed" and row["injection_status"] == ("pending" if fault == "write" else "failed")
+        assert await asyncio.wait_for(mgr.delete_session(session.id), 3)
+        await rm.wait_for_idle()
+        await mgr.drain_turns()
+        assert len(attempts) == 2 and attempts[0] == attempts[1]
+        assert retained == [True]
+        assert [e["tool_input"]["delivery_id"] for e in events if e["type"] == "delivery_notice"] == [f"research:{job['id']}"]
+        # A pre-commit write error also exposes the still-pending row's diagnostic.
+        states = [e["injection_status"] for e in events if e["type"] == "research_delivery" and e["research_id"] == job["id"]]
+        assert states == (["pending", "failed"] if fault == "write" else ["failed"])
+        assert await db.get_session_binding(session.id) is None
+    finally:
+        release.set()
+        if deleting is not None:
+            await asyncio.gather(deleting, return_exceptions=True)
+        await rm.shutdown()
+
+
 async def test_cancel_confirmed_before_report_commit_cannot_become_completed(rm, mgr, db, monkeypatch):
     entered, release = asyncio.Event(), asyncio.Event()
     complete = rm._complete_report
@@ -448,7 +776,7 @@ async def test_cancel_confirmed_before_report_commit_cannot_become_completed(rm,
     monkeypatch.setattr(mgr, "start_message", deliver)
     session = await _session(mgr, db)
     job = await rm.start(session.id, "cancel before commit")
-    task = rm._tasks[job["id"]]
+    task = rm._task(job["id"])
     await asyncio.wait_for(entered.wait(), 2)
     try:
         assert (await rm.cancel(job["id"]))["status"] == "cancelled"
@@ -470,7 +798,7 @@ async def test_report_write_failure_never_completes_or_delivers(rm, mgr, db, mon
     monkeypatch.setattr(os, "fsync", reject_report_sync)
     session = await _session(mgr, db)
     job = await rm.start(session.id, "must save the report")
-    await rm._tasks[job["id"]]
+    await rm._task(job["id"])
     row = await db.get_research_job(job["id"])
     assert row["status"] == "failed"
     assert row["injection_status"] == "pending"
@@ -493,7 +821,7 @@ async def test_cancel_after_completion_preserves_pending_delivery(rm, mgr, db, m
     monkeypatch.setattr(mgr, "start_message", deliver)
     session = await _session(mgr, db)
     job = await rm.start(session.id, "completed before cancel")
-    task = rm._tasks[job["id"]]
+    task = rm._task(job["id"])
     await asyncio.wait_for(entered.wait(), 2)
     try:
         row = await rm.cancel(job["id"])
@@ -523,7 +851,7 @@ async def test_cancel_waiter_cannot_leave_a_committed_cancellation_without_pipel
     monkeypatch.setattr(rm_mod, "run_research", pipeline)
     session = await _session(mgr, db)
     job = await rm.start(session.id, "cancel across the real transaction")
-    original = rm._tasks[job["id"]]
+    original = rm._task(job["id"])
     await asyncio.wait_for(started.wait(), 2)
     execute, commit = db.conn._execute, db.conn.commit
     updating = False
@@ -582,7 +910,7 @@ async def test_repeated_cancel_stops_a_previously_cancelled_job_and_joins_origin
     monkeypatch.setattr(rm_mod, "run_research", pipeline)
     session = await _session(mgr, db)
     job = await rm.start(session.id, "finish the original cancellation")
-    original = rm._tasks[job["id"]]
+    original = rm._task(job["id"])
     await asyncio.wait_for(started.wait(), 2)
     # A prior transaction can have committed without its old waiter signalling.
     won, saved = await db.confirm_research_outcome(job["id"], "cancelled", completed_at="original cancellation")
@@ -624,11 +952,11 @@ async def test_shutdown_joins_admitted_cancellation_without_cancelling_its_trans
     async with db._write_lock:
         waiter = asyncio.create_task(rm.cancel(job["id"]))
         async with asyncio.timeout(2):
-            while job["id"] not in rm._cancel_tasks:
+            while rm._task(job["id"], "control") is None:
                 await asyncio.sleep(0)
         # Let its original control reach the actual held database lock first.
         await asyncio.sleep(0)
-        control = rm._cancel_tasks[job["id"]]
+        control = rm._task(job["id"], "control")
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
@@ -654,14 +982,14 @@ async def test_late_cancellation_signals_only_its_captured_pipeline(rm, mgr, db)
         async with db._write_lock:
             waiter = asyncio.create_task(rm.cancel("original-job"))
             async with asyncio.timeout(2):
-                while "original-job" not in rm._cancel_tasks:
+                while rm._task("original-job", "control") is None:
                     await asyncio.sleep(0)
             rm._register_task("original-job", replacement)
         assert (await waiter)["status"] == "cancelled"
         await asyncio.gather(original, return_exceptions=True)
         assert original.cancelled()
         assert not replacement.done() and replacement.cancelling() == 0
-        assert rm._tasks["original-job"] is replacement
+        assert rm._task("original-job") is replacement
     finally:
         replacement_release.set()
         await asyncio.gather(*(task for task in (original, replacement, waiter) if task is not None), return_exceptions=True)
@@ -672,7 +1000,7 @@ async def test_missing_job_cancellation_is_a_domain_error_during_shutdown(rm, db
     async with db._write_lock:
         waiter = asyncio.create_task(rm.cancel("missing-job"))
         async with asyncio.timeout(2):
-            while "missing-job" not in rm._cancel_tasks:
+            while rm._task("missing-job", "control") is None:
                 await asyncio.sleep(0)
         rm.begin_shutdown()
     with pytest.raises(rm_mod.ResearchError) as error:
@@ -697,7 +1025,7 @@ async def test_delivery_receipts_distinguish_queue_processing_and_current_browse
     monkeypatch.setattr(rm_mod, "run_research", fake_run)
     session = await _session(mgr, db)
     row = await rm.start(session.id, "question")
-    await rm._tasks[row["id"]]
+    await rm._task(row["id"])
     receipt = (await db.get_research_job(row["id"]))["delivery_receipt"]
     assert receipt["stage"] == "queued" and "processed_at" not in receipt
     assert await db.acknowledge_research_delivery(row["id"], "wrong-request", receipt["version"]) is None
@@ -771,7 +1099,7 @@ async def test_start_completes_and_injects_report(rm, mgr, db, monkeypatch):
     row = await rm.start(session.id, "what is X?")
     rid = row["id"]
     # let the background task finish
-    await asyncio.wait_for(rm._tasks[rid], timeout=5)
+    await asyncio.wait_for(rm._task(rid), timeout=5)
 
     final = await db.get_research_job(rid)
     assert final["status"] == "completed" and final["phase"] == "done"
@@ -1203,7 +1531,7 @@ async def test_scratch_preparation_failure_retires_without_starting_a_leaf(
     assert "prepare research scratch directory" in row["error"].lower()
     assert "controlled scratch preparation refusal" in row["error"]
     assert started == []
-    assert job["id"] not in rm._tasks and job["id"] not in rm._contexts
+    assert job["id"] not in rm._jobs
     assert not rm.drain_blockers()
     await rm.shutdown()
 
@@ -1251,7 +1579,7 @@ async def test_cancellation_and_scratch_failure_select_one_original_outcome(rm, 
         assert final["id"] == job["id"] and final["status"] == winner
         assert final["completed_at"] == selected["completed_at"]
         assert [(event["research_id"], event["status"]) for event in published] == [(job["id"], winner)]
-        assert job["id"] not in rm._tasks and job["id"] not in rm._contexts
+        assert job["id"] not in rm._jobs
         assert not rm.drain_blockers()
     finally:
         release.set()
@@ -1275,7 +1603,7 @@ async def test_unknown_pipeline_failure_after_scratch_keeps_its_original_owner(r
     assert error.value is failure
     assert (rm_mod.paths_for(session.user_id).research / job["id"] / "cwd").is_dir()
     assert (await db.get_research_job(job["id"]))["status"] == "failed"
-    assert job["id"] in rm._tasks and job["id"] in rm._contexts and rm.drain_blockers()
+    assert rm._task(job["id"]) is not None and rm.drain_blockers()
     with pytest.raises(error_type) as shutdown_error:
         await rm.shutdown()
     assert shutdown_error.value is failure
@@ -1303,7 +1631,7 @@ async def test_cancelled_http_waiter_still_retires_original_research_cli(
     session = await _session(mgr, db)
     job = await rm.start(session.id, "HTTP cancellation owns the original leaf")
     pid = await _cli_pid(pid_file)
-    pipeline = rm._tasks[job["id"]]
+    pipeline = rm._task(job["id"])
     app = FastAPI()
     app.include_router(research.router)
     app.dependency_overrides[get_session_manager] = lambda: mgr
@@ -1364,9 +1692,7 @@ async def test_research_shutdown_interrupts_job_after_cli_retires(
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
     finally:
-        for task in tuple(rm._tasks.values()):
-            task.cancel()
-        await asyncio.gather(*tuple(rm._tasks.values()), return_exceptions=True)
+        await rm.shutdown()
 
 
 @pytest.mark.asyncio
@@ -1400,9 +1726,7 @@ async def test_research_shutdown_owns_job_while_start_notification_is_pending(
         release.set()
         admission.cancel()
         await asyncio.gather(admission, return_exceptions=True)
-        for task in tuple(rm._tasks.values()):
-            task.cancel()
-        await asyncio.gather(*tuple(rm._tasks.values()), return_exceptions=True)
+        await rm.shutdown()
 
 
 @pytest.mark.asyncio
@@ -1441,7 +1765,7 @@ async def test_research_shutdown_reports_web_cli_retirement_failure(
     pid_file = _blocking_research_cli(monkeypatch, tmp_path, stage="web")
     session = await _session(mgr, db)
     job = await rm.start(session.id, "web research")
-    original = rm._tasks[job["id"]]
+    original = rm._task(job["id"])
     pid = await _cli_pid(pid_file)
     killpg = os.killpg
 
@@ -1453,7 +1777,7 @@ async def test_research_shutdown_reports_web_cli_retirement_failure(
     monkeypatch.setattr(os, "killpg", failing_signal)
     try:
         if cancel_before_shutdown:
-            owner = rm._tasks[job["id"]]
+            owner = rm._task(job["id"])
             await rm.cancel(job["id"])
             await asyncio.gather(owner, return_exceptions=True)
         with pytest.raises(Exception) as error:
@@ -1462,7 +1786,7 @@ async def test_research_shutdown_reports_web_cli_retirement_failure(
         assert (await db.get_research_job(job["id"]))["status"] == (
             "cancelled" if cancel_before_shutdown else "running"
         )
-        assert rm._tasks[job["id"]] is original and job["id"] in rm._contexts
+        assert rm._task(job["id"]) is original
         assert rm.drain_blockers()
         with pytest.raises(Exception) as idle_error:
             await rm.wait_for_idle()
@@ -1526,6 +1850,41 @@ async def test_research_shutdown_preserves_user_cancellation(
     assert final["error"] == "cancelled by user"
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+@pytest.mark.parametrize(("stage", "recording_failure"), [("reason", False), ("web", False), ("web", True)])
+async def test_permanent_session_delete_confirms_original_research_leaf_exit(
+    rm, mgr, db, monkeypatch, tmp_path, stage, recording_failure,
+):
+    monkeypatch.setattr("server.research.research_manager", rm)
+    pid_file = _blocking_research_cli(monkeypatch, tmp_path, stage=stage)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "Delete with an active research leaf")
+    try:
+        pid = await _cli_pid(pid_file)
+        if recording_failure:
+            confirm = db.confirm_research_outcome
+
+            async def fail_cancelled_outcome(job_id, status, **kwargs):
+                if status == "cancelled":
+                    raise OSError("Transient Research recording failure")
+                return await confirm(job_id, status, **kwargs)
+
+            with monkeypatch.context() as fault:
+                fault.setattr(db, "confirm_research_outcome", fail_cancelled_outcome)
+                with pytest.raises(OSError, match="Transient Research recording failure"):
+                    await asyncio.wait_for(mgr.delete_session(session.id), 5)
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+            assert mgr.get_session(session.id) is session
+            assert (await db.get_research_job(job["id"]))["status"] == "running"
+        assert await asyncio.wait_for(mgr.delete_session(session.id), 5)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert await db.get_research_job(job["id"]) is None
+        assert not rm.drain_blockers()
+    finally:
+        await rm.shutdown()
 
 
 @pytest.mark.asyncio

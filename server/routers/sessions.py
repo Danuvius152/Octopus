@@ -37,7 +37,7 @@ from ..models import (
     SubagentRun,
 )
 from ..session_manager import ForkError
-from ..sessions import SessionManager
+from ..sessions import Session, SessionManager
 from ..sessions.configuration import SessionConfigurationError
 from ..sessions.lifecycle import SessionArchiveFailed
 from ..sessions.presentation import session_info
@@ -76,7 +76,7 @@ async def list_sessions(
 
 def _own_session(
     session_manager: SessionManager, session_id: str, user_id: str | None
-) -> None:
+) -> Session:
     """404 unless this account owns `session_id` (multi-tenancy.md §5).
 
     For the routes that act on a session without reading it back — fork,
@@ -85,8 +85,10 @@ def _own_session(
     one named place, rather than as an `if` each of them might be written
     without.
     """
-    if session_manager.get_session(session_id, user_id) is None:
+    session = session_manager.get_session(session_id, user_id)
+    if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    return session
 
 
 async def _check_credential_binding(
@@ -573,9 +575,9 @@ async def delete_session(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    _own_session(session_manager, session_id, user_id)
+    session = _own_session(session_manager, session_id, user_id)
     try:
-        deleted = await session_manager.delete_session(session_id)
+        deleted = await session_manager.delete_session(session_id, expected_session=session)
     except ForkError as error:
         raise HTTPException(error.status_code, detail={"reason": error.reason, "message": str(error)})
     if not deleted:

@@ -653,6 +653,8 @@ class OwnerRuntime:
             return WorkRetirement(resources)
         if isinstance(command, (Reset, CloseExecution)):
             if isinstance(command, CloseExecution):
+                if command.reason == "archived" and manager.session_deleting(session.id):
+                    raise ValueError(f"Session {session.id} is being deleted")
                 if command.only_empty_application is not None:
                     # The original Owner serializes this proof with Submit.
                     # Once closed, no later input can race session deletion.
@@ -700,7 +702,8 @@ class OwnerRuntime:
                 return None
             return self.retire(command.backend, "held_process_reaped")
         if isinstance(command, ReleaseApplication):
-            if manager.sessions.get(session.id) is session and session._archive_reservation is None:
+            if (manager.sessions.get(session.id) is session and session._archive_reservation is None
+                    and not manager.session_deleting(session.id)):
                 session._admission_closed = False
             return True
         if isinstance(command, OwnForkProcess):
@@ -713,7 +716,7 @@ class OwnerRuntime:
             if command.reserve:
                 from ..delegations import delegation_manager
                 if (session._admission_closed or session._archive_reservation is not None
-                        or manager.sessions.get(session.id) is not session):
+                        or manager.sessions.get(session.id) is not session or manager.session_deleting(session.id)):
                     raise ForkError("Parent session admission is closed", reason="fork_blocked_parent_turn_active", status_code=409)
                 if session._dispatch_paused:
                     raise ForkError("Parent session dispatch is paused; resume it before forking", reason="fork_blocked_parent_turn_active", status_code=409)
@@ -735,7 +738,8 @@ class OwnerRuntime:
         if isinstance(command, AutoArchive):
             if (self.current is not None or session._dispatch_paused or session._pending_queue
                     or session._archive_reservation is not None
-                    or session._forking or manager.sessions.get(session.id) is not session):
+                    or session._forking or manager.sessions.get(session.id) is not session
+                    or manager.session_deleting(session.id)):
                 return None
             reservation = session._archive_reservation = object()
             self._auto_archive_operation = command.operation
@@ -958,7 +962,7 @@ class OwnerRuntime:
         agent = await manager.require_active_agent(session.agent_id)
         if session._transcript_integrity != "ok":
             raise AdmissionIntegrityError("Transcript has duplicate sequences; export and review it before continuing")
-        closed = (manager._admission_closed or session._admission_closed
+        closed = (manager._admission_closed or session._admission_closed or manager.session_deleting(session.id)
                   or session.agent_id in manager._closed_agents or not work_is_open(request.work_id))
         if closed:
             return SubmissionReceipt.closed(request.request_id, "shutdown" if manager._admission_closed else "withdrawn")
@@ -1144,6 +1148,8 @@ class OwnerRuntime:
         if (supersedes_handoff and self.current is not None and session._ticket_batch_request_id is not None
                 and not session._dispatch_paused):
             superseded_handoff = (self.current.request.request_id, session._ticket_batch_request_id)
+        if manager.session_deleting(session.id) or not work_is_open(request.work_id):
+            return SubmissionReceipt.closed(request.request_id, "withdrawn")
         created, row = await database.admit_client_submission(
             session.id, client_id, digest, request.request_id, payload=payload,
             receipt={"accepted": True, "disposition": disposition}, recovery_of=command.recovery_of,
@@ -1726,7 +1732,7 @@ class OwnerRuntime:
             if not publication_ready:
                 return
             eligible = manager._eligible_request(session)
-            if (eligible is None or manager._admission_closed
+            if (eligible is None or manager._admission_closed or manager.session_deleting(session.id)
                     or session._forking or session._archive_reservation is not None or session._run.retirements
                     or self._idle_action is not None):
                 return
@@ -1749,7 +1755,7 @@ class OwnerRuntime:
             # Retain the projection while loading. An awaited database read
             # must not make admitted work disappear or leave a stale quota
             # decision in force before this Owner reserves its active slot.
-            if manager._admission_closed:
+            if manager._admission_closed or manager.session_deleting(session.id):
                 return
             try:
                 manager._check_turn_quota(session)
