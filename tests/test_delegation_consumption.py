@@ -76,11 +76,11 @@ async def test_child_admission_and_parent_seal_have_one_order(notification_runti
     if first == "seal":
         original = runtime.delegations._commit_admission
 
-        async def delayed(previous, proposed, user_id):
+        async def delayed(previous, proposed, parent_session, scope):
             if proposed.parent_work_id == outer.work_id:
                 entered.set()
                 await release.wait()
-            return await original(previous, proposed, user_id)
+            return await original(previous, proposed, parent_session, scope)
 
         monkeypatch.setattr(runtime.delegations, "_commit_admission", delayed)
     else:
@@ -149,14 +149,14 @@ async def test_withdrawing_unadmitted_child_rechecks_the_already_successful_pare
     second_waiting, second_go = asyncio.Event(), asyncio.Event()
     admissions = 0
 
-    async def delayed(previous, proposed, user_id):
+    async def delayed(previous, proposed, parent_session, scope):
         nonlocal admissions
         if proposed.parent_work_id == outer.work_id:
             admissions += 1
             if admissions == 2:
                 second_waiting.set()
                 await second_go.wait()
-        saved = await commit(previous, proposed, user_id)
+        saved = await commit(previous, proposed, parent_session, scope)
         if proposed.parent_work_id == outer.work_id:
             entered.set()
             await release.wait()

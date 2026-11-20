@@ -1,14 +1,13 @@
-"""Unit tests for the `ask_agent` MCP stdio server tool surface.
-
-Mirrors the inline MCP tests in `tests/test_bg_tasks.py`: we invoke
-the FastMCP-wrapped tool functions directly with httpx mocked, so we
-don't need a live FastAPI to verify the tool's request shape. End-to-
-end coverage (a real ask_agent call into a real DelegationManager
-into a real child session) is exercised by `tests/test_delegations.py`
-plus the integration tests added in Phase 5.
-"""
+"""Check delegation tool validation and loopback requests with HTTP doubles."""
 
 from __future__ import annotations
+
+from unittest.mock import AsyncMock
+
+import httpx
+from mcp.server.fastmcp import Context
+
+from server.mcp_servers.ask_agent import ask_agent
 
 
 def _call(tool: str, **kwargs):
@@ -32,46 +31,46 @@ def _call(tool: str, **kwargs):
 # ---------------------------------------------------------------------------
 
 
-def test_ask_agent_misconfigured(monkeypatch):
+async def test_ask_agent_misconfigured(monkeypatch):
     monkeypatch.delenv("OCTOPUS_API_BASE", raising=False)
     monkeypatch.delenv("OCTOPUS_SESSION_ID", raising=False)
     monkeypatch.delenv("OCTOPUS_AUTH_TOKEN", raising=False)
-    out = _call("ask_agent", name="Vera", request="r")
+    out = await ask_agent(ctx=Context(), name="Vera", request="r")
     assert "misconfigured" in out.lower()
 
 
-def test_ask_agent_rejects_empty_request(monkeypatch):
+async def test_ask_agent_rejects_empty_request(monkeypatch):
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
     monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
-    out = _call("ask_agent", name="Vera", request="   ")
+    out = await ask_agent(ctx=Context(), name="Vera", request="   ")
     assert "request" in out.lower() and "non-empty" in out.lower()
 
 
-def test_ask_agent_rejects_when_neither_id_provided(monkeypatch):
+async def test_ask_agent_rejects_when_neither_id_provided(monkeypatch):
     """The merged `ask` tool requires exactly one of `name` or
     `delegation_id`. Neither set is an error."""
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
     monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
-    out = _call("ask_agent", request="r")
+    out = await ask_agent(ctx=Context(), request="r")
     assert "exactly one" in out.lower()
     # Whitespace-only ids count as not-set.
-    out = _call("ask_agent", name="   ", delegation_id="   ", request="r")
+    out = await ask_agent(ctx=Context(), name="   ", delegation_id="   ", request="r")
     assert "exactly one" in out.lower()
 
 
-def test_ask_agent_rejects_when_both_ids_provided(monkeypatch):
+async def test_ask_agent_rejects_when_both_ids_provided(monkeypatch):
     """Both set is also an error — can't simultaneously start fresh
     and continue the same delegation."""
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
     monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
-    out = _call("ask_agent", name="Vera", delegation_id="d1", request="r")
+    out = await ask_agent(ctx=Context(), name="Vera", delegation_id="d1", request="r")
     assert "exactly one" in out.lower()
 
 
-def test_ask_agent_success(monkeypatch):
+async def test_ask_agent_success(monkeypatch):
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
     monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
@@ -89,18 +88,16 @@ def test_ask_agent_success(monkeypatch):
                 "state": "running",
             }
 
-    def fake_post(url, json=None, headers=None, timeout=None):  # noqa: ARG001
+    async def fake_post(self, url, *, json, headers):
         posted["url"] = url
         posted["body"] = json
         posted["headers"] = headers
         return FakeResp()
 
-    import httpx
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
 
-    monkeypatch.setattr(httpx, "post", fake_post)
-
-    out = _call(
-        "ask_agent",
+    out = await ask_agent(
+        ctx=Context(),
         name="vera",
         request="review the dashboard",
         files=["a.tsx", "b.tsx"],
@@ -121,7 +118,7 @@ def test_ask_agent_success(monkeypatch):
     assert "agent-reply:Vera" in out
 
 
-def test_ask_agent_omits_files_when_none(monkeypatch):
+async def test_ask_agent_omits_files_when_none(monkeypatch):
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
     monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
@@ -134,20 +131,18 @@ def test_ask_agent_omits_files_when_none(monkeypatch):
         def json(self):
             return {"delegation_id": "id", "target_agent_name": "Vera"}
 
-    def fake_post(url, json=None, headers=None, timeout=None):  # noqa: ARG001
+    async def fake_post(self, url, *, json, headers):  # noqa: ARG001
         posted["body"] = json
         return FakeResp()
 
-    import httpx
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    _call("ask_agent", name="Vera", request="r")
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    await ask_agent(ctx=Context(), name="Vera", request="r")
     # `files` key is omitted entirely when the caller didn't pass any —
     # cleaner over the wire than an empty list.
     assert "files" not in posted["body"]
 
 
-def test_ask_agent_404_passes_through(monkeypatch):
+async def test_ask_agent_404_passes_through(monkeypatch):
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
     monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
@@ -159,14 +154,12 @@ def test_ask_agent_404_passes_through(monkeypatch):
         def json(self):
             return {}
 
-    import httpx
-
-    monkeypatch.setattr(httpx, "post", lambda *a, **k: R())
-    out = _call("ask_agent", name="ghost", request="r")
+    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(return_value=R()))
+    out = await ask_agent(ctx=Context(), name="ghost", request="r")
     assert "ghost" in out.lower()
 
 
-def test_ask_agent_409_surfaced_with_reason(monkeypatch):
+async def test_ask_agent_409_surfaced_with_reason(monkeypatch):
     """Cycle/depth/self errors come back as 409 with a server-side
     explanation — the tool should pass the reason through so the
     model can decide what to do next."""
@@ -181,25 +174,18 @@ def test_ask_agent_409_surfaced_with_reason(monkeypatch):
         def json(self):
             return {}
 
-    import httpx
-
-    monkeypatch.setattr(httpx, "post", lambda *a, **k: R())
-    out = _call("ask_agent", name="Octo", request="r")
+    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(return_value=R()))
+    out = await ask_agent(ctx=Context(), name="Octo", request="r")
     assert "cycle" in out.lower()
 
 
-def test_ask_agent_http_error(monkeypatch):
+async def test_ask_agent_http_error(monkeypatch):
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
     monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
 
-    import httpx
-
-    def boom(*a, **k):  # noqa: ARG001
-        raise httpx.ConnectError("nope")
-
-    monkeypatch.setattr(httpx, "post", boom)
-    out = _call("ask_agent", name="Vera", request="r")
+    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(side_effect=httpx.ConnectError("nope")))
+    out = await ask_agent(ctx=Context(), name="Vera", request="r")
     assert "failed to reach Octopus" in out
 
 
@@ -216,8 +202,6 @@ def test_cancel_agent_task_404(monkeypatch):
     class R:
         status_code = 404
         text = ""
-
-    import httpx
 
     monkeypatch.setattr(httpx, "post", lambda *a, **k: R())
     out = _call("cancel_agent_task", delegation_id="d1")
@@ -240,8 +224,6 @@ def test_cancel_agent_task_success(monkeypatch):
         posted["url"] = url
         posted["body"] = json
         return R()
-
-    import httpx
 
     monkeypatch.setattr(httpx, "post", fake_post)
     out = _call(
@@ -270,8 +252,6 @@ def test_list_agent_tasks_empty(monkeypatch):
         def json(self):
             return []
 
-    import httpx
-
     monkeypatch.setattr(httpx, "get", lambda *a, **k: R())
     out = _call("list_agent_tasks")
     assert "No delegations" in out
@@ -282,7 +262,7 @@ def test_list_agent_tasks_empty(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_ask_agent_continue_routes_to_follow_up_endpoint(monkeypatch):
+async def test_ask_agent_continue_routes_to_follow_up_endpoint(monkeypatch):
     """When `delegation_id` is set (and `name` is not), `ask` posts
     to the /follow-up endpoint and frames the return text as a
     continuation."""
@@ -301,16 +281,14 @@ def test_ask_agent_continue_routes_to_follow_up_endpoint(monkeypatch):
                 "state": "running",
             }
 
-    def fake_post(url, json=None, headers=None, timeout=None):  # noqa: ARG001
+    async def fake_post(self, url, *, json, headers):  # noqa: ARG001
         posted["url"] = url
         posted["body"] = json
         return R()
 
-    import httpx
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    out = _call(
-        "ask_agent",
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    out = await ask_agent(
+        ctx=Context(),
         delegation_id="d1",
         request="round 2",
     )
@@ -328,7 +306,7 @@ def test_ask_agent_continue_routes_to_follow_up_endpoint(monkeypatch):
     assert "agent-reply:Vera" in out
 
 
-def test_ask_agent_continue_404_nudges_to_fresh(monkeypatch):
+async def test_ask_agent_continue_404_nudges_to_fresh(monkeypatch):
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
     monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
@@ -337,19 +315,15 @@ def test_ask_agent_continue_404_nudges_to_fresh(monkeypatch):
         status_code = 404
         text = ""
 
-    import httpx
-
-    monkeypatch.setattr(httpx, "post", lambda *a, **k: R())
-    out = _call(
-        "ask_agent", delegation_id="ghost", request="r"
-    )
+    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(return_value=R()))
+    out = await ask_agent(ctx=Context(), delegation_id="ghost", request="r")
     assert "No delegation" in out
     # Nudges the model to retry with `name` instead.
     assert "`name`" in out
     assert "start fresh" in out.lower()
 
 
-def test_ask_agent_continue_409_still_running(monkeypatch):
+async def test_ask_agent_continue_409_still_running(monkeypatch):
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
     monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
@@ -358,21 +332,17 @@ def test_ask_agent_continue_409_still_running(monkeypatch):
         status_code = 409
         text = "Delegation 'd1' is still running; wait for its reply"
 
-    import httpx
-
-    monkeypatch.setattr(httpx, "post", lambda *a, **k: R())
-    out = _call(
-        "ask_agent", delegation_id="d1", request="round 2"
-    )
+    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(return_value=R()))
+    out = await ask_agent(ctx=Context(), delegation_id="d1", request="round 2")
     assert "Cannot continue" in out
     assert "still running" in out
 
 
-def test_ask_agent_continue_misconfigured(monkeypatch):
+async def test_ask_agent_continue_misconfigured(monkeypatch):
     monkeypatch.delenv("OCTOPUS_API_BASE", raising=False)
     monkeypatch.delenv("OCTOPUS_SESSION_ID", raising=False)
     monkeypatch.delenv("OCTOPUS_AUTH_TOKEN", raising=False)
-    out = _call("ask_agent", delegation_id="d1", request="round 2")
+    out = await ask_agent(ctx=Context(), delegation_id="d1", request="round 2")
     assert "misconfigured" in out.lower()
 
 
@@ -420,8 +390,6 @@ def test_answer_agent_question_success(monkeypatch):
         posted["body"] = json
         return R()
 
-    import httpx
-
     monkeypatch.setattr(httpx, "post", fake_post)
     out = _call(
         "answer_agent_question", delegation_id="d1", choice="Yes"
@@ -443,8 +411,6 @@ def test_answer_agent_question_404(monkeypatch):
         status_code = 404
         text = ""
 
-    import httpx
-
     monkeypatch.setattr(httpx, "post", lambda *a, **k: R())
     out = _call(
         "answer_agent_question", delegation_id="d-gone", choice="A"
@@ -462,8 +428,6 @@ def test_answer_agent_question_409(monkeypatch):
     class R:
         status_code = 409
         text = "Question already answered by another path"
-
-    import httpx
 
     monkeypatch.setattr(httpx, "post", lambda *a, **k: R())
     out = _call(
@@ -496,8 +460,6 @@ def test_list_agent_tasks_summary(monkeypatch):
                     "error": "boom",
                 },
             ]
-
-    import httpx
 
     monkeypatch.setattr(httpx, "get", lambda *a, **k: R())
     out = _call("list_agent_tasks")

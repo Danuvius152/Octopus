@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from itertools import groupby
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..session_operations import (
     SavedHandoffSelection,
+    TicketPhase,
     decode_payload,
     handoff_human_scope,
 )
@@ -18,6 +19,9 @@ from .base import DatabaseBase
 from .schedules import ScheduleChangedError
 from .transaction import Transaction
 from .users import owner_is_available
+
+if TYPE_CHECKING:
+    from ..knowledge import AdmittedRequest
 
 _COLUMNS = ("session_id", "client_id", "payload_sha256", "request_id", "receipt", "payload", "execution_state",
             "execution_owner", "execution_generation", "reason_code", "state_version", "created_at",
@@ -42,11 +46,24 @@ _NATIVE_STEER_NOTICE = (
 # Legacy message submissions stored the body without an operation object.
 HUMAN_MESSAGE = ("json_extract(i.payload,'$.source')='human' AND "
                  "(json_type(i.payload,'$.operation') IS NULL OR json_extract(i.payload,'$.operation.kind')='message')")
+_ADOPTED_BATCH = ("COALESCE(json_extract(i.payload,'$.ticket_batch_update_for'),"
+                  "json_extract(i.payload,'$.finish_ticket_batch_for'))")
 INDEPENDENT_HUMAN_INPUT = (f"{HUMAN_MESSAGE} AND json_extract(i.receipt,'$.disposition') IS NOT 'steered' "
-                           "AND json_extract(i.payload,'$.finish_ticket_batch_for') IS NULL")
+                           f"AND {_ADOPTED_BATCH} IS NULL")
 _BATCH_NOT_REPLACED = (
     "NOT EXISTS (SELECT 1 FROM client_submissions i WHERE i.session_id=client_submissions.session_id "
     f"AND i.rowid>client_submissions.rowid AND {INDEPENDENT_HUMAN_INPUT})"
+)
+_QUEUED_BATCH_CANDIDATE_FOR = (
+    "CASE WHEN i.execution_state='pending' AND json_extract(i.payload,'$.ticket_batch') IS NULL "
+    "THEN json_extract(i.payload,'$.ticket_batch_candidate_for') END"
+)
+# Future candidates are classified in their own turn. They still block
+# ordinary handoff, result admission, and close until their scope is known.
+_BATCH_MAY_AMEND = (
+    "NOT EXISTS (SELECT 1 FROM client_submissions i WHERE i.session_id=client_submissions.session_id "
+    f"AND i.rowid>client_submissions.rowid AND {INDEPENDENT_HUMAN_INPUT} "
+    f"AND {_QUEUED_BATCH_CANDIDATE_FOR} IS NOT client_submissions.request_id)"
 )
 
 _EXECUTION_INPUT_COLUMNS = "i.request_id,i.payload,i.receipt,i.delivery_state,m.seq,m.content,m.tool_input,i.native_inputs"
@@ -60,26 +77,31 @@ _EXECUTION_INPUT_MESSAGE = """
 TICKET_ACCEPTANCE_EVIDENCE = f"""
     WITH acceptance AS (
         SELECT session_id,request_id AS batch_id,NULL AS adopted_id,
-               json_extract(payload,'$.ticket_batch_limit_request_id') AS instruction_id
+               json_extract(payload,'$.ticket_batch_limit_request_id') AS instruction_id, 0 AS is_update
           FROM client_submissions
          WHERE (?1 IS NULL OR session_id=?1) AND (?2 IS NULL OR request_id=?2)
            AND (json_extract(payload,'$.ticket_batch')='finishing' OR json_type(payload,'$.ticket_batch_limit_request_id') IS NOT NULL)
         UNION ALL
         SELECT session_id,json_extract(payload,'$.finish_ticket_batch_for'),request_id,
-               COALESCE(json_extract(payload,'$.finish_ticket_batch_instruction_id'),request_id)
+               COALESCE(json_extract(payload,'$.finish_ticket_batch_instruction_id'),request_id), 0
           FROM client_submissions
          WHERE (?1 IS NULL OR session_id=?1) AND (?2 IS NULL OR json_extract(payload,'$.finish_ticket_batch_for')=?2)
            AND (json_type(payload,'$.finish_ticket_batch_for') IS NOT NULL
              OR json_type(payload,'$.finish_ticket_batch_instruction_id') IS NOT NULL)
+        UNION ALL
+        SELECT session_id,json_extract(payload,'$.ticket_batch_update_for'),request_id,request_id,1
+          FROM client_submissions
+         WHERE (?1 IS NULL OR session_id=?1) AND (?2 IS NULL OR json_extract(payload,'$.ticket_batch_update_for')=?2)
+           AND json_type(payload,'$.ticket_batch_update_for') IS NOT NULL
     )
     SELECT a.session_id,s.user_id,a.batch_id,a.adopted_id,b.payload,b.receipt,b.execution_owner,
-           instruction.request_id,c.request_id,c.payload,c.delivery_state,{_EXECUTION_INPUT_COLUMNS}
+           instruction.request_id,c.request_id,c.payload,c.delivery_state,a.is_update,{_EXECUTION_INPUT_COLUMNS}
       FROM acceptance a JOIN sessions s ON s.id=a.session_id
       LEFT JOIN client_submissions b ON b.session_id=a.session_id AND b.request_id=a.batch_id
       LEFT JOIN client_submissions latest ON latest.session_id=b.session_id
         AND latest.request_id=json_extract(b.payload,'$.ticket_batch_limit_request_id')
       LEFT JOIN client_submissions instruction ON instruction.session_id=b.session_id
-        AND instruction.request_id=a.instruction_id AND instruction.rowid<=latest.rowid
+        AND instruction.request_id=a.instruction_id AND (a.is_update=1 OR instruction.rowid<=latest.rowid)
       LEFT JOIN client_submissions c ON c.session_id=instruction.session_id AND c.request_id=instruction.execution_owner
         AND c.execution_owner=c.request_id AND c.rowid BETWEEN b.rowid AND instruction.rowid
         AND (a.adopted_id IS NULL OR c.request_id=a.adopted_id)
@@ -118,7 +140,7 @@ def _execution_snapshot(original: dict[str, Any], owner: str | None, rows) -> di
 
 
 def verify_ticket_acceptance_evidence(rows) -> None:
-    """Check which human input narrowed a batch, with its actual carrier and message."""
+    """Check the carrier and confirmed message for each batch amendment."""
     from ..sessions.client_submissions import (
         confirmed_execution_from_inputs,
         saved_context,
@@ -127,11 +149,13 @@ def verify_ticket_acceptance_evidence(rows) -> None:
     try:
         for (session_id, root_id, adopted_id), members in groupby(rows, key=lambda row: (row[0], row[2], row[3])):
             group = list(members)
-            _, user_id, _, _, raw_root, raw_receipt, execution_owner, instruction_id, carrier_id, raw_carrier, delivery = group[0][:11]
+            (_, user_id, _, _, raw_root, raw_receipt, execution_owner, instruction_id,
+             carrier_id, raw_carrier, delivery, is_update) = group[0][:12]
             root, receipt = decode_payload(json.loads(raw_root)), json.loads(raw_receipt)
             origin = saved_context(session_id, {"request_id": root_id, "payload": root})
+            states = {"registered", "finishing", "stopped"} if is_update else {"finishing", "stopped"}
             if (root.get("source") != "human" or root["operation"]["kind"] != "message"
-                    or root.get("ticket_batch") not in {"finishing", "stopped"} or execution_owner != root_id
+                    or root.get("ticket_batch") not in states or execution_owner != root_id
                     or receipt.get("accepted") is not True or receipt.get("disposition") != "accepted"
                     or origin is None or origin.origin.user_id != user_id):
                 raise ValueError("Invalid original ticket batch")
@@ -139,7 +163,7 @@ def verify_ticket_acceptance_evidence(rows) -> None:
                 raise ValueError("Missing carrier for ticket acceptance")
             original = {"request_id": carrier_id, "execution_owner": carrier_id, "delivery_state": delivery,
                         "payload": decode_payload(json.loads(raw_carrier))}
-            snapshot = _execution_snapshot(original, user_id, (row[11:] for row in group))
+            snapshot = _execution_snapshot(original, user_id, (row[12:] for row in group))
             execution = confirmed_execution_from_inputs(session_id, snapshot, require_terminal=False)
             if execution is None:
                 raise ValueError("Unconfirmed ticket acceptance input")
@@ -200,6 +224,57 @@ async def _withdraw_unsent_handoff(tx: Transaction, session_id: str, request_id:
     return previous
 
 
+async def _ticket_batch_stage(tx: Transaction, session_id: str, origin_id: str,
+                              opening_request_id: str | None) -> tuple[str, TicketPhase] | None:
+    from ..sessions.client_submissions import saved_context
+
+    rows = await tx.fetch_all(
+        "SELECT i.request_id,i.payload,i.delivery_state,i.execution_state FROM client_submissions i "
+        "WHERE i.session_id=:session AND json_extract(i.payload,'$.source')='handoff' "
+        "AND i.rowid>(SELECT b.rowid FROM client_submissions b WHERE b.session_id=:session AND b.request_id=:batch) "
+        "AND (:opening IS NULL OR i.request_id=:opening) ORDER BY i.rowid DESC",
+        {"session": session_id, "batch": origin_id, "opening": opening_request_id},
+    )
+    for request_id, raw, delivery, execution in rows:
+        payload = decode_payload(json.loads(raw))
+        if not payload.get("fresh_native_id") and delivery != "unknown" and execution != "unknown":
+            continue
+        context = saved_context(session_id, {"request_id": request_id, "payload": payload})
+        if context is None:
+            return None
+        if context.origin.session_id == session_id and context.origin.request_id == origin_id:
+            if not payload.get("fresh_native_id"):
+                return None
+            return request_id, "final_acceptance" if payload.get("handoff_phase") == "final_acceptance" else "ticket"
+    if opening_request_id is not None:
+        return None
+    return origin_id, "ticket"
+
+
+async def ticket_review_stage(tx: Transaction, caller: AdmittedRequest) -> str | None:
+    """Resolve the ticket from the captured caller and committed Owner facts."""
+    active, origin = caller.reference, caller.context.origin
+    if (active.session_id, active.user_id) != (origin.session_id, origin.user_id):
+        return None
+    original = await tx.fetch_one(
+        "SELECT 1 FROM client_submissions WHERE session_id=? AND request_id=? "
+        "AND json_extract(payload,'$.ticket_batch') IN ('registered','finishing') "
+        f"AND {_BATCH_NOT_REPLACED}", (origin.session_id, origin.request_id),
+    )
+    if original is None:
+        return None
+    request = await tx.fetch_one(
+        "SELECT json_extract(payload,'$.source') FROM client_submissions WHERE session_id=? AND request_id=? "
+        "AND execution_state='running' AND execution_owner=request_id",
+        (active.session_id, active.request_id),
+    )
+    if request is None:
+        return None
+    stage = await _ticket_batch_stage(tx, origin.session_id, origin.request_id,
+                                     active.request_id if request[0] == "handoff" else None)
+    return stage[0] if stage is not None and stage[1] == "ticket" else None
+
+
 class ClientSubmissionsMixin(DatabaseBase):
     async def verify_ticket_acceptance_limits(self, session_id: str | None = None) -> None:
         async with self.transaction(write=False) as tx:
@@ -224,18 +299,38 @@ class ClientSubmissionsMixin(DatabaseBase):
             )
             return row[0] if row else None
 
-    async def stop_ticket_batch(self, session_id: str, origin_id: str, *, only_finishing: bool = False) -> bool:
+    async def ticket_batch_stage(self, session_id: str, origin_id: str, *,
+                                 opening_request_id: str | None = None) -> tuple[str, TicketPhase] | None:
+        """Follow the accepted boundary even if its native history had to be replayed."""
+        async with self.transaction(write=False) as tx:
+            return await _ticket_batch_stage(tx, session_id, origin_id, opening_request_id)
+
+    async def ticket_review_stage(self, caller: AdmittedRequest) -> str | None:
+        async with self.transaction(write=False) as tx:
+            return await ticket_review_stage(tx, caller)
+
+    async def finish_ticket_batch(self, session_id: str, origin_id: str, state: Literal["registered", "finishing"]) -> bool:
+        """Close a batch from a verified stage, after any human supplement settles."""
+        async with self.transaction(write=True) as tx:
+            updated = await tx.execute(
+                "UPDATE client_submissions SET payload=json_set(payload,'$.ticket_batch','stopped') "
+                "WHERE session_id=? AND request_id=? AND json_extract(payload,'$.ticket_batch')=? "
+                f"AND {_BATCH_NOT_REPLACED}", (session_id, origin_id, state),
+            )
+            return updated.rowcount == 1
+
+    async def stop_ticket_batch(self, session_id: str, origin_id: str) -> bool:
         """Check the original batch is still current in the same write transaction."""
         async with self.transaction(write=True) as tx:
             updated = await tx.execute(
                 "UPDATE client_submissions SET payload=json_set(payload,'$.ticket_batch','stopped') "
-                "WHERE session_id=? AND request_id=? AND json_extract(payload,'$.ticket_batch') IN ('finishing',?) "
-                f"AND ({_BATCH_NOT_REPLACED} OR (? AND request_id=(SELECT CASE "
+                "WHERE session_id=? AND request_id=? AND json_extract(payload,'$.ticket_batch') IN ('finishing','registered') "
+                f"AND ({_BATCH_NOT_REPLACED} OR request_id=(SELECT CASE "
                 "WHEN i.execution_state IN ('pending','running') AND json_extract(i.payload,'$.ticket_batch') IS NULL "
                 "THEN json_extract(i.payload,'$.ticket_batch_candidate_for') END FROM client_submissions i "
                 f"WHERE i.session_id=client_submissions.session_id AND {INDEPENDENT_HUMAN_INPUT} "
-                "ORDER BY i.rowid DESC LIMIT 1)))",
-                (session_id, origin_id, None if only_finishing else "registered", not only_finishing),
+                "ORDER BY i.rowid DESC LIMIT 1))",
+                (session_id, origin_id),
             )
             return updated.rowcount == 1
 
@@ -243,10 +338,30 @@ class ClientSubmissionsMixin(DatabaseBase):
         """Work captured before adoption cannot return as independent work afterward."""
         async with self.transaction(write=False) as tx:
             row = await tx.fetch_one(
-                "SELECT 1 FROM client_submissions WHERE session_id=? AND request_id=? "
-                "AND json_extract(payload,'$.finish_ticket_batch_for') IS NOT NULL", (session_id, request_id),
+                "SELECT 1 FROM client_submissions i WHERE session_id=? AND request_id=? "
+                f"AND {_ADOPTED_BATCH} IS NOT NULL", (session_id, request_id),
             )
             return row is not None
+
+    async def adopt_ticket_batch_update(self, session_id: str, origin_id: str, request_id: str) -> str:
+        async with self.transaction(write=True) as tx:
+            adopted = await tx.execute(
+                "UPDATE client_submissions SET payload=json_set(payload,'$.ticket_batch_update_for',?) "
+                "WHERE session_id=? AND request_id=? AND execution_state='running' AND execution_owner=request_id "
+                "AND json_extract(payload,'$.ticket_batch_candidate_for')=? "
+                "AND json_extract(payload,'$.ticket_batch') IS NULL "
+                "AND json_extract(payload,'$.finish_ticket_batch_for') IS NULL",
+                (origin_id, session_id, request_id, origin_id),
+            )
+            original = await tx.fetch_one(
+                "SELECT json_extract(payload,'$.ticket_batch') FROM client_submissions WHERE session_id=? AND request_id=? "
+                f"AND json_extract(payload,'$.ticket_batch') IN ('registered','finishing') AND {_BATCH_MAY_AMEND}",
+                (session_id, origin_id),
+            )
+            if adopted.rowcount != 1 or original is None:
+                raise ValueError("The original ticket batch cannot adopt this human update")
+            verify_ticket_acceptance_evidence(await tx.fetch_all(TICKET_ACCEPTANCE_EVIDENCE, (session_id, origin_id)))
+            return original[0]
 
     async def limit_ticket_batch(self, session_id: str, origin_id: str, carrier_id: str, instruction_id: str,
                                  *, adopt_input: bool) -> None:
@@ -269,7 +384,7 @@ class ClientSubmissionsMixin(DatabaseBase):
                 "UPDATE client_submissions SET payload=json_set(payload,'$.ticket_batch','finishing',"
                 "'$.ticket_batch_limit_request_id',?) WHERE session_id=? AND request_id=? "
                 "AND json_extract(payload,'$.ticket_batch') IN ('registered','finishing') "
-                f"AND {_BATCH_NOT_REPLACED}", (instruction_id, session_id, origin_id),
+                f"AND {_BATCH_MAY_AMEND}", (instruction_id, session_id, origin_id),
             )
             if updated.rowcount != 1:
                 raise ValueError("The original ticket batch is no longer current")
@@ -308,7 +423,8 @@ class ClientSubmissionsMixin(DatabaseBase):
             return row[0] if row else None
 
     async def handoff_human_executions(self, session_id: str, origin_id: str, *,
-                                       before_handoff: str | None = None) -> list[str] | None:
+                                       before_handoff: str | None = None,
+                                       amending: str | None = None) -> list[str] | None:
         """Locate confirmed human updates from the batch origin to its active or replayed boundary."""
         async with self.transaction(write=False) as tx:
             origin = await tx.fetch_one("SELECT rowid FROM client_submissions i WHERE session_id=? AND request_id=? "
@@ -327,13 +443,14 @@ class ClientSubmissionsMixin(DatabaseBase):
                 cutoff = boundary[0]
             later = await tx.fetch_all(
                 "SELECT request_id,json_extract(receipt,'$.disposition'),execution_owner,delivery_state,execution_state,"
-                "json_extract(payload,'$.finish_ticket_batch_for') "
+                f"{_ADOPTED_BATCH},json_extract(payload,'$.ticket_batch_candidate_for') "
                 f"FROM client_submissions i WHERE session_id=:session AND rowid>:origin AND {HUMAN_MESSAGE} "
-                "AND (:cutoff IS NULL OR rowid<:cutoff) ORDER BY rowid",
-                {"session": session_id, "origin": origin[0], "cutoff": cutoff})
+                "AND (:cutoff IS NULL OR rowid<:cutoff) "
+                f"AND (:amending IS NULL OR ({_QUEUED_BATCH_CANDIDATE_FOR}) IS NOT :batch) ORDER BY rowid",
+                {"session": session_id, "origin": origin[0], "cutoff": cutoff, "amending": amending, "batch": origin_id})
             carriers = {origin_id: None}
-            for request_id, disposition, owner, delivery, state, finish_for in later:
-                if finish_for == origin_id:
+            for request_id, disposition, owner, delivery, state, adopted_for, candidate_for in later:
+                if adopted_for == origin_id or (request_id == amending and candidate_for == origin_id and state == "running"):
                     carriers[request_id] = None
                     continue
                 if disposition != "steered":

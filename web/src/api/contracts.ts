@@ -4731,6 +4731,10 @@ export interface components {
         FollowUpDelegationRequest: {
             /** Request */
             request: string;
+            /** Purpose */
+            purpose?: ("consultation" | "ticket_review") | null;
+            /** Caller Request Id */
+            caller_request_id?: string | null;
         };
         /**
          * ForkRevertRecord
@@ -6361,6 +6365,14 @@ export interface components {
             request: string;
             /** Files */
             files?: string[] | null;
+            /**
+             * Purpose
+             * @default consultation
+             * @enum {string}
+             */
+            purpose: "consultation" | "ticket_review";
+            /** Caller Request Id */
+            caller_request_id?: string | null;
         };
         /** StartResearchRequest */
         StartResearchRequest: {

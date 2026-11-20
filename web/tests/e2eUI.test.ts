@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
+import { executionPlan, uiModeArgs } from "../e2e/execution-plan";
 
 const require = createRequire(import.meta.url);
 const library = path.join(path.dirname(require.resolve("playwright/package.json")), "lib");
@@ -58,35 +59,44 @@ function phases(stdout: string): Phase[] {
   return stdout.split("\n").filter(line => line.startsWith("UI_PROTOCOL ")).map(line => JSON.parse(line.slice(12)));
 }
 
-it("keeps the actual package UI entry on the same scoped runner", () => {
-  const child = runUI(["app.spec.ts"], "none", true);
-  expect(child.status, child.stderr || child.stdout).toBe(0);
-  expect(phases(child.stdout).map(({ scope, projects }) => [scope, projects])).toEqual([["main", ["chromium"]]]);
-}, 15_000);
-
-for (const [label, flags, host, port] of [
-  ["UI window", ["--ui"], undefined, undefined],
-  ["inline host and port", ["--ui-host=127.0.0.1", "--ui-port=0"], "127.0.0.1", 0],
-  ["separate host and port", ["--ui-host", "127.0.0.1", "--ui-port", "0"], "127.0.0.1", 0],
-  ["host alone", ["--ui-host=127.0.0.1"], "127.0.0.1", undefined],
-  ["port alone", ["--ui-port", "0"], undefined, 0],
-] as const) it(`collects before opening the native ${label} and confines each UI phase`, () => {
-  const child = runUI(["app.spec.ts", "connectors.spec.ts", "accounts.spec.ts", ...flags]);
+it("opens the package UI entry once per selected scope with only that scope's tests", () => {
+  const files = ["app.spec.ts", "connectors.spec.ts", "accounts.spec.ts"];
+  const child = runUI([...files, "--ui-host=127.0.0.1", "--ui-port", "0"], "none", true);
   expect(child.status, child.stderr || child.stdout).toBe(0);
   const opened = phases(child.stdout);
   expect(opened.map(({ scope, projects }) => [scope, projects])).toEqual([
     ["main", ["chromium"]], ["main", ["installation"]], ["accounts", ["installation"]],
   ]);
   for (const phase of opened) {
-    expect(phase.options.args).toEqual(["app.spec.ts", "connectors.spec.ts", "accounts.spec.ts"]);
+    expect(phase.options.args).toEqual(files);
     expect(phase.options.project).toEqual(phase.projects);
     expect(phase.options.reporter).toBeUndefined();
-    expect(phase.options.host).toBe(host);
-    expect(phase.options.port).toBe(port);
+    expect(phase.options.host).toBe("127.0.0.1");
+    expect(phase.options.port).toBe(0);
     if (phase.projects[0] === "installation") expect(phase.workers).toBe(1);
   }
   expect(child.stdout.match(/no offline test execution was audited/g)).toHaveLength(3);
 }, 20_000);
+
+it.each([
+  { label: "inline host and port", flags: ["--ui-host=127.0.0.1", "--ui-port=0"], placeholders: ["--list", "--list"] },
+  { label: "separate host and port", flags: ["--ui-host", "127.0.0.1", "--ui-port", "0"], placeholders: ["--list", "--list"] },
+  { label: "host alone", flags: ["--ui-host=127.0.0.1"], placeholders: ["--list"] },
+  { label: "port alone", flags: ["--ui-port", "0"], placeholders: ["--list"] },
+])("preserves $label across all execution partitions", ({ flags, placeholders }) => {
+  const files = ["app.spec.ts", "connectors.spec.ts", "accounts.spec.ts"];
+  const args = [...files, ...flags];
+  expect(uiModeArgs(args)).toEqual({ collectionArgs: [...files, ...placeholders], interactive: true });
+  expect(executionPlan(args, [
+    { project: "chromium", file: files[0] },
+    { project: "installation", file: files[1] },
+    { project: "installation", file: files[2] },
+  ])).toEqual([
+    { project: "chromium", scope: "main", args },
+    { project: "installation", scope: "main", args: [...args, "--workers=1"] },
+    { project: "installation", scope: "accounts", args: [...args, "--workers=1", "--repeat-each=1"] },
+  ]);
+});
 
 it("preserves the UI option boundary after native variadic project selection", () => {
   const child = runUI(["--project", "chromium", "--ui-port", "0", "app.spec.ts", "connectors.spec.ts"]);
@@ -99,9 +109,14 @@ it("preserves the UI option boundary after native variadic project selection", (
 it("leaves interactive repetitions to the UI instead of scheduling repeated empty-install windows", () => {
   const child = runUI(["app.spec.ts", "accounts.spec.ts", "--ui", "--repeat-each=6"]);
   expect(child.status, child.stderr || child.stdout).toBe(0);
-  expect(phases(child.stdout).map(({ scope, projects }) => [scope, projects])).toEqual([
+  const opened = phases(child.stdout);
+  expect(opened.map(({ scope, projects }) => [scope, projects])).toEqual([
     ["main", ["chromium"]], ["accounts", ["installation"]],
   ]);
+  for (const phase of opened) {
+    expect(phase.options.host).toBeUndefined();
+    expect(phase.options.port).toBeUndefined();
+  }
 }, 15_000);
 
 it("audits native UI setup restarts and still rejects swallowed refusals or wrong-scope evidence", () => {

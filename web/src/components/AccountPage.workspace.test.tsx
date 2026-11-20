@@ -40,25 +40,25 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 async function mount() {
-  const view = render(<AccountPage />);
-  await screen.findByLabelText("Stop allowing /repo/a");
+  const view = await act(async () => render(<AccountPage />));
+  expect(screen.getByLabelText("Stop allowing /repo/a")).toBeEnabled();
   return view;
 }
 
 it("admits only one same-batch retry of the editing baseline", async () => {
   const original = fetch, pending = deferred<Response>();
-  heldLoads.push(pending);
   let openings = 0, body: Record<string, unknown>;
   vi.stubGlobal("fetch", vi.fn(async (url: unknown, init?: RequestInit) => {
     if (String(url).endsWith("/workspace-edits")) {
       body = JSON.parse(String(init?.body));
       if (++openings === 1) return Response.json({ detail: "Unavailable" }, { status: 503 });
+      heldLoads.push(pending);
       return pending.promise;
     }
     return original(url as RequestInfo, init);
   }));
-  render(<AccountPage />);
-  const retry = await screen.findByRole("button", { name: "Retry loading" });
+  await act(async () => { render(<AccountPage />); });
+  const retry = screen.getByRole("button", { name: "Retry loading" });
   act(() => { retry.click(); retry.click(); });
   expect(openings).toBe(2);
   await act(async () => pending.resolve(Response.json({ ...body!, service_generation: "workspace-service", sealed_through: 0,
@@ -142,15 +142,16 @@ it("preserves the pending flow across form reopening and account A to B to A whi
   const view = await mount();
   fireEvent.click(screen.getByLabelText("Stop allowing /repo/a"));
   view.unmount();
-  render(<AccountPage />);
-  await screen.findByRole("button", { name: "Confirm directory permissions" });
+  await act(async () => { render(<AccountPage />); });
+  expect(screen.getByRole("button", { name: "Confirm directory permissions" })).toBeEnabled();
   expect(registrations).toHaveLength(1);
-  act(() => useSessionStore.getState().setToken("workspace-b"));
-  await screen.findByText("/other/root");
+  await act(async () => useSessionStore.getState().setToken("workspace-b"));
+  expect(screen.getByText("/other/root")).toBeVisible();
   expect(screen.queryByText("/repo/a")).toBeNull();
-  act(() => useSessionStore.getState().setToken("workspace-a"));
-  fireEvent.click(await screen.findByRole("button", { name: "Confirm directory permissions" }));
+  await act(async () => useSessionStore.getState().setToken("workspace-a"));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm directory permissions" }));
   expect(registrations).toHaveLength(2); // One for each account, never a replacement flow for A.
+  expect(confirms).toHaveLength(1);
   expect(confirms[0].body).toMatchObject({ flow_id: puts[0].body.flow_id, sequence: puts[0].body.sequence });
   await act(async () => confirms[0].response.resolve(proof(confirms[0], ["/repo/a", "/repo/b"])));
   fireEvent.click(screen.getByLabelText("Stop allowing /repo/b"));

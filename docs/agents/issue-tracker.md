@@ -83,11 +83,18 @@ application/research output and private publication resources keep their owners.
   without implementation. Status changes do not grant implementation,
   publication or production authority.
 
+### Skill phases
+
+Start each phase when the user requests it and reuse the design context.
+`grill-with-docs` ends with design questions, answers and notes. `to-spec`
+ends with the spec in the local issue tracker. `to-tickets` ends with the
+approved tickets in that tracker. Register and claim a batch after the user
+authorizes implementation.
+
 ### Implement tickets
 
-Keep the design context through `to-tickets`. One Octo main session implements
-an authorized batch in dependency order, one ticket at a time. Octo owns the
-tracker, integration and final delivery.
+One Octo main session implements an authorized batch in dependency order,
+one ticket at a time. Octo owns the tracker, integration and final delivery.
 
 1. **Claim.** Register the authorized batch in the main chat with
    `mcp__ask_agent__begin_ticket_batch` before working on its first ticket.
@@ -102,18 +109,20 @@ tracker, integration and final delivery.
    candidate that includes new files. Save the commands, results and evidence
    for that candidate.
 3. **Review.** Open a [named delegation](../implemented/agent-collaboration.md#invocation-and-identity)
-   with `name="Vera"` for each ticket, starting at design time when a decision
-   needs early review. For final review, provide the ticket, baseline, fixed
-   diff, check results and open questions. Vera assesses the candidate against
+   with `name="Vera"` and `purpose="ticket_review"` for each ticket, starting
+   at design time when a decision needs early review. For final review, provide
+   the ticket, baseline, fixed diff, check results and open questions. Vera assesses the candidate against
    the acceptance criteria and repository standards. Octo reads her verdict,
    fixes substantiated findings, reruns the affected checks and returns the
-   revised candidate to the same `delegation_id` for verification. The next
-   ticket gets a new Vera conversation.
+   revised candidate to the same `delegation_id` for verification. Follow-up
+   inherits the purpose and returns a new `work_id` for the review round.
 4. **Accept.** Keep the ticket `claimed` until its criteria are met, its checks
    pass and Vera's independent review is complete for the accepted version.
    In one ticket update, set `Status: resolved` and record the integrated
-   revision or snapshot, passing checks, Vera's delegation ID and conclusion
-   under `## Answer`. If the user authorized further work, include the next
+   revision or snapshot, applicable passing checks, and Vera's delegation ID,
+   `work_id` and explicit conclusion on that candidate under `## Answer`.
+   Read the verdict before accepting the ticket. A completed delegation round
+   can also contain a request for corrections. If the user authorized further work, include the next
    eligible ticket within that scope or the agreed final acceptance and a
    stable handoff ID marked pending. Otherwise stop at this ticket.
    A user directive to stop after acceptance keeps this ticket's review in
@@ -122,6 +131,8 @@ tracker, integration and final delivery.
    and report the outcome.
 5. **Start the next phase.** Use the recorded ID with the
    [ticket handoff tool](../implemented/input-reliability.md#ticket-handoffs).
+   After the last ticket passes, pass `pointers.next_phase="final_acceptance"`
+   and point `next_work` to the batch acceptance record.
    If the installation lacks automatic clearing, leave the handoff pending.
    When available, the runtime starts the named
    phase automatically in a fresh model context in the same Octo chat. Apply
@@ -143,10 +154,16 @@ tracker, integration and final delivery.
    supersede the automatic batch. To resume after closing, Stop or an
    unconfirmed handoff, reconcile any outstanding receipt and register under
    new human authorization.
-6. **Deliver the batch.** After the last ticket, Octo checks the integrated
-   behavior across tickets and runs the [full gate](../testing.md#full-checks-before-code-commits)
+6. **Deliver and close the batch.** From confirmed final acceptance, Octo
+   checks the integrated behavior across tickets and runs the [full gate](../testing.md#full-checks-before-code-commits)
    once on the final candidate. Complete the applicable [release checks](../testing.md#release-and-documentation-checks)
-   before the authorized commit, push and deployment.
+   before the authorized commit, push and deployment. Settle pending human
+   input and verify the delivery still matches the authorization. Adopt a
+   separate input that supplements the same batch with
+   `mcp__ask_agent__adopt_ticket_batch_update`, using its exact text before
+   acting on it. Record the final checks and the outcome of authorized
+   delivery, call `mcp__ask_agent__finish_ticket_batch`, then report the
+   outcome after confirming the close receipt.
 
 ## Lifecycle
 

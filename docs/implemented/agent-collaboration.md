@@ -23,8 +23,12 @@ These facts do not prove the model understood or used every returned detail.
 `delegation_id` (new round in the retained child). It returns immediately; results,
 questions and errors return to the caller in later inputs. `answer`, `cancel`
 and `list` operate through the parent-scoped delegation API.
-An Octo batch opens a fresh Vera delegation for each ticket and uses
-[ticket handoff](input-reliability.md#ticket-handoffs) to continue in the original Octo chat.
+Octo opens a fresh Vera delegation with `purpose="ticket_review"` for each ticket
+and uses [ticket handoff](input-reliability.md#ticket-handoffs) to continue in
+the original chat. New delegations default to consultation. Follow-up inherits
+the purpose chosen at creation, including when the argument is omitted.
+Consultations and older delegations without a recorded ticket binding follow
+the ordinary rules and remain available in the delegation history.
 
 The target is a non-archived agent in the same account. Missing/ambiguous names,
 self-delegation, an ancestor-agent cycle or depth beyond three are refused.
@@ -40,6 +44,23 @@ Conversation identity and round identity are different: the child session is the
 terminal preceding round. It can explicitly restore archived history but cannot
 reuse a hard-deleted child. Concurrent independent requests use separate children.
 The two modes share one tool to avoid a redundant model-facing interface.
+
+Formal review belongs to an active, confirmed implementation ticket. The
+binding is the original human request ID for the first ticket and the accepted
+handoff's opening request ID for subsequent tickets. Registration leaves the
+old ticket in effect. A handoff opener must present its own confirmed input
+evidence. A possible but unconfirmed write pauses formal review, and a confirmed
+unsent handoff keeps the original ticket. Both creation and continuation check
+the binding in the transaction that commits the review round, before any child
+model turn begins. A batch closure that commits first blocks that admission.
+Each accepted review round keeps the caller's return binding and follows the
+existing rules for late replies.
+
+The MCP tool captures the logical request ID before calling REST. Both formal
+review operations require that ID to match the verified caller's active request,
+including follow-ups that inherit the formal purpose. Claude can keep the same
+process and bearer across requests. Ordinary consultation accepts an optional
+caller request ID.
 
 Dynamic admission converges at `_require_caller`: initial work and
 follow-ups recheck the original caller at their actual boundaries. They retain

@@ -20,7 +20,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from ..auth import verify_token
-from ..delegations import DelegationError, TerminalDisposition, delegation_manager
+from ..delegations import (
+    DelegationError,
+    DelegationPurpose,
+    TerminalDisposition,
+    delegation_manager,
+)
 from ..deps import ScopeUser, SessionMgr, resolve_principal
 from ..mcp_identity import verify
 from ..sessions import SessionManager
@@ -36,6 +41,8 @@ class StartDelegationRequest(BaseModel):
     # verbatim; we don't validate existence here (the child's tools
     # will report missing files naturally).
     files: list[str] | None = None
+    purpose: DelegationPurpose = "consultation"
+    caller_request_id: str | None = None
 
 
 class DelegationResponse(BaseModel):
@@ -76,6 +83,8 @@ class FollowUpDelegationRequest(BaseModel):
     The original brief lives in the child's transcript; we don't
     repeat it — only the new request is needed."""
     request: str
+    purpose: DelegationPurpose | None = None
+    caller_request_id: str | None = None
 
 
 def _require_session(
@@ -123,6 +132,8 @@ async def start_delegation(
             request=req.request,
             files=req.files,
             scope=verify(_),
+            purpose=req.purpose,
+            caller_request_id=req.caller_request_id,
         )
     except DelegationError as e:
         raise HTTPException(e.status_code, str(e))
@@ -221,6 +232,8 @@ async def follow_up_delegation(
             delegation_id=delegation_id,
             request=req.request,
             scope=verify(_),
+            purpose=req.purpose,
+            caller_request_id=req.caller_request_id,
         )
     except DelegationError as e:
         raise HTTPException(e.status_code, str(e))

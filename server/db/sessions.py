@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
@@ -32,8 +32,19 @@ from .applications import (
     retain_application_session_owner,
 )
 from .base import DatabaseBase
-from .client_submissions import INDEPENDENT_HUMAN_INPUT, _withdraw_unsent_handoff
+from .client_submissions import (
+    INDEPENDENT_HUMAN_INPUT,
+    _withdraw_unsent_handoff,
+    ticket_review_stage,
+)
 from .transaction import Transaction
+
+if TYPE_CHECKING:
+    from ..knowledge import AdmittedRequest
+
+
+class TicketReviewAdmissionClosed(ValueError):
+    """The formal review's ticket has changed or no longer accepts reviews."""
 
 
 class MessageExportError(ValueError):
@@ -328,9 +339,17 @@ class SessionsMixin(DatabaseBase):
         *, parent_session_id: str, user_id: str | None, target_agent_id: str,
         parent_expected_state: str | None = None, parent_new_state: str | None = None,
         seal_request_id: str | None = None,
+        review_binding: tuple[AdmittedRequest, str] | None = None,
     ) -> bool:
         """Commit a round only through its captured target and previous snapshot."""
         async with self.transaction(write=True) as tx:
+            if review_binding is not None:
+                caller, expected_ticket = review_binding
+                stage = await ticket_review_stage(tx, caller)
+                if stage is None:
+                    raise TicketReviewAdmissionClosed("Formal review requires an active, confirmed ticket")
+                if stage != expected_ticket:
+                    raise TicketReviewAdmissionClosed("This formal review belongs to a different ticket; start a fresh review")
             if parent_expected_state is not None:
                 parent = await tx.fetch_one("SELECT delegation_state FROM sessions WHERE id=? AND user_id IS ?",
                                             (parent_session_id, user_id))

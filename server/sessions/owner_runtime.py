@@ -120,9 +120,10 @@ class FinishTicketBatch:
 
 
 @dataclass(frozen=True)
-class LimitTicketBatch:
+class ApplyTicketBatchInstruction:
     scope: McpScope
     message: str
+    limit: bool
 
 
 @dataclass(frozen=True)
@@ -261,7 +262,7 @@ class IdlePublication:
 
 RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | ReadContext | UpdateConfiguration | CloseWork | RetireProcess | RetireHeldProcess
                   | CloseExecution | ReleaseApplication | ReserveFork | OwnForkProcess | ReleaseArchive | AutoArchive | FinishAutoArchive
-                  | IdleEvent | CorrelatedControl | RecoveryDismissed | RegisterTicketBatch | FinishTicketBatch | LimitTicketBatch
+                  | IdleEvent | CorrelatedControl | RecoveryDismissed | RegisterTicketBatch | FinishTicketBatch | ApplyTicketBatchInstruction
                   | CommitBatchReturn)
 
 
@@ -539,8 +540,8 @@ class OwnerRuntime:
                 return await manager._save_session_configuration(session.id, command.fields, command.user_id)
         if isinstance(command, Submit):
             return await self._submit(command)
-        if isinstance(command, LimitTicketBatch):
-            return await self._limit_ticket_batch(command)
+        if isinstance(command, ApplyTicketBatchInstruction):
+            return await self._apply_ticket_batch_instruction(command)
         if isinstance(command, CommitBatchReturn):
             execution = self.current
             if (execution is None or execution.request.request_id != command.request_id
@@ -555,18 +556,13 @@ class OwnerRuntime:
             origin = parent.context.origin
             database = manager.input_database()
             if (session.origin not in TICKET_BATCH_ORIGINS or self.current is None
+                    or self.current.request.request_id != parent.reference.request_id
                     or self.current.interrupted or session._dispatch_paused
                     or origin.session_id != session.id or origin.user_id != session.user_id
                     or await database.handoff_human_executions(session.id, origin.request_id) is None):
                 raise ValueError("Control the batch from its current human authorization in the main chat")
             if isinstance(command, FinishTicketBatch):
-                if await database.stop_ticket_batch(session.id, origin.request_id, only_finishing=True):
-                    session._ticket_batch_request_id = None
-                    await self._withdraw_batch_work(withdraw_returns=True)
-                    self.changed()
-                elif await database.ticket_batch_state(session.id, origin.request_id) != "stopped":
-                    raise ValueError("The user has not limited this batch to acceptance of the current ticket")
-                return {"state": "stopped", "original_request_id": origin.request_id}
+                return await self._finish_ticket_batch(origin.request_id)
             if not await database.register_ticket_batch(session.id, origin.request_id):
                 raise ValueError("The ticket batch is finishing or stopped. Further tickets require a new human request")
             session._ticket_batch_request_id = origin.request_id
@@ -823,11 +819,43 @@ class OwnerRuntime:
         return bool(request.operation == "message" and request.question_session_id and request.question_id and request.knowledge_context is not None
                     and request.knowledge_context.interaction_policy == "unattended")
 
-    async def _limit_ticket_batch(self, command: LimitTicketBatch) -> dict[str, str]:
+    async def _finish_ticket_batch(self, origin_id: str) -> dict[str, str]:
+        session = self.owner.session
+        database = self.owner.manager.input_database()
+        state = await database.ticket_batch_state(session.id, origin_id)
+        receipt = {"state": "stopped", "original_request_id": origin_id}
+        if state == "stopped":
+            return receipt
+        if state == "registered":
+            if session._steer_queue or self.steer is not None:
+                raise ValueError("Wait for pending human input before closing the ticket batch")
+            assert self.current is not None
+            request = self.current.request
+            stage = await database.ticket_batch_stage(
+                session.id, origin_id,
+                opening_request_id=request.request_id if request.source == "handoff" else None,
+            )
+            if stage is None or stage[1] != "final_acceptance":
+                raise ValueError("Normal close requires confirmed final acceptance")
+        if state not in {"registered", "finishing"}:
+            raise ValueError("The original ticket batch is no longer current")
+        expected: Literal["registered", "finishing"] = "registered" if state == "registered" else "finishing"
+        if not await database.finish_ticket_batch(session.id, origin_id, expected):
+            raise ValueError("The original ticket batch is no longer current")
+        session._ticket_batch_request_id = None
+        await self._withdraw_batch_work(withdraw_returns=True)
+        self.changed()
+        return receipt
+
+    async def _apply_ticket_batch_instruction(self, command: ApplyTicketBatchInstruction) -> dict[str, str]:
         from ..knowledge import capture
         from ..wiki.tasks import tasks
         from .client_submissions import confirmed_execution
-        from .handoff import FINISH_TICKET_INSTRUCTIONS, updated_batch_context
+        from .handoff import (
+            FINISH_TICKET_INSTRUCTIONS,
+            TICKET_BATCH_RETURN_STATES,
+            updated_batch_context,
+        )
 
         session, manager, execution = self.owner.session, self.owner.manager, self.current
         caller = capture(session, command.scope, prompt="")
@@ -835,42 +863,63 @@ class OwnerRuntime:
                 or caller.reference.request_id != execution.request.request_id or session._dispatch_paused
                 or caller.context.origin.session_id != session.id
                 or session._steer_queue or self.steer is not None):
-            raise ValueError("Wait for the current human input to settle before limiting the ticket batch")
+            raise ValueError("Wait for the current human input to settle before changing the ticket batch")
         request = execution.request
         database = manager.input_database()
         original_id = request.ticket_batch_candidate_for or caller.context.origin.request_id
         human = await confirmed_execution(database, session.id, request.request_id, require_terminal=False)
         if human is None:
             raise ValueError("The current human input has unconfirmed delivery")
-        adopt = request.ticket_batch_candidate_for is not None
-        input_id = next((edit.reference.request_id for _, edit in reversed(human.steers)
-                         if command.message == edit.context.trusted_request), None)
-        if input_id is None and human.primary is not None and command.message == request.prompt:
+        candidate = request.ticket_batch_candidate_for is not None
+        input_id = None
+        if human.primary is not None and command.message == human.primary[1].context.trusted_request:
             input_id = request.request_id
+        if command.limit:
+            input_id = next((edit.reference.request_id for _, edit in reversed(human.steers)
+                             if command.message == edit.context.trusted_request), input_id)
+        elif not candidate:
+            raise ValueError("Adoption requires the queued human supplement")
         if input_id is None:
             raise ValueError("The scope instruction must match the current human input verbatim")
-        await database.limit_ticket_batch(session.id, original_id, request.request_id, input_id, adopt_input=adopt)
+        state = await database.ticket_batch_state(session.id, original_id)
+        if state not in TICKET_BATCH_RETURN_STATES:
+            raise ValueError("The original ticket batch is no longer current")
+        if command.limit:
+            # Persist a confirmed limit even if earlier input still prevents
+            # rebuilding the scope for returns.
+            await database.limit_ticket_batch(session.id, original_id, request.request_id, input_id,
+                                             adopt_input=candidate and human.adopted_for is None)
+            state = "finishing"
+
+        updated = None
+        if candidate:
+            root = await database.get_submission_for_request(session.id, original_id)
+            original = saved_context(session.id, root) if root else None
+            if original is not None:
+                updated = await updated_batch_context(manager, session, original, amending=request.request_id)
+        if not command.limit:
+            # Verify the amended scope before claiming the input for this batch.
+            if updated is None:
+                raise ValueError("The original ticket batch has unconfirmed human input")
+            state = await database.adopt_ticket_batch_update(session.id, original_id, request.request_id)
         session._ticket_batch_request_id = original_id
         execution.human_message_claimed = False
         await self._withdraw_batch_work(withdraw_returns=False)
-        if adopt:
-            # Keep the recorded new human turn intact. Subsequent work it starts
-            # belongs to the ticket whose scope the new input just narrowed.
+        if candidate:
             session._steer_open = False
-            root = await database.get_submission_for_request(session.id, original_id)
-            original = saved_context(session.id, root) if root else None
-            updated = await updated_batch_context(
-                manager, session, original, live_request=request.request_id,
-            ) if original else None
-            if updated is not None:
-                limits = updated.maintenance.restrict(caller.context.maintenance)
-                mode = "read" if caller.context.mode == "read" or not limits.may_submit else updated.mode
-                updated = replace(updated, maintenance=limits, mode=mode)
-                session._run.knowledge_context, session._run.wiki_mode = updated, mode
-                if (token := session._run.wiki_task_id) and (task := tasks.active.get(token)):
-                    tasks.active[token] = replace(task, request=updated.trusted_request, knowledge=updated, mode=mode)
+        if updated is not None:
+            # Keep the recorded human turn intact and bind its subsequent work
+            # to the amended batch.
+            limits = updated.maintenance.restrict(caller.context.maintenance)
+            mode = "read" if caller.context.mode == "read" or not limits.may_submit else updated.mode
+            updated = replace(updated, maintenance=limits, mode=mode)
+            session._run.knowledge_context, session._run.wiki_mode = updated, mode
+            if (token := session._run.wiki_task_id) and (task := tasks.active.get(token)):
+                tasks.active[token] = replace(task, request=updated.trusted_request, knowledge=updated, mode=mode)
         self.changed()
-        return {"state": "finishing", "original_request_id": original_id, "instructions": FINISH_TICKET_INSTRUCTIONS}
+        if command.limit:
+            return {"state": "finishing", "original_request_id": original_id, "instructions": FINISH_TICKET_INSTRUCTIONS}
+        return {"state": state, "original_request_id": original_id}
 
     async def _submit(self, command: Submit) -> SubmissionReceipt:
         from ..knowledge import for_entry
@@ -952,24 +1001,26 @@ class OwnerRuntime:
                            handoff_backend=session.backend,
                            handoff_human_scope={key: [clause.model_dump(exclude_defaults=True) for clause in clauses]
                                                 for key, clauses in decisions.items()})
+            if pointers.next_phase != "ticket":
+                payload["handoff_phase"] = pointers.next_phase
         if command.return_parent is not None:
             assert request.operation == "message"
             parent_binding = command.return_parent
             if not await database.request_in_model_history(session.id, parent_binding.reference.request_id,
                                                            parent_binding.captured_after_seq):
                 raise SessionAdmissionClosed("The calling ticket has handed off its model context")
-            switching = self.current is not None and self.current.request.source == "handoff"
-            if switching or any(item.source == "handoff" for item in session._pending_queue):
-                raise SessionAdmissionBusy("The calling ticket has a pending model context handoff")
             origin = parent_binding.context.origin
             if origin.session_id == session.id and await database.ticket_input_has_joined_batch(session.id, origin.request_id):
                 raise SessionAdmissionClosed("The original input joined a ticket batch")
             batch = await database.ticket_batch_state(session.id, origin.request_id) if origin.session_id == session.id else None
+            if batch is not None and (batch not in TICKET_BATCH_RETURN_STATES or session._dispatch_paused):
+                raise SessionAdmissionClosed("The calling ticket batch is paused")
+            switching = self.current is not None and self.current.request.source == "handoff"
+            if switching or any(item.source == "handoff" for item in session._pending_queue):
+                raise SessionAdmissionBusy("The calling ticket has a pending model context handoff")
             if batch is not None:
                 from .handoff import updated_batch_context
 
-                if batch not in TICKET_BATCH_RETURN_STATES or session._dispatch_paused:
-                    raise SessionAdmissionClosed("The calling ticket batch is paused")
                 if self.current is not None or session._pending_queue:
                     raise SessionAdmissionBusy("Wait for the calling ticket batch's current inputs to settle")
                 context = await updated_batch_context(manager, session, parent_binding.context)
@@ -1049,9 +1100,12 @@ class OwnerRuntime:
                 and not any(item.source == "human" and (not session._dispatch_paused or item.priority)
                             for item in session._pending_queue)
                 and len(session._steer_queue) + int(self.steer is not None and self.steer.write is not None) < _MAX_PENDING_STEERS)
-        if (human_message and not steering and not supersedes_handoff and not session._dispatch_paused
-                and session._ticket_batch_request_id is not None):
+        if human_message and not steering and not supersedes_handoff and not session._dispatch_paused:
             request.ticket_batch_candidate_for = session._ticket_batch_request_id
+            if (request.ticket_batch_candidate_for is None and self.current is not None
+                    and self.current.human_message_claimed):
+                request.ticket_batch_candidate_for = self.current.request.ticket_batch_candidate_for
+        if request.ticket_batch_candidate_for is not None:
             payload["ticket_batch_candidate_for"] = request.ticket_batch_candidate_for
         # An accepted input owns its notification too. At most the current
         # handoff can wait outside the publisher's budget; a slow subscriber

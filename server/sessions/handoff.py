@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
@@ -16,6 +16,7 @@ from ..session_operations import (
     HandoffHumanScope,
     HandoffScopeClause,
     SavedHandoffSelection,
+    TicketPhase,
     handoff_human_scope,
 )
 from .base import TICKET_BATCH_ORIGINS, QueuedPrompt
@@ -40,6 +41,7 @@ FINISH_TICKET_INSTRUCTIONS = (
 TICKET_BATCH_CANDIDATE_INSTRUCTIONS = (
     "Read the human message below before continuing. If it directs you to complete acceptance of the current "
     "ticket and stop the batch, call mcp__ask_agent__limit_ticket_batch with the exact human message. "
+    "If it supplements the authorized batch, call mcp__ask_agent__adopt_ticket_batch_update with the exact message. "
     "A separate task is a new request."
 )
 
@@ -71,6 +73,7 @@ class HandoffPointers(BaseModel):
     accepted_ticket: Pointer
     candidate: Pointer
     next_work: Pointer
+    next_phase: TicketPhase = "ticket"
     answered_progress_questions: tuple[ProgressQuestion, ...] = ()
     human_scope: tuple[HumanScopeSelection, ...] = ()
 
@@ -80,7 +83,7 @@ class HandoffPointers(BaseModel):
                 "Start from next_work, the relevant part of spec, and the fixed candidate. "
                 "Consult earlier acceptance evidence for a dependency, check reuse, recovery, or final acceptance. "
                 "If the receipt is unconfirmed, leave the handoff pending.\n"
-                + self.model_dump_json(exclude={"answered_progress_questions", "human_scope"}))
+                + self.model_dump_json(exclude_defaults=True, exclude={"answered_progress_questions", "human_scope"}))
 
     def digest(self) -> str:
         """Idempotency binds the submitted material, independently of prompt wording."""
@@ -145,20 +148,30 @@ def _scope_projection(clauses: tuple[HandoffScopeClause, ...], seq: int) -> str:
     ) for clause in clauses)
 
 
+@dataclass
+class _ConfirmedBatchInputs:
+    original: KnowledgeContext
+    updates: list[tuple[int, AdmittedRequest]]
+    adopted: set[str]
+
+
 async def _confirmed_batch_inputs(db: Database, origin: RequestRef,
-                                  carriers: list[str], *, live_request: str | None = None, finishing: bool = False,
-                                  ) -> tuple[KnowledgeContext, list[tuple[int, AdmittedRequest]]] | None:
+                                  carriers: list[str], *, require_terminal: bool = False,
+                                  amending: str | None = None,
+                                  ) -> _ConfirmedBatchInputs | None:
     from .client_submissions import confirmed_execution
 
     original = None
     steers: list[tuple[int, AdmittedRequest]] = []
+    adopted: set[str] = set()
     for carrier in carriers:
-        confirmed = await confirmed_execution(db, origin.session_id, carrier,
-                                              require_terminal=not finishing and carrier != live_request)
+        confirmed = await confirmed_execution(db, origin.session_id, carrier, require_terminal=require_terminal)
         if confirmed is None:
             return None
-        if confirmed.adopted_for == origin.request_id and confirmed.primary is not None:
+        proposed = carrier == amending and carrier != origin.request_id and confirmed.adopted_for is None
+        if (confirmed.adopted_for == origin.request_id or proposed) and confirmed.primary is not None:
             steers.append(confirmed.primary)
+            adopted.add(confirmed.primary[1].reference.request_id)
         elif confirmed.original.origin != origin:
             return None
         if carrier == origin.request_id:
@@ -166,20 +179,20 @@ async def _confirmed_batch_inputs(db: Database, origin: RequestRef,
         steers.extend(confirmed.steers)
     if original is None:
         return None
-    return original, sorted(steers, key=lambda member: member[0])
+    return _ConfirmedBatchInputs(original, sorted(steers, key=lambda member: member[0]), adopted)
 
 
 async def resolve_handoff_human_scope(manager: SessionManager, chat: Session, parent: AdmittedRequest,
                                       carriers: list[str], pointers: HandoffPointers) -> HandoffHumanScope:
     db = manager.input_database()
     origin = parent.context.origin
-    confirmed = await _confirmed_batch_inputs(db, origin, carriers, live_request=parent.reference.request_id)
-    if confirmed is None or confirmed[0].registration != parent.context.registration:
+    confirmed = await _confirmed_batch_inputs(db, origin, carriers)
+    if confirmed is None or confirmed.original.registration != parent.context.registration:
         raise ValueError("The ticket batch has unconfirmed human input")
     earlier = await db.saved_handoff_human_scope(chat.id, origin.request_id, advancing=True)
     pending: dict[str, str] = {}
     repairs: list[HumanScopeSelection] = []
-    for _, edit in confirmed[1]:
+    for _, edit in confirmed.updates:
         input_id, text = edit.reference.request_id, edit.context.trusted_request
         prior = earlier.get(input_id)
         if prior is None:
@@ -208,11 +221,13 @@ async def resolve_handoff_human_scope(manager: SessionManager, chat: Session, pa
 
 
 async def continuation_context(manager: SessionManager, chat: Session, request_id: str) -> KnowledgeContext | None:
-    from .client_submissions import confirmed_execution
+    from .client_submissions import confirmed_execution, saved_context
 
     db = manager.input_database()
     row = await db.get_submission_for_request(chat.id, request_id)
-    payload = row["payload"] if row else None
+    if row is None:
+        return None
+    payload = row["payload"]
     if (not payload or payload.get("handoff_backend") != chat.backend
             or payload.get("previous_native_id") != chat.claude_session_id):
         return None
@@ -220,27 +235,33 @@ async def continuation_context(manager: SessionManager, chat: Session, request_i
     if parent is None or (parent["terminal"] or {}).get("status") != "success":
         return None
     closed = await confirmed_execution(db, chat.id, parent["request_id"])
-    if closed is None or await db.ticket_batch_state(chat.id, closed.original.origin.request_id) != "registered":
+    registered = saved_context(chat.id, row)
+    if closed is None or registered is None:
         return None
-    return await updated_batch_context(
-        manager, chat, closed.effective, handoff_human_scope(payload),
-    )
+    origin = registered.origin
+    if closed.original.origin != origin and closed.adopted_for != origin.request_id:
+        return None
+    if await db.ticket_batch_state(chat.id, origin.request_id) != "registered":
+        return None
+    return await updated_batch_context(manager, chat, registered, handoff_human_scope(payload))
 
 
 async def updated_batch_context(manager: SessionManager, chat: Session, context: KnowledgeContext,
                                 new_scope: HandoffHumanScope | None = None, *,
-                                live_request: str | None = None) -> KnowledgeContext | None:
+                                amending: str | None = None) -> KnowledgeContext | None:
     if context.origin.session_id != chat.id or context.origin.user_id != chat.user_id:
         return None
     db = manager.input_database()
-    carriers = await db.handoff_human_executions(chat.id, context.origin.request_id)
+    carriers = await db.handoff_human_executions(chat.id, context.origin.request_id, amending=amending)
     if carriers is None:
         return None
     finishing = new_scope is None and await db.ticket_batch_state(chat.id, context.origin.request_id) == "finishing"
-    confirmed = await _confirmed_batch_inputs(db, context.origin, carriers, live_request=live_request, finishing=finishing)
+    # Confirmed human input survives an interrupted carrier. Starting a new
+    # native history also requires the immediate parent to finish successfully.
+    confirmed = await _confirmed_batch_inputs(db, context.origin, carriers, amending=amending)
     # Start from the verified human request to avoid duplicating edits that
     # the parent or a previous handoff already includes.
-    if confirmed is None or confirmed[0].registration != context.registration:
+    if confirmed is None or confirmed.original.registration != context.registration:
         return None
     decisions = await db.saved_handoff_human_scope(chat.id, context.origin.request_id, advancing=new_scope is not None)
     if new_scope is not None:
@@ -249,14 +270,14 @@ async def updated_batch_context(manager: SessionManager, chat: Session, context:
     return _project_batch_context(context, confirmed, decisions, finishing=finishing)
 
 
-def _project_batch_context(context: KnowledgeContext, confirmed: tuple[KnowledgeContext, list[tuple[int, AdmittedRequest]]],
+def _project_batch_context(context: KnowledgeContext, confirmed: _ConfirmedBatchInputs,
                            decisions: dict[str, SavedHandoffSelection], *, finishing: bool = False) -> KnowledgeContext:
     from ..knowledge import revise
 
-    authority, steers = confirmed
+    authority = confirmed.original
     mode = "read" if authority.mode == "read" else context.mode
     sources = dict.fromkeys(authority.sources)
-    for seq, edit in steers:
+    for seq, edit in confirmed.updates:
         text = edit.context.trusted_request
         selection = decisions.get(edit.reference.request_id)
         clauses: tuple[HandoffScopeClause, ...] | None = ()
@@ -271,7 +292,7 @@ def _project_batch_context(context: KnowledgeContext, confirmed: tuple[Knowledge
         if selection is None or any(not clause.hold and clause.start is not None and not text[:clause.start].strip()
                                     for clause in clauses or ()):
             sources.update(dict.fromkeys(edit.context.sources))
-        if finishing and (presentation is None or presentation):
+        if (finishing or edit.reference.request_id in confirmed.adopted) and (presentation is None or presentation):
             authority = replace(authority, maintenance=authority.maintenance.restrict(edit.context.maintenance))
             if edit.context.mode == "read":
                 mode = "read"
@@ -341,8 +362,8 @@ async def _legacy_replay_scope(db: Database, message: MessageContent, snapshot: 
     carriers = await db.handoff_human_executions(origin.session_id, origin.request_id, before_handoff=request_id)
     if carriers is None:
         return None
-    confirmed = await _confirmed_batch_inputs(db, origin, carriers)
-    if confirmed is None or confirmed[0].registration != snapshot.registration:
+    confirmed = await _confirmed_batch_inputs(db, origin, carriers, require_terminal=True)
+    if confirmed is None or confirmed.original.registration != snapshot.registration:
         return None
     decisions = await db.saved_handoff_human_scope(origin.session_id, origin.request_id, through_handoff=request_id)
     projected = _project_batch_context(snapshot, confirmed, decisions)
@@ -394,10 +415,17 @@ async def finish_ticket_batch(manager: SessionManager, scope: McpScope) -> dict[
 
 
 async def limit_ticket_batch(manager: SessionManager, scope: McpScope, message: str) -> dict[str, str]:
-    from .owner_runtime import LimitTicketBatch
+    from .owner_runtime import ApplyTicketBatchInstruction
 
     session = _main_chat(manager, scope)
-    return await manager._session_owner(session).call_runtime(LimitTicketBatch(scope, message))
+    return await manager._session_owner(session).call_runtime(ApplyTicketBatchInstruction(scope, message, limit=True))
+
+
+async def adopt_ticket_batch_update(manager: SessionManager, scope: McpScope, message: str) -> dict[str, str]:
+    from .owner_runtime import ApplyTicketBatchInstruction
+
+    session = _main_chat(manager, scope)
+    return await manager._session_owner(session).call_runtime(ApplyTicketBatchInstruction(scope, message, limit=False))
 
 
 async def ticket_handoff(manager: SessionManager, scope: McpScope, handoff_id: str,

@@ -24,10 +24,10 @@ from .owner_questions import (
     question_command_bytes,
 )
 from .owner_runtime import (
+    ApplyTicketBatchInstruction,
     Execution,
     IdleEvent,
     IdlePublication,
-    LimitTicketBatch,
     OwnerRuntime,
     RuntimeCommand,
     Submit,
@@ -195,7 +195,7 @@ class SessionOwner:
             pointers = command.handoff[1]
             size += len(pointers.model_dump_json(include={"answered_progress_questions", "human_scope"},
                                                  exclude_defaults=True).encode("utf-8"))
-        if isinstance(command, LimitTicketBatch):
+        if isinstance(command, ApplyTicketBatchInstruction):
             size += len(command.message.encode("utf-8"))
         ordinary = isinstance(command, Submit)
         if ordinary:

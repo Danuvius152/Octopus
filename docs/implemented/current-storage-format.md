@@ -215,12 +215,18 @@ Wiki reads that original request's saved closure without a new domain status.
 
 A [ticket batch](input-reliability.md#ticket-handoffs) records its state on the
 original human input and marks its adopted automatic returns in their input
-payloads. A separate human input can record `ticket_batch_candidate_for`. The
-same transaction that limits the batch records the confirmed human input ID
+payloads. A separate human input can record `ticket_batch_candidate_for`.
+Adopting that input as a same-batch supplement stores the original request ID
+in `ticket_batch_update_for`. The same transaction that limits the batch records
+the confirmed human input ID
 on the batch and, when adopting the separate input, sets `finish_ticket_batch_for`
 on that input. A handoff stores its stable ID, parent request, previous native
-history and confirmed new native ID in its input payload. `handoff_human_scope`
-records exact clauses and their scopes by confirmed input ID. New selections
+history and confirmed new native ID in its input payload. `handoff_phase`
+records `final_acceptance` when requested. Older handoffs and ticket handoffs
+without that field use the ticket phase. The phase takes effect when the first
+native input is confirmed. Closing records `stopped` in a transaction that
+checks the original input still owns the batch. `handoff_human_scope` records
+exact clauses and their scopes by confirmed input ID. New selections
 store each original Unicode character offset. A hold stores a quote naming the
 operation to defer and uses the same scope. An empty selection closes an update
 with no applicable cross-ticket clause. Later phases inherit these selections
@@ -310,6 +316,13 @@ boolean markers are accepted only for reading and never infer completion or get
 written again. There is no DDL, format-marker change, startup backfill or new root.
 Complete backup retains these session facts; account archives exclude them under
 their existing chat/execution-history boundary.
+
+A formal review also records its immutable `review_ticket_id` in
+`sessions.delegation_state`. It is the original batch request ID or the
+confirmed handoff opening request ID, scoped to the parent chat. The round
+admission transaction checks the binding alongside the batch and the active
+execution. Ordinary and legacy snapshots may omit the field. Complete backups
+retain it with the matching input evidence.
 
 Model `CredentialUse` and Connector `grant_stamp` are derived comparison evidence,
 not new persistent revisions. The original credential/installation transaction

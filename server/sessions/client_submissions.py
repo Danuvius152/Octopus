@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..attachments import AttachmentUnavailable, validate_message_attachments
+from ..session_operations import adopted_ticket_batch
 from .runtime_types import QuotaExceeded
 
 if TYPE_CHECKING:
@@ -148,7 +149,7 @@ def confirmed_execution_from_inputs(session_id: str, snapshot: dict[str, Any], *
                 return None
             context = merged
             steers.append(member)
-        return ConfirmedExecution(base, context, primary, steers, original["payload"].get("finish_ticket_batch_for"))
+        return ConfirmedExecution(base, context, primary, steers, adopted_ticket_batch(original["payload"]))
     except (KeyError, TypeError, ValueError):
         return None
 

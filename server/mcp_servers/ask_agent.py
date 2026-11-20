@@ -54,7 +54,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 # Keep the import-path mirror from bg.py — the harness spawns us with
 # arbitrary cwd, so import-style "server.foo" needs the repo root on
@@ -66,8 +66,10 @@ if str(_REPO_ROOT) not in sys.path:
 import httpx  # noqa: E402
 from mcp.server.fastmcp import Context, FastMCP
 
+from ..knowledge import capture
 from ..sessions.handoff import (
     HandoffPointers,
+    adopt_ticket_batch_update,
     begin_ticket_batch,
     finish_ticket_batch,
     limit_ticket_batch,
@@ -113,11 +115,11 @@ async def begin_batch(ctx: Context) -> dict[str, str]:
 
 @mcp.tool(name="finish_ticket_batch")
 async def finish_batch(ctx: Context) -> dict[str, str]:
-    """Close a batch that the user limited to acceptance of the current ticket.
+    """Close an authorized batch from its confirmed final acceptance phase.
 
-    Call after the current ticket has passed its checks and independent review
-    and you have recorded acceptance. Then report the outcome to the user.
-    Further tickets require new human authorization.
+    Call after recording final acceptance and authorized delivery. If the user
+    limited the batch to the current ticket, record that ticket's acceptance
+    and close from there. Process pending human input before closing.
     """
     manager, scope = _ticket_runtime(ctx)
     return await finish_ticket_batch(manager, scope)
@@ -136,12 +138,26 @@ async def limit_batch(message: str, ctx: Context) -> dict[str, str]:
     return await limit_ticket_batch(manager, scope, message)
 
 
+@mcp.tool(name="adopt_ticket_batch_update")
+async def adopt_batch_update(message: str, ctx: Context) -> dict[str, str]:
+    """Keep a separate human input that supplements the authorized ticket batch.
+
+    Pass the exact current human message before acting on its requirements.
+    Use this for a supplement to the active batch. Treat a separate task as a
+    new request. Use limit_ticket_batch when the user directs you to stop
+    after accepting the current ticket.
+    """
+    manager, scope = _ticket_runtime(ctx)
+    return await adopt_ticket_batch_update(manager, scope, message)
+
+
 @mcp.tool(name="handoff")
 async def handoff(handoff_id: str, ctx: Context, pointers: HandoffPointers | None = None) -> dict[str, Any]:
     """Continue an authorized ticket batch in fresh model history in this same chat.
 
     After the ticket's checks and its own independent review pass, record a stable
     handoff_id, then supply the spec, accepted_ticket, candidate and next_work pointers.
+    Set next_phase="final_acceptance" in the pointers when all tickets have passed.
     Human updates default to this ticket. Leave ticket-specific instructions,
     discussion, and requirements whose scope is unclear in this ticket without
     asking the user. In pointers.human_scope include only updates that clearly
@@ -197,11 +213,13 @@ def _headers() -> dict[str, str] | None:
 
 
 @mcp.tool(name="ask")
-def ask_agent(
+async def ask_agent(
     request: str,
+    ctx: Context,
     name: str | None = None,
     delegation_id: str | None = None,
     files: list[str] | None = None,
+    purpose: Literal["consultation", "ticket_review"] | None = None,
 ) -> str:
     """Delegate work to another agent and wait — across turns — for
     their reply. Returns a delegation id immediately; the other
@@ -252,6 +270,10 @@ def ask_agent(
         files: Optional list of paths the other agent should read.
             Mode 1 only; ignored for continuations (the prior turn's
             file references are already in the transcript).
+        purpose: Pass "ticket_review" when opening each ticket's formal Vera
+            review. The active, confirmed ticket owns that conversation.
+            Same-ticket follow-ups inherit the original purpose. New
+            delegations default to consultation.
 
     Returns:
         A short string with the delegation id. Cite that id back to
@@ -276,6 +298,21 @@ def ask_agent(
             "`delegation_id` (continue prior) must be provided."
         )
 
+    body: dict[str, object] = {"request": request}
+    if purpose is not None:
+        body["purpose"] = purpose
+    if _host.scope() is not None:
+        try:
+            manager, scope = _ticket_runtime(ctx)
+            session = manager.get_session(sid, scope.user_id)
+            if session is None:
+                raise ValueError("The original requesting session is no longer live")
+            # Reused native processes can keep their bearer across turns.
+            # Pin the logical request before awaiting the loopback call.
+            body["caller_request_id"] = capture(session, scope, prompt=request).reference.request_id
+        except ValueError as error:
+            return f"Cannot delegate: {error}"
+
     if delegation_id is not None:
         # Continuation mode — same child session, model resumes with
         # prior transcript in view.
@@ -283,9 +320,9 @@ def ask_agent(
             f"{api}/api/sessions/{sid}/delegations/"
             f"{delegation_id}/follow-up"
         )
-        body: dict[str, object] = {"request": request}
         try:
-            r = httpx.post(url, json=body, headers=hdrs, timeout=10.0)
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                r = await http.post(url, json=body, headers=hdrs)
         except httpx.HTTPError as e:
             return (
                 f"Error: failed to reach Octopus to continue "
@@ -321,14 +358,13 @@ def ask_agent(
 
     # Fresh-delegation mode.
     url = f"{api}/api/sessions/{sid}/delegations"
-    body = {
-        "agent_name": name,
-        "request": request,
-    }
+    assert name is not None
+    body["agent_name"] = name
     if files:
         body["files"] = files
     try:
-        r = httpx.post(url, json=body, headers=hdrs, timeout=10.0)
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            r = await http.post(url, json=body, headers=hdrs)
     except httpx.HTTPError as e:
         return f"Error: failed to reach Octopus to start the delegation: {e}"
     if r.status_code == 404:

@@ -61,9 +61,10 @@ if TYPE_CHECKING:
 from .aio import complete_cleanup
 from .bg_tasks import bg_task_manager
 from .db.applications import ApplicationDeleting
-from .db.sessions import DelegationWorkPending
+from .db.sessions import DelegationWorkPending, TicketReviewAdmissionClosed
 from .diagnostics import exception_diagnostic, safe_diagnostic
 from .knowledge import (
+    AdmittedRequest,
     OwnedTaskContext,
     capture,
     decode_owned,
@@ -76,6 +77,7 @@ from .monitor import record as _mon_record
 from .question_resolution import UNKNOWN_SOURCE, AnswerSource, QuestionAnswerInvalid
 from .research.manager import research_manager
 from .service_health import ServiceUnavailable
+from .sessions.base import TICKET_BATCH_ORIGINS
 from .sessions.runtime_types import (
     AdmissionIntegrityError,
     SessionAdmissionBusy,
@@ -131,6 +133,7 @@ _DELEGATION_PROTOCOL = (
 TerminalDisposition = Literal[
     "accepted", "duplicate", "steered", "closed", "unbound", "unavailable", "not_replayed", "stopped", "unknown",
 ]
+DelegationPurpose = Literal["consultation", "ticket_review"]
 
 
 class DelegationError(Exception):
@@ -161,6 +164,7 @@ class _PersistedRound(BaseModel):
     terminal_disposition: TerminalDisposition | None
     terminal_delivery_error: str | None
     knowledge_context: str | None = None
+    review_ticket_id: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="before")
     @classmethod
@@ -212,6 +216,7 @@ class DelegationRunState:
     work_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     parent_work_id: str | None = None
     owned_context: OwnedTaskContext | None = field(default=None, repr=False)
+    review_ticket_id: str | None = None
     created_at: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat()
     )
@@ -310,7 +315,7 @@ class DelegationManager:
         self._retire_delivery_failures()
 
     def _snapshot(self, rec: DelegationRunState) -> str:
-        return json.dumps({
+        snapshot = {
             "work_id": rec.work_id, "parent_work_id": rec.parent_work_id,
             "target_agent_name": rec.target_agent_name, "request": rec.request,
             "created_at": rec.created_at, "state": rec.state,
@@ -320,7 +325,10 @@ class DelegationManager:
             "terminal_disposition": rec._terminal_disposition,
             "terminal_delivery_error": rec.terminal_delivery_error,
             "knowledge_context": encode(rec.owned_context) if rec.owned_context is not None else None,
-        }, sort_keys=True, separators=(",", ":"))
+        }
+        if rec.review_ticket_id is not None:
+            snapshot["review_ticket_id"] = rec.review_ticket_id
+        return json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
 
     def _start_command(
         self, operation: Coroutine[Any, Any, _T], *, parent_session_id: str | None = None,
@@ -431,6 +439,7 @@ class DelegationManager:
         self, rec: DelegationRunState, proposed: DelegationRunState,
         user_id: str | None,
         *, parent_change: tuple[DelegationRunState, DelegationRunState] | None = None,
+        review_binding: tuple[AdmittedRequest, str] | None = None,
     ) -> str:
         """Commit the captured full value while the record lock is held.
 
@@ -448,6 +457,7 @@ class DelegationManager:
             parent_new_state=self._snapshot(parent_change[1]) if parent_change else None,
             seal_request_id=proposed._candidate_request_id if proposed.state == "completed"
                 and (rec.state != "completed" or rec.work_id != proposed.work_id) else None,
+            review_binding=review_binding,
         )
         if not saved:
             missing = await self._missing_relationship(rec, user_id)
@@ -462,8 +472,20 @@ class DelegationManager:
         return snapshot
 
     async def _commit_admission(self, previous: DelegationRunState, proposed: DelegationRunState,
-                                user_id: str | None) -> str:
+                                parent_session: Session, scope: McpScope | None) -> str:
         """One parent-work ordering point for child responsibility and seal."""
+        user_id = parent_session.user_id
+        if proposed.review_ticket_id is not None:
+            assert proposed.owned_context is not None
+            caller = proposed.owned_context.return_binding
+            current = self._capture_caller(parent_session, scope, proposed.request, caller.reference.request_id)
+            if current.context != caller.context:
+                raise DelegationError("The review caller's authorization changed; retry from the current input", status_code=409)
+            try:
+                return await self._commit_round(previous, proposed, user_id,
+                                                review_binding=(caller, proposed.review_ticket_id))
+            except TicketReviewAdmissionClosed as error:
+                raise DelegationError(str(error), status_code=409) from error
         if proposed.parent_work_id is None:
             return await self._commit_round(previous, proposed, user_id)
         parent = self._records.get(proposed.parent_session_id)
@@ -605,6 +627,7 @@ class DelegationManager:
                 terminal_delivery_error=data.terminal_delivery_error,
                 _child_work_ids=set(data.child_work_ids), _candidate_request_id=data.candidate_request_id,
                 owned_context=decode_owned(data.knowledge_context),
+                review_ticket_id=data.review_ticket_id,
             )
             changes: dict[str, Any] = {}
             if rec.state == "running":
@@ -638,12 +661,13 @@ class DelegationManager:
     async def start_delegation(
         self, *, parent_session_id: str, agent_name: str, request: str,
         files: list[str] | None = None, scope: McpScope | None = None,
+        purpose: DelegationPurpose = "consultation", caller_request_id: str | None = None,
     ) -> DelegationRunState:
         if self.session_mgr is None or self.db is None:
             raise DelegationError("DelegationManager not bound", status_code=500)
         return await self._command(self._start_delegation(
             parent_session_id=parent_session_id, agent_name=agent_name,
-            request=request, files=files, scope=scope,
+            request=request, files=files, scope=scope, purpose=purpose, caller_request_id=caller_request_id,
         ), parent_session_id=parent_session_id)
 
     async def _start_delegation(
@@ -652,8 +676,10 @@ class DelegationManager:
         parent_session_id: str,
         agent_name: str,
         request: str,
-        files: list[str] | None = None,
-        scope: McpScope | None = None,
+        files: list[str] | None,
+        scope: McpScope | None,
+        purpose: DelegationPurpose,
+        caller_request_id: str | None,
     ) -> DelegationRunState:
         """Create a child session under the named target agent and kick
         off its first turn. Returns immediately with the record — the
@@ -674,18 +700,20 @@ class DelegationManager:
                 f"Parent session {parent_session_id!r} not found",
                 status_code=404,
             )
+        caller = self._capture_caller(parent, scope, request, caller_request_id)
         try:
             await self.db.require_application_session_writable(parent_session_id)
         except ApplicationDeleting as error:
             raise DelegationError(str(error), status_code=409) from error
-
-        try:
-            caller = capture(parent, scope, prompt=request)
-        except ValueError as exc:
-            raise DelegationError(str(exc), status_code=409) from exc
         owned_context = derive(caller, request)
         parent_work_id = caller.work_id
         self._require_caller(scope, parent_session_id, parent_work_id)
+        review_ticket_id = None
+        if purpose == "ticket_review":
+            self._require_review_scope(parent, scope, caller_request_id)
+            review_ticket_id = await self.db.ticket_review_stage(caller)
+            if review_ticket_id is None:
+                raise DelegationError("Formal review requires an active, confirmed ticket", status_code=409)
 
         target = await self._resolve_target_agent(agent_name, parent.user_id)
         self._require_caller(scope, parent_session_id, parent_work_id)
@@ -744,6 +772,7 @@ class DelegationManager:
             request=request,
             parent_work_id=parent_work_id,
             owned_context=owned_context,
+            review_ticket_id=review_ticket_id,
         )
 
         async def settle_initial_terminal_return() -> None:
@@ -830,7 +859,7 @@ class DelegationManager:
         # a fast child can synchronously broadcast its complete result there.
         try:
             async with rec._save_lock:
-                rec._persisted_state = await self._commit_admission(rec, rec, parent.user_id)
+                rec._persisted_state = await self._commit_admission(rec, rec, parent, scope)
                 self._records[child.id] = rec
                 self._rounds[rec.work_id] = rec
         except DelegationError:
@@ -944,39 +973,42 @@ class DelegationManager:
     async def follow_up_delegation(
         self, *, parent_session_id: str, delegation_id: str, request: str,
         scope: McpScope | None = None,
+        purpose: DelegationPurpose | None = None, caller_request_id: str | None = None,
     ) -> DelegationRunState:
         """Continue a terminal round in its existing child conversation."""
         if self.session_mgr is None or self.db is None:
             raise DelegationError("DelegationManager not bound", status_code=500)
         return await self._command(self._follow_up_delegation(
             parent_session_id=parent_session_id, delegation_id=delegation_id,
-            request=request, scope=scope,
+            request=request, scope=scope, purpose=purpose, caller_request_id=caller_request_id,
         ), parent_session_id=parent_session_id)
 
     async def _follow_up_delegation(
         self, *, parent_session_id: str, delegation_id: str, request: str,
-        scope: McpScope | None,
+        scope: McpScope | None, purpose: DelegationPurpose | None, caller_request_id: str | None,
     ) -> DelegationRunState:
         assert self.session_mgr is not None and self.db is not None
         if not request or not request.strip():
             raise DelegationError("request must be a non-empty string", status_code=400)
+        parent = self.session_mgr.get_session(parent_session_id)
+        if parent is None:
+            raise DelegationError("Parent session is no longer live", status_code=404)
+        caller = self._capture_caller(parent, scope, request, caller_request_id)
         try:
             await self.db.require_application_session_writable(parent_session_id)
         except ApplicationDeleting as error:
             raise DelegationError(str(error), status_code=409) from error
-        parent = self.session_mgr.get_session(parent_session_id)
-        if parent is None:
-            raise DelegationError("Parent session is no longer live", status_code=404)
-        try:
-            caller = capture(parent, scope, prompt=request)
-        except ValueError as exc:
-            raise DelegationError(str(exc), status_code=409) from exc
         owned_context = derive(caller, request)
         parent_work_id = caller.work_id
         self._require_caller(scope, parent_session_id, parent_work_id)
         previous = self._records.get(delegation_id)
         if previous is None or previous.parent_session_id != parent_session_id:
             raise DelegationError(f"No delegation {delegation_id!r} owned by this session", status_code=404)
+        formal = previous.review_ticket_id is not None
+        if purpose is not None and (purpose == "ticket_review") != formal:
+            raise DelegationError("A delegation's purpose cannot change; start a fresh delegation", status_code=409)
+        if formal:
+            self._require_review_scope(parent, scope, caller_request_id)
 
         # The old round's lock also coordinates every continuation. A winning
         # CAS publishes the new round before another contender can enter.
@@ -997,7 +1029,7 @@ class DelegationManager:
                 _child_work_ids=set(), request=request, _candidate_request_id=None,
                 owned_context=owned_context, created_at=datetime.now(UTC).isoformat(),
             )
-            rec._persisted_state = await self._commit_admission(previous, rec, parent.user_id)
+            rec._persisted_state = await self._commit_admission(previous, rec, parent, scope)
             self._records[delegation_id] = rec
             self._rounds[rec.work_id] = rec
 
@@ -1140,6 +1172,24 @@ class DelegationManager:
         rounds = [rec for rec in self._rounds.values() if rec.parent_session_id == session_id]
         for rec in rounds:
             await self.cancel_delegation(rec.delegation_id, work_id=rec.work_id, reason="Application writer retired")
+
+    @staticmethod
+    def _capture_caller(parent: Session, scope: McpScope | None, request: str,
+                        expected_request_id: str | None) -> AdmittedRequest:
+        try:
+            caller = capture(parent, scope, prompt=request)
+        except ValueError as exc:
+            raise DelegationError(str(exc), status_code=409) from exc
+        if expected_request_id is not None and caller.reference.request_id != expected_request_id:
+            raise DelegationError("The original requesting turn is no longer active", status_code=409)
+        return caller
+
+    @staticmethod
+    def _require_review_scope(parent: Session, scope: McpScope | None, caller_request_id: str | None) -> None:
+        if scope is None or parent.origin not in TICKET_BATCH_ORIGINS or scope.work_id is not None:
+            raise DelegationError("Formal review requires a live model turn in the original ticket chat", status_code=409)
+        if caller_request_id is None:
+            raise DelegationError("Formal review requires the original requesting turn ID", status_code=409)
 
     def _require_caller(self, scope: McpScope | None, session_id: str, work_id: str | None, *, allow_closed: bool = False) -> None:
         if not allow_closed and session_id in self._closed_parents:

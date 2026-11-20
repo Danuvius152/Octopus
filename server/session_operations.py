@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 OperationKind = Literal["message", "compact"]
+TicketPhase = Literal["ticket", "final_acceptance"]
 
 
 class MessageOperation(BaseModel):
@@ -80,6 +81,10 @@ def handoff_human_scope(payload: dict[str, Any]) -> HandoffHumanScope:
     return decisions
 
 
+def adopted_ticket_batch(payload: dict[str, Any]) -> str | None:
+    return payload.get("ticket_batch_update_for", payload.get("finish_ticket_batch_for"))
+
+
 def decode_payload(value: dict[str, Any]) -> dict[str, Any]:
     """Normalize legacy flat messages only at the retained-input boundary.
 
@@ -104,6 +109,11 @@ def decode_payload(value: dict[str, Any]) -> dict[str, Any]:
         instruction_id = value["finish_ticket_batch_instruction_id"]
         if "finish_ticket_batch_for" not in value or not isinstance(instruction_id, str) or not instruction_id.strip():
             raise ValueError("The adopted ticket input has no valid instruction binding")
+    if "ticket_batch_update_for" in value:
+        batch = value.get("ticket_batch_candidate_for")
+        if (not isinstance(batch, str) or value["ticket_batch_update_for"] != batch
+                or "finish_ticket_batch_for" in value or "ticket_batch" in value):
+            raise ValueError("The adopted ticket update has no valid original human binding")
     if value.get("source") == "handoff":
         if (operation.kind != "message" or operation.attachment_ids or value.get("recovery_of_client_id")
                 or value.get("handoff_backend") not in {"codex", "claude-code"}
@@ -113,6 +123,8 @@ def decode_payload(value: dict[str, Any]) -> dict[str, Any]:
         fresh = value.get("fresh_native_id")
         if fresh is not None and (not isinstance(fresh, str) or not fresh or fresh == value["previous_native_id"]):
             raise ValueError("Ticket handoff has no distinct fresh native history")
+        if value.get("handoff_phase", "ticket") not in ("ticket", "final_acceptance"):
+            raise ValueError("Ticket handoff has an invalid receiving phase")
         progress = value.get("answered_progress_request_ids", [])
         if (not isinstance(progress, list)
                 or any(not isinstance(request_id, str) or not request_id.strip() for request_id in progress)

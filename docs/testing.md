@@ -272,9 +272,10 @@ pointing to the actual service interpreter. Rebuilding dependencies belongs to
 [environment recovery](local-wsl.md#环境重建), not routine validation.
 
 The pre-commit pytest hook runs `./scripts/check.sh --gate pytest`. The shared
-gate reads its pytest configuration from `pyproject.toml` and uses four
-pytest-xdist workers grouped by file, with worker restart disabled.
-Focused development checks and live-provider checks stay serial. To save
+gate reads its pytest configuration from `pyproject.toml`, groups tests by file
+and disables worker restart. It uses pytest-xdist's CPU-based worker count with
+a cap of eight and records `PYTEST_XDIST_AUTO_NUM_WORKERS` in the evidence when
+set. Focused development checks and live-provider checks use serial pytest. To save
 structured evidence from the hook, set `OCTOPUS_PYTEST_OUTPUT` to a new evidence
 directory. When pytest runs, the summary displays its nonzero exit code and the
 evidence directory retains the native report and execution log when available.

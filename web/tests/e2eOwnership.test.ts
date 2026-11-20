@@ -5,14 +5,18 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+interface Spec {
+  file: string;
+  tests: { projectName: string }[];
+}
 interface Suite {
-  specs?: { tests: { projectName: string }[] }[];
+  specs?: Spec[];
   suites?: Suite[];
 }
-function projects(suites: Suite[]): string[] {
+function collectedSpecs(suites: Suite[]): Spec[] {
   return suites.flatMap((suite) => [
-    ...(suite.specs ?? []).flatMap((spec) => spec.tests.map((test) => test.projectName)),
-    ...projects(suite.suites ?? []),
+    ...(suite.specs ?? []),
+    ...collectedSpecs(suite.suites ?? []),
   ]);
 }
 
@@ -29,22 +33,10 @@ for (const [label, selection, expected] of [
 ] as const) it(`intersects ${label} with each real configuration partition`, () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "octopus-project-selection-"));
   try {
-    const args = [...selection];
     const env = { ...process.env, OCTOPUS_E2E_MODE: "offline", OCTOPUS_E2E_AUDIT_DIR: root, TMPDIR: root };
-    const reportFile = path.join(root, "execution.json");
-    writeFileSync(reportFile, "execution report must survive internal collection");
-    const plan = collectExecutionPlan(args, { ...env, PLAYWRIGHT_JSON_OUTPUT_FILE: reportFile });
-    expect(readFileSync(reportFile, "utf8")).toBe("execution report must survive internal collection");
-    expect(plan.map((partition) => partition.project)).toEqual(expected);
-    for (const partition of plan) {
-      const child = spawnSync("node_modules/.bin/playwright", ["test", ...playwrightArgs(partition.args, [`--project=${partition.project}`, "--list", "--reporter=json"])], {
-        encoding: "utf8", env: { ...env, OCTOPUS_E2E_SCOPE: partition.scope },
-      });
-      expect(child.status, child.stderr || child.stdout).toBe(0);
-      const report = JSON.parse(child.stdout);
-      expect(report.errors).toEqual([]);
-      expect(new Set(projects(report.suites))).toEqual(new Set([partition.project]));
-    }
+    expect(collectExecutionPlan([...selection], env)).toEqual(expected.map(project => ({
+      project, scope: "main", args: project === "installation" ? [...files, "--workers=1"] : files,
+    })));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }, 15_000);
 
@@ -76,7 +68,11 @@ it("prepares account services only when the actual file/grep selection includes 
   const root = mkdtempSync(path.join(os.tmpdir(), "octopus-scope-selection-"));
   try {
     const env = { ...process.env, OCTOPUS_E2E_MODE: "offline", OCTOPUS_E2E_AUDIT_DIR: root, TMPDIR: root };
-    const plan = collectExecutionPlan(["app.spec.ts", "accounts.spec.ts", "connectors.spec.ts"], env);
+    const reportFile = path.join(root, "execution.json");
+    writeFileSync(reportFile, "execution report must survive internal collection");
+    const plan = collectExecutionPlan(["app.spec.ts", "accounts.spec.ts", "connectors.spec.ts"],
+      { ...env, PLAYWRIGHT_JSON_OUTPUT_FILE: reportFile });
+    expect(readFileSync(reportFile, "utf8")).toBe("execution report must survive internal collection");
     expect(plan.map(({ project, scope }) => [project, scope])).toEqual([
       ["chromium", "main"], ["installation", "main"], ["installation", "accounts"],
     ]);
@@ -86,11 +82,10 @@ it("prepares account services only when the actual file/grep selection includes 
       });
       expect(child.status, child.stderr || child.stdout).toBe(0);
       const report = JSON.parse(child.stdout);
-      const files = (suites: { specs?: { file: string }[]; suites?: never[] }[]): string[] =>
-        suites.flatMap((suite) => [...(suite.specs ?? []).map((spec) => spec.file), ...files(suite.suites ?? [])]);
-      const collected = files(report.suites);
-      expect(collected.length).toBeGreaterThan(0);
-      expect(collected.every((file) => /accounts\.spec\.ts$/.test(file) === (partition.scope === "accounts"))).toBe(true);
+      expect(report.errors).toEqual([]);
+      const collected = collectedSpecs(report.suites);
+      expect(new Set(collected.flatMap(spec => spec.tests.map(test => test.projectName)))).toEqual(new Set([partition.project]));
+      expect(collected.every(({ file }) => /accounts\.spec\.ts$/.test(file) === (partition.scope === "accounts"))).toBe(true);
     }
     expect(collectExecutionPlan(["app.spec.ts", "accounts.spec.ts", "--grep=shows connection status"], env)
       .map(({ scope }) => scope)).toEqual(["main"]);
