@@ -14,7 +14,7 @@ beforeEach(() => {
   useSessionStore.setState({ token: "owned", accountGeneration: 1, connected: true, dispatchGeneration: "same-service", messages: {},
     messageWindows: { s: Symbol("original window") }, lastAppliedSeq: { s: 10 } });
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 // A layout-time snapshot of the public reader catches stale content before
 // passive effects can hide it. No reader internals are exposed to the test.
@@ -116,7 +116,7 @@ test("an unavailable native association expands original identity and content wi
 
 test.each(["refresh", "reconnect", "target", "reopen", "account", "service"])("%s invalidates a late page", async (change) => {
   let resolveOld!: (response: Response) => void;
-  const fetch = vi.fn().mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveOld = resolve; }))
+  const fetch = vi.fn<typeof globalThis.fetch>().mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveOld = resolve; }))
     .mockImplementation(() => Promise.resolve(respond(page("Current saved body", change === "target" ? 7 : 1))));
   vi.stubGlobal("fetch", fetch);
   const view = render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
@@ -132,10 +132,94 @@ test.each(["refresh", "reconnect", "target", "reopen", "account", "service"])("%
     view.unmount();
     render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
   }
+  expect(fetch.mock.calls[0][1]?.signal?.aborted).toBe(true);
+  expect(fetch.mock.calls[1][1]?.signal?.aborted).toBe(false);
   expect(await screen.findByText("Current saved body")).toBeInTheDocument();
   await act(async () => { resolveOld(respond(page("Stale old body"))); });
   expect(screen.queryByText("Stale old body")).not.toBeInTheDocument();
   expect(screen.getByText("Current saved body")).toBeInTheDocument();
+});
+
+test("A→B→A cancels old reads and keeps the current reader loading through late content and failure", async () => {
+  const responses: ((response: Response) => void)[] = [];
+  // The transport still delivers late results after cancellation.
+  const fetch = vi.fn<typeof globalThis.fetch>(() => new Promise<Response>((resolve) => { responses.push(resolve); }));
+  vi.stubGlobal("fetch", fetch);
+  const view = render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
+  let body!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({ start(controller) { body = controller; } });
+  await act(async () => { responses[0](new Response(stream)); });
+
+  view.rerender(<NativeSubagentDetails sessionId="s" anchorSeq={7} />);
+  view.rerender(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
+  expect(responses).toHaveLength(3);
+  expect(fetch.mock.calls.map(([, init]) => init?.signal?.aborted)).toEqual([true, true, false]);
+
+  await act(async () => {
+    body.enqueue(new TextEncoder().encode(JSON.stringify(page("Retired A body"))));
+    body.close();
+    responses[1](new Response(null, { status: 503 }));
+  });
+  expect(screen.queryByText("Retired A body")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("Loading saved details");
+
+  await act(async () => { responses[2](respond(page("Current A body"))); });
+  expect(screen.getByText("Current A body")).toBeVisible();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test.each(["headers", "body"])("ends a saved-detail read at the 30-second deadline while waiting for %s and can retry", async (phase) => {
+  vi.useFakeTimers();
+  vi.spyOn(AbortSignal, "timeout").mockImplementation((delay) => {
+    const deadline = new AbortController();
+    setTimeout(() => deadline.abort(new DOMException("Saved detail read timed out.", "TimeoutError")), delay);
+    return deadline.signal;
+  });
+  const fetch = vi.fn<typeof globalThis.fetch>().mockImplementationOnce(async (_url, init) => {
+    const signal = init?.signal;
+    if (phase === "headers") return new Promise<Response>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20_000));
+    return new Response(new ReadableStream({
+      start(body) { signal?.addEventListener("abort", () => body.error(signal.reason), { once: true }); },
+    }));
+  }).mockResolvedValueOnce(respond(page("Saved details after retry")));
+  vi.stubGlobal("fetch", fetch);
+  render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
+  expect(screen.getByRole("status")).toHaveTextContent("Loading saved details");
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent(/timed out.*refresh to try again/i);
+
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh details" })); });
+  expect(screen.getByText("Saved details after retry")).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("an HTTP error cancels a stalled body before the next detail read", async () => {
+  const cancel = vi.fn();
+  const body = new ReadableStream({
+    start(stream) { stream.enqueue(new Uint8Array([123])); },
+    cancel,
+  });
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(new Response(body, { status: 503 }))
+    .mockResolvedValueOnce(respond(page("Saved details after HTTP error")));
+  vi.stubGlobal("fetch", fetch);
+  render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("HTTP 503");
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(cancel).toHaveBeenCalledOnce();
+
+  fireEvent.click(screen.getByRole("button", { name: "Refresh details" }));
+  expect(await screen.findByText("Saved details after HTTP error")).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
 test("uncollected history differs from a failed query and retry only reads saved items", async () => {
@@ -149,6 +233,19 @@ test("uncollected history differs from a failed query and retry only reads saved
   expect(await screen.findByText(/history was not collected/)).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+test("a deadline setup failure ends loading and leaves the detail reader retryable", async () => {
+  vi.spyOn(AbortSignal, "timeout").mockImplementationOnce(() => { throw new Error("Could not start read deadline."); });
+  const fetch = vi.fn().mockResolvedValue(respond(page("Saved details after retry")));
+  vi.stubGlobal("fetch", fetch);
+  await act(async () => { render(<NativeSubagentDetails sessionId="s" anchorSeq={1} />); });
+
+  expect(screen.getByRole("alert")).toHaveTextContent("Refresh to try again.");
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(fetch).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh details" }));
+  expect(await screen.findByText("Saved details after retry")).toBeVisible();
 });
 
 test("detail pagination keeps tool use and result sharing a native item and never bills them again", async () => {
@@ -189,7 +286,7 @@ test("a late next page cannot append into a refreshed view of the same helper", 
 
 test.each(["success", "failure"])("replaces the same-anchor reader on a new window without accepting an old page's %s or finally", async (outcome) => {
   const responses: ((response: Response) => void)[] = [];
-  const fetch = vi.fn(() => new Promise<Response>((resolve) => { responses.push(resolve); }));
+  const fetch = vi.fn<typeof globalThis.fetch>(() => new Promise<Response>((resolve) => { responses.push(resolve); }));
   vi.stubGlobal("fetch", fetch);
   const commits: string[] = [];
   render(<NativeView anchorSeq={1} commits={commits} />);
@@ -202,6 +299,8 @@ test.each(["success", "failure"])("replaces the same-anchor reader on a new wind
   expect(useSessionStore.getState().messageWindows.s).not.toBe(oldWindow);
   expect(commits[0], "the first replacement-window commit excludes the retired page").not.toContain("Old first page");
   expect(responses).toHaveLength(3);
+  expect(fetch.mock.calls[1][1]?.signal?.aborted).toBe(true);
+  expect(fetch.mock.calls[2][1]?.signal?.aborted).toBe(false);
   expect(screen.getByRole("status")).toHaveTextContent("Loading saved details");
   await act(async () => {
     responses[1](outcome === "success" ? respond(page("Retired next page", 1, 3)) : new Response("Old page failure", { status: 503 }));

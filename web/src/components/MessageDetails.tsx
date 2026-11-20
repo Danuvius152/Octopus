@@ -4,6 +4,8 @@ import { accountFetch } from "../lib/accountFetch";
 import type { MessageInput } from "../lib/turnOutcome";
 import { useSessionStore } from "../stores/sessionStore";
 
+export const SAVED_DETAIL_TIMEOUT_MS = 30_000;
+
 /** Full historical control records stay separate from current live state. */
 export function SavedMessageRecord({ message, label }: { message: { seq?: number | null }; label: string }) {
   return <section aria-label={label} className="text-xs space-y-2">
@@ -52,7 +54,7 @@ export function useMessageDetail(sessionId: string, detailRef?: string | null, s
       const expected = `/api/sessions/${encodeURIComponent(sessionId)}/messages/${seq}`;
       if (!context.token || seq === undefined || detailRef !== expected) throw new Error("No complete saved message reference is available.");
       const response = await accountFetch(`${expected}?view=browser`, { headers: { Authorization: `Bearer ${context.token}` },
-        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]), cache: "no-store" });
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(SAVED_DETAIL_TIMEOUT_MS)]), cache: "no-store" });
       if (!response.ok) throw new Error(`Could not load full message (HTTP ${response.status}).`);
       const value: MessageInput = await response.json();
       if (!current()) return;

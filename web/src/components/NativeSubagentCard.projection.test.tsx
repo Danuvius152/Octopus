@@ -143,7 +143,7 @@ it("reads saved helper details when a complete snapshot supplies the native turn
   act(() => { applySessionSnapshot(sessionId, { ...snapshot, subagents: [{ ...run, native_turn_id: "turn" }] }); });
   await act(async () => { toggleCard(); });
   expect(fetchDetails).toHaveBeenCalledExactlyOnceWith(`/api/sessions/${sessionId}/native-details/7?view=browser`,
-    { headers: { Authorization: "Bearer projection-account" } });
+    expect.objectContaining({ headers: { Authorization: "Bearer projection-account" } }));
   const savedDetails = screen.getByRole("region", { name: "Saved helper details" });
   expect(within(savedDetails).getByText("Saved helper answer")).toBeInTheDocument();
 });

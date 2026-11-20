@@ -2,14 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NativeDetailPage } from "../api";
 import { accountFetch } from "../lib/accountFetch";
 import { useSessionStore } from "../stores/sessionStore";
-import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
+import { MessageDetails, SAVED_DETAIL_TIMEOUT_MS, SavedMessageRecord } from "./MessageDetails";
 import { displayToolInput } from "../lib/messagePresentation";
 import { ToolInputDetails } from "./ToolInputDetails";
 
 /** A separate read view: it never merges detail pages into chat or usage. */
 export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: string; anchorSeq?: number }) {
   const [refresh, setRefresh] = useState(0);
-  const reading = useRef(0);
   // The existing synchronous subscription wakes a new reader on scope changes,
   // including disconnect/reconnect in one React batch. Capture that scope in
   // the owner too: an old UI callback cannot borrow the new store's identity.
@@ -20,6 +19,7 @@ export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: str
   }, [sessionId, anchorSeq, refresh]);
   const currentIdentity = useRef(identity);
   currentIdentity.current = identity;
+  const read = useRef<{ owner: typeof identity; controller: AbortController } | null>(null);
   const [detail, setDetail] = useState<{ owner: typeof identity; page: NativeDetailPage | null; error: string; busy: boolean }>(
     { owner: identity, page: null, error: "", busy: false });
   const currentResource = useCallback(() => {
@@ -33,6 +33,12 @@ export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: str
   const error = visible ? detail.error : "";
   const busy = visible && detail.busy;
 
+  const retireReader = useCallback(() => {
+    currentIdentity.current.retired = true;
+    read.current?.controller.abort();
+    setRefresh((value) => value + 1);
+  }, []);
+
   useEffect(() => useSessionStore.subscribe((next, previous) => {
     const session = currentIdentity.current.sessionId;
     if (next.connected !== previous.connected || next.accountGeneration !== previous.accountGeneration ||
@@ -41,32 +47,41 @@ export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: str
       // into one render with the same final connection and service identity.
       // Retire the reader itself, so old controls cannot start a new request
       // while React's successor commit is pending and scope values return.
-      currentIdentity.current.retired = true;
-      reading.current++;
-      setRefresh((value) => value + 1);
+      retireReader();
     }
-  }), []);
+  }), [retireReader]);
 
   const load = useCallback(async (afterSeq?: number, previous?: NativeDetailPage) => {
     if (!currentResource()) return;
-    const request = ++reading.current;
     const context = useSessionStore.getState();
-    const current = () => reading.current === request && currentResource();
     if (anchorSeq === undefined || !context.token) {
       setDetail({ owner: identity, page: null, error: "", busy: false });
       return;
     }
+    read.current?.controller.abort();
+    const controller = new AbortController();
+    const operation = { owner: identity, controller };
+    read.current = operation;
+    const current = () => read.current === operation && !controller.signal.aborted && currentResource();
     setDetail({ owner: identity, page: previous ?? null, error: "", busy: true });
+    let deadline: AbortSignal | undefined;
     let nextPage = previous ?? null;
     let failureMessage = "";
     try {
       const query = new URLSearchParams();
       query.set("view", "browser");
       if (afterSeq !== undefined) query.set("after_seq", String(afterSeq));
+      deadline = AbortSignal.timeout(SAVED_DETAIL_TIMEOUT_MS);
       const response = await accountFetch(`/api/sessions/${encodeURIComponent(sessionId)}/native-details/${anchorSeq}?${query}`, {
         headers: { Authorization: `Bearer ${context.token}` },
+        signal: AbortSignal.any([controller.signal, deadline]),
       });
-      if (!response.ok) throw new Error(`Could not load saved details (HTTP ${response.status}).`);
+      if (!current()) return;
+      if (!response.ok) {
+        // Release an unread body without delaying the HTTP error.
+        void response.body?.cancel().catch(() => {});
+        throw new Error(`Could not load saved details (HTTP ${response.status}).`);
+      }
       const value: NativeDetailPage = await response.json();
       if (!current()) return;
       if (value.anchor_seq !== anchorSeq) throw new Error("Details belong to a different task.");
@@ -74,22 +89,31 @@ export function NativeSubagentDetails({ sessionId, anchorSeq }: { sessionId: str
         !previous.messages.some((saved) => saved.seq === row.seq))] : value.messages;
       nextPage = { ...value, messages };
     } catch (failure) {
-      failureMessage = failure instanceof Error ? failure.message : "Could not load saved details.";
-    } finally { if (current()) setDetail({ owner: identity, page: nextPage, error: failureMessage, busy: false }); }
+      if (deadline?.aborted) failureMessage = "Saved detail read timed out.";
+      else failureMessage = failure instanceof Error ? failure.message : "Could not load saved details.";
+    } finally {
+      if (current()) {
+        read.current = null;
+        setDetail({ owner: identity, page: nextPage, error: failureMessage, busy: false });
+      }
+    }
   }, [sessionId, anchorSeq, identity, currentResource]);
   useEffect(() => {
-    const reads = reading;
     void load();
-    return () => { if (currentIdentity.current === identity) reads.current++; };
+    return () => {
+      const operation = read.current;
+      if (operation?.owner === identity) {
+        read.current = null;
+        operation.controller.abort();
+      }
+    };
   }, [load, identity]);
 
   return <section aria-label="Saved helper details" className="space-y-2 border-t border-gray-300 pt-2 text-xs">
     <div className="flex items-center justify-between gap-2">
       <strong>Saved helper details</strong>
       <button type="button" onClick={() => {
-        if (!currentResource()) return;
-        identity.retired = true;
-        reading.current++; setRefresh((value) => value + 1);
+        if (currentResource()) retireReader();
       }}>Refresh details</button>
     </div>
     <p className="text-gray-700">Collected content only. Helper completion does not confirm that its parent has consumed the result.</p>
