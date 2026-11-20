@@ -22,10 +22,13 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import sys
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
+from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -2113,7 +2116,9 @@ async def test_api_create_validation(client):
 
 @pytest.mark.asyncio
 async def test_api_duplicate_name_is_409(client):
-    await _api_create(client, name="Dup")
+    first = await _api_create(client, name="Dup")
+    app_dir = Path(first["app_dir"])
+    before = set(app_dir.parent.iterdir())
     agents = (await client.get("/api/agents", headers=client.headers)).json()
     resp = await client.post(
         "/api/applications",
@@ -2121,6 +2126,30 @@ async def test_api_duplicate_name_is_409(client):
         headers=client.headers,
     )
     assert resp.status_code == 409
+    assert resp.json()["detail"] == "An application named 'dup' already exists"
+    assert set(app_dir.parent.iterdir()) == before
+
+
+async def test_api_application_id_collision_preserves_the_other_row_and_cleans_up(client, db, monkeypatch):
+    first = await _api_create(client, name="Existing")
+    root = Path(first["app_dir"]).parent
+    before = set(root.iterdir())
+    other, _ = await create_account(db, username="other-app-owner")
+    identifier = UUID("01234567-89ab-4000-8000-000000000000")
+    app_id = identifier.hex[:12]
+    await db.save_application(
+        app_id=app_id, name="Independent", app_dir="/unused/independent-app",
+        created_at=first["created_at"], updated_at=first["updated_at"], user_id=other["id"],
+    )
+    other_app = await db.get_application(app_id, other["id"])
+    monkeypatch.setattr("server.applications.uuid", SimpleNamespace(uuid4=lambda: identifier))
+
+    with pytest.raises(sqlite3.IntegrityError) as raised:
+        await _api_create(client, name="New app")
+
+    assert raised.value.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY
+    assert set(root.iterdir()) == before
+    assert await db.get_application(app_id, other["id"]) == other_app
 
 
 @pytest.mark.asyncio
@@ -2175,6 +2204,49 @@ async def test_api_archive_and_restore(client):
     assert resp.json()["archived"] is False
     live = (await client.get("/api/applications", headers=client.headers)).json()
     assert [a["id"] for a in live] == [created["id"]]
+
+
+async def test_api_concurrent_restore_returns_renameable_conflict(client, db, monkeypatch):
+    app_ids = []
+    for name in ("Notes", "notes"):
+        created = await _api_create(client, name=name)
+        app_ids.append(created["id"])
+        response = await client.post(f"/api/applications/{created['id']}/archive")
+        assert response.status_code == 200
+
+    # Both requests reach the write before either can claim the name in SQLite.
+    writes = asyncio.Barrier(2)
+    update_application = db.update_application
+
+    async def write_together(app_id, **fields):
+        if fields.get("archived") == 0:
+            await writes.wait()
+        await update_application(app_id, **fields)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "update_application", write_together)
+        async with asyncio.timeout(5):
+            responses = await asyncio.gather(*(
+                client.post(f"/api/applications/{app_id}/unarchive") for app_id in app_ids
+            ))
+
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    (_, winner_id), (conflict, loser_id) = sorted(
+        zip(responses, app_ids, strict=True), key=lambda result: result[0].status_code,
+    )
+    assert "rename" in conflict.json()["detail"].lower()
+    live = (await client.get("/api/applications")).json()
+    archived = (await client.get("/api/applications", params={"archived": "true"})).json()
+    assert [row["id"] for row in live] == [winner_id]
+    assert [row["id"] for row in archived] == [loser_id]
+
+    renamed = await client.patch(f"/api/applications/{loser_id}", json={"name": "Work Notes"})
+    assert renamed.status_code == 200
+    assert renamed.json()["archived"] is True
+    restored = await client.post(f"/api/applications/{loser_id}/unarchive")
+    assert restored.status_code == 200
+    assert restored.json()["name"] == "Work Notes"
+    assert restored.json()["archived"] is False
 
 
 @pytest.mark.asyncio

@@ -43,6 +43,7 @@ from .application_resources import data_dir_for as data_dir_for
 from .application_resources import runtime_dir_for as runtime_dir_for
 from .config import settings
 from .crypto import is_sha256_hexdigest
+from .db.applications import ApplicationNameConflict
 from .sessions.runtime_types import SessionAdmissionClosed
 from .sessions.submission import RequestCompletion
 from .workspace import paths_for
@@ -493,6 +494,10 @@ class ApplicationManager:
                 )
         except SessionAdmissionClosed as error:
             raise ApplicationError(str(error), status_code=409) from error
+        except ApplicationNameConflict as error:
+            raise ApplicationError(
+                f"An application named {name.strip()!r} already exists", status_code=409,
+            ) from error
 
         # The original task retains the prepared app/session while subscribers
         # run outside agent registration. A subscriber can archive the builder
@@ -542,19 +547,12 @@ class ApplicationManager:
         name = (name or "").strip()
         if not name:
             raise ApplicationError("Application name is required")
-        # The agent is resolved first because the owner comes from it — whoever
-        # owns the agent that builds the app owns the app (multi-tenancy.md §5)
-        # — and the name check below is "taken for *this account*", not for the
-        # whole box: two people must both be able to have an app called Notes.
+        # The agent's account owns the application and its resources.
         agent = await db.get_agent(agent_id) if agent_id else None
         if agent is None:
             raise ApplicationError("Agent not found", status_code=404)
         owner_id = agent.get("user_id")
 
-        if await db.get_application_by_name(name, user_id=owner_id) is not None:
-            raise ApplicationError(
-                f"An application named {name!r} already exists", status_code=409
-            )
         description = (description or "").strip()
         if not description:
             raise ApplicationError("Application description is required")
@@ -605,7 +603,8 @@ class ApplicationManager:
             db.health.require_healthy()
             if not created_dir:
                 raise
-            if await db.get_application(app_id) is None:
+            stored = await db.get_application(app_id)
+            if stored is None or (stored["user_id"], stored["app_dir"]) != (owner_id, app_dir):
                 try:
                     async with self._resource_updates:
                         await self._require_exclusive_resources(app_id, app_dir, owner_id)
@@ -804,14 +803,6 @@ class ApplicationManager:
             new_name = str(fields["name"]).strip()
             if not new_name:
                 raise ApplicationError("Application name cannot be empty")
-            clash = await db.get_application_by_name(
-                new_name, user_id=row["user_id"]
-            )
-            if clash is not None and clash["id"] != app_id:
-                raise ApplicationError(
-                    f"An application named {new_name!r} already exists",
-                    status_code=409,
-                )
             updates["name"] = new_name
         if "description" in fields and fields["description"] is not None:
             updates["description"] = str(fields["description"]).strip()
@@ -827,7 +818,12 @@ class ApplicationManager:
             assert row is not None  # just written above
             return row
         updates["updated_at"] = _now()
-        await db.update_application(app_id, **updates)
+        try:
+            await db.update_application(app_id, **updates)
+        except ApplicationNameConflict as error:
+            raise ApplicationError(
+                f"An application named {updates['name']!r} already exists", status_code=409,
+            ) from error
         # An entrypoint change can flip a failed app to ready (and back), so
         # re-derive rather than trusting the stored status.
         if "entrypoint" in updates:
@@ -853,19 +849,13 @@ class ApplicationManager:
         if bool(row["archived"]) == archived:
             assert row is not None  # just written above
             return row
-        if not archived:
-            clash = await db.get_application_by_name(
-                row["name"], user_id=row["user_id"]
-            )
-            if clash is not None and clash["id"] != app_id:
-                raise ApplicationError(
-                    f"An application named {row['name']!r} already exists — "
-                    f"rename it before restoring this one",
-                    status_code=409,
-                )
-        await db.update_application(
-            app_id, archived=1 if archived else 0, updated_at=_now()
-        )
+        try:
+            await db.update_application(app_id, archived=int(archived), updated_at=_now())
+        except ApplicationNameConflict as error:
+            raise ApplicationError(
+                "An active application already uses this name. Rename this application before restoring it.",
+                status_code=409,
+            ) from error
         if not archived:
             # Restoring is choosing to use it again: it comes back to the
             # sidebar (where it was, if it was pinned when it left).

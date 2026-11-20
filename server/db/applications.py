@@ -9,6 +9,8 @@ changed.
 from __future__ import annotations
 
 import json
+import sqlite3
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from .base import DatabaseBase
@@ -28,6 +30,23 @@ _INPUT_TERMINAL = (
 
 class ApplicationDeleting(ValueError):
     """Admission refused while the application's deletion remains unfinished."""
+
+
+class ApplicationNameConflict(Exception):
+    """The active application name is already held by another app in the account."""
+
+
+async def _execute_application_write(tx: Transaction, sql: str, parameters: Iterable[Any]) -> None:
+    try:
+        await tx.execute(sql, parameters)
+    except sqlite3.IntegrityError as error:
+        # SQLite reports this unique expression index by name.
+        if (
+            getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+            and str(error) == "UNIQUE constraint failed: index 'applications_name_unique'"
+        ):
+            raise ApplicationNameConflict() from error
+        raise
 
 
 async def require_application_writable(tx: Transaction, session_id: str) -> None:
@@ -99,7 +118,8 @@ class ApplicationsMixin(DatabaseBase):
         status: str = "building",
     ) -> None:
         async with self.transaction(write=True) as tx:
-            await tx.execute(
+            await _execute_application_write(
+                tx,
                 "INSERT INTO applications "
                 "(id, name, description, icon, agent_id, session_id, app_dir, "
                 " entrypoint, status, created_at, updated_at, user_id, "
@@ -163,32 +183,6 @@ class ApplicationsMixin(DatabaseBase):
             row = await cursor.fetchone()
             return self._row_to_application(row) if row else None
 
-    async def get_application_by_name(
-        self,
-        name: str,
-        *,
-        include_archived: bool = False,
-        user_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Live applications only by default — an archived app doesn't hold its
-        name (the unique index is live-only), so creating a replacement with
-        the same name is allowed."""
-        async with self.transaction(write=False) as tx:
-            query = (
-                f"SELECT {self._APPLICATION_COLS} FROM applications "
-                "WHERE name = ? COLLATE NOCASE"
-            )
-            params: list[Any] = [name]
-            if user_id is not None:
-                # A name is taken *for this account*, not for the box.
-                query += " AND user_id = ?"
-                params.append(user_id)
-            if not include_archived:
-                query += " AND archived = 0"
-            cursor = await tx.execute(query, params)
-            row = await cursor.fetchone()
-            return self._row_to_application(row) if row else None
-
     async def update_application(self, app_id: str, **fields: Any) -> None:
         """Patch any of: name, description, icon, icon_src, agent_id,
         session_id, entrypoint, status, error, updated_at, last_built_at.
@@ -208,7 +202,8 @@ class ApplicationsMixin(DatabaseBase):
             if not updates:
                 return
             set_clause = ", ".join(f"{k} = ?" for k in updates)
-            await tx.execute(
+            await _execute_application_write(
+                tx,
                 f"UPDATE applications SET {set_clause} WHERE id = ?",
                 list(updates.values()) + [app_id],
             )
