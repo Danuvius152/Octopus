@@ -31,36 +31,82 @@ async def create_default_agent(tx: Transaction, *, user_id: str, created_at: str
     )
 
 
+async def _require_connector_agent(tx: Transaction, agent_id: str, user_id: str | None) -> None:
+    from .users import owner_is_available
+
+    agent = await tx.fetch_one("SELECT user_id FROM agents WHERE id = ?", (agent_id,))
+    if agent is None or agent[0] != user_id or not await owner_is_available(tx, user_id):
+        raise ValueError("agent not found")
+
+
+async def _require_connector_binding_scope(
+    tx: Transaction, agent_id: str, installation_id: str, user_id: str | None,
+) -> None:
+    await _require_connector_agent(tx, agent_id, user_id)
+    installation = await tx.fetch_one(
+        "SELECT user_id FROM connector_installations WHERE id = ?", (installation_id,),
+    )
+    if installation is None or installation[0] != user_id:
+        raise ValueError("connector installation not found")
+
+
+async def _set_agent_connector(
+    tx: Transaction, agent_id: str, installation_id: str, enabled: bool,
+) -> None:
+    if enabled:
+        await tx.execute(
+            "INSERT OR IGNORE INTO agent_connectors (agent_id, installation_id) VALUES (?, ?)",
+            (agent_id, installation_id),
+        )
+    else:
+        await tx.execute(
+            "DELETE FROM agent_connectors WHERE agent_id = ? AND installation_id = ?",
+            (agent_id, installation_id),
+        )
+
+
+async def _agent_connector_ids(tx: Transaction, agent_id: str) -> list[str]:
+    rows = await tx.fetch_all(
+        "SELECT installation_id FROM agent_connectors WHERE agent_id = ?", (agent_id,),
+    )
+    return [row[0] for row in rows]
+
+
 class AgentsMixin(DatabaseBase):
     # --- agent-scoped enablement join -------------------------------------
 
-    async def set_agent_connector(
-        self, agent_id: str, installation_id: str, enabled: bool
-    ) -> None:
+    async def set_agent_connector(self, agent_id: str, installation_id: str, enabled: bool) -> None:
         """Toggle one connector for one agent (presence in the join = on)."""
         async with self.transaction(write=True) as tx:
-            if enabled:
-                await tx.execute(
-                    "INSERT OR IGNORE INTO agent_connectors "
-                    "(agent_id, installation_id) VALUES (?, ?)",
-                    (agent_id, installation_id),
-                )
-            else:
-                await tx.execute(
-                    "DELETE FROM agent_connectors "
-                    "WHERE agent_id = ? AND installation_id = ?",
-                    (agent_id, installation_id),
-                )
+            await _set_agent_connector(tx, agent_id, installation_id, enabled)
+
+    async def read_owned_agent_connector(
+        self, agent_id: str, installation_id: str, user_id: str | None,
+    ) -> bool:
+        async with self.transaction(write=False) as tx:
+            await _require_connector_binding_scope(tx, agent_id, installation_id, user_id)
+            row = await tx.fetch_one(
+                "SELECT 1 FROM agent_connectors WHERE agent_id = ? AND installation_id = ?",
+                (agent_id, installation_id),
+            )
+            return row is not None
+
+    async def set_owned_agent_connector(
+        self, agent_id: str, installation_id: str, enabled: bool, user_id: str | None,
+    ) -> None:
+        async with self.transaction(write=True) as tx:
+            await _require_connector_binding_scope(tx, agent_id, installation_id, user_id)
+            await _set_agent_connector(tx, agent_id, installation_id, enabled)
 
     async def get_agent_connector_ids(self, agent_id: str) -> list[str]:
         """Installation ids enabled for an agent."""
         async with self.transaction(write=False) as tx:
-            cursor = await tx.execute(
-                "SELECT installation_id FROM agent_connectors WHERE agent_id = ?",
-                (agent_id,),
-            )
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+            return await _agent_connector_ids(tx, agent_id)
+
+    async def list_owned_agent_connectors(self, agent_id: str, user_id: str | None) -> list[str]:
+        async with self.transaction(write=False) as tx:
+            await _require_connector_agent(tx, agent_id, user_id)
+            return await _agent_connector_ids(tx, agent_id)
 
     async def replace_agent_connectors(
         self, agent_id: str, installation_ids: list[str], user_id: str | None,
@@ -68,9 +114,7 @@ class AgentsMixin(DatabaseBase):
         """Validate and replace one complete selection in a single commit."""
         target = sorted(set(installation_ids))
         async with self.transaction(write=True) as tx:
-            agent = await tx.fetch_one("SELECT user_id FROM agents WHERE id = ?", (agent_id,))
-            if agent is None or agent[0] != user_id:
-                raise ValueError("agent not found")
+            await _require_connector_agent(tx, agent_id, user_id)
             for iid in target:
                 installation = await tx.fetch_one("SELECT user_id FROM connector_installations WHERE id = ?", (iid,))
                 if installation is None or installation[0] != user_id:

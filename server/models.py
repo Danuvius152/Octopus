@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from enum import Enum
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -988,11 +989,37 @@ class AgentConnectorsResponse(BaseModel):
     installation_ids: list[str]
 
 
+class AgentConnectorBindingsResponse(AgentConnectorsResponse):
+    pending_operations: dict[str, UUID]
+
+
 class SetAgentConnectorsRequest(BaseModel):
     installation_ids: list[str]
 
 
 class ToggleAgentConnectorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+class ReserveAgentConnectorRequest(ToggleAgentConnectorRequest):
+    intent_id: UUID
+
+
+class ApplyAgentConnectorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: UUID
+
+
+class AgentConnectorReservation(BaseModel):
+    operation_id: UUID
+    reserved: bool
+
+
+class AgentConnectorSettlement(BaseModel):
+    disposition: Literal["applied", "retired", "unavailable"]
     enabled: bool
 
 

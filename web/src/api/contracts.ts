@@ -2951,6 +2951,40 @@ export interface paths {
         patch: operations["toggle_agent_connector_api_agents__agent_id__connectors__installation_id__patch"];
         trace?: never;
     };
+    "/api/agents/{agent_id}/connectors/{installation_id}/operations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reserve Agent Connector */
+        post: operations["reserve_agent_connector_api_agents__agent_id__connectors__installation_id__operations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{agent_id}/connectors/{installation_id}/operations/{operation_id}/settle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Settle Agent Connector */
+        post: operations["settle_agent_connector_api_agents__agent_id__connectors__installation_id__operations__operation_id__settle_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/backends/{backend}/models": {
         parameters: {
             query?: never;
@@ -3096,6 +3130,35 @@ export interface components {
              * @default []
              */
             sources: components["schemas"]["Source"][];
+        };
+        /** AgentConnectorBindingsResponse */
+        AgentConnectorBindingsResponse: {
+            /** Installation Ids */
+            installation_ids: string[];
+            /** Pending Operations */
+            pending_operations: {
+                [key: string]: string;
+            };
+        };
+        /** AgentConnectorReservation */
+        AgentConnectorReservation: {
+            /**
+             * Operation Id
+             * Format: uuid
+             */
+            operation_id: string;
+            /** Reserved */
+            reserved: boolean;
+        };
+        /** AgentConnectorSettlement */
+        AgentConnectorSettlement: {
+            /**
+             * Disposition
+             * @enum {string}
+             */
+            disposition: "applied" | "retired" | "unavailable";
+            /** Enabled */
+            enabled: boolean;
         };
         /** AgentConnectorsResponse */
         AgentConnectorsResponse: {
@@ -3554,6 +3617,14 @@ export interface components {
             icon?: string | null;
             /** Entrypoint */
             entrypoint?: string | null;
+        };
+        /** ApplyAgentConnectorRequest */
+        ApplyAgentConnectorRequest: {
+            /**
+             * Operation Id
+             * Format: uuid
+             */
+            operation_id: string;
         };
         /**
          * AttachmentMetadata
@@ -5759,6 +5830,16 @@ export interface components {
             request_id: string;
             /** Version */
             version: number;
+        };
+        /** ReserveAgentConnectorRequest */
+        ReserveAgentConnectorRequest: {
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * Intent Id
+             * Format: uuid
+             */
+            intent_id: string;
         };
         /** Restore */
         Restore: {
@@ -12955,7 +13036,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AgentConnectorsResponse"];
+                    "application/json": components["schemas"]["AgentConnectorBindingsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -13020,7 +13101,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ToggleAgentConnectorRequest"];
+                "application/json": components["schemas"]["ToggleAgentConnectorRequest"] | components["schemas"]["ApplyAgentConnectorRequest"];
             };
         };
         responses: {
@@ -13030,6 +13111,79 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reserve_agent_connector_api_agents__agent_id__connectors__installation_id__operations_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                agent_id: string;
+                installation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReserveAgentConnectorRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConnectorReservation"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    settle_agent_connector_api_agents__agent_id__connectors__installation_id__operations__operation_id__settle_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                agent_id: string;
+                installation_id: string;
+                operation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConnectorSettlement"];
+                };
             };
             /** @description Validation Error */
             422: {

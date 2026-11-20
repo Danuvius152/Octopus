@@ -1,9 +1,17 @@
-import type { Request as BrowserRequest } from "@playwright/test";
+import type { Page, Request as BrowserRequest } from "@playwright/test";
+import { deferred } from "../src/test-support/deferred";
 import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect } from "./test";
 
 const agentsUrl = "http://localhost:8765/api/agents";
 const headers = { get Authorization() { return `Bearer ${accountToken()}`; } };
+
+async function stubConnectorCatalog(page: Page, ids: string[]) {
+  await page.route(/\/api\/connectors$/, (route) => route.fulfill({ json: ids.map((id) => ({
+    id, kind: "github", label: `${id} account`, auth_type: "oauth", scopes: [], needs_reconnect: false,
+    external_account_id: id, enable_by_default: false, created_at: "2026-11-10T00:00:00Z",
+  })) }));
+}
 
 test("a saved Agent remains saved while its delayed receipt leaves the reopened draft alone", async ({ page, request }) => {
   const created = await request.post(agentsUrl, { headers, data: { name: "E2E Form lifetime" } });
@@ -48,7 +56,7 @@ test("a saved Agent remains saved while its delayed receipt leaves the reopened 
   }
 });
 
-test("closing an Agent form cancels its connector read and isolates its failed toggle", async ({ page, request }) => {
+test("reopening an Agent cancels its first read and lets a delayed Connector write settle before reversal", async ({ page, request }) => {
   const created = await request.post(agentsUrl, { headers, data: { name: "E2E Connector draft lifetime" } });
   expect(created.ok()).toBe(true);
   const agent = await created.json();
@@ -58,12 +66,12 @@ test("closing an Agent form cancels its connector read and isolates its failed t
   const firstWrite = new Promise<void>((resolve) => { releaseWrite = resolve; });
   let holdOpeningRead = true;
   const openingReads: BrowserRequest[] = [];
-  let writes = 0;
-  await page.route(/\/api\/connectors$/, (route) => route.fulfill({ json: ["first", "second"].map((id) => ({
-    id, kind: "github", label: `${id} account`, auth_type: "oauth", scopes: [], needs_reconnect: false,
-    external_account_id: id, enable_by_default: false, created_at: "2026-11-10T00:00:00Z",
-  })) }));
-  await page.route(`**/api/agents/${agent.id}/connectors`, async (route) => {
+  const selected = new Set<string>();
+  const pending = new Map<string, { operation_id: string; enabled: boolean }>();
+  let nextId = 0;
+  const bindingsPath = `**/api/agents/${agent.id}/connectors`;
+  await stubConnectorCatalog(page, ["first", "second"]);
+  await page.route(bindingsPath, async (route) => {
     if (holdOpeningRead) {
       const read = route.request();
       openingReads.push(read);
@@ -71,13 +79,32 @@ test("closing an Agent form cancels its connector read and isolates its failed t
       if (!read.failure()) await route.fulfill({ json: { installation_ids: ["first"] } });
       return;
     }
-    await route.fulfill({ json: { installation_ids: [] } });
+    await route.fulfill({ json: {
+      installation_ids: [...selected],
+      pending_operations: Object.fromEntries([...pending].map(([id, op]) => [id, op.operation_id])),
+    } });
   });
-  await page.route(`**/api/agents/${agent.id}/connectors/*`, async (route) => {
-    if (++writes === 1) {
-      await firstWrite;
-      await route.fulfill({ status: 503 });
-    } else await route.fulfill({ status: 204 });
+  await page.route(`${bindingsPath}/*/operations`, async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-2)!;
+    const op = { operation_id: `write-${++nextId}`, enabled: route.request().postDataJSON().enabled };
+    pending.set(id, op);
+    await route.fulfill({ json: { operation_id: op.operation_id, reserved: true } });
+  });
+  await page.route(`${bindingsPath}/first/operations/write-1/settle`, async (route) => {
+    expect(pending.get("first")?.operation_id).toBe("write-1");
+    pending.delete("first");
+    await route.fulfill({ json: { disposition: "retired", enabled: selected.has("first") } });
+  });
+  await page.route(`${bindingsPath}/*`, async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-1)!;
+    const operationId = route.request().postDataJSON().operation_id;
+    if (operationId === "write-1") await firstWrite;
+    const op = pending.get(id);
+    if (!op || op.operation_id !== operationId) return route.fulfill({ status: 409 });
+    if (op.enabled) selected.add(id);
+    else selected.delete(id);
+    pending.delete(id);
+    await route.fulfill({ status: 204 });
   });
   try {
     await page.goto("/");
@@ -101,24 +128,115 @@ test("closing an Agent form cancels its connector read and isolates its failed t
     await expect(first).toBeEnabled();
     await expect(first).not.toBeChecked();
     releaseRead();
+    const delayed = page.waitForRequest((item) => item.method() === "PATCH" && item.url().endsWith("/connectors/first"));
     await first.click();
+    const originalWrite = await delayed;
     await expect(first).toBeDisabled();
     await expect(second).toBeEnabled();
     await second.click();
     await expect(second).toBeChecked();
+    await expect(second).toBeEnabled();
     await page.locator(".btn-agent-cancel").click();
     await row.dblclick();
+    await expect(first).toBeDisabled();
+    await expect(second).toBeEnabled();
+    await page.getByRole("button", { name: "Check update for first account" }).click();
     await expect(first).toBeEnabled();
-    const received = page.waitForResponse((response) => response.url().endsWith(`/connectors/first`));
-    releaseWrite();
-    await received;
+    await first.click();
+    await expect(first).toBeChecked();
+    await expect(first).toBeEnabled();
+    await first.click();
     await expect(first).not.toBeChecked();
     await expect(first).toBeEnabled();
-    await expect(second).not.toBeChecked();
-    expect(writes).toBe(2);
+    const received = page.waitForResponse((response) => response.request() === originalWrite);
+    releaseWrite();
+    expect((await received).status()).toBe(409);
+    await expect(first).not.toBeChecked();
+    await expect(first).toBeEnabled();
+    await expect(second).toBeChecked();
+    expect([...selected]).toEqual(["second"]);
   } finally {
     releaseRead();
     releaseWrite();
-    await request.post(`${agentsUrl}/${agent.id}/archive`, { headers });
   }
 });
+
+for (const delayedStage of ["admission", "delivery"] as const) {
+  test(`a retired form cannot send a Connector write after late reservation ${delayedStage}`, async ({ page, request }) => {
+    const created = await request.post(agentsUrl, { headers, data: { name: "E2E Connector preparation" } });
+    expect(created.ok()).toBe(true);
+    const agent = await created.json();
+    const bindingsPath = `**/api/agents/${agent.id}/connectors`;
+    const holdOld = deferred<void>();
+    const holdNewWrite = deferred<void>();
+    const oldRequested = deferred<void>();
+    const newPatchRequested = deferred<void>();
+    const oldResolved = deferred<void>();
+    const oldCleanup = deferred<void>();
+    let preparationCount = 0;
+    let pendingId: string | undefined;
+    let enabled = false;
+    const writes: string[] = [];
+
+    await stubConnectorCatalog(page, ["source"]);
+    await page.route(bindingsPath, (route) => route.fulfill({ json: {
+      installation_ids: enabled ? ["source"] : [],
+      pending_operations: pendingId ? { source: pendingId } : {},
+    } }));
+    await page.route(`${bindingsPath}/source/operations`, async (route) => {
+      const id = `reservation-${++preparationCount}`;
+      const original = id === "reservation-1";
+      if (original) oldRequested.resolve();
+      if (original && delayedStage === "admission") await holdOld.promise;
+      const reservation = { operation_id: pendingId ?? id, reserved: pendingId === undefined };
+      pendingId ??= id;
+      if (original && delayedStage === "delivery") await holdOld.promise;
+      await route.fulfill({ json: reservation });
+      if (original) oldResolved.resolve();
+    });
+    await page.route(`${bindingsPath}/source/operations/reservation-1/settle`, async (route) => {
+      if (pendingId === "reservation-1") pendingId = undefined;
+      else oldCleanup.resolve();
+      await route.fulfill({ json: { disposition: "retired", enabled } });
+    });
+    await page.route(`${bindingsPath}/source`, async (route) => {
+      const operationId = route.request().postDataJSON().operation_id;
+      writes.push(operationId);
+      if (operationId === "reservation-2") {
+        newPatchRequested.resolve();
+        await holdNewWrite.promise;
+      }
+      if (pendingId !== operationId) return route.fulfill({ status: 409 });
+      enabled = true;
+      pendingId = undefined;
+      await route.fulfill({ status: 204 });
+    });
+    try {
+      await page.goto("/");
+      await enterAccountCredentials(page);
+      const row = page.locator(".agent-item", { hasText: agent.name });
+      const checkbox = page.getByRole("checkbox", { name: /source account/ });
+      await row.dblclick();
+      await checkbox.click();
+      await oldRequested.promise;
+      await page.locator(".btn-agent-cancel").click();
+      await row.dblclick();
+      if (delayedStage === "delivery") {
+        await page.getByRole("button", { name: "Check update for source account" }).click();
+      }
+      await checkbox.click();
+      await newPatchRequested.promise;
+      holdOld.resolve();
+      await oldResolved.promise;
+      if (delayedStage === "delivery") await oldCleanup.promise;
+      expect(pendingId).toBe("reservation-2");
+      holdNewWrite.resolve();
+      await expect(checkbox).toBeEnabled();
+      await expect(checkbox).toBeChecked();
+      expect(writes).toEqual(["reservation-2"]);
+    } finally {
+      holdOld.resolve();
+      holdNewWrite.resolve();
+    }
+  });
+}

@@ -510,14 +510,15 @@ async def test_delete_cleans_every_account_and_keeps_historical_success(custom_r
         login_id, iid = await install(client, headers=headers)
         agent = await manager.db.get_system_agent(account["id"])
         await manager.set_agent_connector(agent["id"], iid, True, account["id"])
-        installed.append((login_id, iid, agent["id"], headers))
+        installed.append((login_id, iid, agent["id"], account["id"], headers))
     _, kept = await install(client, "other-kind")
     await manager.set_agent_connector(installed[0][2], kept, True, accounts[0][0]["id"])
     assert (await client.delete("/api/connectors/custom/linear")).status_code == 204
-    for login_id, iid, agent_id, headers in installed:
+    for login_id, iid, agent_id, account_id, headers in installed:
         assert await manager.get_installation(iid) is None
         assert await manager.db.get_connector_secret(iid) is None
-        assert await manager.get_agent_connector_ids(agent_id) == ([kept] if agent_id == installed[0][2] else [])
+        expected = [kept] if agent_id == installed[0][2] else []
+        assert await manager.get_agent_connector_bindings(agent_id, account_id) == (expected, {})
         assert (await client.get(f"/api/connectors/oauth/status/{login_id}", headers=headers)).json() == {
             "status": "success", "installation_id": iid, "message": None,
         }
@@ -593,7 +594,9 @@ async def test_definition_delete_cancellation_and_failure_keep_one_complete_stat
     assert (await manager.resolve_client_creds("linear") is None) == changed
     assert (await manager.get_installation(iid) is None) == changed
     assert await db.get_connector_secret(iid) == (None if changed else original_secret)
-    assert await manager.get_agent_connector_ids(agent["id"]) == ([] if changed else [iid])
+    assert await manager.get_agent_connector_bindings(agent["id"], accounts[0][0]["id"]) == (
+        [] if changed else [iid], {},
+    )
     if changed:
         await _create_custom(client)
     page = await client.get("/api/connectors/oauth/callback", params=params)

@@ -119,6 +119,7 @@ describe("AgentFormPage", () => {
   it.each([true, false])("lets a prior Connector write settle during Save without unlocking the editors (success=%s)", async success => {
     const connector = deferred<Response>(), save = deferred<Response>();
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/operations")) return json({ operation_id: "prior-write", reserved: true });
       if (init?.method === "PATCH") return url.includes("/connectors/") ? connector.promise : save.promise;
       return emptyRead(url);
     });
@@ -129,7 +130,7 @@ describe("AgentFormPage", () => {
     }] }));
     await act(async () => {});
     const checkbox = screen.getByRole("checkbox", { name: /Prior source/ });
-    fireEvent.click(checkbox);
+    await act(async () => fireEvent.click(checkbox));
     fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
     await act(async () => connector.resolve(new Response(null, { status: success ? 204 : 503 })));
     expect(checkbox).toHaveProperty("checked", success);
@@ -138,7 +139,11 @@ describe("AgentFormPage", () => {
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(2);
     await act(async () => save.resolve(json({ detail: "Save refused" }, 409)));
     expect(checkbox).toHaveProperty("checked", success);
-    expect(checkbox).toBeEnabled();
+    if (success) expect(checkbox).toBeEnabled();
+    else {
+      expect(checkbox).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Check update for Prior source" })).toBeEnabled();
+    }
   });
 
   it.each(["archive", "delete"])("an external %s keeps the draft's original edit target", async (change) => {
@@ -410,10 +415,81 @@ describe("AgentFormPage", () => {
     expect(checkbox).toBeEnabled();
   });
 
-  it("locks only a pending connector and confines its failed rollback to its original opening", async () => {
+  it("keeps an unconfirmed write locked until its own settlement confirms the current value", async () => {
+    const connector = deferred<Response>();
+    const settlement = deferred<Response>();
+    let checks = 0;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/operations")) return json({ operation_id: "first-write", reserved: true });
+      if (url.endsWith("/operations/first-write/settle")) return ++checks === 1 ? json({}, 503) : settlement.promise;
+      if (init?.method === "PATCH") return connector.promise;
+      return emptyRead(url);
+    });
+    mount("ag1");
+    showConnectorInstallations("first", "second");
+    const first = screen.getByRole("checkbox", { name: /first/ });
+    const second = screen.getByRole("checkbox", { name: /second/ });
+    await waitFor(() => expect(first).toBeEnabled());
+    await act(async () => fireEvent.click(first));
+    await act(async () => connector.resolve(new Response(null, { status: 503 })));
+    const check = screen.getByRole("button", { name: "Check update for first" });
+    expect(first).toBeDisabled();
+    expect(second).toBeEnabled();
+    expect(first).not.toBeChecked();
+    await act(async () => fireEvent.click(check));
+    expect(screen.getByText("Could not check update. Try again.")).toBeVisible();
+    expect(first).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Check update for first" }));
+    expect(first).toBeDisabled();
+    await act(async () => settlement.resolve(json({ disposition: "applied", enabled: true })));
+    expect(first).toBeChecked();
+    expect(first).toBeEnabled();
+  });
+
+  it.each(["A→B→A", "new account", "reopen"] as const)("ignores a late settlement after %s", async (transition) => {
+    const settlement = deferred<Response>();
+    const agents = [agent(), agent({ id: "ag2", name: "Other agent" })];
+    let opened = false;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.endsWith("/operations/original/settle")) return settlement.promise;
+      if (url.endsWith("/operations/current/settle")) return json({ disposition: "retired", enabled: false });
+      if (url.endsWith("/ag1/connectors")) return json({
+        installation_ids: [],
+        pending_operations: { first: opened ? "current" : "original" },
+      });
+      return emptyRead(url);
+    });
+    mount("ag1", agents);
+    showConnectorInstallations("first");
+    const checkUpdate = () => screen.findByRole("button", { name: "Check update for first" });
+    fireEvent.click(await checkUpdate());
+    expect(screen.getByText("Checking update…")).toBeVisible();
+    opened = true;
+    act(() => {
+      const store = useSessionStore.getState();
+      if (transition === "A→B→A") store.openAgentForm("ag2");
+      else if (transition === "reopen") store.showChat();
+      else {
+        store.setToken("replacement");
+        useSessionStore.setState({ agents, connectorInstallations: store.connectorInstallations });
+      }
+      useSessionStore.getState().openAgentForm("ag1");
+    });
+    await checkUpdate();
+    await act(async () => settlement.resolve(json({ disposition: "applied", enabled: true })));
+    const first = screen.getByRole("checkbox", { name: /first/ });
+    expect(first).toBeDisabled();
+    expect(first).not.toBeChecked();
+    await act(async () => fireEvent.click(await checkUpdate()));
+    expect(first).toBeEnabled();
+    expect(first).not.toBeChecked();
+  });
+
+  it("confines a late write receipt to its original opening", async () => {
     const write = deferred<Response>();
     const writes: string[] = [];
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/operations")) return json({ operation_id: "write", reserved: true });
       if (init?.method === "PATCH") {
         writes.push(url);
         if (writes.length === 1) return write.promise;
@@ -444,10 +520,73 @@ describe("AgentFormPage", () => {
     await waitFor(() => expect(screen.getByRole("checkbox", { name: /first/ })).toBeChecked());
     await act(async () => write.resolve(new Response(null, { status: 503 })));
     // A new edit still belongs to the reopened draft.
-    fireEvent.click(screen.getByRole("checkbox", { name: /first/ }));
+    await act(async () => fireEvent.click(screen.getByRole("checkbox", { name: /first/ })));
     expect(screen.getByRole("checkbox", { name: /first/ })).not.toBeChecked();
     expect(writes).toHaveLength(3);
-    await act(async () => {});
+  });
+
+  it("retries the same unsent edit after its reservation was accepted but the response was lost", async () => {
+    let originalIntent: string | undefined;
+    const patches = vi.fn(() => new Response(null, { status: 204 }));
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/operations")) {
+        const intent = JSON.parse(init!.body as string).intent_id;
+        if (!originalIntent) {
+          originalIntent = intent;
+          throw new TypeError("Response lost");
+        }
+        return json({ operation_id: "original-reservation", reserved: originalIntent === intent });
+      }
+      if (init?.method === "PATCH") return patches();
+      return emptyRead(url);
+    });
+    mount("ag1");
+    showConnectorInstallations("first");
+    const checkbox = screen.getByRole("checkbox", { name: /first/ });
+    await waitFor(() => expect(checkbox).toBeEnabled());
+    await act(async () => fireEvent.click(checkbox));
+    expect(screen.getByText("Update was not sent. Try again.")).toBeVisible();
+    expect(checkbox).not.toBeChecked();
+    expect(checkbox).toBeEnabled();
+    expect(patches).not.toHaveBeenCalled();
+    await act(async () => fireEvent.click(checkbox));
+    expect(checkbox).toBeChecked();
+    expect(patches).toHaveBeenCalledOnce();
+  });
+
+  it.each([true, false])("does not send a prepared write after Save takes the form (Save still pending=%s)", async (pending) => {
+    const reserve = deferred<Response>(), save = deferred<Response>();
+    const connectorWrites = vi.fn(() => new Response(null, { status: 204 }));
+    const intents: string[] = [];
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/operations")) {
+        intents.push(JSON.parse(init!.body as string).intent_id);
+        return intents.length === 1 ? reserve.promise : json({ operation_id: "staged", reserved: intents[0] === intents[1] });
+      }
+      if (init?.method === "PATCH") {
+        if (url.includes("/connectors/")) return connectorWrites();
+        return save.promise;
+      }
+      return emptyRead(url);
+    });
+    mount("ag1");
+    showConnectorInstallations("first");
+    const checkbox = screen.getByRole("checkbox", { name: /first/ });
+    await waitFor(() => expect(checkbox).toBeEnabled());
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    if (!pending) await act(async () => save.resolve(json({ detail: "Save refused" }, 409)));
+    await act(async () => reserve.resolve(json({ operation_id: "staged", reserved: true })));
+    if (pending) {
+      expect(checkbox).toBeDisabled();
+      await act(async () => save.resolve(json({ detail: "Save refused" }, 409)));
+    }
+    expect(checkbox).toBeEnabled();
+    expect(checkbox).not.toBeChecked();
+    expect(connectorWrites).not.toHaveBeenCalled();
+    await act(async () => fireEvent.click(checkbox));
+    expect(checkbox).toBeChecked();
+    expect(connectorWrites).toHaveBeenCalledOnce();
   });
 
   it.each(["switch", "reopen", "account"] as const)(
@@ -497,6 +636,7 @@ describe("AgentFormPage", () => {
   it.each([true, false])("admits Connector edits after confirming the initial binding (enabled=%s)", async enabled => {
     const read = deferred<Response>();
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/operations")) return json({ operation_id: "confirmed", reserved: true });
       if (init?.method === "PATCH") return new Response(null, { status: 204 });
       if (url.endsWith("/ag1/connectors")) return read.promise;
       return emptyRead(url);
@@ -517,8 +657,11 @@ describe("AgentFormPage", () => {
     expect(checkbox).toHaveProperty("checked", enabled);
     expect(checkbox).toBeEnabled();
     await act(async () => fireEvent.click(checkbox));
+    const reservation = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/ag1/connectors/github/operations"));
+    expect(reservation?.[1]?.method).toBe("POST");
+    expect(JSON.parse(reservation?.[1]?.body as string)).toEqual({ enabled: !enabled, intent_id: expect.any(String) });
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/ag1/connectors/github"),
-      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ enabled: !enabled }) }));
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ operation_id: "confirmed" }) }));
   });
 
   it("retries a failed binding read in the same form after Save unfreezes it", async () => {
@@ -612,7 +755,7 @@ describe("AgentFormPage", () => {
     expect(screen.getByText(/cannot enforce tool_deny/)).toBeInTheDocument();
   });
 
-  it("loads connector enablement, rolls back a failed toggle and removes deleted installations", async () => {
+  it("retains the last confirmed value on explicit refusal and removes deleted installations", async () => {
     let patches = 0;
     let removed = false;
     const installation = {
@@ -624,9 +767,10 @@ describe("AgentFormPage", () => {
       if (init?.method === "DELETE") { removed = true; return new Response(null, { status: 204 }); }
       if (url.endsWith("/api/connectors")) return json(removed ? [] : [installation]);
       if (url.endsWith("/connectors")) return json({ installation_ids: ["installation"] });
+      if (url.endsWith("/operations")) return json({ operation_id: `write-${patches + 1}`, reserved: true });
       if (init?.method === "PATCH") {
         patches += 1;
-        return new Response(null, { status: patches === 1 ? 500 : 204 });
+        return patches === 1 ? json({ detail: "Connector installation not found" }, 404) : new Response(null, { status: 204 });
       }
       return emptyRead(url);
     });
@@ -637,11 +781,12 @@ describe("AgentFormPage", () => {
     fireEvent.click(checkbox);
     await waitFor(() => expect(patches).toBe(1));
     await waitFor(() => expect(checkbox).toBeChecked());
+    expect(screen.getByText("Update was rejected.")).toBeVisible();
     fireEvent.click(checkbox);
     await waitFor(() => expect(patches).toBe(2));
     await waitFor(() => expect(checkbox).not.toBeChecked());
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/api/agents/ag1/connectors/installation"),
-      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ enabled: false }) }));
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ operation_id: "write-2" }) }));
     await act(async () => { await connectorInstallations.disconnect("installation"); });
     expect(screen.queryByRole("checkbox", { name: /GitHub account/ })).toBeNull();
   });
@@ -1141,6 +1286,14 @@ function mockCodexEdit(existing: Agent) {
     }
     return emptyRead(url);
   });
+}
+
+function showConnectorInstallations(...ids: string[]) {
+  act(() => useSessionStore.setState({ connectorInstallations: ids.map((id) => ({
+    id, kind: "github", label: id, auth_type: "oauth", scopes: [], external_account_id: id,
+    enable_by_default: false, needs_reconnect: false,
+    token_expires_at: null, last_refresh_error_code: null, created_at: "2026-11-10",
+  })) }));
 }
 
 function emptyRead(url: unknown): Response {

@@ -41,7 +41,10 @@ export type ConnectorOAuthStatusResponse = components["schemas"]["ConnectorOAuth
 export type ConnectorOAuthClientInfo = components["schemas"]["ConnectorOAuthClientInfo"];
 export type CustomConnectorCreateRequest = components["schemas"]["CustomConnectorCreateRequest"];
 export type UpdateConnectorRequest = components["schemas"]["UpdateConnectorRequest"];
-export type AgentConnectorsResponse = components["schemas"]["AgentConnectorsResponse"];
+export type AgentConnectorBindingsResponse = components["schemas"]["AgentConnectorBindingsResponse"];
+export type AgentConnectorReservation = components["schemas"]["AgentConnectorReservation"];
+export type AgentConnectorSettlement = components["schemas"]["AgentConnectorSettlement"];
+export type ReserveAgentConnectorRequest = components["schemas"]["ReserveAgentConnectorRequest"];
 // Native sub-agents (native-subagents.md): a live run on a session, and a
 // definition an agent carries.
 export type SubagentRun = components["schemas"]["SubagentRun"];

@@ -15,18 +15,28 @@ from __future__ import annotations
 import asyncio
 import logging
 from html import escape
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
 from ..auth import verify_token
 from ..config import settings
-from ..connector_manager import ConnectorError, ConnectorManager
+from ..connector_manager import (
+    ConnectorBindingOperationRetired,
+    ConnectorBindingOperationsFull,
+    ConnectorError,
+    ConnectorManager,
+)
 from ..connectors.errors import ConnectorTokenError
 from ..connectors.oauth import ConnectorLoginError, ConnectorLoginManager
-from ..deps import AdminUser, ScopeUser, SessionMgr
+from ..deps import AdminUser, ScopeUser
 from ..models import (
+    AgentConnectorBindingsResponse,
+    AgentConnectorReservation,
+    AgentConnectorSettlement,
     AgentConnectorsResponse,
+    ApplyAgentConnectorRequest,
     ConnectorCatalogEntry,
     ConnectorInstallationInfo,
     ConnectorOAuthCancelRequest,
@@ -38,6 +48,7 @@ from ..models import (
     ConnectorRejectionResponse,
     ConnectorTokenResponse,
     CustomConnectorCreateRequest,
+    ReserveAgentConnectorRequest,
     SetAgentConnectorsRequest,
     SetConnectorOAuthClientRequest,
     ToggleAgentConnectorRequest,
@@ -108,20 +119,6 @@ def _callback_page(title: str, body: str) -> HTMLResponse:
 <script>setTimeout(function(){{window.close()}},800)</script>
 </body></html>"""
     )
-
-
-async def _own_agent(
-    session_manager: SessionMgr, agent_id: str, user_id: str | None
-) -> None:
-    """404 unless this account owns the agent (multi-tenancy.md §5).
-
-    Enabling a connector on an agent is a write to that agent's configuration,
-    so it needs the same check the agents router makes — and without it, an
-    agent id was enough to attach somebody's Gmail to your own agent.
-    """
-    assert session_manager.db is not None
-    if await session_manager.db.get_agent(agent_id, user_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
 
 # --- catalog + installations ----------------------------------------------
@@ -431,30 +428,29 @@ async def mark_needs_reconnect(
 
 
 @agent_router.get(
-    "/{agent_id}/connectors", response_model=AgentConnectorsResponse
+    "/{agent_id}/connectors", response_model=AgentConnectorBindingsResponse
 )
 async def list_agent_connectors(
-    session_manager: SessionMgr,
     agent_id: str,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    await _own_agent(session_manager, agent_id, user_id)
-    ids = await _require_manager().get_agent_connector_ids(agent_id)
-    return AgentConnectorsResponse(installation_ids=ids)
+    try:
+        ids, pending = await _require_manager().get_agent_connector_bindings(agent_id, user_id)
+    except ConnectorError as error:
+        raise _http_error(error)
+    return AgentConnectorBindingsResponse(installation_ids=ids, pending_operations=pending)
 
 
 @agent_router.put(
     "/{agent_id}/connectors", response_model=AgentConnectorsResponse
 )
 async def set_agent_connectors(
-    session_manager: SessionMgr,
     agent_id: str,
     req: SetAgentConnectorsRequest,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    await _own_agent(session_manager, agent_id, user_id)
     try:
         ids = await _require_manager().replace_agent_connectors(
             agent_id, req.installation_ids, user_id
@@ -469,17 +465,60 @@ async def set_agent_connectors(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def toggle_agent_connector(
-    session_manager: SessionMgr,
     agent_id: str,
     installation_id: str,
-    req: ToggleAgentConnectorRequest,
+    req: ToggleAgentConnectorRequest | ApplyAgentConnectorRequest,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    await _own_agent(session_manager, agent_id, user_id)
+    mgr = _require_manager()
     try:
-        await _require_manager().set_agent_connector(
-            agent_id, installation_id, req.enabled, user_id
-        )
+        if isinstance(req, ApplyAgentConnectorRequest):
+            await mgr.apply_agent_connector(agent_id, installation_id, req.operation_id, user_id)
+        else:
+            await mgr.set_agent_connector(agent_id, installation_id, req.enabled, user_id)
+    except ConnectorBindingOperationRetired as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
     except ConnectorError as e:
         raise _http_error(e)
+
+
+@agent_router.post(
+    "/{agent_id}/connectors/{installation_id}/operations", response_model=AgentConnectorReservation,
+)
+async def reserve_agent_connector(
+    agent_id: str,
+    installation_id: str,
+    req: ReserveAgentConnectorRequest,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+):
+    try:
+        operation_id, reserved = await _require_manager().reserve_agent_connector(
+            agent_id, installation_id, req.enabled, req.intent_id, user_id,
+        )
+    except ConnectorBindingOperationsFull as error:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
+    except ConnectorError as error:
+        raise _http_error(error)
+    return AgentConnectorReservation(operation_id=operation_id, reserved=reserved)
+
+
+@agent_router.post(
+    "/{agent_id}/connectors/{installation_id}/operations/{operation_id}/settle",
+    response_model=AgentConnectorSettlement,
+)
+async def settle_agent_connector(
+    agent_id: str,
+    installation_id: str,
+    operation_id: UUID,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+):
+    try:
+        disposition, enabled = await _require_manager().settle_agent_connector(
+            agent_id, installation_id, operation_id, user_id,
+        )
+    except ConnectorError as error:
+        raise _http_error(error)
+    return AgentConnectorSettlement(disposition=disposition, enabled=enabled)

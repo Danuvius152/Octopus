@@ -7,10 +7,12 @@ from __future__ import annotations
 import asyncio
 import time
 from html.parser import HTMLParser
+from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server import connector_manager as connector_manager_mod
 from server.agent_manager import AgentManager
 from server.connector_manager import ConnectorManager
 from server.connectors.base import ConnectorBase
@@ -978,6 +980,152 @@ async def test_mark_needs_reconnect_route(client):
 
 
 # --- agent-scoped enablement ----------------------------------------------
+
+
+async def _reserve_binding(client, binding, enabled, *, intent_id=None):
+    response = await client.post(f"{binding}/operations", json={
+        "enabled": enabled, "intent_id": intent_id or str(uuid4()),
+    })
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_agent_binding_settlement_retires_a_delayed_write_before_reversal(client):
+    installation, _ = await _install(client)
+    agent_id = await _new_agent(client)
+    selection = f"/api/agents/{agent_id}/connectors"
+    binding = f"{selection}/{installation['id']}"
+
+    async def reserve(enabled):
+        reservation = await _reserve_binding(client, binding, enabled)
+        assert reservation["reserved"] is True
+        return reservation["operation_id"]
+
+    original = await reserve(True)
+    release = asyncio.Event()
+
+    async def delayed_write():
+        await release.wait()
+        return await client.patch(binding, json={"operation_id": original})
+
+    delayed = asyncio.create_task(delayed_write())
+    try:
+        observed = (await client.get(selection)).json()
+        assert observed["installation_ids"] == []
+        assert observed["pending_operations"] == {installation["id"]: original}
+        receipt = await client.post(f"{binding}/operations/{original}/settle")
+        assert receipt.json() == {"disposition": "retired", "enabled": False}
+        reversal = await reserve(False)
+        assert (await client.patch(binding, json={"operation_id": reversal})).status_code == 204
+    finally:
+        release.set()
+        late = await delayed
+
+    assert late.status_code == 409
+    assert (await client.get(selection)).json() == {"installation_ids": [], "pending_operations": {}}
+
+
+async def test_agent_binding_settlement_keeps_the_receipt_when_commit_waiter_is_cancelled(client, monkeypatch):
+    installation, _ = await _install(client)
+    agent_id = await _new_agent(client)
+    binding = f"/api/agents/{agent_id}/connectors/{installation['id']}"
+    operation_id = (await _reserve_binding(client, binding, True))["operation_id"]
+
+    db = connectors_mod._require_manager().db
+    commit = db.conn.commit
+    committed, deliver = asyncio.Event(), asyncio.Event()
+
+    async def hold_write_commit():
+        await commit()
+        if await db.conn.execute_fetchall(
+            "SELECT 1 FROM agent_connectors WHERE agent_id = ? AND installation_id = ?",
+            (agent_id, installation["id"]),
+        ):
+            committed.set()
+            await deliver.wait()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(db.conn, "commit", hold_write_commit)
+        pending = asyncio.create_task(client.patch(binding, json={"operation_id": operation_id}))
+        try:
+            await asyncio.wait_for(committed.wait(), 5)
+        finally:
+            pending.cancel()
+            deliver.set()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+
+    check = f"{binding}/operations/{operation_id}/settle"
+    assert (await client.post(check)).json() == {"disposition": "applied", "enabled": True}
+    assert (await client.patch(binding, json={"enabled": False})).status_code == 204
+    assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 204
+    assert (await client.post(check)).json() == {"disposition": "applied", "enabled": False}
+
+
+@pytest.mark.parametrize("retirement", ["patch", "put", "new_manager"])
+async def test_agent_binding_reservation_survives_late_prepare_and_retires_at_the_writer_boundary(client, retirement):
+    installation, _ = await _install(client)
+    agent_id = await _new_agent(client)
+    selection = f"/api/agents/{agent_id}/connectors"
+    binding = f"{selection}/{installation['id']}"
+    intent_id = str(uuid4())
+    first = await _reserve_binding(client, binding, True, intent_id=intent_id)
+    operation_id = first["operation_id"]
+    assert first["reserved"] is True
+    assert await _reserve_binding(client, binding, True, intent_id=intent_id) == first
+    assert await _reserve_binding(client, binding, False) == {"operation_id": operation_id, "reserved": False}
+    assert (await client.patch(binding, json={"operation_id": operation_id, "enabled": True})).status_code == 422
+
+    if retirement == "patch":
+        assert (await client.patch(binding, json={"enabled": False})).status_code == 204
+    elif retirement == "put":
+        assert (await client.put(selection, json={"installation_ids": []})).status_code == 200
+    else:
+        connectors_mod.set_manager(ConnectorManager(connectors_mod._require_manager().db))
+    assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 409
+    assert (await client.post(f"{binding}/operations/{operation_id}/settle")).json() == {
+        "disposition": "unavailable" if retirement == "new_manager" else "retired", "enabled": False,
+    }
+
+
+async def test_agent_binding_receipts_are_scoped_to_the_original_account_agent_and_installation(client):
+    installation, _ = await _install(client)
+    agent_id = await _new_agent(client)
+    other_agent_id = await _new_agent(client, "Second Agent")
+    binding = f"/api/agents/{agent_id}/connectors/{installation['id']}"
+    operation_id = (await _reserve_binding(client, binding, True))["operation_id"]
+    check = f"{binding}/operations/{operation_id}/settle"
+
+    db = connectors_mod._require_manager().db
+    _, other_bearer = await create_account(db, username="another")
+    assert (await client.post(check, headers={"Authorization": f"Bearer {other_bearer}"})).status_code == 404
+    assert (await client.post(check.replace(agent_id, other_agent_id))).json() == {
+        "disposition": "unavailable", "enabled": False,
+    }
+    assert (await client.post(check.replace(installation["id"], "different"))).status_code == 404
+    assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 204
+    assert (await client.post(check)).json() == {"disposition": "applied", "enabled": True}
+
+
+@pytest.mark.parametrize("applied", [False, True])
+async def test_agent_binding_expired_operation_id_cannot_be_used(client, monkeypatch, applied):
+    if not applied:
+        monkeypatch.setattr(connector_manager_mod, "_BINDING_OPERATION_SECONDS", 0)
+    installation, _ = await _install(client)
+    agent_id = await _new_agent(client)
+    selection = f"/api/agents/{agent_id}/connectors"
+    binding = f"{selection}/{installation['id']}"
+    operation_id = (await _reserve_binding(client, binding, True))["operation_id"]
+    if applied:
+        monkeypatch.setattr(connector_manager_mod, "_BINDING_OPERATION_SECONDS", 0)
+        assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 204
+    assert (await client.get(selection)).json() == {
+        "installation_ids": [installation["id"]] if applied else [], "pending_operations": {},
+    }
+    assert (await client.patch(binding, json={"operation_id": operation_id})).status_code == 409
+    assert (await client.post(f"{binding}/operations/{operation_id}/settle")).json() == {
+        "disposition": "unavailable", "enabled": applied,
+    }
 
 
 @pytest.mark.asyncio

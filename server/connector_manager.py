@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -43,7 +43,41 @@ _RESERVED_KINDS = {"oauth", "catalog", "custom"}
 # Refresh when the access token expires within this window.
 _REFRESH_SKEW_SECONDS = 300
 _REFRESH_SHUTDOWN_SECONDS = 30.0
+_BINDING_OPERATION_SECONDS = 120
+_BINDING_OPERATION_LIMIT_PER_ACCOUNT = 4096
 logger = logging.getLogger(__name__)
+
+
+class ConnectorBindingOperationRetired(ConnectorError):
+    """The presented operation cannot start or repeat its effect."""
+
+
+class ConnectorBindingOperationsFull(ConnectorError):
+    """The receipt retention window has no room for a new operation."""
+
+
+type BindingDisposition = Literal["applied", "retired"]
+type BindingSettlement = BindingDisposition | Literal["unavailable"]
+
+
+@dataclass(frozen=True)
+class _BindingScope:
+    agent_id: str
+    installation_id: str
+    user_id: str | None
+
+
+@dataclass
+class _BindingOperation:
+    scope: _BindingScope
+    intent_id: uuid.UUID
+    enabled: bool
+    expires_at: float
+    disposition: BindingDisposition | None = None
+
+    def finish(self, disposition: BindingDisposition) -> None:
+        self.disposition = disposition
+        self.expires_at = time.monotonic() + _BINDING_OPERATION_SECONDS
 
 
 @dataclass(frozen=True)
@@ -105,6 +139,8 @@ class ConnectorManager:
         self._token_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._definition_lock = asyncio.Lock()
         self._definitions: dict[str, object] = {}
+        self._binding_lock = asyncio.Lock()
+        self._binding_operations: dict[uuid.UUID, _BindingOperation] = {}
         self._closing = False
         db.add_close_hook(self.shutdown)
 
@@ -591,19 +627,120 @@ class ConnectorManager:
 
     # --- agent-scoped enablement -----------------------------------------
 
-    async def get_agent_connector_ids(self, agent_id: str) -> list[str]:
-        return await self.db.get_agent_connector_ids(agent_id)
+    def _prune_binding_operations(self) -> None:
+        now = time.monotonic()
+        for operation_id in [oid for oid, op in self._binding_operations.items() if op.expires_at <= now]:
+            del self._binding_operations[operation_id]
+
+    def _retire_binding_operations(
+        self, agent_id: str, user_id: str | None, installation_id: str | None = None,
+    ) -> None:
+        for op in self._binding_operations.values():
+            scope = op.scope
+            if (op.disposition is None and scope.agent_id == agent_id and scope.user_id == user_id
+                and (installation_id is None or scope.installation_id == installation_id)):
+                op.finish("retired")
+
+    async def get_agent_connector_bindings(
+        self, agent_id: str, user_id: str | None,
+    ) -> tuple[list[str], dict[str, uuid.UUID]]:
+        async with self._binding_lock:
+            try:
+                ids = await self.db.list_owned_agent_connectors(agent_id, user_id)
+            except ValueError as error:
+                raise ConnectorError(str(error)) from error
+            self._prune_binding_operations()
+            pending = {
+                op.scope.installation_id: oid for oid, op in self._binding_operations.items()
+                if op.disposition is None and op.scope.agent_id == agent_id and op.scope.user_id == user_id
+            }
+            return ids, pending
+
+    async def _binding_enabled(self, scope: _BindingScope) -> bool:
+        try:
+            return await self.db.read_owned_agent_connector(scope.agent_id, scope.installation_id, scope.user_id)
+        except ValueError as error:
+            raise ConnectorError(str(error)) from error
+
+    async def reserve_agent_connector(
+        self, agent_id: str, installation_id: str, enabled: bool, intent_id: uuid.UUID,
+        user_id: str | None,
+    ) -> tuple[uuid.UUID, bool]:
+        scope = _BindingScope(agent_id, installation_id, user_id)
+        async with self._binding_lock:
+            await self._binding_enabled(scope)
+            self._prune_binding_operations()
+            account_operations = 0
+            for oid, op in self._binding_operations.items():
+                if op.scope.user_id != user_id:
+                    continue
+                account_operations += 1
+                if op.scope == scope and op.disposition is None:
+                    # A lost preparation response can be retried without granting another intent the write ID.
+                    return oid, op.intent_id == intent_id and op.enabled == enabled
+            if account_operations >= _BINDING_OPERATION_LIMIT_PER_ACCOUNT:
+                raise ConnectorBindingOperationsFull("Connector binding operations are busy")
+            operation_id = uuid.uuid4()
+            self._binding_operations[operation_id] = _BindingOperation(
+                scope, intent_id, enabled, time.monotonic() + _BINDING_OPERATION_SECONDS,
+            )
+            return operation_id, True
+
+    async def apply_agent_connector(
+        self, agent_id: str, installation_id: str, operation_id: uuid.UUID, user_id: str | None,
+    ) -> None:
+        scope = _BindingScope(agent_id, installation_id, user_id)
+        async with self._binding_lock:
+            self._prune_binding_operations()
+            operation = self._binding_operations.get(operation_id)
+            if operation is None or operation.scope != scope or operation.disposition == "retired":
+                raise ConnectorBindingOperationRetired("Connector binding operation is retired")
+            if operation.disposition == "applied":
+                await self._binding_enabled(scope)
+                return
+            await complete_cleanup(self._write_agent_connector(scope, operation.enabled, operation))
+
+    async def settle_agent_connector(
+        self, agent_id: str, installation_id: str, operation_id: uuid.UUID, user_id: str | None,
+    ) -> tuple[BindingSettlement, bool]:
+        scope = _BindingScope(agent_id, installation_id, user_id)
+        async with self._binding_lock:
+            enabled = await self._binding_enabled(scope)
+            self._prune_binding_operations()
+            operation = self._binding_operations.get(operation_id)
+            if operation is None or operation.scope != scope:
+                return "unavailable", enabled
+            if operation.disposition is not None:
+                return operation.disposition, enabled
+            operation.finish("retired")
+            return "retired", enabled
 
     async def set_agent_connector(
         self,
         agent_id: str,
         installation_id: str,
         enabled: bool,
-        user_id: str | None = None,
+        user_id: str | None,
     ) -> None:
-        if await self.db.get_connector_installation(installation_id, user_id) is None:
-            raise ConnectorError("connector installation not found")
-        await self.db.set_agent_connector(agent_id, installation_id, enabled)
+        scope = _BindingScope(agent_id, installation_id, user_id)
+        async with self._binding_lock:
+            await complete_cleanup(self._write_agent_connector(scope, enabled))
+
+    async def _write_agent_connector(
+        self, scope: _BindingScope, enabled: bool, operation: _BindingOperation | None = None,
+    ) -> None:
+        # Keep the commit and receipt together even if the HTTP waiter is cancelled.
+        try:
+            await self.db.set_owned_agent_connector(scope.agent_id, scope.installation_id, enabled, scope.user_id)
+        except ValueError as error:
+            if operation is not None:
+                operation.finish("retired")
+            raise ConnectorError(str(error)) from error
+        if operation is not None:
+            operation.finish("applied")
+        else:
+            self._prune_binding_operations()
+            self._retire_binding_operations(scope.agent_id, scope.user_id, scope.installation_id)
 
     async def replace_agent_connectors(
         self,
@@ -611,10 +748,17 @@ class ConnectorManager:
         installation_ids: list[str],
         user_id: str | None = None,
     ) -> list[str]:
-        try:
-            return await self.db.replace_agent_connectors(agent_id, installation_ids, user_id)
-        except ValueError as error:
-            raise ConnectorError(str(error)) from error
+        async def replace() -> list[str]:
+            try:
+                ids = await self.db.replace_agent_connectors(agent_id, installation_ids, user_id)
+            except ValueError as error:
+                raise ConnectorError(str(error)) from error
+            self._prune_binding_operations()
+            self._retire_binding_operations(agent_id, user_id)
+            return ids
+
+        async with self._binding_lock:
+            return await complete_cleanup(replace())
 
     async def enabled_installations_for_agent(
         self, agent_id: str

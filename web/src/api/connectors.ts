@@ -5,13 +5,16 @@ import { accountFetch as fetch } from "../lib/accountFetch";
  * a popup + status-poll flow (the callback lands on the server, not here). */
 
 import type {
-  AgentConnectorsResponse,
+  AgentConnectorBindingsResponse,
+  AgentConnectorReservation,
+  AgentConnectorSettlement,
   ConnectorCatalogEntry,
   ConnectorInstallationInfo,
   ConnectorOAuthClientInfo,
   ConnectorOAuthStartResponse,
   ConnectorOAuthStatusResponse,
   CustomConnectorCreateRequest,
+  ReserveAgentConnectorRequest,
   UpdateConnectorRequest,
 } from ".";
 
@@ -185,30 +188,79 @@ export async function fetchAgentConnectors(
   token: string,
   agentId: string,
   signal: AbortSignal,
-): Promise<string[]> {
-  const r = await json<AgentConnectorsResponse>(
-    await fetch(`${API}/api/agents/${agentId}/connectors`, {
+): Promise<AgentConnectorBindingsResponse> {
+  const bindings = await json<AgentConnectorBindingsResponse>(
+    await fetch(`${API}/api/agents/${encodeURIComponent(agentId)}/connectors`, {
       headers: authHeaders(token),
       cache: "no-store",
       signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
     })
   );
-  return r.installation_ids;
+  if (!bindings || !Array.isArray(bindings.installation_ids)) throw new Error("Invalid Connector bindings");
+  return bindings;
 }
 
-export async function toggleAgentConnector(
+function agentConnectorUrl(agentId: string, installationId: string): string {
+  return `${API}/api/agents/${encodeURIComponent(agentId)}/connectors/${encodeURIComponent(installationId)}`;
+}
+
+export async function reserveAgentConnector(
   token: string,
   agentId: string,
   installationId: string,
-  enabled: boolean
-): Promise<void> {
-  const res = await fetch(
-    `${API}/api/agents/${agentId}/connectors/${installationId}`,
-    {
+  body: ReserveAgentConnectorRequest,
+): Promise<AgentConnectorReservation> {
+  const reservation = await json<AgentConnectorReservation>(
+    await fetch(`${agentConnectorUrl(agentId, installationId)}/operations`, {
+      method: "POST",
+      headers: authHeaders(token),
+      signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify(body),
+    }),
+  );
+  if (!reservation || typeof reservation.operation_id !== "string" || typeof reservation.reserved !== "boolean") {
+    throw new Error("Invalid Connector operation reservation");
+  }
+  return reservation;
+}
+
+export async function applyAgentConnector(
+  token: string,
+  agentId: string,
+  installationId: string,
+  operationId: string,
+): Promise<"applied" | "rejected" | "unknown"> {
+  try {
+    const response = await fetch(agentConnectorUrl(agentId, installationId), {
       method: "PATCH",
       headers: authHeaders(token),
-      body: JSON.stringify({ enabled }),
-    }
+      signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify({ operation_id: operationId }),
+    });
+    if (response.status === 204) return "applied";
+    if ([400, 401, 403, 404, 422].includes(response.status)) return "rejected";
+  } catch {
+    // A transport failure leaves the original request eligible to reach the server.
+  }
+  return "unknown";
+}
+
+export async function settleAgentConnector(
+  token: string,
+  agentId: string,
+  installationId: string,
+  operationId: string,
+): Promise<AgentConnectorSettlement> {
+  const settlement = await json<AgentConnectorSettlement>(
+    await fetch(`${agentConnectorUrl(agentId, installationId)}/operations/${encodeURIComponent(operationId)}/settle`, {
+      method: "POST",
+      headers: authHeaders(token),
+      signal: AbortSignal.timeout(30_000),
+    }),
   );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!settlement || typeof settlement.enabled !== "boolean"
+    || !["applied", "retired", "unavailable"].includes(settlement.disposition)) {
+    throw new Error("Invalid Connector operation settlement");
+  }
+  return settlement;
 }

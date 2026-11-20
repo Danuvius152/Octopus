@@ -23,9 +23,11 @@ from httpx import ASGITransport, AsyncClient
 from server import agent_memory, crypto, deps
 from server.agent_manager import AgentError, AgentManager
 from server.config import settings
+from server.connector_manager import ConnectorManager
 from server.database import Database
 from server.main import app
 from server.routers import agents as agents_router
+from server.routers import connectors as connectors_router
 from server.session_manager import session_manager
 from server.users import UserManager
 from server.workspace import WorkspaceError, paths_for
@@ -78,6 +80,7 @@ async def two_accounts(tmp_path, monkeypatch):
     session_manager._admission_closed = False
     await session_manager.initialize(db)
     agents_router.set_manager(AgentManager(db))
+    monkeypatch.setattr(connectors_router, "_manager", ConnectorManager(db))
     users = UserManager(db)
     deps.set_user_manager(users)
 

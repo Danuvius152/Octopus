@@ -473,7 +473,7 @@ async def test_reauthorization_keeps_identity_configuration_and_agent_links(mgr,
     assert updated["user_id"] == owner["id"] and updated["enable_by_default"] is True
     assert updated["label"] == "First opened" and updated["scopes"] == ["first-scope"]
     assert updated["needs_reconnect"] is False and updated["last_refresh_error_code"] is None
-    assert await mgr.get_agent_connector_ids("a-1") == [original["id"]]
+    assert await mgr.get_agent_connector_bindings("a-1", owner["id"]) == ([original["id"]], {})
     assert (await mgr.get_access_token(original["id"], owner["id"]))["access_token"] == "first-token"
 
 
@@ -606,11 +606,11 @@ async def test_delete_missing_raises(mgr):
 @pytest.mark.asyncio
 async def test_agent_enable_validates_installation(mgr, db, owner):
     await _agent(db, user_id=owner["id"])
-    with pytest.raises(ConnectorError):
-        await mgr.set_agent_connector("a-1", "ghost", True)
+    with pytest.raises(ConnectorError, match="installation not found"):
+        await mgr.set_agent_connector("a-1", "ghost", True, owner["id"])
     inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
-    await mgr.set_agent_connector("a-1", inst["id"], True)
-    assert await mgr.get_agent_connector_ids("a-1") == [inst["id"]]
+    await mgr.set_agent_connector("a-1", inst["id"], True, owner["id"])
+    assert await mgr.get_agent_connector_bindings("a-1", owner["id"]) == ([inst["id"]], {})
 
 
 @pytest.mark.asyncio
@@ -623,10 +623,10 @@ async def test_replace_agent_connectors_diffs(mgr, db, owner):
     get_connector("fakekind")._identity = ("ext-2", "two@x.com")  # type: ignore
     i2 = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
 
-    await mgr.set_agent_connector("a-1", i1["id"], True)
+    await mgr.set_agent_connector("a-1", i1["id"], True, owner["id"])
     result = await mgr.replace_agent_connectors("a-1", [i2["id"]], owner["id"])
     assert result == [i2["id"]]
-    assert await mgr.get_agent_connector_ids("a-1") == [i2["id"]]
+    assert await mgr.get_agent_connector_bindings("a-1", owner["id"]) == ([i2["id"]], {})
 
     with pytest.raises(ConnectorError):
         await mgr.replace_agent_connectors("a-1", ["ghost"], owner["id"])
@@ -651,7 +651,7 @@ async def test_replace_rolls_back_every_member_when_storage_rejects_a_later_inse
                          "BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected insert failure"):
         await mgr.replace_agent_connectors("a-1", ["first", "second"], owner["id"])
-    assert await mgr.get_agent_connector_ids("a-1") == []
+    assert await mgr.get_agent_connector_bindings("a-1", owner["id"]) == ([], {})
 
 
 async def test_concurrent_replacements_commit_one_complete_target(mgr, db, owner):
@@ -669,9 +669,11 @@ async def test_concurrent_replacements_commit_one_complete_target(mgr, db, owner
         second = asyncio.create_task(replace_target(1, ["c", "d"]))
         await asyncio.gather(*(event.wait() for event in entered))
     assert await asyncio.gather(first, second) == [["a", "b"], ["c", "d"]]
-    assert set(await mgr.get_agent_connector_ids("a-1")) in ({"a", "b"}, {"c", "d"})
+    ids, pending = await mgr.get_agent_connector_bindings("a-1", owner["id"])
+    assert set(ids) in ({"a", "b"}, {"c", "d"})
+    assert pending == {}
     assert await mgr.replace_agent_connectors("a-1", [], owner["id"]) == []
-    assert await mgr.get_agent_connector_ids("a-1") == []
+    assert await mgr.get_agent_connector_bindings("a-1", owner["id"]) == ([], {})
 
 
 async def test_replace_rejects_foreign_or_missing_members_without_changing_selection(mgr, db, owner):
@@ -685,10 +687,10 @@ async def test_replace_rejects_foreign_or_missing_members_without_changing_selec
     for invalid in ("foreign", "missing"):
         with pytest.raises(ConnectorError, match="installation not found"):
             await mgr.replace_agent_connectors("a-1", ["new", invalid], owner["id"])
-        assert await mgr.get_agent_connector_ids("a-1") == ["original"]
+        assert await mgr.get_agent_connector_bindings("a-1", owner["id"]) == (["original"], {})
     with pytest.raises(ConnectorError, match="agent not found"):
         await mgr.replace_agent_connectors("a-1", [], other["id"])
-    assert await mgr.get_agent_connector_ids("a-1") == ["original"]
+    assert await mgr.get_agent_connector_bindings("a-1", owner["id"]) == (["original"], {})
 
 
 @pytest.mark.parametrize("operation", ["reauth", "delete", "mark", "metadata"])
@@ -898,7 +900,7 @@ async def test_resolve_client_creds_db_and_env(db, clean_registry, provider, mon
 async def test_enabled_installations_for_agent_views(mgr, db, owner):
     await _agent(db, user_id=owner["id"])
     inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
-    await mgr.set_agent_connector("a-1", inst["id"], True)
+    await mgr.set_agent_connector("a-1", inst["id"], True, owner["id"])
     views = await mgr.enabled_installations_for_agent("a-1")
     assert len(views) == 1
     assert views[0].id == inst["id"]

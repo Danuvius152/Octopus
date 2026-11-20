@@ -2,7 +2,8 @@ import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { IconArchive, IconPlus, IconTrash, IconUsers } from "@tabler/icons-react";
 import { setAgentPinned } from "../api/agents";
-import { fetchAgentConnectors, toggleAgentConnector } from "../api/connectors";
+import { applyAgentConnector, fetchAgentConnectors, reserveAgentConnector, settleAgentConnector } from "../api/connectors";
+import { newSubmissionId } from "../lib/submission";
 import { openAgentChat } from "../lib/openAgentChat";
 import { pinnedInOrder } from "../lib/sidebarPins";
 import { knownAgentScope, refreshAgents, withAgentRequest } from "../lib/refreshAgents";
@@ -47,6 +48,29 @@ type ConnectorBindingRead =
   | { status: "loading" }
   | { status: "ready"; ids: string[] }
   | { status: "failed" };
+
+type ConnectorBindingEdit =
+  | { status: "preparing" | "writing"; enabled: boolean }
+  | { status: "unknown" | "checking"; operationId: string; checkFailed?: boolean }
+  | { status: "not_sent"; intentId?: string }
+  | { status: "rejected" | "applied" | "retired" | "unavailable" };
+
+const bindingStatusText: Record<ConnectorBindingEdit["status"], string> = {
+  preparing: "Preparing update…",
+  writing: "Saving update…",
+  unknown: "Update unconfirmed.",
+  checking: "Checking update…",
+  not_sent: "Update was not sent. Try again.",
+  rejected: "Update was rejected.",
+  applied: "Previous update confirmed.",
+  retired: "Previous update can no longer apply.",
+  unavailable: "Previous result unavailable. A delayed update cannot apply.",
+};
+
+function bindingEditBlocked(edit?: ConnectorBindingEdit): boolean {
+  return edit?.status === "preparing" || edit?.status === "writing"
+    || edit?.status === "unknown" || edit?.status === "checking";
+}
 
 function agentFields(draft: AgentDraft) {
   return {
@@ -157,16 +181,14 @@ function AgentFormInstance({
   const [toolDeny, setToolDeny] = useState(initialDraft.toolDeny);
   const toolPolicy = backendToolPolicies[backend];
   const [connectorBindings, setConnectorBindings] = useState<ConnectorBindingRead>({ status: "loading" });
-  // Pending/successful writes override the opening read; rejection restores
-  // the previous override, or the read's value when this was the first edit.
-  const [connectorEdits, setConnectorEdits] = useState<Record<string, boolean>>({});
+  const [connectorEdits, setConnectorEdits] = useState<Record<string, ConnectorBindingEdit | undefined>>({});
   const pendingConnectors = useRef(new Set<string>());
-  const [connectorPending, setConnectorPending] = useState<string[]>([]);
   // Sub-agents this agent brings with it (native-subagents.md §6). Empty is
   // the normal case: the CLI's own built-ins are always available.
   const [subagents, setSubagents] = useState(initialDraft.subagents);
   const [busy, setBusy] = useState(false);
   const saving = useRef(false);
+  const saveVersion = useRef(0);
   const freezeEdit = (event: SyntheticEvent) => {
     if (saving.current) { event.preventDefault(); event.stopPropagation(); }
   };
@@ -189,8 +211,12 @@ function AgentFormInstance({
     if (!editingAgentId || connectorBindings.status !== "loading" || !isCurrent()) return;
     const read = new AbortController();
     void fetchAgentConnectors(token, editingAgentId, read.signal).then(
-      (ids) => {
-        if (!read.signal.aborted && isCurrent()) setConnectorBindings({ status: "ready", ids });
+      ({ installation_ids, pending_operations }) => {
+        if (read.signal.aborted || !isCurrent()) return;
+        setConnectorEdits(Object.fromEntries(Object.entries(pending_operations ?? {}).map(([id, operationId]) => [
+          id, { status: "unknown", operationId },
+        ])));
+        setConnectorBindings({ status: "ready", ids: installation_ids });
       },
       () => {
         if (!read.signal.aborted && isCurrent()) setConnectorBindings({ status: "failed" });
@@ -218,6 +244,7 @@ function AgentFormInstance({
       }
     }
     saving.current = true;
+    saveVersion.current += 1;
     setBusy(true);
     setError(null);
     const fields = agentFields({
@@ -346,25 +373,78 @@ function AgentFormInstance({
     }
   };
 
+  const canEditBinding = () => isCurrent() && !saving.current && useSessionStore.getState().pageTab === "form";
+
+  const publishBinding = (id: string, edit?: ConnectorBindingEdit, confirmed?: boolean) => {
+    if (!isCurrent()) return;
+    if (confirmed !== undefined) setConnectorBindings((current) => {
+      if (current.status !== "ready" || current.ids.includes(id) === confirmed) return current;
+      return { status: "ready", ids: confirmed ? [...current.ids, id] : current.ids.filter((item) => item !== id) };
+    });
+    setConnectorEdits((current) => ({ ...current, [id]: edit }));
+  };
+
   const toggleConnector = async (installationId: string, enabled: boolean) => {
-    if (!editing || connectorBindings.status !== "ready" || !isCurrent()
-      || saving.current || pendingConnectors.current.has(installationId)) return;
-    pendingConnectors.current.add(installationId);
-    setConnectorPending([...pendingConnectors.current]);
+    if (!editing || connectorBindings.status !== "ready" || !canEditBinding()
+      || pendingConnectors.current.has(installationId) || bindingEditBlocked(connectorEdits[installationId])) return;
+    const agentId = editing.id;
+    const startedBeforeSave = saveVersion.current;
     const previous = connectorEdits[installationId];
-    setConnectorEdits((current) => ({ ...current, [installationId]: enabled }));
+    let intentId: string;
     try {
-      await toggleAgentConnector(token, editing.id, installationId, enabled);
+      intentId = (previous?.status === "not_sent" ? previous.intentId : undefined) ?? newSubmissionId();
     } catch {
-      if (isCurrent()) setConnectorEdits((current) => {
-        const restored = { ...current };
-        if (previous === undefined) delete restored[installationId];
-        else restored[installationId] = previous;
-        return restored;
-      });
+      publishBinding(installationId, { status: "not_sent" });
+      return;
+    }
+    pendingConnectors.current.add(installationId);
+    publishBinding(installationId, { status: "preparing", enabled });
+    try {
+      const reservation = await reserveAgentConnector(token, agentId, installationId, {
+        enabled, intent_id: intentId,
+      }).catch(() => null);
+      if (!reservation) {
+        publishBinding(installationId, { status: "not_sent", intentId });
+        return;
+      }
+      const operationId = reservation.operation_id;
+      if (!reservation.reserved) {
+        publishBinding(installationId, { status: "unknown", operationId });
+        return;
+      }
+      if (!isCurrent()) {
+        // Only this invocation could send the reserved PATCH. Close the unused reservation.
+        void settleAgentConnector(token, agentId, installationId, operationId).catch(() => {});
+        return;
+      }
+      if (!canEditBinding() || startedBeforeSave !== saveVersion.current) {
+        publishBinding(installationId, { status: "not_sent", intentId });
+        return;
+      }
+      publishBinding(installationId, { status: "writing", enabled });
+      const result = await applyAgentConnector(token, agentId, installationId, operationId);
+      if (result === "applied") publishBinding(installationId, undefined, enabled);
+      else if (result === "rejected") publishBinding(installationId, { status: "rejected" });
+      else publishBinding(installationId, { status: "unknown", operationId });
     } finally {
       pendingConnectors.current.delete(installationId);
-      if (isCurrent()) setConnectorPending([...pendingConnectors.current]);
+    }
+  };
+
+  const checkConnectorUpdate = async (installationId: string) => {
+    const edit = connectorEdits[installationId];
+    if (!editing || !canEditBinding() || edit?.status !== "unknown"
+      || pendingConnectors.current.has(installationId)) return;
+    const { operationId } = edit;
+    pendingConnectors.current.add(installationId);
+    publishBinding(installationId, { status: "checking", operationId });
+    try {
+      const result = await settleAgentConnector(token, editing.id, installationId, operationId);
+      publishBinding(installationId, { status: result.disposition }, result.enabled);
+    } catch {
+      publishBinding(installationId, { status: "unknown", operationId, checkFailed: true });
+    } finally {
+      pendingConnectors.current.delete(installationId);
     }
   };
 
@@ -623,32 +703,42 @@ function AgentFormInstance({
                   )}
                   <div className="agent-connectors card divide-y divide-gray-300">
                     {installations.map((inst) => {
-                      const on = connectorEdits[inst.id]
-                        ?? (connectorBindings.status === "ready" && connectorBindings.ids.includes(inst.id));
-                      const disabled = !editing || connectorBindings.status !== "ready" || connectorPending.includes(inst.id);
+                      const edit = connectorEdits[inst.id];
+                      const on = edit?.status === "preparing" || edit?.status === "writing"
+                        ? edit.enabled
+                        : connectorBindings.status === "ready" && connectorBindings.ids.includes(inst.id);
+                      const disabled = !editing || connectorBindings.status !== "ready" || bindingEditBlocked(edit);
                       return (
-                        <label
-                          key={inst.id}
-                          className={`flex items-center gap-3 px-4 py-3 ${
-                            disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            className="size-4 accent-[hsl(var(--primary-600))]"
-                            checked={on}
-                            disabled={disabled}
-                            onChange={(e) =>
-                              toggleConnector(inst.id, e.target.checked)
-                            }
-                          />
-                          <span className="truncate text-[13.5px] text-gray-900">
-                            {inst.label}
-                          </span>
-                          <span className="ml-auto font-mono text-[11px] text-gray-700">
-                            {inst.kind}
-                          </span>
-                        </label>
+                        <div key={inst.id} className="px-4 py-3">
+                          <label className={`flex items-center gap-3 ${disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
+                            <input
+                              type="checkbox"
+                              className="size-4 accent-[hsl(var(--primary-600))]"
+                              checked={on}
+                              disabled={disabled}
+                              onChange={(e) => void toggleConnector(inst.id, e.target.checked)}
+                            />
+                            <span className="truncate text-[13.5px] text-gray-900">{inst.label}</span>
+                            <span className="ml-auto font-mono text-[11px] text-gray-700">{inst.kind}</span>
+                          </label>
+                          {edit && (
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              <p role="status" className="text-xs text-gray-700">
+                                {edit.status === "unknown" && edit.checkFailed
+                                  ? "Could not check update. Try again."
+                                  : bindingStatusText[edit.status]}
+                              </p>
+                              {edit.status === "unknown" && (
+                                <Button type="button" variant="outline" size="sm"
+                                  aria-label={`Check update for ${inst.label}`}
+                                  title="Confirm whether the update applied and prevent a delayed write"
+                                  onClick={() => void checkConnectorUpdate(inst.id)}>
+                                  Check update
+                                </Button>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       );
                     })}
                     {installations.length === 0 && (
