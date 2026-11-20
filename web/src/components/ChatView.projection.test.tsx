@@ -51,11 +51,25 @@ it("does no extra foreground projection for background work or unchanged active 
   expect(project).toHaveBeenCalledTimes(1);
   expect(view.getByText("New foreground answer")).toBeVisible();
   project.mockClear();
-  act(() => useSessionStore.getState().appendStreamingText("background", "Hidden background delta"));
+  const store = useSessionStore.getState();
+  const identity = { request_id: "current-request", attempt_id: "attempt" };
+  act(() => store.setActiveAttempt("foreground", identity));
+  act(() => store.appendStreamingText("background", "Hidden background delta"));
   expect(view.queryByText("Hidden background delta")).toBeNull();
-  act(() => useSessionStore.getState().appendStreamingText("foreground", "Visible foreground delta"));
+  act(() => store.appendStreamingText("foreground", "Visible foreground delta", identity));
   expect(view.getByTestId("streaming-text")).toHaveTextContent("Visible foreground delta");
   expect(project).not.toHaveBeenCalled();
+
+  // A child can stream before its card is projected. While reading, those
+  // deltas leave the saved window and root output untouched.
+  const metadata = { ...identity, native: { thread_id: "child", turn_id: "turn", item_id: "item",
+    root_thread_id: "root", root_turn_id: "root-turn" } };
+  act(() => store.appendStreamingText("foreground", "Unobserved helper", metadata));
+  act(() => store.appendStreamingText("foreground", " keeps streaming", metadata));
+  expect(view.queryByText(/Unobserved helper/)).not.toBeInTheDocument();
+  expect(view.getByTestId("streaming-text")).toHaveTextContent("Visible foreground delta");
+  expect(project).not.toHaveBeenCalled();
+
   act(() => dispatch("foreground", 22, "next-request"));
   expect(project).toHaveBeenCalledTimes(1);
 });

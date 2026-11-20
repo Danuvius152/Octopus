@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { Profiler } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { components } from "../api/contracts";
 import { NativeSubagentCard } from "./SubagentCard";
@@ -49,21 +50,64 @@ it("reads a long saved window once across mounted historical cards", () => {
   expect(rowReads).toBeLessThanOrEqual(history.length);
 });
 
-it("keeps four cards' saved projections and detail anchors across twenty accepted live deltas", () => {
+it("reuses delta admission and commits only the affected card across twenty live deltas", () => {
   const project = vi.spyOn(nativeOutput, "nativeCardState");
   const anchor = vi.spyOn(nativeOutput, "nativeDetailAnchor");
-  const { container } = render(<>{[0, 1, 2, 3].map((index) => <NativeSubagentCard key={index} sessionId="session" cardId={`card-${index}`} />)}</>);
-  expect(container.querySelectorAll(".subagent-card")).toHaveLength(4);
+  const store = useSessionStore.getState();
+  let rowReads = 0;
+  const original = new Proxy(store.messages.session, {
+    get(target, key, receiver) {
+      if (typeof key === "string" && /^\d+$/.test(key)) rowReads++;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  useSessionStore.setState({ messages: { session: original } });
+  const commits = vi.fn();
+  const { container } = render(<>{[0, 1, 2, 3].map((index) =>
+    <Profiler key={index} id={`card-${index}`} onRender={commits}>
+      <NativeSubagentCard sessionId="session" cardId={`card-${index}`} />
+    </Profiler>)}</>);
+  const summaries = () => [...container.querySelectorAll(".subagent-summary")].map((row) => row.textContent);
+  expect(summaries()).toEqual(["Saved child 0", "Saved child 1", "Saved child 2", "Saved child 3"]);
   expect(project).toHaveBeenCalledTimes(4);
-  const original = useSessionStore.getState().messages.session;
+
+  // Allow the first delta to prepare admission for this window.
+  act(() => store.appendStreamingText("session", "x", identity(0)));
+  rowReads = 0;
+  commits.mockClear();
   project.mockClear(); anchor.mockClear();
-  for (let index = 0; index < 20; index++) {
-    act(() => useSessionStore.getState().appendStreamingText("session", "x", identity(0)));
+  for (let index = 1; index < 20; index++) {
+    act(() => store.appendStreamingText("session", "x", identity(0)));
   }
-  expect(container.querySelector(".subagent-summary")?.textContent).toBe(`Saved child 0\n\n${"x".repeat(20)}`);
+  expect(summaries()).toEqual([`Saved child 0\n\n${"x".repeat(20)}`, "Saved child 1", "Saved child 2", "Saved child 3"]);
   expect(useSessionStore.getState().messages.session).toBe(original);
-  expect(project.mock.calls.length).toBe(0);
-  expect(anchor.mock.calls.length).toBe(0);
+  expect.soft(rowReads).toBe(0);
+  expect(commits.mock.calls.map(([card]) => card)).toEqual(Array(19).fill("card-0"));
+  expect(project).not.toHaveBeenCalled();
+  expect(anchor).not.toHaveBeenCalled();
+});
+
+it("updates the owner of an evicted preview at the shared item limit", () => {
+  const store = useSessionStore.getState();
+  store.appendStreamingText("session", "Oldest preview", identity(1));
+  store.appendStreamingText("session", "Retained preview", identity(2));
+  for (let index = 0; index < 30; index++) {
+    store.appendStreamingText("session", "x", identity(0, `item-${index}`));
+  }
+  const commits = vi.fn();
+  const { container } = render(<>
+    {[0, 1, 2].map((index) => <Profiler key={index} id={`card-${index}`} onRender={commits}>
+      <NativeSubagentCard sessionId="session" cardId={`card-${index}`} />
+    </Profiler>)}
+  </>);
+  const summaries = () => [...container.querySelectorAll(".subagent-summary")].map((row) => row.textContent);
+  expect(summaries().slice(1)).toEqual(["Saved child 1\n\nOldest preview", "Saved child 2\n\nRetained preview"]);
+
+  commits.mockClear();
+  act(() => store.appendStreamingText("session", "Newest preview", identity(0, "newest")));
+  expect(summaries()[0]).toMatch(/Newest preview$/);
+  expect(summaries().slice(1)).toEqual(["Saved child 1", "Saved child 2\n\nRetained preview"]);
+  expect(commits.mock.calls.map(([card]) => card).sort()).toEqual(["card-0", "card-1"]);
 });
 
 it("updates saved body, terminal status and snapshot facts after retaining the live preview", () => {
@@ -90,6 +134,58 @@ it("updates saved body, terminal status and snapshot facts after retaining the l
   expect(screen.getByText("Collected answer")).toBeInTheDocument();
   expect(project.mock.calls.length).toBe(3);
   expect(anchor.mock.calls.length).toBe(3);
+});
+
+it("keeps card output session-scoped and rechecks admission after the history window changes", () => {
+  const store = useSessionStore.getState();
+  const first = identity(0);
+  const other = identity(0, "another-item");
+  const history = store.messages.session;
+  store.setMessages("other-session", history);
+  store.setActiveAttempt("other-session", first);
+  const view = render(<NativeSubagentCard sessionId="session" cardId="card-0" />);
+  const answer = () => view.container.querySelector(".subagent-summary")?.textContent;
+
+  act(() => store.appendStreamingText("session", "Original preview", first));
+  expect(answer()).toBe("Saved child 0\n\nOriginal preview");
+  view.rerender(<NativeSubagentCard sessionId="other-session" cardId="card-0" />);
+  act(() => store.appendStreamingText("session", " from the other view", first));
+  expect(answer()).toBe("Saved child 0");
+  act(() => store.appendStreamingText("other-session", "Other preview", first));
+  expect(answer()).toBe("Saved child 0\n\nOther preview");
+  view.rerender(<NativeSubagentCard sessionId="session" cardId="card-0" />);
+  expect(answer()).toBe("Saved child 0\n\nOriginal preview from the other view");
+
+  act(() => {
+    store.installTranscript("session", { messages: [history[0],
+      { role: "assistant", type: "text", seq: 200, content: "Complete collected answer", runtime_metadata: first },
+    ], high: 200, oldestSeq: 0, hasMore: false });
+    store.appendStreamingText("session", "Late collected item", first);
+    store.appendStreamingText("session", "Continuation in a different item", other);
+  });
+  expect(answer()).toBe("Complete collected answer\n\nContinuation in a different item");
+
+  act(() => {
+    store.addMessage("session", { role: "assistant", type: "text", seq: 201, content: "Complete continuation", runtime_metadata: other });
+    store.addMessage("session", { role: "system", type: "native_subagent", seq: 202, runtime_metadata: first,
+      tool_input: { card_id: "card-0", status: "failed", stop_reason: "native_interrupted" } });
+    store.addMessage("session", { role: "system", type: "result", seq: 203, runtime_metadata: first });
+    store.appendStreamingText("session", "Late terminal delta", identity(0, "third-item"));
+  });
+  expect(answer()).toBe("Complete collected answer\n\nComplete continuation");
+  expect(screen.getByText("failed")).toBeVisible();
+  expect(screen.getByText("Helper execution was interrupted")).toBeVisible();
+
+  const next = { ...first, attempt_id: "next-attempt" };
+  act(() => {
+    store.setActiveAttempt("session", next);
+    store.installTranscript("session", { messages: [{ ...history[0], seq: 204, runtime_metadata: next }],
+      high: 204, oldestSeq: 204, hasMore: true });
+    store.appendStreamingText("session", "Old attempt", first);
+    store.appendStreamingText("session", "Current attempt", next);
+  });
+  expect(answer()).toBe("Saved child 0\n\nCurrent attempt");
+  expect(screen.queryByText("Helper execution was interrupted")).not.toBeInTheDocument();
 });
 
 it("keeps an expanded work open and reads its newly paged persisted anchor", async () => {

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
+import { useShallow } from "zustand/react/shallow";
+import { shallow } from "zustand/shallow";
 import { hasEmptyTranscript, hasTranscriptBaseline, observeAcceptedText, useSessionStore, type Message, type PendingQuestion,
   type SessionInfo, type StreamingItem, type SubagentRun } from "../stores/sessionStore";
 import { observeOlderMessages } from "../lib/transcript";
 import { observeSession } from "../lib/hydrateSession";
 import { matchesPendingQuestion } from "../lib/questionPresentation";
-import { isNativeChild, nativeChatMessages } from "../lib/nativeOutput";
+import { nativeRootPreviews } from "../lib/nativeOutput";
 import type { QuestionCommandTarget, SubmissionReply } from "../lib/submission";
 import { Button } from "./ui/button";
 import { MessageBubble } from "./MessageBubble";
@@ -13,14 +15,13 @@ import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { MessageTime } from "./MessageTime";
 import { QuestionPrompt, type AnswerPayload } from "./QuestionPrompt";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
-import { HelperOutputLayout, collapsedHelperHasChangedText, helperOutputWork, matchTranscriptTransfers,
+import { HelperOutputLayout, chatProjection, chatProjectionIndex, collapsedHelperHasChangedText, matchTranscriptTransfers,
   readableChangeOutside, readableSpansOutside, recordTranscriptOutput,
   savedOutputHasBody, savedOutputOutside, scrollportBounds,
   type PendingTranscriptOutput } from "./chatOutputVisibility";
 import { projectMarkdownOutput } from "./chatMarkdown";
 
 const EMPTY_MESSAGES: Message[] = [];
-const EMPTY_STREAMING_ITEMS: Record<string, StreamingItem> = {};
 const EMPTY_SUBAGENTS: Record<string, SubagentRun> = {};
 // An avatar-height row and its list spacing are a better unknown than the
 // height of whichever conversation card Virtuoso happens to probe first.
@@ -188,7 +189,7 @@ function measureInitialTail(viewport: HTMLElement, last: Message | undefined, se
   if (session?.status === "running") {
     if (!live?.running || live.sessionId !== sessionId ||
       live.text !== (state.streamingText[sessionId]?.content ?? "") ||
-      live.items !== (state.streamingItems[sessionId] ?? EMPTY_STREAMING_ITEMS)) return "waiting";
+      !shallow(live.items, nativeRootPreviews(state.streamingItems[sessionId]))) return "waiting";
   } else if (live?.running) return "waiting";
   const inView = (box: DOMRect) => box.height > 0 && box.bottom > top && box.bottom <= bottom + INITIAL_TAIL_TOLERANCE;
   if (footerBox?.height) {
@@ -228,8 +229,8 @@ interface ChatFooterContext {
 function ChatFooter({ context }: { context?: ChatFooterContext }) {
   const sid = context?.sessionId;
   const text = useSessionStore((state) => sid ? state.streamingText[sid]?.content ?? "" : "");
-  const items = useSessionStore((state) => sid ? state.streamingItems[sid] ?? EMPTY_STREAMING_ITEMS : EMPTY_STREAMING_ITEMS);
-  const rootItems = useMemo(() => Object.entries(items).filter(([, item]) => !isNativeChild(item.runtime_metadata)), [items]);
+  const items = useSessionStore(useShallow((state) => nativeRootPreviews(sid ? state.streamingItems[sid] : undefined)));
+  const rootItems = Object.entries(items);
   const layout = context?.onLayout;
   const running = context?.running;
   const footer = useRef<HTMLDivElement>(null);
@@ -426,11 +427,12 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   const empty = useSessionStore((s) => !!activeSession && hasEmptyTranscript(s, activeSession));
   const transcriptReadError = useSessionStore((s) => s.transcriptReadErrors[activeSessionId]);
   const transcriptDamaged = activeSession?.transcript_integrity === "duplicate_seq";
-  const messages = useSessionStore((s) => s.messages[activeSessionId] ?? EMPTY_MESSAGES);
-  const subagentSnapshots = useSessionStore((s) => s.subagents[activeSessionId] ?? EMPTY_SUBAGENTS);
+  const savedMessages = useSessionStore((s) => s.messages[activeSessionId]);
+  const savedSubagents = useSessionStore((s) => s.subagents[activeSessionId]);
+  const messages = savedMessages ?? EMPTY_MESSAGES;
+  const subagentSnapshots = savedSubagents ?? EMPTY_SUBAGENTS;
   const activeRequestId = useSessionStore((s) => s.dispatchStates[activeSessionId]?.active_request_id);
-  const chatMessages = useMemo(() => nativeChatMessages(messages, Object.values(subagentSnapshots), activeRequestId),
-    [messages, subagentSnapshots, activeRequestId]);
+  const chatMessages = chatProjection(savedMessages, savedSubagents, activeRequestId);
   const pendingQuestions = useSessionStore((s) => s.pendingQuestions[activeSessionId] ?? EMPTY_QUESTIONS);
   const activeAgent = useSessionStore((s) => s.agents.find((agent) => agent.id === activeSession?.agent_id));
   const agentLabel = activeAgent?.name || "Assistant";
@@ -456,14 +458,21 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   const [scrolledIntoHistory, setScrolledIntoHistory] = useState(false);
   const [outputOutside, setOutputOutside] = useState(false);
   const pausedOutput = useRef<PendingTranscriptOutput | null>({ saved: new Map(), live: new Map(), helpers: new Map() });
+  const pausedOutputFrame = useRef<number | null>(null);
+  const cancelPausedOutputMeasurement = useCallback(() => {
+    if (pausedOutputFrame.current === null) return;
+    cancelAnimationFrame(pausedOutputFrame.current);
+    pausedOutputFrame.current = null;
+  }, []);
   const resetPausedOutput = useCallback((keepOffer = false) => {
+    cancelPausedOutputMeasurement();
     const pending = pausedOutput.current;
     if (pending) { pending.live.clear(); pending.saved.clear(); pending.helpers.clear(); }
     else if (!keepOffer) {
       pausedOutput.current = { saved: new Map(), live: new Map(), helpers: new Map() };
       setOutputOutside(false);
     }
-  }, []);
+  }, [cancelPausedOutputMeasurement]);
   // Input retires follow intent before queued layout work can overwrite it.
   // Position alone cannot distinguish native navigation from virtual layout.
   const following = useRef(true);
@@ -550,7 +559,8 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const pending = pausedOutput.current;
     const view = currentView.current;
     const viewport = scroller.current;
-    if (!pending || (!pending.live.size && !pending.saved.size && !pending.helpers.size) || !view?.sessionId ||
+    if (pausedOutputFrame.current !== null || !pending ||
+      (!pending.live.size && !pending.saved.size && !pending.helpers.size) || !view?.sessionId ||
       !viewport?.clientHeight || document.hidden || (position.current && position.current.kind !== "initial") ||
       !currentViewportView(view) || (following.current && !selectionPaused(viewport))) return;
     const port = scrollportBounds(viewport);
@@ -579,16 +589,21 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         if (readableSpansOutside(body, change.spans, port, clip)) { offerReturn(); return; }
       }
     }
-    if ((!pending.saved.size && !pending.helpers.size) ||
-      committed.current.messages !== (useSessionStore.getState().messages[view.sessionId] ?? EMPTY_MESSAGES)) return;
+    if (!pending.saved.size && !pending.helpers.size) return;
+    const state = useSessionStore.getState();
+    const sid = view.sessionId;
+    if (committed.current.messages !== (state.messages[sid] ?? EMPTY_MESSAGES) ||
+      committed.current.subagentSnapshots !== (state.subagents[sid] ?? EMPTY_SUBAGENTS) ||
+      committed.current.activeRequestId !== state.dispatchStates[sid]?.active_request_id) return;
     const rows = projectedMessages.current;
     const mounted = Array.from(viewport.querySelectorAll<HTMLElement>("[data-message-key]"));
     const first = mounted[0];
     const last = mounted.at(-1);
     const firstMessage = first && renderedMessages.get(first);
     const lastMessage = last && renderedMessages.get(last);
-    const firstIndex = firstMessage ? rows.indexOf(firstMessage) : -1;
-    const lastIndex = lastMessage ? rows.indexOf(lastMessage) : -1;
+    const { positions, helpers } = chatProjectionIndex(rows);
+    const firstIndex = firstMessage ? positions.get(firstMessage) ?? -1 : -1;
+    const lastIndex = lastMessage ? positions.get(lastMessage) ?? -1 : -1;
     // The mounted range must cover the scrollport edge before it can certify
     // the position of an unmounted row in the committed projection.
     const outsideMountedRange = (index: number) =>
@@ -607,8 +622,8 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       }
     }
     for (const [work, change] of pending.helpers) {
-      const index = rows.findIndex((row) => helperOutputWork(row) === work);
-      if (index < 0 || !outsideMountedRange(index)) continue;
+      const helper = helpers.get(work);
+      if (!helper || !outsideMountedRange(helper.index)) continue;
       pending.helpers.delete(work);
       if (first && collapsedHelperHasChangedText(change, first)) { offerReturn(); return; }
     }
@@ -1237,6 +1252,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const viewport = scroller.current;
     if (!viewport?.clientHeight || document.hidden) {
       suspendViewportMotion();
+      cancelPausedOutputMeasurement();
       return;
     }
     const view = currentView.current;
@@ -1253,7 +1269,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     consumeTimeoutRecovery();
     measurePausedOutput();
     followMeasuredOutput();
-  }, [consumeTimeoutRecovery, positionMeasuredOutput, followMeasuredOutput, measurePausedOutput, observeUpwardScroll,
+  }, [cancelPausedOutputMeasurement, consumeTimeoutRecovery, positionMeasuredOutput, followMeasuredOutput, measurePausedOutput, observeUpwardScroll,
     preparationBudget, restoreReading, sampleHeldContact, suspendViewportMotion]);
   const onItemsRendered = useCallback(() => {
     positionMeasuredOutput();
@@ -1546,7 +1562,16 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       if (!sid || !outputChanged || !view || !viewport || !currentViewportView(view) ||
         (following.current && !selectionPaused(viewport))) return;
       const transfers = matchTranscriptTransfers(sid, state, before);
-      if (pausedOutput.current) recordTranscriptOutput(pausedOutput.current, sid, state, before, projectedMessages.current, transfers);
+      if (pausedOutput.current && recordTranscriptOutput(pausedOutput.current, sid, state, before, transfers) &&
+        !messagesChanged && state.subagents[sid] === before.subagents[sid] &&
+        pausedOutputFrame.current === null && !document.hidden) {
+        // Unmounted helpers have no layout effect. Wait for this publication's
+        // other cards to commit too: a preview eviction can move the new text.
+        pausedOutputFrame.current = requestAnimationFrame(() => {
+          pausedOutputFrame.current = null;
+          if (scroller.current === viewport && currentViewportView(view)) measurePausedOutput();
+        });
+      }
       if (messagesChanged && !position.current && !navigationContact.current && !document.hidden && viewport.clientHeight) {
         const bounds = viewport.getBoundingClientRect();
         const oldRows = before.messages[sid];
@@ -1622,7 +1647,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     olderRead.current?.cancel(); olderRead.current = null;
     setViewportView({ sessionId: sid, account: state.accountGeneration, window: messageWindow });
   }), [activeSessionId, cancelFollow, currentViewportView, retirePosition, publishPresentation, retireRecovery, retireWheel, saveReadingHandoff,
-    resetPausedOutput, retireSelection, selectionPaused, settleContactBeforeLayout]);
+    measurePausedOutput, resetPausedOutput, retireSelection, selectionPaused, settleContactBeforeLayout]);
   useLayoutEffect(() => {
     currentView.current = viewportView;
     cancelFollow();

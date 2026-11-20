@@ -26,6 +26,38 @@ export function nativeWorkKey(value: unknown, thread?: unknown, turn?: unknown):
     ? workKey(identity, thread, turn) : undefined;
 }
 
+type StreamingItems = Record<string, StreamingItem>;
+const EMPTY_STREAMING_ITEMS: StreamingItems = {};
+const previewsBySnapshot = new WeakMap<StreamingItems, { root: StreamingItems; work: Map<string, StreamingItems> }>();
+
+function streamingGroups(items: StreamingItems) {
+  const cached = previewsBySnapshot.get(items);
+  if (cached) return cached;
+  const root: StreamingItems = {};
+  const work = new Map<string, StreamingItems>();
+  for (const [key, item] of Object.entries(items)) {
+    const metadata = item.runtime_metadata;
+    if (!isNativeChild(metadata)) root[key] = item;
+    const owner = nativeWorkKey(metadata, metadata.native?.thread_id, metadata.native?.turn_id);
+    if (owner) {
+      let group = work.get(owner);
+      if (!group) work.set(owner, group = {});
+      group[key] = item;
+    }
+  }
+  const groups = { root, work };
+  previewsBySnapshot.set(items, groups);
+  return groups;
+}
+
+export function nativeWorkPreviews(items: StreamingItems | undefined, work: string | undefined): StreamingItems {
+  return (items && work ? streamingGroups(items).work.get(work) : undefined) ?? EMPTY_STREAMING_ITEMS;
+}
+
+export function nativeRootPreviews(items: StreamingItems | undefined): StreamingItems {
+  return items ? streamingGroups(items).root : EMPTY_STREAMING_ITEMS;
+}
+
 const OBSERVED_CARD_PREFIX = "observed:";
 
 interface NativeHistory {
@@ -72,17 +104,13 @@ type NativeAnswerPart = { text: string } & (
 
 const NATIVE_ANSWER_SEPARATOR = "\n\n";
 
-export function nativeAnswer(run: SubagentRun, items: Record<string, StreamingItem> | undefined, messages?: Message[]) {
+export function nativeAnswer(run: SubagentRun, workPreviews: StreamingItems | undefined, messages?: Message[]) {
   const collected = messages && nativeAnswerRows(messages, run);
   const parts: NativeAnswerPart[] = collected && (collected.length > 1 || collected[0]?.content)
     ? collected.map((message) => ({ source: "saved", message, text: message.content ?? "" }))
     : run.summary ? [{ source: "summary", text: run.summary }] : [];
-  const owner = nativeWorkKey(run.runtime_metadata, run.native_thread_id, run.native_turn_id);
-  if (owner) for (const [key, item] of Object.entries(items ?? {})) {
-    const metadata = item.runtime_metadata;
-    if (item.content && owner === nativeWorkKey(metadata, metadata.native?.thread_id, metadata.native?.turn_id)) {
-      parts.push({ source: "preview", key, text: item.content });
-    }
+  for (const [key, item] of Object.entries(workPreviews ?? EMPTY_STREAMING_ITEMS)) {
+    if (item.content) parts.push({ source: "preview", key, text: item.content });
   }
   let offset = 0;
   const occurrences = new Map<string, number>();

@@ -1,4 +1,5 @@
 import { Component, Fragment, createRef, useContext, useLayoutEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   IconChevronDown,
   IconChevronRight,
@@ -10,7 +11,7 @@ import {
 } from "@tabler/icons-react";
 
 import { useSessionStore, type Message, type SubagentRun } from "../stores/sessionStore";
-import { nativeAnswer, nativeCardState, nativeDetailAnchor, nativeWorkKey } from "../lib/nativeOutput";
+import { nativeAnswer, nativeCardState, nativeDetailAnchor, nativeWorkKey, nativeWorkPreviews } from "../lib/nativeOutput";
 import { NativeSubagentDetails } from "./NativeSubagentDetails";
 import { HelperOutputLayout, collapsedHelperAnswerClass, helperAnswerCardWidthClass, legacyHelperWork } from "./chatOutputVisibility";
 import { useStreamingTextNode } from "../hooks/useStreamingTextNode";
@@ -19,14 +20,14 @@ const EMPTY_MESSAGES: Message[] = [];
 
 export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; cardId: string }) {
   const messages = useSessionStore((s) => s.messages[sessionId] ?? EMPTY_MESSAGES);
-  const streaming = useSessionStore((s) => s.streamingItems[sessionId]);
   const snapshot = useSessionStore((s) => s.subagents[sessionId]?.[cardId]);
   // Saved facts own the collected body and its detail anchor. Live deltas
   // only compose the current preview.
   const saved = useMemo(() => nativeCardState(messages, cardId, snapshot), [messages, cardId, snapshot]);
   const anchorSeq = useMemo(() => saved ? nativeDetailAnchor(messages, saved) : undefined, [messages, saved]);
-  const answer = useMemo(() => saved && nativeAnswer(saved, streaming, messages), [messages, saved, streaming]);
   const work = saved && nativeWorkKey(saved.runtime_metadata, saved.native_thread_id, saved.native_turn_id);
+  const streaming = useSessionStore(useShallow((s) => nativeWorkPreviews(s.streamingItems[sessionId], work)));
+  const answer = useMemo(() => saved && nativeAnswer(saved, streaming, messages), [messages, saved, streaming]);
   return <SubagentCard key={JSON.stringify([sessionId, work ?? cardId])}
     sessionId={sessionId} observedRun={saved} answer={answer} detailAnchor={anchorSeq} />;
 }

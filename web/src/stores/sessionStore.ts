@@ -648,6 +648,33 @@ function hasTerminalFor(messages: MessageInput[], identity: AttemptIdentity | un
     message.type === "result" && sameAttempt(readAttemptIdentity(message), identity)));
 }
 
+interface StreamingAdmission {
+  terminals: Set<string>;
+  collectedItems: Set<string>;
+}
+
+// Saved windows are immutable. Admission facts can expire with the array that
+// supplied them, independent of which sessions or attempts are still active.
+const admissionsByHistory = new WeakMap<Message[], StreamingAdmission>();
+const attemptKey = (identity: AttemptIdentity) => JSON.stringify([identity.request_id, identity.attempt_id]);
+
+function streamingAdmission(messages: Message[]): StreamingAdmission {
+  const cached = admissionsByHistory.get(messages);
+  if (cached) return cached;
+  const admission: StreamingAdmission = { terminals: new Set(), collectedItems: new Set() };
+  for (const message of messages) {
+    if (message.type === "result") {
+      const attempt = readAttemptIdentity(message);
+      if (attempt) admission.terminals.add(attemptKey(attempt));
+    } else if (message.role === "assistant" && message.type === "text") {
+      const key = nativeItemKey(message.runtime_metadata);
+      if (key) admission.collectedItems.add(key);
+    }
+  }
+  admissionsByHistory.set(messages, admission);
+  return admission;
+}
+
 function retainStreamingPreviews(state: SessionStore, sessionId: string, keep: (attempt: AttemptIdentity | undefined) => boolean) {
   const root = state.streamingText[sessionId];
   const items = Object.entries(state.streamingItems[sessionId] ?? {});
@@ -1147,10 +1174,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set((s) => {
       const key = nativeItemKey(metadata);
       const identity = readAttemptIdentity(metadata);
-      const messages = s.messages[sessionId] || [];
-      if (identity && (hasTerminalFor(messages, identity) || !sameAttempt(identity, s.activeAttempts[sessionId]))) return s;
-      if (key && messages.some((message) => message.role === "assistant" && message.type === "text" &&
-          nativeItemKey(message.runtime_metadata) === key)) return s;
+      if (identity && !sameAttempt(identity, s.activeAttempts[sessionId])) return s;
+      const messages = s.messages[sessionId] ?? [];
+      if (messages.length && identity) {
+        const admission = streamingAdmission(messages);
+        if (admission.terminals.has(attemptKey(identity)) || key && admission.collectedItems.has(key)) return s;
+      }
       if (chunk.length > 0) consumers = textConsumers(sessionId, s.accountGeneration);
       if (key && metadata) {
         const previous = s.streamingItems[sessionId]?.[key];

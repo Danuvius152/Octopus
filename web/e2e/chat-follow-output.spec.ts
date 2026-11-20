@@ -1275,7 +1275,12 @@ test(`a new saved ${kind} outside the mounted rows offers a return`, async ({ pa
 });
 }
 
-test("an unmounted existing helper offers a return for a short continuation visible in its collapsed answer", async ({ page }) => {
+for (const { source, stationaryWheel } of [
+  { source: "live", stationaryWheel: false },
+  { source: "saved", stationaryWheel: false },
+  { source: "live", stationaryWheel: true },
+] as const) {
+test(`an unmounted existing helper offers a return for a short ${source} continuation${stationaryWheel ? " during a zero-distance wheel" : ""}`, async ({ page }) => {
   const { scroller, gap, send, settle } = await openChat(page, 4);
   const reference = "/api/sessions/follow-output/messages/5";
   await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
@@ -1292,12 +1297,77 @@ test("an unmounted existing helper offers a return for a short continuation visi
   await settle();
   const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
   await expect(jump).toHaveCount(0);
-  send({ type: "assistant_text", seq: 7, content: "Short continuation.", runtime_metadata: identity("new-helper", "second") });
+  const continuation = { content: "Short continuation.", runtime_metadata: identity("new-helper", "second") };
+  if (stationaryWheel) {
+    await scroller.hover();
+    const scrollTop = () => scroller.evaluate((viewport) => viewport.scrollTop);
+    const readingTop = await scrollTop();
+    const wheel = await scroller.evaluateHandle((viewport) => {
+      let observed: { trusted: boolean; cancelable: boolean } | undefined;
+      const read = (event: Event) => { observed = { trusted: event.isTrusted, cancelable: event.cancelable }; };
+      viewport.addEventListener("wheel", read, { passive: false, once: true });
+      return { observed: () => observed, stop: () => viewport.removeEventListener("wheel", read) };
+    });
+    const gate = await holdAnimationFrames(page);
+    try {
+      expect(await gate.evaluate((frames) => frames.count())).toBe(0);
+      send({ type: "assistant_delta", ...continuation });
+      await expect.poll(() => gate.evaluate((frames) => frames.count())).toBeGreaterThan(0);
+      await page.mouse.wheel(0, 0.1);
+      await expect.poll(() => wheel.evaluate((event) => event.observed())).toEqual({ trusted: true, cancelable: true });
+    } finally {
+      await gate.evaluate((frames) => frames.release());
+      await gate.dispose();
+      await wheel.evaluate((event) => event.stop());
+      await wheel.dispose();
+    }
+    await settle();
+    expect(await scrollTop()).toBe(readingTop);
+  } else if (source === "live") send({ type: "assistant_delta", ...continuation });
+  else send({ type: "assistant_text", seq: 7, ...continuation });
   await expect(jump).toBeVisible();
   await expect(answer).toHaveCount(0);
   await jump.click();
   await expect(answer).toHaveText("Short first answer. Short continuation.");
   await expect(answer).toBeInViewport({ ratio: 1 });
+});
+}
+
+test("a helper answer revealed by preview eviction stays readable without a return offer", async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page, 4);
+  const nextHelper = { ...helper, card_id: "next-helper-card", task_id: "next-helper", native_thread_id: "next-helper",
+    runtime_metadata: identity("next-helper", "item"), name: "Next helper" };
+  send({ type: "subagent", ...helper, seq: 5 });
+  send({ type: "subagent", ...nextHelper, seq: 6 });
+  send({ type: "assistant_delta", runtime_metadata: helper.runtime_metadata,
+    content: "The oldest helper preview fills the viewport.\n".repeat(90) });
+  const first = scroller.getByRole("button", { name: /^Helper Reading/ });
+  const next = scroller.getByRole("button", { name: /^Next helper Reading/ });
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(scroller.locator(".subagent-summary")).toContainText("The oldest helper preview");
+  await expect(next).toBeInViewport();
+  await first.click();
+  await expect.poll(gap).toBeGreaterThan(500);
+  await expect(next).toHaveCount(0);
+  const scrollTop = () => scroller.evaluate((element) => element.scrollTop);
+  await settle();
+  await expect(jump).toHaveCount(0);
+  const readingTop = await scrollTop();
+  const movement = await trackTop(first);
+
+  // Leave the oldest preview in the expanded card until the next helper
+  // receives the 33rd item. The other previews have no projected card.
+  for (let index = 0; index < 31; index++) {
+    send({ type: "assistant_delta", runtime_metadata: identity("unobserved", `item-${index}`), content: "Preview" });
+  }
+  send({ type: "assistant_delta", runtime_metadata: nextHelper.runtime_metadata, content: "New answer in view" });
+  await expect(scroller.getByText("New answer in view", { exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(scroller.getByText(/The oldest helper preview/)).toHaveCount(0);
+  await settle();
+  expect(await scrollTop()).toBe(readingTop);
+  expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+  await movement.dispose();
+  await expect(jump).toHaveCount(0);
 });
 
 test("reconnect fills new output around a previously seen sequence without moving the reader", async ({ page }) => {

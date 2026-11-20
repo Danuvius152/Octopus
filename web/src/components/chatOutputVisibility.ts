@@ -1,8 +1,8 @@
 import { createContext } from "react";
 import katex from "katex";
-import { isNativeChild, nativeAnswer, nativeCardState, nativeChatMessages, nativeItemKey, nativeWorkKey } from "../lib/nativeOutput";
+import { isNativeChild, nativeAnswer, nativeCardState, nativeChatMessages, nativeItemKey, nativeWorkKey, nativeWorkPreviews } from "../lib/nativeOutput";
 import { readAttemptIdentity, readRuntimeMetadata, sameAttempt } from "../lib/toolIdentity";
-import { streamingTranscriptSource, type Message, type useSessionStore } from "../stores/sessionStore";
+import { streamingTranscriptSource, type Message, type SubagentRun, type useSessionStore } from "../stores/sessionStore";
 import type { RuntimeMetadata } from "../api";
 import { clippedMathmlSelector, formulaBodySelector, formulaProbeOptions, projectMarkdownOutput } from "./chatMarkdown";
 
@@ -39,6 +39,33 @@ export const helperAnswerCardWidthClass = "box-border border-[0.7px] px-3";
 export const collapsedHelperAnswerClass = "subagent-summary mt-1.5 line-clamp-2 text-[12px] text-gray-800";
 
 const EMPTY_ROWS: Message[] = [];
+type SavedHelpers = Record<string, SubagentRun>;
+const EMPTY_HELPERS: SavedHelpers = {};
+
+interface HelperOutputOwner { work: string; id: string; native: boolean }
+interface ChatProjection {
+  activeRequest: string | null | undefined;
+  rows: Message[];
+}
+interface ChatProjectionIndex {
+  positions: Map<Message, number>;
+  helpers: Map<string, HelperOutputOwner & { index: number }>;
+}
+
+// Rendering and paused-output tracking share the projection for the same
+// saved inputs, including before React commits a newly saved row.
+const projectedWindows = new WeakMap<Message[], WeakMap<SavedHelpers, ChatProjection>>();
+const projectionIndexes = new WeakMap<Message[], ChatProjectionIndex>();
+
+export function chatProjection(messages = EMPTY_ROWS, cards = EMPTY_HELPERS, activeRequest?: string | null): Message[] {
+  let snapshots = projectedWindows.get(messages);
+  if (!snapshots) projectedWindows.set(messages, snapshots = new WeakMap());
+  const cached = snapshots.get(cards);
+  if (cached && cached.activeRequest === activeRequest) return cached.rows;
+  const projection = { activeRequest, rows: nativeChatMessages(messages, Object.values(cards), activeRequest) };
+  snapshots.set(cards, projection);
+  return projection.rows;
+}
 
 export function matchTranscriptTransfers(sid: string, state: SessionState, before: SessionState) {
   const transfers = new Map<string, TranscriptTransfer>();
@@ -69,7 +96,7 @@ export function legacyHelperWork(toolCallId?: string | null) {
   return toolCallId ? JSON.stringify(["tool", toolCallId]) : undefined;
 }
 
-function helperOutputOwner(row: Message) {
+function helperOutputOwner(row: Message): HelperOutputOwner | undefined {
   if (row.type === "native_subagent" && typeof row.tool_input?.card_id === "string") {
     const work = nativeWorkKey(row.runtime_metadata, row.tool_input.native_thread_id, row.tool_input.native_turn_id);
     return work ? { work, id: row.tool_input.card_id, native: true } : undefined;
@@ -78,12 +105,23 @@ function helperOutputOwner(row: Message) {
   return id ? { work: legacyHelperWork(id)!, id, native: false } : undefined;
 }
 
-export function helperOutputWork(row: Message) {
-  return helperOutputOwner(row)?.work;
+export function chatProjectionIndex(rows: Message[]): ChatProjectionIndex {
+  const cached = projectionIndexes.get(rows);
+  if (cached) return cached;
+  const positions = new Map<Message, number>();
+  const helpers: ChatProjectionIndex["helpers"] = new Map();
+  rows.forEach((row, index) => {
+    if (!positions.has(row)) positions.set(row, index);
+    const owner = helperOutputOwner(row);
+    if (owner && !helpers.has(owner.work)) helpers.set(owner.work, { ...owner, index });
+  });
+  const indexed = { positions, helpers };
+  projectionIndexes.set(rows, indexed);
+  return indexed;
 }
 
 export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: string, state: SessionState, before: SessionState,
-  projection: Message[], transfers: ReturnType<typeof matchTranscriptTransfers>) {
+  transfers: ReturnType<typeof matchTranscriptTransfers>): boolean {
   const oldRows = before.messages[sid];
   const rows = state.messages[sid];
   const oldRoot = before.streamingText[sid];
@@ -92,8 +130,8 @@ export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: st
   const items = state.streamingItems[sid];
   const oldCards = before.subagents[sid];
   const cards = state.subagents[sid];
-  if (oldRows === rows && oldRoot === root && oldItems === items && oldCards === cards) return;
-  const affectedHelpers = new Set(pending.helpers.keys());
+  if (oldRows === rows && oldRoot === root && oldItems === items && oldCards === cards) return false;
+  const affectedHelpers = new Set(oldRows !== rows || oldCards !== cards ? pending.helpers.keys() : undefined);
   const newHelperRows = new Set<number>();
   const noteHelper = (metadata: RuntimeMetadata | null | undefined) => {
     const work = nativeWorkKey(metadata, metadata?.native?.thread_id, metadata?.native?.turn_id);
@@ -139,20 +177,24 @@ export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: st
       if (!isNativeChild(item.runtime_metadata)) live(key, oldItems?.[key]?.content, item.content);
       else if (oldItems?.[key]?.content !== item.content) noteHelper(item.runtime_metadata);
     }
-    for (const key of Object.keys(oldItems ?? {})) if (!items?.[key]) pending.live.delete(key);
+    for (const [key, item] of Object.entries(oldItems ?? {})) if (!items?.[key]) {
+      if (isNativeChild(item.runtime_metadata)) noteHelper(item.runtime_metadata);
+      else pending.live.delete(key);
+    }
   }
-  if (!affectedHelpers.size) return;
-  // A collected answer can be the first evidence that projects a helper.
-  const knownHelpers = new Set(projection.map(helperOutputWork));
-  const helperProjection = [...affectedHelpers].every((work) => knownHelpers.has(work)) ? projection
-    : nativeChatMessages(rows ?? EMPTY_ROWS, Object.values(cards ?? {}), state.dispatchStates[sid]?.active_request_id);
-  for (const row of helperProjection) {
-    const owner = helperOutputOwner(row);
-    if (!owner || !affectedHelpers.has(owner.work)) continue;
-    const { work, id } = owner;
-    affectedHelpers.delete(work);
+  if (!affectedHelpers.size) return false;
+  const { helpers } = chatProjectionIndex(chatProjection(rows, cards, state.dispatchStates[sid]?.active_request_id));
+  let helperOutputChanged = false;
+  for (const work of affectedHelpers) {
+    const owner = helpers.get(work);
+    if (!owner) {
+      pending.helpers.delete(work);
+      continue;
+    }
+    const { id } = owner;
     const card = owner.native ? nativeCardState(rows ?? EMPTY_ROWS, id, cards?.[id]) : cards?.[id];
-    const answer = card && nativeAnswer(card, items, rows ?? EMPTY_ROWS);
+    const answer = card && nativeAnswer(card, nativeWorkPreviews(items,
+      nativeWorkKey(card.runtime_metadata, card.native_thread_id, card.native_turn_id)), rows ?? EMPTY_ROWS);
     const awaiting = pending.helpers.get(work)?.previousByPart;
     const previousByPart = new Map<string, string>();
     const spans: TextSpan[] = [];
@@ -182,10 +224,12 @@ export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: st
         }
       }
     }
-    if (answer && spans.length) pending.helpers.set(work, { previousByPart, spans, text: answer.text });
-    else pending.helpers.delete(work);
+    if (answer && spans.length) {
+      pending.helpers.set(work, { previousByPart, spans, text: answer.text });
+      helperOutputChanged = true;
+    } else pending.helpers.delete(work);
   }
-  for (const work of affectedHelpers) pending.helpers.delete(work);
+  return helperOutputChanged;
 }
 
 export function scrollportBounds(viewport: HTMLElement) {
