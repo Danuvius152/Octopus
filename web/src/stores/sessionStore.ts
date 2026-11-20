@@ -54,7 +54,12 @@ function notifyAcceptedText(consumers: readonly AcceptedTextConsumer[]) {
 
 const streamingBytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
 // Private facts follow the lifetime of each displayed preview.
-const streamingFacts = new WeakMap<{ content: string }, { truncated: boolean; arrival: symbol }>();
+const streamingFacts = new WeakMap<{ content: string }, { truncated: boolean; arrival: symbol; afterSeq?: number }>();
+
+export function streamingTranscriptSource(preview: { content: string }) {
+  const facts = streamingFacts.get(preview);
+  return { text: facts?.truncated ? preview.content.slice(0, -1) : preview.content, afterSeq: facts?.afterSeq };
+}
 
 function streamingPreview(previous: { content: string } | undefined, chunk: string, budget: number) {
   const truncated = previous && streamingFacts.get(previous)?.truncated;
@@ -1165,7 +1170,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       if (!chunk && previous === root) return s;
       const { content, truncated } = streamingPreview(previous, chunk, 64 * 1024);
       const preview = previous && content === previous.content ? previous : { content, attempt };
-      streamingFacts.set(preview, { truncated, arrival: Symbol() });
+      // The ordered live channel sends the delta before its durable block.
+      // Preserve the known history frontier as of the first observed chunk.
+      const afterSeq = previous ? streamingFacts.get(previous)?.afterSeq
+        : messages.reduce((high, message) => Math.max(high, message.seq ?? -1), s.lastAppliedSeq[sessionId] ?? -1);
+      streamingFacts.set(preview, { truncated, arrival: Symbol(), afterSeq });
       if (preview === previous) return s;
       return {
         streamingText: { ...s.streamingText, [sessionId]: preview },

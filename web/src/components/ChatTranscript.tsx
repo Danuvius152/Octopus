@@ -5,7 +5,7 @@ import { hasEmptyTranscript, hasTranscriptBaseline, observeAcceptedText, useSess
 import { observeOlderMessages } from "../lib/transcript";
 import { observeSession } from "../lib/hydrateSession";
 import { matchesPendingQuestion } from "../lib/questionPresentation";
-import { isNativeChild, nativeChatMessages, nativeItemKey } from "../lib/nativeOutput";
+import { isNativeChild, nativeChatMessages } from "../lib/nativeOutput";
 import type { QuestionCommandTarget, SubmissionReply } from "../lib/submission";
 import { Button } from "./ui/button";
 import { MessageBubble } from "./MessageBubble";
@@ -13,6 +13,11 @@ import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { MessageTime } from "./MessageTime";
 import { QuestionPrompt, type AnswerPayload } from "./QuestionPrompt";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
+import { HelperOutputLayout, collapsedHelperHasChangedText, helperOutputWork, matchTranscriptTransfers,
+  readableChangeOutside, readableSpansOutside, recordTranscriptOutput,
+  savedOutputHasBody, savedOutputOutside, scrollportBounds,
+  type PendingTranscriptOutput } from "./chatOutputVisibility";
+import { projectMarkdownOutput } from "./chatMarkdown";
 
 const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_STREAMING_ITEMS: Record<string, StreamingItem> = {};
@@ -43,6 +48,21 @@ function sampleScroll(viewport: HTMLElement) {
   return { top: viewport.scrollTop, maximum: Math.max(0, viewport.scrollHeight - viewport.clientHeight) };
 }
 
+function transcriptSelection(viewport: HTMLElement | null): Selection | null {
+  const selection = viewport?.ownerDocument.getSelection();
+  if (!viewport || !selection || selection.isCollapsed ||
+    !viewport.contains(selection.anchorNode) || !viewport.contains(selection.focusNode)) return null;
+  const selector = "[data-message-key], [data-live-output]";
+  const inBody = (node: Node | null) => {
+    const element = node instanceof Element ? node : node?.parentElement;
+    return element?.closest(selector);
+  };
+  if (!selection.toString()) return null;
+  if (inBody(selection.anchorNode) || inBody(selection.focusNode)) return selection;
+  const range = selection.getRangeAt(0);
+  return Array.from(viewport.querySelectorAll(selector)).some((body) => range.intersectsNode(body)) ? selection : null;
+}
+
 function changesScrollLayout(viewport: HTMLElement, records: MutationRecord[] = []) {
   return records.some(({ target, type }) => {
     let element = target instanceof Element ? target : target.parentElement;
@@ -71,15 +91,54 @@ interface ReadingAnchor {
   key: string;
   offset: number;
   textOffset?: true;
+  selected?: { range: Range; restored?: Range; projected: ReturnType<typeof projectMarkdownOutput>; offset: number; backward: boolean };
 }
 
-function captureReadingAnchor(viewport: HTMLElement): ReadingAnchor | null {
+function visibleReadingRow(viewport: HTMLElement) {
   const bounds = viewport.getBoundingClientRect();
-  const visible = Array.from(viewport.querySelectorAll<HTMLElement>("[data-message-key]")).find((element) => {
+  return Array.from(viewport.querySelectorAll<HTMLElement>("[data-message-key]")).find((element) => {
     const rectangle = element.getBoundingClientRect();
     return rectangle.bottom > bounds.top && rectangle.top < bounds.bottom;
   });
-  return visible ? { key: visible.dataset.messageKey!, offset: visible.getBoundingClientRect().top - bounds.top } : null;
+}
+
+function captureReadingAnchor(viewport: HTMLElement): ReadingAnchor | null {
+  const row = visibleReadingRow(viewport);
+  return row ? { key: row.dataset.messageKey!, offset: row.getBoundingClientRect().top - viewport.getBoundingClientRect().top } : null;
+}
+
+function captureTransferredSelection(body: HTMLElement, selection: Selection, viewportTop: number) {
+  const range = selection.getRangeAt(0);
+  if (!body.contains(range.startContainer) || !body.contains(range.endContainer)) return;
+  const text = range.toString();
+  const top = Array.from(range.getClientRects())[0]?.top;
+  if (!text.trim() || top === undefined) return;
+  const preceding = document.createRange();
+  preceding.selectNodeContents(body);
+  preceding.setEnd(range.startContainer, range.startOffset);
+  const start = preceding.toString().length;
+  const backward = selection.anchorNode === range.endContainer && selection.anchorOffset === range.endOffset;
+  return { range, source: { start, end: start + text.length }, offset: top - viewportTop, backward };
+}
+
+function transferredSelection(row: HTMLElement, selected: NonNullable<ReadingAnchor["selected"]>): Range | null {
+  const body = row.querySelector(".msg-content");
+  const text = body?.textContent;
+  const { spans, text: rendered } = selected.projected;
+  if (!body || !text?.endsWith(rendered) || !spans.length) return null;
+  const prefix = text.length - rendered.length;
+  const start = prefix + spans[0].start;
+  const end = prefix + spans[spans.length - 1].end;
+  const range = document.createRange();
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const next = offset + (node.textContent?.length ?? 0);
+    if (offset <= start && start < next) range.setStart(node, start - offset);
+    if (offset < end && end <= next) { range.setEnd(node, end - offset); return range; }
+    offset = next;
+  }
+  return null;
 }
 
 function transcriptTextTop(row: HTMLElement): number {
@@ -249,15 +308,31 @@ type ViewportPosition = ViewportScope & {
   frame: number | null;
 } & ({ kind: "initial" } |
   { kind: "restore"; handoff: ReadingHandoff; limit: number } |
-  ({ kind: "history"; physicalTop: number; expectedTop?: number; alignedHeight?: number } & ReadingAnchor));
+  ({ kind: "history"; physicalTop: number; expectedTop?: number; alignedHeight?: number; alignOnMount?: true } & ReadingAnchor));
 function alignReadingAnchor(operation: Extract<ViewportPosition, { kind: "history" }>, element: HTMLElement,
   writePosition: (viewport: HTMLElement, view: ChatViewportView, write: () => void) => boolean) {
   const { viewport } = operation;
-  const top = operation.textOffset ? transcriptTextTop(element) : element.getBoundingClientRect().top;
-  const delta = top - viewport.getBoundingClientRect().top - operation.offset;
-  if (Math.abs(delta) <= 1) return "aligned";
+  const movedSelection = operation.selected && transferredSelection(element, operation.selected);
+  const selectedTop = movedSelection && Array.from(movedSelection.getClientRects())[0]?.top;
+  const top = typeof selectedTop === "number" ? selectedTop : operation.textOffset ? transcriptTextTop(element) : element.getBoundingClientRect().top;
+  const offset = typeof selectedTop === "number" ? operation.selected!.offset : operation.offset;
+  const delta = top - viewport.getBoundingClientRect().top - offset;
   const before = viewport.scrollTop;
-  if (!writePosition(viewport, operation.view, () => { viewport.scrollTop = before + delta; })) return "superseded";
+  const aligned = Math.abs(delta) <= 1;
+  if (!aligned && !writePosition(viewport, operation.view, () => { viewport.scrollTop = before + delta; })) return "superseded";
+  const selection = movedSelection && viewport.ownerDocument.getSelection();
+  // Removing the preview collapses the original Range in place. A later
+  // selection or an explicit clear has already taken ownership away from it.
+  if (movedSelection && selection && selection.rangeCount && selection.getRangeAt(0) === operation.selected?.range) {
+    if (operation.selected.backward) {
+      selection.setBaseAndExtent(movedSelection.endContainer, movedSelection.endOffset, movedSelection.startContainer, movedSelection.startOffset);
+    } else {
+      selection.removeAllRanges();
+      selection.addRange(movedSelection);
+    }
+    operation.selected.restored = selection.getRangeAt(0);
+  }
+  if (aligned) return "aligned";
   operation.alignedHeight = undefined;
   if (operation.expectedTop !== undefined) operation.expectedTop = viewport.scrollTop;
   return viewport.scrollTop !== before ? "moved" : "clamped";
@@ -379,6 +454,16 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   const readingHandoff = useRef<ReadingHandoff | null>(null);
   const [readingBoundary, setReadingBoundary] = useState(false);
   const [scrolledIntoHistory, setScrolledIntoHistory] = useState(false);
+  const [outputOutside, setOutputOutside] = useState(false);
+  const pausedOutput = useRef<PendingTranscriptOutput | null>({ saved: new Map(), live: new Map(), helpers: new Map() });
+  const resetPausedOutput = useCallback((keepOffer = false) => {
+    const pending = pausedOutput.current;
+    if (pending) { pending.live.clear(); pending.saved.clear(); pending.helpers.clear(); }
+    else if (!keepOffer) {
+      pausedOutput.current = { saved: new Map(), live: new Map(), helpers: new Map() };
+      setOutputOutside(false);
+    }
+  }, []);
   // Input retires follow intent before queued layout work can overwrite it.
   // Position alone cannot distinguish native navigation from virtual layout.
   const following = useRef(true);
@@ -412,6 +497,16 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   const navigationContact = useRef<NavigationContact | null>(null);
   const pendingWheel = useRef<PendingWheel | null>(null);
   const viewportInputHeld = useCallback(() => !!(navigationContact.current || pendingWheel.current), []);
+  const selectedViewport = useRef<HTMLElement | null>(null);
+  const selectionPaused = useCallback((viewport = scroller.current) => {
+    if (!transcriptSelection(viewport)) return false;
+    selectedViewport.current = viewport;
+    return true;
+  }, []);
+  const retireSelection = useCallback((viewport: HTMLElement | null) => {
+    selectedViewport.current = null;
+    transcriptSelection(viewport)?.removeAllRanges();
+  }, []);
   const retireWheel = useCallback(() => {
     if (!pendingWheel.current) return;
     window.clearTimeout(pendingWheel.current.timer);
@@ -451,6 +546,73 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     return position.current === operation && scroller.current === operation.viewport &&
       currentViewportView(operation.view);
   }, [currentViewportView]);
+  const measurePausedOutput = useCallback(() => {
+    const pending = pausedOutput.current;
+    const view = currentView.current;
+    const viewport = scroller.current;
+    if (!pending || (!pending.live.size && !pending.saved.size && !pending.helpers.size) || !view?.sessionId ||
+      !viewport?.clientHeight || document.hidden || (position.current && position.current.kind !== "initial") ||
+      !currentViewportView(view) || (following.current && !selectionPaused(viewport))) return;
+    const port = scrollportBounds(viewport);
+    const offerReturn = () => {
+      pausedOutput.current = null;
+      setOutputOutside(true);
+    };
+    if (pending.live.size) {
+      for (const output of viewport.querySelectorAll<HTMLElement>("[data-live-output]")) {
+        const key = output.dataset.liveOutput!;
+        const change = pending.live.get(key);
+        const body = change && output.querySelector<HTMLElement>(".msg-streaming-text");
+        if (!change || !body || body.textContent !== change.text) continue;
+        pending.live.delete(key);
+        if (readableChangeOutside(body, change.previous, port)) { offerReturn(); return; }
+      }
+    }
+    if (pending.helpers.size) {
+      for (const card of viewport.querySelectorAll<HTMLElement>("[data-helper-work]")) {
+        const work = card.dataset.helperWork!;
+        const change = pending.helpers.get(work);
+        const body = change && card.querySelector<HTMLElement>(".subagent-summary");
+        if (!change || !body || body.textContent !== change.text) continue;
+        pending.helpers.delete(work);
+        const clip = body.closest(".subagent-detail") ? undefined : body.getBoundingClientRect();
+        if (readableSpansOutside(body, change.spans, port, clip)) { offerReturn(); return; }
+      }
+    }
+    if ((!pending.saved.size && !pending.helpers.size) ||
+      committed.current.messages !== (useSessionStore.getState().messages[view.sessionId] ?? EMPTY_MESSAGES)) return;
+    const rows = projectedMessages.current;
+    const mounted = Array.from(viewport.querySelectorAll<HTMLElement>("[data-message-key]"));
+    const first = mounted[0];
+    const last = mounted.at(-1);
+    const firstMessage = first && renderedMessages.get(first);
+    const lastMessage = last && renderedMessages.get(last);
+    const firstIndex = firstMessage ? rows.indexOf(firstMessage) : -1;
+    const lastIndex = lastMessage ? rows.indexOf(lastMessage) : -1;
+    // The mounted range must cover the scrollport edge before it can certify
+    // the position of an unmounted row in the committed projection.
+    const outsideMountedRange = (index: number) =>
+      (first && index < firstIndex && first.getBoundingClientRect().top <= port.top) ||
+      (last && lastIndex >= 0 && index > lastIndex && last.getBoundingClientRect().bottom >= port.bottom);
+    for (const [seq, change] of pending.saved) {
+      const index = rows.findIndex((message) => message.seq === seq);
+      if (index < 0 || rows[index].content !== change.message.content) { pending.saved.delete(seq); continue; }
+      const row = mounted.find((element) => renderedMessages.get(element) === rows[index]);
+      if (row) {
+        pending.saved.delete(seq);
+        if (savedOutputOutside(row, change, port)) { offerReturn(); return; }
+      } else if (outsideMountedRange(index)) {
+        pending.saved.delete(seq);
+        if (savedOutputHasBody(change, viewport)) { offerReturn(); return; }
+      }
+    }
+    for (const [work, change] of pending.helpers) {
+      const index = rows.findIndex((row) => helperOutputWork(row) === work);
+      if (index < 0 || !outsideMountedRange(index)) continue;
+      pending.helpers.delete(work);
+      if (first && collapsedHelperHasChangedText(change, first)) { offerReturn(); return; }
+    }
+  }, [currentViewportView, selectionPaused]);
   const followMeasuredOutput = useCallback(() => {
     const viewport = scroller.current;
     const view = currentView.current;
@@ -458,7 +620,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const sessionId = view.sessionId;
     const canAdvance = () => scroller.current === viewport && following.current && !viewportInputHeld() &&
       !position.current && !document.hidden && viewport.clientHeight > 0 && currentViewportView(view) &&
-      hasTranscriptBaseline(useSessionStore.getState(), sessionId);
+      !selectionPaused(viewport) && hasTranscriptBaseline(useSessionStore.getState(), sessionId);
     if (!canAdvance()) return;
     if (!reducedMotion.current && typeof window.matchMedia === "function") {
       reducedMotion.current = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -506,7 +668,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       }
     };
     work.frame = requestAnimationFrame(advance);
-  }, [currentViewportView, viewportInputHeld]);
+  }, [currentViewportView, selectionPaused, viewportInputHeld]);
   const retireRecovery = useCallback((owner = initialPresentation.current) => {
     const recovery = owner.recovery;
     owner.recovery = undefined;
@@ -526,17 +688,18 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     following.current = true;
     setReadingBoundary(false);
     setScrolledIntoHistory(false);
+    resetPausedOutput();
     owner.timeoutHint = false;
     // Following grants visible movement; it does not manufacture the retired
     // initial operation's measurement proof or open a new preparation budget.
     publishPresentation(owner, "reading");
     followMeasuredOutput();
-  }, [cancelFollow, currentViewportView, followMeasuredOutput, publishPresentation, retirePosition, retireRecovery, retireWheel]);
+  }, [cancelFollow, currentViewportView, followMeasuredOutput, publishPresentation, resetPausedOutput, retirePosition, retireRecovery, retireWheel]);
   const consumeTimeoutRecovery = useCallback((owner = initialPresentation.current) => {
     if (owner !== initialPresentation.current || !owner.recovery?.pending || document.hidden ||
-      !scroller.current?.clientHeight || viewportInputHeld()) return;
+      !scroller.current?.clientHeight || viewportInputHeld() || selectionPaused()) return;
     resumeVisibleFollowing("accepted-output");
-  }, [resumeVisibleFollowing, viewportInputHeld]);
+  }, [resumeVisibleFollowing, selectionPaused, viewportInputHeld]);
   useLayoutEffect(() => () => retireRecovery(), [retireRecovery]);
   const failPreparation = useCallback((owner: InitialPresentation, error: string) => {
     if (owner !== initialPresentation.current ||
@@ -588,7 +751,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const viewport = scroller.current;
     const active = (owner.phase === "preparing" || owner.phase === "revealing") && view?.sessionId &&
       currentViewportView(view) && hasTranscriptBaseline(useSessionStore.getState(), view.sessionId) &&
-      viewport?.clientHeight && !document.hidden && !viewportInputHeld();
+      viewport?.clientHeight && !document.hidden && !viewportInputHeld() && !selectionPaused(viewport);
     if (!active) { pausePreparation(owner); return; }
     if (owner.since !== null) return;
     if (owner.remaining <= 0) { expirePreparation(owner); return; }
@@ -598,7 +761,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       pausePreparation(owner);
       updateBudget();
     }, owner.remaining);
-  }, [currentViewportView, expirePreparation, viewportInputHeld]);
+  }, [currentViewportView, expirePreparation, selectionPaused, viewportInputHeld]);
   const pauseFollowing = useCallback((source?: "handoff" | "details") => {
     retireRecovery();
     retireWheel();
@@ -848,9 +1011,9 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     }
     return true;
   }, [observeReleasedContactScroll]);
-  const alignTransferredRow = useCallback((element: HTMLDivElement | null) => {
+  const alignCommittedReadingRow = useCallback((element: HTMLDivElement | null) => {
     const operation = position.current;
-    if (!element || operation?.kind !== "history" || !operation.textOffset ||
+    if (!element || operation?.kind !== "history" || !operation.alignOnMount ||
       element.dataset.messageKey !== operation.key || !currentPosition(operation) ||
       document.hidden || viewportInputHeld()) return;
     const { viewport, expectedTop } = operation;
@@ -868,7 +1031,9 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   const positionMeasuredOutput = useCallback(function schedulePosition() {
     preparationBudget();
     const operation = position.current;
-    if (!operation || !currentPosition(operation) || !operation.viewport.clientHeight || document.hidden || viewportInputHeld()) return;
+    const canPosition = (operation: ViewportPosition) => currentPosition(operation) && operation.viewport.clientHeight &&
+      !document.hidden && !viewportInputHeld() && (operation.kind !== "initial" || !selectionPaused(operation.viewport));
+    if (!operation || !canPosition(operation)) return;
     // A live Footer can grow between the reveal commit and the first paint.
     // The initial operation still owns that layout and lands without animation.
     const sessionId = operation.view.sessionId;
@@ -880,7 +1045,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const frame = requestAnimationFrame(() => {
       if (operation.frame !== frame) return;
       operation.frame = null;
-      if (!currentPosition(operation) || !operation.viewport.clientHeight || document.hidden || viewportInputHeld()) return;
+      if (!canPosition(operation)) return;
       const viewport = operation.viewport;
       if (observeReleasedContactScroll(viewport, operation.view)) return;
       const rows = projectedMessages.current;
@@ -901,6 +1066,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         }
         retirePosition(operation);
         restorePhysicalReading(operation.view, viewport, Math.min(physical.top, limit));
+        measurePausedOutput();
         return;
       }
       const finish = () => {
@@ -912,6 +1078,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
           readingHandoff.current = { view: operation.view, anchor };
         }
         retirePosition(operation);
+        measurePausedOutput();
         followMeasuredOutput();
       };
       if (operation.kind === "initial") {
@@ -962,12 +1129,43 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       if (element) {
         const result = alignReadingAnchor(operation, element, writePosition);
         if (result === "superseded") return;
+        if (operation.selected && result !== "moved" && element.parentElement && virtuoso.current) {
+          const height = element.parentElement.getBoundingClientRect().height;
+          let measured = false;
+          virtuoso.current.getState(({ ranges }) => {
+            measured = ranges.some(({ startIndex, endIndex, size }) =>
+              startIndex <= index && index <= endIndex && Math.abs(size - height) <= 1);
+          });
+          // The first DOM write can precede Virtuoso's size compensation.
+          // The list's measurement notifications wake the still-owned correction.
+          if (!measured) return;
+        }
         if (result === "moved" || result === "aligned" && operation.alignedHeight !== viewport.scrollHeight) {
           // A write can change the virtual range. Confirm the same anchor
           // after measurement, and end the operation after a physical clamp.
           if (result === "aligned") operation.alignedHeight = viewport.scrollHeight;
           schedulePosition();
           return;
+        }
+        const fonts = element.ownerDocument.fonts;
+        const selected = operation.selected;
+        const restored = selected?.restored;
+        if (selected && restored && fonts?.status === "loading") {
+          const { view } = operation;
+          const settledTop = viewport.scrollTop;
+          // A font swap can move a glyph without changing the row height.
+          // Let normal positioning settle and recheck the still-owned range once.
+          void fonts.ready.then(() => {
+            if (position.current || scroller.current !== viewport || !viewport.clientHeight || !currentViewportView(view) || document.hidden ||
+              viewportInputHeld() || viewport.scrollTop !== settledTop || transcriptSelection(viewport)?.getRangeAt(0) !== restored) return;
+            if (!element.contains(restored.startContainer) || !element.contains(restored.endContainer)) return;
+            const top = Array.from(restored.getClientRects())[0]?.top;
+            if (top === undefined) return;
+            const delta = top - viewport.getBoundingClientRect().top - selected.offset;
+            if (Math.abs(delta) <= 1 || !writePosition(viewport, view, () => { viewport.scrollTop += delta; })) return;
+            if (!following.current) readingHandoff.current = { view, anchor: captureReadingAnchor(viewport) };
+            measurePausedOutput();
+          });
         }
         finish();
       } else {
@@ -992,8 +1190,8 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       }
     });
     operation.frame = frame;
-  }, [currentPosition, followMeasuredOutput, observeReleasedContactScroll, preparationBudget, publishPresentation,
-    retirePosition, restorePhysicalReading, viewportInputHeld, writePosition]);
+  }, [currentPosition, currentViewportView, followMeasuredOutput, observeReleasedContactScroll, preparationBudget, publishPresentation,
+    measurePausedOutput, retirePosition, restorePhysicalReading, selectionPaused, viewportInputHeld, writePosition]);
   const restoreReading = useCallback((view: ChatViewportView, viewport: HTMLElement) => {
     if (!currentViewportView(view) || !viewport.clientHeight || document.hidden || viewportInputHeld()) return;
     const handoff = readingHandoff.current;
@@ -1053,9 +1251,31 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     }
     positionMeasuredOutput();
     consumeTimeoutRecovery();
+    measurePausedOutput();
     followMeasuredOutput();
-  }, [consumeTimeoutRecovery, positionMeasuredOutput, followMeasuredOutput, observeUpwardScroll,
+  }, [consumeTimeoutRecovery, positionMeasuredOutput, followMeasuredOutput, measurePausedOutput, observeUpwardScroll,
     preparationBudget, restoreReading, sampleHeldContact, suspendViewportMotion]);
+  const onItemsRendered = useCallback(() => {
+    positionMeasuredOutput();
+    measurePausedOutput();
+  }, [positionMeasuredOutput, measurePausedOutput]);
+  useEffect(() => {
+    const changed = () => {
+      const viewport = scroller.current;
+      const view = currentView.current;
+      if (!viewport || !view || !currentViewportView(view)) return;
+      if (selectionPaused(viewport)) {
+        cancelFollow();
+        preparationBudget();
+      } else if (selectedViewport.current === viewport) {
+        selectedViewport.current = null;
+        if (following.current) resetPausedOutput();
+        measuredOutput();
+      }
+    };
+    document.addEventListener("selectionchange", changed);
+    return () => document.removeEventListener("selectionchange", changed);
+  }, [cancelFollow, currentViewportView, measuredOutput, preparationBudget, resetPausedOutput, selectionPaused]);
   const settleWheel = useCallback((wheel = pendingWheel.current) => {
     if (!wheel || pendingWheel.current !== wheel || wheel.event.eventPhase !== Event.NONE) return;
     retireWheel();
@@ -1263,6 +1483,8 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       if (keepReading) saveReadingHandoff(view, previous);
       else readingHandoff.current = null;
     }
+    retireSelection(previous);
+    if (previous) resetPausedOutput(!following.current);
     cancelFollow();
     retirePosition();
     retireWheel();
@@ -1297,7 +1519,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         }
       });
     }
-  }, [cancelFollow, retirePosition, retireWheel, startInitialPosition, measuredOutput, currentViewportView, rebaseContactAfterLayout,
+  }, [cancelFollow, resetPausedOutput, retirePosition, retireSelection, retireWheel, startInitialPosition, measuredOutput, currentViewportView, rebaseContactAfterLayout,
     saveReadingHandoff, restoreReading]);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderRead = useRef<ReturnType<typeof observeOlderMessages> | null>(null);
@@ -1319,29 +1541,48 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       // The old DOM can still certify movement during publication, including
       // for cards that subscribe directly to the store.
       if (view && viewport) settleContactBeforeLayout(viewport, view);
-      // Match the saved row to the preview removed by the same publication.
-      // Take its position while the live text and its viewport are still mounted.
-      if (sid && messagesChanged &&
-        !following.current && !position.current && !navigationContact.current && !document.hidden &&
-        view && currentViewportView(view) && viewport?.clientHeight && !captureReadingAnchor(viewport)) {
+      const outputChanged = sid && (messagesChanged || state.streamingText[sid] !== before.streamingText[sid] ||
+        state.streamingItems[sid] !== before.streamingItems[sid] || state.subagents[sid] !== before.subagents[sid]);
+      if (!sid || !outputChanged || !view || !viewport || !currentViewportView(view) ||
+        (following.current && !selectionPaused(viewport))) return;
+      const transfers = matchTranscriptTransfers(sid, state, before);
+      if (pausedOutput.current) recordTranscriptOutput(pausedOutput.current, sid, state, before, projectedMessages.current, transfers);
+      if (messagesChanged && !position.current && !navigationContact.current && !document.hidden && viewport.clientHeight) {
         const bounds = viewport.getBoundingClientRect();
-        const preview = [...viewport.querySelectorAll<HTMLElement>("[data-live-output]")].find((entry) => {
-          const box = entry.getBoundingClientRect();
-          return box.bottom > bounds.top && box.top < bounds.bottom;
-        });
-        if (preview) {
-          const item = preview.dataset.liveOutput;
-          const previous = item ? before.streamingItems[sid]?.[item] : before.streamingText[sid];
-          const remaining = item ? state.streamingItems[sid]?.[item] : state.streamingText[sid];
-          const saved = previous && !remaining && state.messages[sid]?.find((message) => message.role === "assistant" &&
-            message.type === "text" && message.content === previous.content && nativeItemKey(message.runtime_metadata) === (item || undefined) &&
-            !before.messages[sid]?.includes(message));
-          if (saved && preview.querySelector(".msg-streaming-text")?.textContent === previous.content) {
-            position.current = { kind: "history", view, viewport, frame: null, key: chatMessageKey(saved),
-              offset: transcriptTextTop(preview) - bounds.top, textOffset: true, physicalTop: viewport.scrollTop };
-            // The reader can be below Virtuoso's estimated range for the
-            // new row. Render back to the preview's start until it measures.
-            setTransferOverscan(Math.max(0, bounds.top - preview.getBoundingClientRect().top));
+        const oldRows = before.messages[sid];
+        const rows = state.messages[sid];
+        const readingRow = visibleReadingRow(viewport);
+        const selected = transcriptSelection(viewport);
+        // Match each actual preview to the saved row taking its place. The
+        // selected live item takes priority over other visible rows.
+        for (const preview of viewport.querySelectorAll<HTMLElement>("[data-live-output]")) {
+          const body = preview.querySelector<HTMLElement>(".msg-streaming-text");
+          if (!body) continue;
+          const selection = selected ? captureTransferredSelection(body, selected, bounds.top) : undefined;
+          const box = preview.getBoundingClientRect();
+          if (!selection && (readingRow || selected || box.bottom <= bounds.top || box.top >= bounds.bottom)) continue;
+          const transfer = transfers.get(preview.dataset.liveOutput!);
+          if (!transfer || body.textContent !== transfer.displayed) continue;
+          const saved = transfer.message;
+          const savedSelection = selection && { ...selection, projected: projectMarkdownOutput(saved.content!, {
+            ...selection.source, end: Math.min(selection.source.end, transfer.previous.length),
+          }, "selection") };
+          position.current = { kind: "history", view, viewport, frame: null, key: chatMessageKey(saved),
+            offset: transcriptTextTop(preview) - bounds.top, textOffset: true, selected: savedSelection, physicalTop: viewport.scrollTop,
+            alignOnMount: true };
+          // The reader can be below the estimated range for the new row.
+          setTransferOverscan(Math.max(0, bounds.top - box.top));
+          break;
+        }
+        // A continuous reconnect can fill a sequence gap before a mounted
+        // reader without changing the window or invoking a prepend callback.
+        if (!position.current && readingRow && oldRows && rows && state.oldestSeq[sid] === before.oldestSeq[sid]) {
+          const seq = renderedMessages.get(readingRow)?.seq;
+          const index = seq === undefined ? -1 : oldRows.findIndex((row) => row.seq === seq);
+          const nextIndex = seq === undefined ? -1 : rows.findIndex((row) => row.seq === seq);
+          if (index >= 0 && nextIndex > index) {
+            position.current = { kind: "history", view, viewport, frame: null, key: readingRow.dataset.messageKey!,
+              offset: readingRow.getBoundingClientRect().top - bounds.top, physicalTop: viewport.scrollTop, alignOnMount: true };
           }
         }
       }
@@ -1372,6 +1613,8 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       initialPresentation.current.phase !== "preparing" && initialPresentation.current.phase !== "incomplete") {
       publishPresentation(initialPresentation.current, "preparing");
     }
+    retireSelection(viewport);
+    resetPausedOutput(sameOpening && !following.current);
     currentView.current = null;
     cancelFollow(); retirePosition(); retireWheel();
     scrollNavigation.current = null;
@@ -1379,7 +1622,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     olderRead.current?.cancel(); olderRead.current = null;
     setViewportView({ sessionId: sid, account: state.accountGeneration, window: messageWindow });
   }), [activeSessionId, cancelFollow, currentViewportView, retirePosition, publishPresentation, retireRecovery, retireWheel, saveReadingHandoff,
-    settleContactBeforeLayout]);
+    resetPausedOutput, retireSelection, selectionPaused, settleContactBeforeLayout]);
   useLayoutEffect(() => {
     currentView.current = viewportView;
     cancelFollow();
@@ -1422,7 +1665,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       if (!element?.clientHeight) return;
       // The incoming page may commit before an existing scroll is reported.
       if (!settleContactBeforeLayout(element, view) && !following.current) scrollNavigation.current = null;
-      if (following.current) return;
+      if (following.current && !selectionPaused(element)) return;
       const anchor = captureReadingAnchor(element);
       retirePosition();
       const top = element.scrollTop;
@@ -1448,13 +1691,15 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         setOlderStalled(true);
       }
     });
-  }, [activeSessionId, pauseFollowing, retirePosition, currentViewportView, settleContactBeforeLayout]);
+  }, [activeSessionId, pauseFollowing, retirePosition, currentViewportView, selectionPaused, settleContactBeforeLayout]);
 
   useLayoutEffect(() => {
     committed.current = { messages, subagentSnapshots, activeRequestId, pendingQuestions };
     projectedMessages.current = chatMessages;
     positionMeasuredOutput();
-  }, [messages, subagentSnapshots, activeRequestId, pendingQuestions, chatMessages, loadingOlder, transcriptBaseline, positionMeasuredOutput]);
+    measurePausedOutput();
+  }, [messages, subagentSnapshots, activeRequestId, pendingQuestions, chatMessages, loadingOlder, transcriptBaseline,
+    positionMeasuredOutput, measurePausedOutput]);
 
   useLayoutEffect(() => {
     const request = focusReading.current;
@@ -1607,7 +1852,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         <div className="msg-row group/msg relative" data-message-key={chatMessageKey(msg)} ref={(row) => {
           if (!row) return;
           renderedMessages.set(row, msg);
-          alignTransferredRow(row);
+          alignCommittedReadingRow(row);
           if (msg === projectedMessages.current.at(-1) && position.current?.kind === "initial") positionMeasuredOutput();
         }}>
           {body}
@@ -1615,7 +1860,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         </div>
       );
     },
-    [renderMessageBody, pendingQuestions, activeSessionId, alignTransferredRow, positionMeasuredOutput]
+    [renderMessageBody, pendingQuestions, activeSessionId, alignCommittedReadingRow, positionMeasuredOutput]
   );
 
   // While a turn runs: the text the model is producing right now, or the
@@ -1650,7 +1895,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   }), [activeSessionId, isRunning, activeAgent?.name, activeAgent?.avatar, measuredOutput]);
 
   const showReadingNotice = readingBoundary || presentation.showTimeoutNotice;
-  const showJumpToLatest = showReadingNotice || scrolledIntoHistory && transcriptBaseline && !transcriptDamaged;
+  const showJumpToLatest = showReadingNotice || (scrolledIntoHistory || outputOutside) && transcriptBaseline && !transcriptDamaged;
   return <div className="contents">
       <div className={showReadingNotice ? "shrink-0 px-4 py-2 text-sm text-muted-foreground" : "relative h-0 shrink-0"}>
         <p role="status" aria-atomic="true" className={showReadingNotice ? undefined : "sr-only"}
@@ -1668,6 +1913,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         {showJumpToLatest && <Button size="sm" variant={showReadingNotice ? "ghost" : "outline"}
           className={showReadingNotice ? undefined : "absolute left-4 top-2 z-10"}
           onClick={() => {
+            retireSelection(scroller.current);
             scroller.current?.focus({ preventScroll: true });
             resumeVisibleFollowing();
           }}>Jump to latest</Button>}
@@ -1806,6 +2052,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
           if (contact.source === "touch") considerContactNavigation(contact, event.target, up);
         }}
       >
+      <HelperOutputLayout.Provider value={measurePausedOutput}>
       <Virtuoso
         // Apply the first row measurements within their layout cycle. A
         // deferred range update can otherwise move the tail after reveal.
@@ -1821,7 +2068,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         data={chatMessages}
         itemContent={renderMessage}
         computeItemKey={(_index, message) => chatMessageKey(message)}
-        itemsRendered={positionMeasuredOutput}
+        itemsRendered={onItemsRendered}
         onScrollEnd={(event) => {
           const view = currentView.current;
           if (navigationContact.current || event.currentTarget !== scroller.current || !view || !currentViewportView(view)) return;
@@ -1881,6 +2128,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         components={{ Header: olderHeader, List: ChatRows, Footer: ChatFooter }}
         context={footerContext}
       />
+      </HelperOutputLayout.Provider>
 
       {(presentation.phase === "preparing" || presentation.phase === "incomplete") && <div data-chat-initial-surface
         data-chat-preparation={!transcriptBaseline || presentation.phase === "incomplete" || undefined}

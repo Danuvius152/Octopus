@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Component, Fragment, createRef, useContext, useLayoutEffect, useMemo, useState } from "react";
 import {
   IconChevronDown,
   IconChevronRight,
@@ -10,8 +10,10 @@ import {
 } from "@tabler/icons-react";
 
 import { useSessionStore, type Message, type SubagentRun } from "../stores/sessionStore";
-import { nativeCard, nativeDetailAnchor, nativeWorkKey } from "../lib/nativeOutput";
+import { nativeAnswer, nativeCardState, nativeDetailAnchor, nativeWorkKey } from "../lib/nativeOutput";
 import { NativeSubagentDetails } from "./NativeSubagentDetails";
+import { HelperOutputLayout, collapsedHelperAnswerClass, helperAnswerCardWidthClass, legacyHelperWork } from "./chatOutputVisibility";
+import { useStreamingTextNode } from "../hooks/useStreamingTextNode";
 
 const EMPTY_MESSAGES: Message[] = [];
 
@@ -21,20 +23,64 @@ export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; c
   const snapshot = useSessionStore((s) => s.subagents[sessionId]?.[cardId]);
   // Saved facts own the collected body and its detail anchor. Live deltas
   // only compose the current preview.
-  const saved = useMemo(() => nativeCard(messages, cardId, snapshot), [messages, cardId, snapshot]);
+  const saved = useMemo(() => nativeCardState(messages, cardId, snapshot), [messages, cardId, snapshot]);
   const anchorSeq = useMemo(() => saved ? nativeDetailAnchor(messages, saved) : undefined, [messages, saved]);
-  const run = useMemo(() => {
-    if (!saved) return undefined;
-    const partials = Object.values(streaming || {}).filter((item) =>
-      saved.runtime_metadata && item.runtime_metadata.request_id === saved.runtime_metadata.request_id &&
-      item.runtime_metadata.attempt_id === saved.runtime_metadata.attempt_id &&
-      item.runtime_metadata.native?.thread_id === saved.native_thread_id &&
-      item.runtime_metadata.native?.turn_id === saved.native_turn_id);
-    return { ...saved, summary: [saved.summary, ...partials.map((item) => item.content)].filter(Boolean).join("\n\n") };
-  }, [saved, streaming]);
-  const work = run && nativeWorkKey(run.runtime_metadata, run.native_thread_id, run.native_turn_id);
+  const answer = useMemo(() => saved && nativeAnswer(saved, streaming, messages), [messages, saved, streaming]);
+  const work = saved && nativeWorkKey(saved.runtime_metadata, saved.native_thread_id, saved.native_turn_id);
   return <SubagentCard key={JSON.stringify([sessionId, work ?? cardId])}
-    sessionId={sessionId} observedRun={run} detailAnchor={anchorSeq} />;
+    sessionId={sessionId} observedRun={saved} answer={answer} detailAnchor={anchorSeq} />;
+}
+
+type HelperAnswer = ReturnType<typeof nativeAnswer>;
+
+function AnswerText({ text }: { text: string }) {
+  const ref = useStreamingTextNode(text);
+  return <span ref={ref} />;
+}
+
+interface AnswerBodyProps { answer: HelperAnswer; className: string }
+interface AnswerSelection {
+  range: Range;
+  anchor: Node;
+  anchorOffset: number;
+  focus: Node;
+  focusOffset: number;
+}
+
+class HelperAnswerBody extends Component<AnswerBodyProps, object, AnswerSelection | null> {
+  private body = createRef<HTMLParagraphElement>();
+
+  getSnapshotBeforeUpdate(): AnswerSelection | null {
+    const body = this.body.current;
+    const selection = body?.ownerDocument.getSelection();
+    if (!body || !selection || selection.isCollapsed || !selection.anchorNode || !selection.focusNode ||
+      !body.contains(selection.anchorNode) || !body.contains(selection.focusNode)) return null;
+    return { range: selection.getRangeAt(0), anchor: selection.anchorNode, anchorOffset: selection.anchorOffset,
+      focus: selection.focusNode, focusOffset: selection.focusOffset };
+  }
+
+  componentDidUpdate(_props: AnswerBodyProps, _state: object, saved: AnswerSelection | null) {
+    const body = this.body.current;
+    const selection = body?.ownerDocument.getSelection();
+    if (!saved || !body || !selection?.rangeCount || selection.getRangeAt(0) !== saved.range) return;
+    const { anchor, anchorOffset, focus, focusOffset } = saved;
+    if (selection.anchorNode === anchor && selection.anchorOffset === anchorOffset &&
+      selection.focusNode === focus && selection.focusOffset === focusOffset) return;
+    // A keyed segment can move during completion. The DOM collapses its
+    // Range in place even when the selected Text nodes themselves survive.
+    if (body.contains(anchor) && body.contains(focus) &&
+      anchorOffset <= (anchor instanceof Text ? anchor.length : anchor.childNodes.length) &&
+      focusOffset <= (focus instanceof Text ? focus.length : focus.childNodes.length)) {
+      selection.setBaseAndExtent(anchor, anchorOffset, focus, focusOffset);
+    }
+  }
+
+  render() {
+    const { answer, className } = this.props;
+    return <p ref={this.body} className={className}>{answer.parts.map((part) => <Fragment key={part.id}>
+      {part.separator}<AnswerText text={part.text} />
+    </Fragment>)}</p>;
+  }
 }
 
 const stopReasons: Record<string, string> = {
@@ -66,11 +112,13 @@ export function SubagentCard({
   sessionId,
   toolCallId,
   observedRun,
+  answer: observedAnswer,
   detailAnchor,
 }: {
   sessionId: string;
   toolCallId?: string | null;
   observedRun?: SubagentRun;
+  answer?: HelperAnswer;
   detailAnchor?: number;
 }) {
   const cached = useSessionStore((s) =>
@@ -86,6 +134,13 @@ export function SubagentCard({
   const owner = useMemo(() => ({ account, sessionId, toolCallId, work, reference }), [account, sessionId, toolCallId, work, reference]);
   const [openOwner, setOpenOwner] = useState<object | null>(null);
   const open = openOwner === owner;
+  const onOutputLayout = useContext(HelperOutputLayout);
+  const answer = useMemo(() => observedAnswer ?? (run && nativeAnswer(run, undefined)), [observedAnswer, run]);
+  const answerText = answer?.text;
+  const outputWork = work ?? legacyHelperWork(toolCallId);
+  useLayoutEffect(() => {
+    if (outputWork && answerText) onOutputLayout?.();
+  }, [onOutputLayout, outputWork, answerText, open]);
   if (!run) return null;
 
   const running = run.status === "running";
@@ -102,7 +157,8 @@ export function SubagentCard({
 
   return (
     <div
-      className={`subagent-card subagent-${run.status} rounded-lg border-[0.7px] px-3 py-2 ${
+      data-helper-work={outputWork}
+      className={`subagent-card subagent-${run.status} rounded-lg ${helperAnswerCardWidthClass} py-2 ${
         failed
           ? "border-destructive/40 bg-destructive/5"
           : running
@@ -163,10 +219,8 @@ export function SubagentCard({
       {/* The answer it gave, always in reach — one line closed, whole when
         * opened. While it's still working there is no answer yet, so the
         * closed card shows the step it's on (above) and nothing else. */}
-      {!open && run.summary && (
-        <p className="subagent-summary mt-1.5 line-clamp-2 text-[12px] text-gray-800">
-          {run.summary}
-        </p>
+      {!open && answer?.text && (
+        <HelperAnswerBody answer={answer} className={collapsedHelperAnswerClass} />
       )}
       {run.display_truncated && <p className="text-xs text-muted-foreground">
         Live helper preview truncated. Only collected items have saved details.
@@ -174,12 +228,10 @@ export function SubagentCard({
 
       {open && (
         <div className="subagent-detail mt-2 space-y-2 border-t border-gray-300 pt-2">
-          {run.summary && (
+          {answer?.text && (
             <div>
               <Label>answer</Label>
-              <p className="subagent-summary mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-gray-900">
-                {run.summary}
-              </p>
+              <HelperAnswerBody answer={answer} className="subagent-summary mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-gray-900" />
             </div>
           )}
 

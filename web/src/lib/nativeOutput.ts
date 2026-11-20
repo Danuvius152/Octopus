@@ -1,5 +1,5 @@
 import type { RuntimeMetadata, SubagentRun } from "../api";
-import type { Message } from "../stores/sessionStore";
+import type { Message, StreamingItem } from "../stores/sessionStore";
 import { readRuntimeMetadata } from "./toolIdentity";
 
 export function nativeItemKey(value: unknown): string | undefined {
@@ -31,6 +31,7 @@ const OBSERVED_CARD_PREFIX = "observed:";
 interface NativeHistory {
   statuses: Map<unknown, Message[]>;
   work: Map<string, Message[]>;
+  answers: Map<string, Message[]>;
 }
 
 // The store replaces a saved window on append, prepend or refresh. Cards share
@@ -46,16 +47,57 @@ function groupRow<Key>(groups: Map<Key, Message[]>, key: Key, message: Message) 
 function nativeHistory(messages: Message[]): NativeHistory {
   const indexed = nativeHistories.get(messages);
   if (indexed) return indexed;
-  const history: NativeHistory = { statuses: new Map(), work: new Map() };
+  const history: NativeHistory = { statuses: new Map(), work: new Map(), answers: new Map() };
   for (const message of messages) {
     if (message.type === "native_subagent") groupRow(history.statuses, message.tool_input?.card_id, message);
     const identity = message.runtime_metadata;
     if (identity && (isNativeChild(identity) || (message.type === "text" && message.role === "assistant"))) {
-      groupRow(history.work, workKey(identity, identity.native?.thread_id, identity.native?.turn_id), message);
+      const key = workKey(identity, identity.native?.thread_id, identity.native?.turn_id);
+      groupRow(history.work, key, message);
+      if (message.type === "text" && message.role === "assistant") groupRow(history.answers, key, message);
     }
   }
   nativeHistories.set(messages, history);
   return history;
+}
+
+function nativeAnswerRows(messages: Message[], run: SubagentRun): Message[] | undefined {
+  const identity = run.runtime_metadata;
+  return identity ? nativeHistory(messages).answers.get(workKey(identity, run.native_thread_id, run.native_turn_id)) : undefined;
+}
+
+type NativeAnswerPart = { text: string } & (
+  { source: "saved"; message: Message } | { source: "preview"; key: string } | { source: "summary" }
+);
+
+const NATIVE_ANSWER_SEPARATOR = "\n\n";
+
+export function nativeAnswer(run: SubagentRun, items: Record<string, StreamingItem> | undefined, messages?: Message[]) {
+  const collected = messages && nativeAnswerRows(messages, run);
+  const parts: NativeAnswerPart[] = collected && (collected.length > 1 || collected[0]?.content)
+    ? collected.map((message) => ({ source: "saved", message, text: message.content ?? "" }))
+    : run.summary ? [{ source: "summary", text: run.summary }] : [];
+  const owner = nativeWorkKey(run.runtime_metadata, run.native_thread_id, run.native_turn_id);
+  if (owner) for (const [key, item] of Object.entries(items ?? {})) {
+    const metadata = item.runtime_metadata;
+    if (item.content && owner === nativeWorkKey(metadata, metadata.native?.thread_id, metadata.native?.turn_id)) {
+      parts.push({ source: "preview", key, text: item.content });
+    }
+  }
+  let offset = 0;
+  const occurrences = new Map<string, number>();
+  const positioned = parts.map((part, index) => {
+    const separator = index ? NATIVE_ANSWER_SEPARATOR : "";
+    offset += separator.length;
+    const start = offset;
+    offset += part.text.length;
+    const item = part.source === "preview" ? part.key : part.source === "saved" ? nativeItemKey(part.message.runtime_metadata) : undefined;
+    const identity = item ? `item:${item}` : part.source === "saved" ? `saved:${part.message.seq}` : "summary";
+    const occurrence = occurrences.get(identity) ?? 0;
+    occurrences.set(identity, occurrence + 1);
+    return { ...part, start, separator, id: JSON.stringify([identity, occurrence]) };
+  });
+  return { text: positioned.map((part) => part.separator + part.text).join(""), parts: positioned };
 }
 
 /** Only real persisted seqs may identify a detail read, never snapshot ids. */
@@ -133,7 +175,7 @@ export function nativeChatMessages(messages: Message[], snapshots: SubagentRun[]
 }
 
 /** Rebuild a card from collected rows; no separate persistent body or ledger. */
-export function nativeCard(messages: Message[], cardId: string, cached?: SubagentRun): SubagentRun | undefined {
+export function nativeCardState(messages: Message[], cardId: string, cached?: SubagentRun): SubagentRun | undefined {
   const history = nativeHistory(messages);
   let card: SubagentRun | undefined;
   let identity: RuntimeMetadata | undefined;
@@ -161,8 +203,5 @@ export function nativeCard(messages: Message[], cardId: string, cached?: Subagen
     }
   }
   if (!card) return undefined;
-  const body = identity && history.work.get(workKey(identity, card.native_thread_id, card.native_turn_id));
-  card.summary = body?.filter((message) => message.type === "text" && message.role === "assistant")
-    .map((message) => message.content || "").join("\n\n") || card.summary;
   return { ...card, runtime_metadata: identity };
 }

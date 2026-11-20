@@ -102,6 +102,7 @@ async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [],
   }));
   let snapshot = { messages, next_message_seq: count ? count + 1 : 0, oldest_loaded_seq: count ? 1 : null, has_more_messages: false };
   const pages: Route[] = [];
+  const submissions: Array<{ content: string; client_request_id: string }> = [];
   let socket!: WebSocketRoute;
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -125,7 +126,13 @@ async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [],
     };
     await route.fulfill({ json: data });
   });
-  await page.routeWebSocket("**/ws?*", (ws) => { socket = ws; });
+  await page.routeWebSocket("**/ws?*", (ws) => {
+    socket = ws;
+    ws.onMessage((payload) => {
+      const message = JSON.parse(String(payload));
+      if (message.type === "send_message") submissions.push(message);
+    });
+  });
   await page.goto("/");
   await enterAccountCredentials(page);
   await page.locator(".agent-item", { hasText: "Octo" }).click();
@@ -147,11 +154,12 @@ async function openChat(page: Page, count = 40, pending: PendingQuestion[] = [],
     snapshot = next;
     socket.close({ code: 1012, reason: "Read a replacement transcript window" });
   };
-  return { scroller, gap, send, settle, output, session, pages, replaceOnReconnect };
+  return { scroller, gap, send, settle, output, session, pages, replaceOnReconnect, submissions };
 }
 
 for (const native of [false, true]) {
-  test(`saving a live reply preserves the paragraph already in view (${native ? "native item" : "root text"})`, async ({ page }, info) => {
+for (const selected of [false, true]) {
+  test(`saving a live reply preserves the ${selected ? "selected" : "reading"} paragraph (${native ? "native item" : "root text"})`, async ({ page }, info) => {
     const { scroller, gap, send, settle } = await openChat(page);
     const content = Array.from({ length: 150 }, (_, index) =>
       `Section ${index + 100} contains part of the same reply, with enough words to wrap across the viewport.`).join(" ");
@@ -159,12 +167,17 @@ for (const native of [false, true]) {
     send({ type: "assistant_delta", content, ...runtime });
     await expect(scroller.getByTestId("streaming-text")).toContainText("Section 249");
     await expect.poll(gap).toBeLessThanOrEqual(2);
-    await scroller.hover();
-    await page.mouse.wheel(0, -1120);
-    await expect.poll(gap).toBeGreaterThan(900);
-    await settle();
+    if (!selected) {
+      await scroller.hover();
+      await page.mouse.wheel(0, -1120);
+      await expect.poll(gap).toBeGreaterThan(900);
+      await settle();
+    }
     await capturePaint(page, info, async (paintFrames) => {
-      const reading = await scroller.evaluateHandle((viewport) => {
+      const reading = await scroller.evaluateHandle((viewport, selected) => {
+        // Move inside the same tall live reply without creating an upward
+        // input. This isolates the selection pause from history intent.
+        if (selected) viewport.scrollTop -= 1120;
         const bounds = viewport.getBoundingClientRect();
         const live = viewport.querySelector(".msg-streaming-text")?.firstChild;
         if (!live?.textContent) throw new Error("Live reply was not mounted");
@@ -177,6 +190,11 @@ for (const native of [false, true]) {
           return rect.top > bounds.top + 100 && rect.bottom < bounds.bottom - 100;
         });
         if (!marker) throw new Error("No live text at the current reading position");
+        if (selected) {
+          const selection = window.getSelection()!;
+          selection.removeAllRanges();
+          selection.addRange(range.cloneRange());
+        }
         const paragraph = range.getBoundingClientRect();
         const offset = paragraph.top - bounds.top;
         const getOffset = (node: Node | null | undefined) => {
@@ -197,8 +215,9 @@ for (const native of [false, true]) {
           cancelAnimationFrame(frame);
           return samples;
         } };
-      });
+      }, selected);
       await settle();
+      if (selected) await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
       const savingAt = await page.evaluate(() => performance.timeOrigin + performance.now());
       let evidence;
       try {
@@ -206,16 +225,24 @@ for (const native of [false, true]) {
         await expect(scroller.getByTestId("streaming-text")).toHaveCount(0);
         await expect.poll(() => reading.evaluate((frame) => Math.abs(frame.currentOffset() ?? Infinity))).toBeLessThanOrEqual(2);
         await expect.poll(gap).toBeGreaterThan(900);
+        if (selected) await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toMatch(/^Section \d{3}$/);
         await settle();
       } finally {
         evidence = await reading.evaluate((frame) => ({ samples: frame.stop(), paragraph: frame.paragraph }));
         await reading.dispose();
         await info.attach("live-transfer-offsets", { body: JSON.stringify({ ...evidence, savingAt, paintFrames }), contentType: "application/json" });
       }
-      expect(evidence.samples.filter(({ delta }) => delta === null || Math.abs(delta) > 2),
+      if (selected) expect(Math.abs(evidence.samples.find((sample) => sample.saved)?.delta ?? Infinity),
+        "the saved text first appears at the selected paragraph").toBeLessThanOrEqual(2);
+      else expect(evidence.samples.filter(({ delta }) => delta === null || Math.abs(delta) > 2),
         "the same paragraph stays in view through the transfer").toEqual([]);
     });
+    if (selected) {
+      await page.evaluate(() => window.getSelection()?.removeAllRanges());
+      await expect.poll(gap).toBeLessThanOrEqual(2);
+    }
   });
+}
 }
 
 for (const count of [0, 40]) {
@@ -593,6 +620,801 @@ test("a late downward scroll after expansion cannot restore follow intent", asyn
   await settle();
   expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - reading)).toBeLessThanOrEqual(2);
 });
+
+for (const release of ["clear selection", "click return"] as const) {
+test(`a reply selection keeps the current paragraph visible until ${release}`, async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page);
+  const paragraph = scroller.getByText("Saved row 40", { exact: true });
+  await expect(paragraph).toBeInViewport({ ratio: 1 });
+  const selected = await paragraph.evaluate((element) => {
+    const selection = window.getSelection()!;
+    selection.selectAllChildren(element);
+    return selection.toString();
+  });
+  expect(selected).toBe("Saved row 40");
+  const movement = await trackTop(paragraph);
+  const viewport = await scroller.boundingBox();
+  send({ type: "assistant_delta", content: "An additional line of output.\n".repeat(24) + "Static Footer final marker" });
+  await expect(scroller.getByTestId("streaming-text")).toContainText("Static Footer final marker");
+  await settle();
+  await expect(paragraph).toBeInViewport({ ratio: 1 });
+  expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+  await movement.dispose();
+  expect(await gap()).toBeGreaterThan(150);
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toBeVisible();
+  expect(await scroller.boundingBox()).toEqual(viewport);
+
+  if (release === "clear selection") await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  else {
+    await jump.click();
+    await expect(scroller).toBeFocused();
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("");
+  }
+  await expectFooterMarkerInViewport(scroller);
+  await expect(jump).toHaveCount(0);
+});
+}
+
+test("clearing selected text uses the current navigation intent", async ({ page }) => {
+  const { scroller, gap, send, settle, output } = await openChat(page);
+  const paragraph = scroller.getByText("Saved row 40", { exact: true });
+  const select = () => paragraph.evaluate((element) => window.getSelection()!.selectAllChildren(element));
+  const selection = () => page.evaluate(() => window.getSelection()?.toString());
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await select();
+  await scroller.hover();
+  await page.mouse.wheel(0, -240);
+  await expect(jump).toBeVisible();
+  expect(await selection()).toBe("Saved row 40");
+  const reader = scroller.getByText("Saved row 34", { exact: true });
+  await expect(reader).toBeInViewport({ ratio: 1 });
+  const movement = await trackTop(reader);
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  send({ type: "assistant_delta", content: output("After clearing while reading") });
+  await expect(scroller.getByTestId("streaming-text")).toContainText("After clearing while reading line 12");
+  await settle();
+  expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+  await movement.dispose();
+
+  await scroller.hover();
+  await page.mouse.wheel(0, 10000);
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  const tail = scroller.locator(".msg-streaming-text");
+  await tail.evaluate((element) => window.getSelection()!.selectAllChildren(element));
+  await page.mouse.wheel(0, 200);
+  await expect.poll(selection).toContain("After clearing while reading");
+  const tailTop = (await tail.boundingBox())!.y;
+  send({ type: "assistant_delta", content: output("After navigating with a selection") + "Static Footer final marker" });
+  await expect(jump).toBeVisible();
+  expect(Math.abs((await tail.boundingBox())!.y - tailTop)).toBeLessThanOrEqual(2);
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  await expectFooterMarkerInViewport(scroller);
+});
+
+test("appending to a live reply preserves the selected text offsets", async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page);
+  send({ type: "assistant_delta", content: "Read these words while the reply continues." });
+  const live = scroller.locator(".msg-streaming-text");
+  await expect(live).toBeInViewport({ ratio: 1 });
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  const selected = await live.evaluate((body) => {
+    const range = document.createRange();
+    range.setStart(body.firstChild!, 5);
+    range.setEnd(body.firstChild!, 16);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return selection.toString();
+  });
+  expect(selected).toBe("these words");
+  const movement = await trackTop(live);
+  send({ type: "assistant_delta", content: "\nMore of the same reply.\n".repeat(24) + "Static Footer final marker" });
+  await expect(live).toContainText("Static Footer final marker");
+  await settle();
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(selected);
+  expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+  await movement.dispose();
+});
+
+test("saving the second native preview keeps its selection alongside existing history", async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page);
+  const first = identity("root", "first-preview");
+  const second = identity("root", "second-preview");
+  send({ type: "assistant_delta", content: "First native preview", runtime_metadata: first });
+  send({ type: "assistant_delta", content: "The second native preview", runtime_metadata: second });
+  const live = scroller.locator(".msg-streaming-text").filter({ hasText: "The second native preview" });
+  await expect(live).toBeInViewport({ ratio: 1 });
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await expect(scroller.getByText("Saved row 40", { exact: true })).toBeInViewport();
+  const offset = await live.evaluate((body) => {
+    const range = document.createRange();
+    range.setStart(body.firstChild!, 4);
+    range.setEnd(body.firstChild!, 17);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return range.getBoundingClientRect().top;
+  });
+  send({ type: "assistant_text", seq: 41, content: "The second native preview", runtime_metadata: second });
+  await expect(scroller.getByText("The second native preview", { exact: true })).toBeInViewport();
+  await expect(live).toHaveCount(0);
+  await settle();
+  const saved = await page.evaluate(() => {
+    const selection = window.getSelection()!;
+    return { text: selection.toString(), top: selection.rangeCount ? selection.getRangeAt(0).getBoundingClientRect().top : 0 };
+  });
+  expect(saved.text).toBe("second native");
+  expect(Math.abs(saved.top - offset)).toBeLessThanOrEqual(2);
+});
+
+test("saving Markdown keeps the selected occurrence after a link destination disappears", async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page);
+  const source = "[link](https://example.invalid/token)\n\nFirst token to read.\n\nSecond token to read.";
+  send({ type: "assistant_delta", content: source });
+  send({ type: "assistant_delta", content: "Following native output\n".repeat(10), runtime_metadata: identity("root", "following-item") });
+  const live = scroller.locator(".msg-streaming-text").filter({ hasText: "First token to read." });
+  await expect(live).toBeInViewport();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  const original = await live.evaluate((body) => {
+    const text = body.firstChild!;
+    const index = text.textContent!.indexOf("First token") + "First ".length;
+    const range = document.createRange();
+    range.setStart(text, index);
+    range.setEnd(text, index + "token".length);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const viewport = body.closest<HTMLElement>(".chat-messages")!;
+    viewport.scrollTop -= 64;
+    return { top: range.getBoundingClientRect().top, scrollTop: viewport.scrollTop, maximum: viewport.scrollHeight - viewport.clientHeight };
+  });
+  send({ type: "assistant_text", seq: 41, content: source });
+  await expect(scroller.getByText("First token to read.", { exact: true })).toBeInViewport();
+  await settle();
+  const saved = await page.evaluate(() => {
+    const selection = window.getSelection()!;
+    const viewport = document.querySelector<HTMLElement>(".chat-messages")!;
+    return { text: selection.toString(), paragraph: selection.anchorNode?.parentElement?.closest("p")?.textContent,
+      top: selection.rangeCount ? selection.getRangeAt(0).getBoundingClientRect().top : 0,
+      scrollTop: viewport.scrollTop, maximum: viewport.scrollHeight - viewport.clientHeight };
+  });
+  expect(saved.text).toBe("token");
+  expect(saved.paragraph).toBe("First token to read.");
+  expect(Math.abs(saved.top - original.top), JSON.stringify({ original, saved })).toBeLessThanOrEqual(2);
+});
+
+async function selectLiveWords(body: Locator, pattern: RegExp) {
+  return body.evaluate((element, source) => {
+    const viewport = element.closest<HTMLElement>(".chat-messages")!;
+    const bounds = viewport.getBoundingClientRect();
+    const range = document.createRange();
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+      for (const match of text.textContent!.matchAll(new RegExp(source, "g"))) {
+        range.setStart(text, match.index!);
+        range.setEnd(text, match.index! + match[0].length);
+        const line = range.getBoundingClientRect();
+        if (line.top < bounds.top + 20 || line.bottom > bounds.bottom - 20) continue;
+        const selection = window.getSelection()!;
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return { text: match[0], top: line.top };
+      }
+    }
+    throw new Error("No selectable words in the scrollport");
+  }, pattern.source);
+}
+
+function textInScrollport(body: Locator, phrase: string) {
+  return body.evaluate((element, phrase) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    const bounds = element.closest(".chat-messages")!.getBoundingClientRect();
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const index = node.textContent!.indexOf(phrase);
+      if (index < 0) continue;
+      const range = document.createRange();
+      range.setStart(node, index);
+      range.setEnd(node, index + phrase.length);
+      const line = range.getBoundingClientRect();
+      if (line.height > 0 && line.top >= bounds.top && line.bottom <= bounds.bottom + 1) return true;
+    }
+    return false;
+  }, phrase);
+}
+
+for (const format of ["quote", "fenced code", "task list"] as const) {
+test(`saving a multi-line ${format} preserves the selected word and exposes new lines beyond the viewport`, async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page);
+  const line = format === "quote" ? "> " : format === "task list" ? "  " : "";
+  const opening = format === "quote" ? "> " : format === "task list" ? "- [x] " : "```text\n";
+  const preview = opening + "Opening line\n" + line + "Read this token here\n" + line + "Last seen line";
+  send({ type: "assistant_delta", content: preview });
+  send({ type: "assistant_delta", content: "Following native output\n".repeat(12), runtime_metadata: identity("root", "following-format-item") });
+  const live = scroller.locator(".msg-streaming-text").filter({ hasText: "Read this token here" });
+  await expect(live).toBeInViewport();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  const original = await selectLiveWords(live, /this token/);
+  const addition = ("\n" + line + "New content outside the current reading viewport.").repeat(45) + "\n" + line + "Last new line";
+  send({ type: "assistant_text", seq: 41, content: preview + addition + (format === "fenced code" ? "\n```" : "") });
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  const saved = scroller.locator('[data-message-key="message:41"] .msg-content');
+  await expect(live).toHaveCount(0);
+  await expect(jump).toBeVisible();
+  await settle();
+  const selection = await page.evaluate(() => {
+    const selection = window.getSelection()!;
+    return { text: selection.toString(), top: selection.rangeCount ? selection.getRangeAt(0).getBoundingClientRect().top : 0 };
+  });
+  expect(selection.text).toBe(original.text);
+  expect(Math.abs(selection.top - original.top)).toBeLessThanOrEqual(2);
+  expect(await textInScrollport(saved, "Last new line")).toBe(false);
+  await jump.click();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await expect.poll(() => textInScrollport(saved, "Last new line")).toBe(true);
+});
+}
+
+for (const { expression, word, fraction } of [
+  ...["x+y", "a^2+x", "x+\\alpha", "\\alpha+x+\\beta"].map((expression) => ({ expression, word: /x(?=[+$])/, fraction: undefined })),
+  { expression: "x/y", word: /x\/y/, fraction: undefined },
+  { expression: "x/y", word: /\//, fraction: undefined },
+  { expression: String.raw`x/y+\alpha`, word: /x\/y/, fraction: undefined },
+  { expression: "(x+y)", word: /\(x\+y\)/, fraction: undefined },
+  { expression: "α+β", word: /α/, fraction: undefined },
+  { expression: String.raw`\alpha+x`, word: /\+/, fraction: undefined },
+  { expression: String.raw`\alpha=x`, word: /=/, fraction: undefined },
+  { expression: String.raw`\frac{x}{x}`, word: /x(?=\}\{)/, fraction: "numerator" },
+  { expression: String.raw`\frac{x}{x}`, word: /x(?=\}\$)/, fraction: "denominator" },
+]) {
+test(`saving a formula keeps the selected literal characters and their offset: ${expression} ${fraction ?? word.source}`, async ({ page }) => {
+  let releaseFonts!: () => void;
+  const fontsMayFinish = new Promise<void>((resolve) => { releaseFonts = resolve; });
+  await page.route(/KaTeX_.*\.woff2$/, async (route) => {
+    await fontsMayFinish;
+    await route.continue();
+  });
+  const { scroller, gap, send, settle } = await openChat(page);
+  const source = `Keep $${expression}$ beside the original line`;
+  send({ type: "assistant_delta", content: source });
+  send({ type: "assistant_delta", content: "Following native output\n".repeat(12), runtime_metadata: identity("root", "following-math-item") });
+  const live = scroller.locator(".msg-streaming-text").filter({ hasText: "beside the original line" });
+  await expect(live).toBeInViewport();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  const original = await selectLiveWords(live, word);
+  // Leave room for the alignment while the reader holds the selection.
+  send({ type: "assistant_delta", content: "More following native output\n".repeat(4),
+    runtime_metadata: identity("root", "following-math-item") });
+  await expect.poll(gap).toBeGreaterThan(12);
+  send({ type: "assistant_text", seq: 41, content: source });
+  await expect(live).toHaveCount(0);
+  await expect(scroller.locator(".katex-html")).toBeInViewport();
+  await settle();
+  releaseFonts();
+  await page.evaluate(async () => { await document.fonts.ready; });
+  await settle();
+  const saved = await scroller.evaluate((viewport) => {
+    const selection = window.getSelection()!;
+    const first = selection.rangeCount ? selection.getRangeAt(0).getClientRects()[0] : undefined;
+    return { text: selection.toString(), top: first?.top,
+      scrollTop: viewport.scrollTop, maximum: viewport.scrollHeight - viewport.clientHeight };
+  });
+  expect(saved.text).toBe(original.text);
+  expect(saved.top).toBeDefined();
+  if (fraction) {
+    const glyphs = await scroller.locator(".katex-html").evaluate((element) => {
+      const range = document.createRange();
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      const tops = [];
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.textContent === "x") {
+          range.selectNodeContents(node);
+          tops.push(range.getBoundingClientRect().top);
+        }
+      }
+      return tops.sort((a, b) => a - b);
+    });
+    expect(glyphs).toHaveLength(2);
+    expect(glyphs[1] - glyphs[0]).toBeGreaterThan(8);
+    expect(saved.top).toBe(glyphs[fraction === "numerator" ? 0 : 1]);
+  }
+  expect(Math.abs(saved.top! - original.top), JSON.stringify({ original, saved })).toBeLessThanOrEqual(2);
+});
+}
+
+test("a later reply offers return while the selected formula is waiting for fonts", async ({ page }) => {
+  let releaseFonts!: () => void;
+  const fontsMayFinish = new Promise<void>((resolve) => { releaseFonts = resolve; });
+  await page.route(/KaTeX_.*\.woff2$/, async (route) => {
+    await fontsMayFinish;
+    await route.continue();
+  });
+  const { scroller, gap, send, settle } = await openChat(page);
+  const source = "Keep $x+y$ beside the original line";
+  const following = identity("root", "following-math-item");
+  send({ type: "assistant_delta", content: source });
+  send({ type: "assistant_delta", content: "Following native output\n".repeat(12), runtime_metadata: following });
+  const live = scroller.locator(".msg-streaming-text").filter({ hasText: "beside the original line" });
+  await expect(live).toBeInViewport();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await selectLiveWords(live, /x(?=\+y)/);
+  send({ type: "assistant_text", seq: 41, content: source });
+  await expect(live).toHaveCount(0);
+  await expect(scroller.locator(".katex-html")).toBeInViewport();
+  await expect.poll(() => page.evaluate(() => document.fonts.status)).toBe("loading");
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe("x");
+  await settle();
+  const latest = "New reply while math fonts load";
+  send({ type: "assistant_delta", content: "\n".repeat(4) + latest, runtime_metadata: following });
+  const tail = scroller.locator(".msg-streaming-text").filter({ hasText: latest });
+  await expect(tail).toHaveCount(1);
+  await expect.poll(() => textInScrollport(tail, latest)).toBe(false);
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expect.poll(() => textInScrollport(tail, latest)).toBe(true);
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  releaseFonts();
+  await page.evaluate(async () => { await document.fonts.ready; });
+  await settle();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await expect.poll(() => textInScrollport(tail, latest)).toBe(true);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("");
+});
+
+test("saving a capped native preview preserves its selected prefix and offers return for the unseen tail", async ({ page }) => {
+  const { scroller, gap, send } = await openChat(page);
+  const runtime_metadata = identity("root", "capped-root");
+  const content = Array.from({ length: 240 }, (_, index) =>
+    `Block ${String(index).padStart(3, "0")} holds a unique marker and enough words to reach the preview limit.`).join("\n\n");
+  send({ type: "assistant_delta", content, runtime_metadata });
+  const live = scroller.locator(".msg-streaming-text");
+  await expect(live).toHaveText(/…$/);
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  const selected = await selectLiveWords(live, /Block \d{3}/);
+  send({ type: "assistant_text", seq: 41, content, runtime_metadata });
+  await expect(live).toHaveCount(0);
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe(selected.text);
+  await jump.click();
+  await expect(scroller.getByText(/Block 239 holds/)).toBeInViewport();
+});
+
+test("footer spacing and saving an already seen live reply do not offer a return", async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page, 4);
+  const paragraph = scroller.getByText("Saved row 4", { exact: true });
+  await paragraph.evaluate((element) => window.getSelection()!.selectAllChildren(element));
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  const live = scroller.locator(".msg-streaming-text");
+  send({ type: "assistant_delta", content: "Short readable reply" });
+  await expect(live).toBeInViewport({ ratio: 1 });
+  const view = page.viewportSize()!;
+  const slack = await live.evaluate((body) => {
+    return body.closest(".chat-messages")!.getBoundingClientRect().bottom - body.getBoundingClientRect().bottom;
+  });
+  expect(slack).toBeGreaterThan(20);
+  await page.setViewportSize({ width: view.width, height: view.height - Math.floor(slack) + 2 });
+  await expect.poll(gap).toBeGreaterThan(2);
+  send({ type: "assistant_delta", content: "!" });
+  await expect(live).toHaveText("Short readable reply!");
+  await expect(live).toBeInViewport({ ratio: 1 });
+  await settle();
+  await expect(jump).toHaveCount(0);
+
+  // Moving the scrollport edge by resize is a layout change. Saving the
+  // text now outside it must not recreate an output notification.
+  await page.setViewportSize({ width: view.width, height: view.height - Math.floor(slack) - 28 });
+  await expect(live).not.toBeInViewport();
+  for (let repeat = 0; repeat < 2; repeat++) send({ type: "assistant_text", seq: 5, content: "Short readable reply!" });
+  await expect(scroller.getByText("Short readable reply!", { exact: true })).toHaveCount(1);
+  await settle();
+  await expect(jump).toHaveCount(0);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Saved row 4");
+});
+
+test("Markdown completion only measures the visible added source span", async ({ page }) => {
+  await page.setViewportSize({ width: 1150, height: 450 });
+  const { scroller, gap, send, settle } = await openChat(page);
+  const preview = "**Previously read formatting** " + "Words that already belong to this reply. ".repeat(38) + "\n\nTail";
+  send({ type: "assistant_delta", content: preview });
+  await expect(scroller.locator(".msg-streaming-text")).toContainText("Tail");
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  const history = scroller.getByText("Saved row 40", { exact: true });
+  await history.evaluate((body) => window.getSelection()!.selectAllChildren(body));
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
+
+  send({ type: "assistant_text", seq: 41, content: preview + " has a readable addition." });
+  await expect(scroller.getByText("Tail has a readable addition.", { exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(scroller.getByText("Previously read formatting", { exact: true })).not.toBeInViewport();
+  await settle();
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Saved row 40");
+  await expect(jump).toHaveCount(0);
+});
+
+test("decoded Markdown entities in offscreen added text offer a return", async ({ page }) => {
+  const { scroller, send } = await openChat(page);
+  const paragraph = scroller.getByText("Saved row 40", { exact: true });
+  await paragraph.evaluate((body) => window.getSelection()!.selectAllChildren(body));
+  send({ type: "assistant_delta", content: "Old &amp;" });
+  await expect(scroller.locator(".msg-streaming-text")).toHaveText("Old &amp;");
+  send({ type: "assistant_text", seq: 41, content: "Old &amp;" + " &copy;".repeat(1_000) + " &reg;" });
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expect.poll(() => scroller.locator('[data-message-key="message:41"] .msg-content p').evaluate((body) => {
+    const text = body.firstChild!;
+    const range = document.createRange();
+    range.setStart(text, text.textContent!.lastIndexOf("®"));
+    range.setEnd(text, text.textContent!.length);
+    return range.getBoundingClientRect().bottom <= body.closest(".chat-messages")!.getBoundingClientRect().bottom;
+  })).toBe(true);
+});
+
+for (const outside of [false, true]) {
+test(`a saved inline formula ${outside ? "beyond" : "inside"} the viewport ${outside ? "offers" : "omits"} the return`, async ({ page }) => {
+  const { scroller, send, settle } = await openChat(page, 4);
+  const old = "Text that has already been read";
+  await scroller.getByText("Saved row 4", { exact: true }).evaluate((body) => window.getSelection()!.selectAllChildren(body));
+  send({ type: "assistant_delta", content: old });
+  const live = scroller.locator(".msg-streaming-text");
+  await expect(live).toHaveText(old);
+  await expect(live).toBeInViewport({ ratio: 1 });
+  await settle();
+  if (outside) {
+    const view = page.viewportSize()!;
+    const slack = await live.evaluate((body) => body.closest(".chat-messages")!.getBoundingClientRect().bottom - body.getBoundingClientRect().top);
+    await page.setViewportSize({ width: view.width, height: view.height - Math.floor(slack) - 8 });
+    await expect(live).not.toBeInViewport();
+  }
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
+  send({ type: "assistant_text", seq: 5, content: old + " $x + y = 42$" });
+  const formula = scroller.locator(".katex-html");
+  await expect(formula).toHaveCount(1);
+  if (outside) {
+    await expect(formula).not.toBeInViewport();
+    await expect(jump).toBeVisible();
+    await jump.click();
+  }
+  await expect(formula).toBeInViewport({ ratio: 1 });
+  await expect(jump).toHaveCount(0);
+});
+}
+
+for (const graphic of [false, true]) {
+test(`offscreen ${graphic ? "painted math rule offers" : "transparent math spacer omits"} the return`, async ({ page }) => {
+  const { scroller, send, settle } = await openChat(page, 4);
+  const old = "Text that has already been read";
+  await scroller.getByText("Saved row 4", { exact: true }).evaluate((body) => window.getSelection()!.selectAllChildren(body));
+  send({ type: "assistant_delta", content: old });
+  const live = scroller.locator(".msg-streaming-text");
+  await expect(live).toHaveText(old);
+  await expect(live).toBeInViewport({ ratio: 1 });
+  await settle();
+  const view = page.viewportSize()!;
+  const slack = await live.evaluate((body) => body.closest(".chat-messages")!.getBoundingClientRect().bottom - body.getBoundingClientRect().top);
+  await page.setViewportSize({ width: view.width, height: view.height - Math.floor(slack) - 8 });
+  await expect(live).not.toBeInViewport();
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
+  send({ type: "assistant_text", seq: 5, content: old + (graphic ? " $\\rule{25mm}{2mm}$" : " $\\phantom{hidden}$") });
+  const formula = scroller.locator(".katex-html");
+  await expect(formula).toHaveCount(1);
+  await expect(formula).not.toBeInViewport();
+  await settle();
+  if (graphic) {
+    const stroke = formula.locator(".katex-rule");
+    expect(await stroke.evaluate((element) => Number.parseFloat(getComputedStyle(element).borderTopWidth))).toBeGreaterThan(0);
+    await expect(jump).toBeVisible();
+    await jump.click();
+    await expect(stroke).toBeInViewport({ ratio: 1 });
+  } else {
+    const colors = await formula.evaluate((element) => [...element.querySelectorAll<HTMLElement>("span")]
+      .filter((child) => child.firstChild instanceof Text && child.textContent?.trim()).map((child) => getComputedStyle(child).color));
+    expect(colors.length).toBeGreaterThan(0);
+    expect(new Set(colors)).toEqual(new Set(["rgba(0, 0, 0, 0)"]));
+    await expect(jump).toHaveCount(0);
+  }
+});
+}
+
+for (const mounted of [true, false]) {
+for (const painted of [true, false]) {
+test(`a ${mounted ? "mounted" : "unmounted"} ${painted ? "stylesheet formula stroke offers" : "zero-width formula omits"} the return`, async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page, 4);
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  const old = "Text that has already been read";
+  if (mounted) {
+    await scroller.getByText("Saved row 4", { exact: true }).evaluate((body) => window.getSelection()!.selectAllChildren(body));
+    send({ type: "assistant_delta", content: old });
+    const live = scroller.locator(".msg-streaming-text");
+    await expect(live).toBeInViewport({ ratio: 1 });
+    await settle();
+    const view = page.viewportSize()!;
+    const slack = await live.evaluate((body) => body.closest(".chat-messages")!.getBoundingClientRect().bottom - body.getBoundingClientRect().top);
+    await page.setViewportSize({ width: view.width, height: view.height - Math.floor(slack) - 8 });
+    await expect(live).not.toBeInViewport();
+  } else {
+    const reference = "/api/sessions/follow-output/messages/5";
+    await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+      role: "assistant", type: "text", seq: 5, content: "Expanded paragraph.\n\n".repeat(55),
+    } }));
+    send({ type: "assistant_text", seq: 5, content: "Long reply preview", body_state: "preview", detail_ref: reference });
+    await scroller.getByRole("button", { name: "View full message" }).click();
+    await expect.poll(gap).toBeGreaterThan(500);
+  }
+  await settle();
+  await expect(jump).toHaveCount(0);
+  const expression = painted ? String.raw`$\text{\sout{\phantom{x}}}$` : String.raw`$\rule{0mm}{2mm}$`;
+  send({ type: "assistant_text", seq: mounted ? 5 : 6, content: mounted ? `${old} ${expression}` : expression });
+  const stroke = scroller.locator(painted ? ".katex-sout" : ".katex-rule");
+  if (mounted) {
+    await expect(stroke).toHaveCount(1);
+    await expect(stroke).not.toBeInViewport();
+  } else {
+    await settle();
+    await expect(stroke).toHaveCount(0);
+  }
+  if (painted) {
+    await expect(jump).toBeVisible();
+    await jump.click();
+    await expect(stroke).toBeInViewport({ ratio: 1 });
+    expect(await stroke.evaluate((node) => parseFloat(getComputedStyle(node).borderBottomWidth))).toBeGreaterThan(0);
+  } else {
+    await settle();
+    await expect(jump).toHaveCount(0);
+    if (!mounted) await scroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect.poll(() => stroke.evaluate((node) => node.getBoundingClientRect().width)).toBe(0);
+  }
+});
+}
+}
+
+for (const kind of ["root reply", "first helper answer", "tool result"] as const) {
+test(`a new saved ${kind} outside the mounted rows offers a return`, async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page, 4);
+  const reference = "/api/sessions/follow-output/messages/5";
+  await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+    role: "assistant", type: "text", seq: 5,
+    content: Array.from({ length: 55 }, (_, index) => `Expanded paragraph ${index + 1}`).join("\n\n"),
+  } }));
+  send({ type: "assistant_text", seq: 5, content: "Preview of the long reply", body_state: "preview", detail_ref: reference });
+  await scroller.getByRole("button", { name: "View full message" }).click();
+  const paragraph = scroller.getByText("Expanded paragraph 1", { exact: true });
+  await expect(paragraph).toBeInViewport({ ratio: 1 });
+  await expect.poll(gap).toBeGreaterThan(500);
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await settle();
+  await expect(jump).toHaveCount(0);
+  const movement = await trackTop(paragraph);
+  const reply = scroller.getByText("Newly saved response at the end", { exact: true });
+  send({ type: "assistant_text", seq: 6, content: "[reference]: https://example.invalid" });
+  await settle();
+  await expect(jump).toHaveCount(0);
+  if (kind === "tool result") send({ type: "tool_result", seq: 7, output: "Newly saved response at the end" });
+  else send({ type: "assistant_text", seq: 7, content: "Newly saved response at the end",
+    ...(kind === "first helper answer" ? { runtime_metadata: identity("new-helper", "answer") } : {}) });
+  await expect(jump).toBeVisible();
+  await expect(reply).toHaveCount(0);
+  expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+  await movement.dispose();
+  await jump.click();
+  await expect(reply).toBeInViewport({ ratio: 1 });
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+});
+}
+
+test("an unmounted existing helper offers a return for a short continuation visible in its collapsed answer", async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page, 4);
+  const reference = "/api/sessions/follow-output/messages/5";
+  await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+    role: "assistant", type: "text", seq: 5,
+    content: "Expanded content shifts the helper outside the mounted range.\n\n".repeat(55),
+  } }));
+  send({ type: "assistant_text", seq: 5, content: "Short preview", body_state: "preview", detail_ref: reference });
+  send({ type: "assistant_text", seq: 6, content: "Short first answer.", runtime_metadata: identity("new-helper", "first") });
+  const answer = scroller.locator(".subagent-summary");
+  await expect(answer).toBeInViewport();
+  await scroller.getByRole("button", { name: "View full message" }).click();
+  await expect.poll(gap).toBeGreaterThan(500);
+  await expect(answer).toHaveCount(0);
+  await settle();
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
+  send({ type: "assistant_text", seq: 7, content: "Short continuation.", runtime_metadata: identity("new-helper", "second") });
+  await expect(jump).toBeVisible();
+  await expect(answer).toHaveCount(0);
+  await jump.click();
+  await expect(answer).toHaveText("Short first answer. Short continuation.");
+  await expect(answer).toBeInViewport({ ratio: 1 });
+});
+
+test("reconnect fills new output around a previously seen sequence without moving the reader", async ({ page }) => {
+  const { scroller, send, settle, replaceOnReconnect } = await openChat(page, 4);
+  const tool = "Tool detail open during reconnect";
+  send({ type: "tool_result", seq: 5, output: tool });
+  await scroller.locator(".msg-tool-result .tool-header").click();
+  const reader = scroller.getByText(tool, { exact: true });
+  await expect(reader).toBeInViewport();
+  send({ type: "user_message", seq: 8, content: "Previously received from another tab" });
+  await expect(scroller.getByText("Previously received from another tab", { exact: true })).toBeInViewport();
+  await settle();
+  const movement = await trackTop(reader);
+  const rows: Message[] = Array.from({ length: 4 }, (_, index) => ({ role: "assistant", type: "text", seq: index + 1, content: `Saved row ${index + 1}` }));
+  rows.push({ role: "tool", type: "tool_result", seq: 5, content: tool },
+    { role: "assistant", type: "text", seq: 6, content: "New after reconnect.\n\n".repeat(22) },
+    { role: "assistant", type: "text", seq: 7, content: "Recovered tail reply" },
+    { role: "user", type: "text", seq: 8, content: "Previously received from another tab" });
+  replaceOnReconnect({ messages: rows, next_message_seq: 9, oldest_loaded_seq: 1, has_more_messages: false });
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toBeVisible();
+  await expect(reader).toBeInViewport();
+  expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+  await movement.dispose();
+  await jump.click();
+  await expect(scroller.getByText("Recovered tail reply", { exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(scroller.getByText("Previously received from another tab", { exact: true })).toHaveCount(1);
+});
+
+test("a reconnect matches the cleared preview to its own saved reply among several additions", async ({ page }) => {
+  const { scroller, send, settle, replaceOnReconnect } = await openChat(page, 4);
+  const tool = "Tool detail stays open";
+  const earlier = "Earlier newly collected sentence";
+  const alreadySeen = "Already seen preview before the reconnect";
+  send({ type: "tool_result", seq: 5, output: tool });
+  await scroller.locator(".msg-tool-result .tool-header").click();
+  send({ type: "assistant_delta", content: alreadySeen });
+  const live = scroller.getByText(alreadySeen, { exact: true });
+  await expect(live).toBeInViewport({ ratio: 1 });
+  await settle();
+  const view = page.viewportSize()!;
+  const slack = await live.evaluate((element) => element.closest(".chat-messages")!.getBoundingClientRect().bottom - element.getBoundingClientRect().bottom);
+  await page.setViewportSize({ width: view.width, height: view.height - Math.floor(slack) + 12 });
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
+  const rows: Message[] = Array.from({ length: 4 }, (_, index) => ({ role: "assistant", type: "text", seq: index + 1, content: `Saved row ${index + 1}` }));
+  rows.push({ role: "tool", type: "tool_result", seq: 5, content: tool },
+    { role: "assistant", type: "text", seq: 6, content: earlier },
+    { role: "assistant", type: "text", seq: 7, content: alreadySeen });
+  replaceOnReconnect({ messages: rows, next_message_seq: 8, oldest_loaded_seq: 1, has_more_messages: false });
+  await expect(scroller.getByText(earlier, { exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(live).not.toBeInViewport();
+  await settle();
+  await expect(jump).toHaveCount(0);
+});
+
+for (const earlierGap of [false, true]) {
+test(`reconnect preserves the first same-text completion and offers the unseen second occurrence (${earlierGap ? "older gap" : "contiguous"})`, async ({ page }) => {
+  const { scroller, send, settle, replaceOnReconnect } = await openChat(page, 4);
+  const content = "Two distinct replies can have the same words.";
+  const earlier: Message = { role: "user", type: "text", seq: 6, content: "Visible before the preview started" };
+  if (earlierGap) {
+    send({ type: "user_message", seq: earlier.seq, content: earlier.content });
+    await expect(scroller.getByText(earlier.content!, { exact: true })).toBeInViewport();
+  }
+  send({ type: "assistant_delta", content });
+  const live = scroller.locator(".msg-streaming-text");
+  await expect(live).toBeInViewport({ ratio: 1 });
+  await selectLiveWords(live, /same words/);
+  const size = page.viewportSize()!;
+  const slack = await live.evaluate((element) => element.closest(".chat-messages")!.getBoundingClientRect().bottom - element.getBoundingClientRect().bottom);
+  await page.setViewportSize({ width: size.width, height: size.height - Math.floor(slack) + 12 });
+  const before = await page.evaluate(() => window.getSelection()!.getRangeAt(0).getBoundingClientRect().top);
+  const messages: Message[] = Array.from({ length: 4 }, (_, index) => ({ role: "assistant", type: "text", seq: index + 1, content: `Saved row ${index + 1}` }));
+  const completion = earlierGap ? 7 : 5;
+  const reply = (seq: number): Message => ({ role: "assistant", type: "text", seq, content });
+  if (earlierGap) messages.push(reply(5), earlier);
+  messages.push(reply(completion), reply(completion + 1));
+  replaceOnReconnect({ messages, next_message_seq: completion + 2, oldest_loaded_seq: 1, has_more_messages: false });
+  await expect(scroller.getByText(content, { exact: true })).toHaveCount(earlierGap ? 3 : 2);
+  await settle();
+  const saved = await page.evaluate(() => {
+    const selection = window.getSelection()!;
+    return { text: selection.toString(), key: selection.anchorNode?.parentElement?.closest<HTMLElement>("[data-message-key]")?.dataset.messageKey,
+      top: selection.rangeCount ? selection.getRangeAt(0).getBoundingClientRect().top : 0 };
+  });
+  expect(saved.text).toBe("same words");
+  expect(saved.key).toBe(`message:${completion}`);
+  expect(Math.abs(saved.top - before)).toBeLessThanOrEqual(2);
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expect(scroller.locator(`[data-message-key="message:${completion + 1}"]`).getByText(content, { exact: true })).toBeInViewport({ ratio: 1 });
+});
+}
+
+test("reconnect can fill a gap above the passage the reader is on", async ({ page }) => {
+  const { scroller, gap, send, settle, replaceOnReconnect } = await openChat(page, 4);
+  const readingText = Array.from({ length: 40 }, (_, index) => `Long reply paragraph ${index + 1}`).join("\n\n");
+  const saved: Message = { role: "assistant", type: "text", seq: 8, content: readingText };
+  send({ type: "assistant_text", seq: 8, content: readingText });
+  await expect(scroller.getByText("Long reply paragraph 40", { exact: true })).toBeInViewport({ ratio: 1 });
+  await scroller.hover();
+  await page.mouse.wheel(0, -300);
+  await expect.poll(gap).toBeGreaterThan(240);
+  await settle();
+  const reader = scroller.getByText("Long reply paragraph 25", { exact: true });
+  await expect(reader).toBeInViewport({ ratio: 1 });
+  const offset = (await reader.boundingBox())!.y;
+  const rows: Message[] = Array.from({ length: 7 }, (_, index) => ({ role: "assistant", type: "text", seq: index + 1,
+    content: index < 4 ? `Saved row ${index + 1}` : `Gap filled with reply ${index + 1}` }));
+  const reread = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/sessions/follow-output");
+  replaceOnReconnect({ messages: [...rows, saved], next_message_seq: 9, oldest_loaded_seq: 1, has_more_messages: false });
+  await reread;
+  await expect(page.locator(".conn-status.on")).toBeVisible();
+  // Connection replaces the detail snapshot asynchronously, including rows
+  // above the mounted range. The mounted saved passage must retain its offset.
+  await settle();
+  await expect(reader).toBeInViewport({ ratio: 1 });
+  expect(Math.abs((await reader.boundingBox())!.y - offset)).toBeLessThanOrEqual(2);
+});
+
+test("departed transcript selection and composer selection cannot pause the returning view", async ({ page }) => {
+  const { scroller, send, session } = await openChat(page);
+  const paragraph = scroller.getByText("Saved row 40", { exact: true });
+  await paragraph.evaluate((element) => window.getSelection()!.selectAllChildren(element));
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Saved row 40");
+  await page.getByRole("button", { name: /^Schedules/ }).evaluate((element) => (element as HTMLElement).click());
+  await expect(scroller).toBeHidden();
+  await page.locator(".session-item", { hasText: session.name }).evaluate((element) => (element as HTMLElement).click());
+  await expect(scroller).toBeVisible();
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("");
+  const input = page.locator(".chat-input-bar textarea");
+  await input.fill("Selected in the composer");
+  await input.selectText();
+  send({ type: "assistant_delta", content: "Output after returning.\n".repeat(24) + "Static Footer final marker" });
+  await expectFooterMarkerInViewport(scroller);
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
+  expect(await input.evaluate((element) => (element as HTMLTextAreaElement).selectionEnd)).toBe(24);
+});
+
+for (const reading of [true, false]) {
+test(`ordinary send and receipts preserve ${reading ? "history reading" : "latest following"}`, async ({ page }) => {
+  const { scroller, gap, send, settle, submissions } = await openChat(page);
+  const input = page.locator(".chat-input-bar textarea");
+  if (reading) {
+    await scroller.hover();
+    await page.mouse.wheel(0, -240);
+    await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+  }
+  const reader = scroller.getByText("Saved row 30", { exact: true });
+  if (reading) await expect(reader).toBeInViewport({ ratio: 1 });
+  const movement = reading ? await trackTop(reader) : null;
+  await input.fill(" ");
+  await input.press("Enter");
+  expect(submissions).toHaveLength(0);
+
+  await input.fill("Rejected ordinary message");
+  await input.press("Enter");
+  await expect.poll(() => submissions.length).toBe(1);
+  send({ type: "submission", client_request_id: submissions[0].client_request_id, accepted: false, message: "Message validation failed" });
+  await expect(page.getByText("Message validation failed", { exact: true })).toBeVisible();
+  if (!reading) await expect.poll(gap).toBeLessThanOrEqual(2);
+
+  await input.fill("My ordinary message");
+  await input.press("Enter");
+  await expect.poll(() => submissions.map(({ content }) => content)).toEqual(["Rejected ordinary message", "My ordinary message"]);
+  send({ type: "submission", client_request_id: submissions[1].client_request_id, accepted: true });
+  send({ type: "user_message", seq: 41, content: "My ordinary message" });
+  send({ type: "user_message", seq: 42, content: "Message from another tab" });
+  send({ type: "user_message", seq: 42, content: "Message from another tab" });
+  const other = scroller.getByText("Message from another tab", { exact: true });
+  await settle();
+  if (movement) {
+    await expect(reader).toBeInViewport({ ratio: 1 });
+    await expect(other).not.toBeInViewport();
+    expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+    await movement.dispose();
+    await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
+  } else {
+    await expect.poll(gap).toBeLessThanOrEqual(2);
+  }
+  await expect(other).toHaveCount(1);
+  await expect(other).toBeInViewport({ ratio: 1 });
+});
+}
 
 test("chat follows output after a card, preserves history reading and resumes at the bottom", async ({ page }) => {
   const { scroller, gap, send, settle, output } = await openChat(page);
@@ -1242,14 +2064,15 @@ test("reversing a native scrollbar drag upward offers a return to the latest out
   const { scroller, gap, send, settle } = await openChat(page, 4);
   const jump = page.getByRole("button", { name: "Jump to latest" });
   await scroller.evaluate((element) => { element.style.scrollbarGutter = "stable"; });
-  send({ type: "tool_result", seq: 5, output: "Open this saved detail without scrolling." });
+  // Establish a stable scroll range while following. Output received after
+  // expansion could independently offer the return before any thumb input.
+  send({ type: "assistant_text", seq: 5, content: "Already saved before reading.\n\n".repeat(80) });
+  send({ type: "tool_result", seq: 6, output: "Open this saved detail without scrolling." });
   const header = scroller.locator(".msg-tool-result .tool-header");
-  await expect(header).toBeVisible();
   await expect.poll(gap).toBeLessThanOrEqual(2);
+  await expect(header).toBeInViewport();
   await header.click();
-  // Keep the native thumb's range stable as it reverses across live output.
-  send({ type: "assistant_delta", content: "New output while reading.\n".repeat(80) });
-  await expect.poll(gap).toBeGreaterThan(700);
+  await expect.poll(() => scroller.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(700);
   await scroller.evaluate((element) => {
     element.scrollTop = element.scrollHeight - element.clientHeight - 450;
   });
@@ -1987,11 +2810,13 @@ test(`expanding a saved tool with ${activation} at the bottom preserves reading 
   expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
   await movement.dispose();
   const position = await scroller.evaluate((element) => element.scrollTop);
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
   send({ type: "assistant_delta", content: output("While reading tool details") });
   await expect(scroller.getByTestId("streaming-text")).toContainText("While reading tool details line 12");
   await settle();
   expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - position)).toBeLessThanOrEqual(2);
-  await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
+  await expect(jump).toBeVisible();
   await scroller.hover({ position: { x: 5, y: 20 } });
   await page.mouse.wheel(0, 100000);
   await expect.poll(gap).toBeLessThanOrEqual(2);
@@ -2028,6 +2853,138 @@ test("loading full reply details preserves reading while the response and new ou
     expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
     await movement.dispose();
   } finally { release(); }
+});
+
+test("only readable new text from a helper answer offers a return", async ({ page }) => {
+  const { scroller, send, settle } = await openChat(page, 4);
+  send({ type: "tool_result", seq: 5, output: "Tool output to read" });
+  send({ type: "subagent", ...helper, seq: 6 });
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  const toggle = scroller.getByRole("button", { name: /Helper Reading/ });
+  const workingAnswer = scroller.locator(".subagent-summary");
+  const runtime_metadata = identity("helper", "item");
+  await scroller.locator(".msg-tool-result .tool-header").click();
+  await expect(scroller.getByText("Tool output to read", { exact: true })).toBeInViewport();
+
+  send({ type: "assistant_delta", runtime_metadata, content: "Helper answer starts here.\n".repeat(35) });
+  const secondItem = identity("helper", "second-item");
+  send({ type: "assistant_delta", runtime_metadata: secondItem, content: "Another live helper item" });
+  await expect(workingAnswer).toContainText("Helper answer starts here.");
+  await expect(workingAnswer).toContainText("Another live helper item");
+  await expect(workingAnswer).toBeInViewport({ ratio: 1 });
+  await settle();
+  await expect(jump).toHaveCount(0);
+
+  await toggle.click();
+  const movement = await trackTop(toggle);
+  await settle();
+  await expect(jump).toHaveCount(0);
+  send({ type: "assistant_text", seq: 7, runtime_metadata: secondItem, content: "Another live helper item" });
+  await expect(workingAnswer).toHaveText(/^Another live helper item.*Helper answer starts here/s);
+  await settle();
+  await expect(jump).toHaveCount(0);
+  send({ type: "assistant_delta", runtime_metadata, content: "The new helper conclusion" });
+  await expect(workingAnswer).toContainText("The new helper conclusion");
+  await expect(jump).toBeVisible();
+  expect(await movement.evaluate((tracker) => tracker.stop())).toBeLessThanOrEqual(2);
+  await movement.dispose();
+  await jump.click();
+  await expect(scroller).toBeFocused();
+  await expect.poll(() => workingAnswer.evaluate((body) => {
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node && !node.textContent?.includes("The new helper conclusion")) node = walker.nextNode();
+    if (!node) return false;
+    const range = document.createRange();
+    range.setStart(node, node.textContent!.lastIndexOf("The new helper conclusion"));
+    range.setEnd(node, node.textContent!.length);
+    const line = range.getBoundingClientRect();
+    const view = body.closest(".chat-messages")!.getBoundingClientRect();
+    return line.height > 0 && line.top >= view.top && line.bottom <= view.bottom;
+  })).toBe(true);
+});
+
+for (const item of ["first", "second"] as const) {
+test(`a helper keeps its selected ${item} item when the first grows and the second is saved`, async ({ page }) => {
+  const { scroller, send, settle } = await openChat(page, 4);
+  const first = identity("helper", "first-answer");
+  const second = identity("helper", "second-answer");
+  send({ type: "subagent", ...helper, seq: 5 });
+  await scroller.getByRole("button", { name: /Helper Reading/ }).click();
+  send({ type: "assistant_delta", runtime_metadata: first, content: "The first helper text" });
+  send({ type: "assistant_delta", runtime_metadata: second, content: "The second helper text" });
+  const answer = scroller.locator(".subagent-summary");
+  await expect(answer).toContainText("The second helper text");
+  const phrase = `${item} helper`;
+  await answer.evaluate((element, phrase) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const index = node.textContent!.indexOf(phrase);
+      if (index < 0) continue;
+      const range = document.createRange();
+      range.setStart(node, index);
+      range.setEnd(node, index + phrase.length);
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return;
+    }
+    throw new Error("Helper output was not mounted");
+  }, phrase);
+  const selected = () => page.evaluate(() => window.getSelection()?.toString());
+  expect(await selected()).toBe(phrase);
+  send({ type: "assistant_delta", runtime_metadata: first, content: " grows." });
+  await expect(answer).toContainText("The first helper text grows.");
+  expect(await selected()).toBe(phrase);
+  send({ type: "assistant_text", seq: 6, runtime_metadata: second, content: "The second helper text" });
+  await expect(answer).toHaveText(/^The second helper text.*The first helper text grows\./s);
+  await settle();
+  expect(await selected()).toBe(phrase);
+});
+}
+
+test("an expanded Claude helper offers a return for its final summary and keeps it on view switch", async ({ page }) => {
+  const { scroller, send, settle, session } = await openChat(page, 4);
+  const runtime_metadata = { request_id: "request", attempt_id: "attempt", tool_call_id: "claude-tool" };
+  send({ type: "tool_use", seq: 5, tool: "Task", input: { description: "Read" }, runtime_metadata });
+  send({ type: "subagent", task_id: "claude-helper", tool_call_id: "claude-tool", status: "running", name: "Claude helper", description: "Reading" });
+  await scroller.getByRole("button", { name: /Claude helper Reading/ }).click();
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
+  send({ type: "subagent", task_id: "claude-helper", tool_call_id: "claude-tool", status: "completed",
+    summary: "Claude generated an answer.\n".repeat(55) + "Final Claude line" });
+  await expect(scroller.locator(".subagent-summary")).toContainText("Final Claude line");
+  await expect(jump).toBeVisible();
+  await page.getByRole("button", { name: /^Schedules/ }).click();
+  await expect(scroller).toBeHidden();
+  await page.locator(".session-item", { hasText: session.name }).click();
+  await expect(scroller).toBeVisible();
+  await expect(jump).toBeVisible();
+  await settle();
+  await jump.click();
+  await expect(jump).toHaveCount(0);
+});
+
+test("saving a capped helper item preserves its selected prefix and visible passage", async ({ page }) => {
+  const { scroller, send, settle } = await openChat(page, 4);
+  send({ type: "subagent", ...helper, seq: 5 });
+  await scroller.getByRole("button", { name: /Helper Reading/ }).click();
+  const runtime_metadata = identity("helper", "capped-answer");
+  const content = Array.from({ length: 225 }, (_, index) => `Helper block ${index} contains a unique marker and enough words to fill the preview.`).join("\n\n");
+  send({ type: "assistant_delta", content, runtime_metadata });
+  const answer = scroller.locator(".subagent-detail .subagent-summary");
+  await expect(answer).toHaveText(/…$/);
+  const selected = await selectLiveWords(answer, /Helper block \d+/);
+  send({ type: "assistant_text", seq: 6, runtime_metadata, content });
+  await expect(answer).toContainText("Helper block 224");
+  await settle();
+  const saved = await page.evaluate(() => {
+    const selection = window.getSelection()!;
+    return { text: selection.toString(), top: selection.rangeCount ? selection.getRangeAt(0).getBoundingClientRect().top : 0 };
+  });
+  expect(saved.text).toBe(selected.text);
+  expect(Math.abs(saved.top - selected.top)).toBeLessThanOrEqual(2);
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
 });
 
 test("collapsing a tool clamps the viewport without restoring following", async ({ page }) => {

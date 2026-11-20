@@ -50,7 +50,7 @@ it("reads a long saved window once across mounted historical cards", () => {
 });
 
 it("keeps four cards' saved projections and detail anchors across twenty accepted live deltas", () => {
-  const project = vi.spyOn(nativeOutput, "nativeCard");
+  const project = vi.spyOn(nativeOutput, "nativeCardState");
   const anchor = vi.spyOn(nativeOutput, "nativeDetailAnchor");
   const { container } = render(<>{[0, 1, 2, 3].map((index) => <NativeSubagentCard key={index} sessionId="session" cardId={`card-${index}`} />)}</>);
   expect(container.querySelectorAll(".subagent-card")).toHaveLength(4);
@@ -67,7 +67,7 @@ it("keeps four cards' saved projections and detail anchors across twenty accepte
 });
 
 it("updates saved body, terminal status and snapshot facts after retaining the live preview", () => {
-  const project = vi.spyOn(nativeOutput, "nativeCard");
+  const project = vi.spyOn(nativeOutput, "nativeCardState");
   const anchor = vi.spyOn(nativeOutput, "nativeDetailAnchor");
   const { container } = render(<NativeSubagentCard sessionId="session" cardId="card-0" />);
   act(() => useSessionStore.getState().appendStreamingText("session", "Live preview", identity(0)));
@@ -98,7 +98,7 @@ it("keeps an expanded work open and reads its newly paged persisted anchor", asy
   vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => Response.json({
     anchor_seq: String(url).includes("/200?") ? 200 : 400, availability: "collected", child: { status: "running" }, messages: [], has_more: false,
   })));
-  const project = vi.spyOn(nativeOutput, "nativeCard");
+  const project = vi.spyOn(nativeOutput, "nativeCardState");
   const anchor = vi.spyOn(nativeOutput, "nativeDetailAnchor");
   render(<NativeSubagentCard sessionId="session" cardId="card-0" />);
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Child 0/ })); });

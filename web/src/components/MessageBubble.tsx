@@ -10,9 +10,6 @@ import {
   IconHelpCircle,
 } from "@tabler/icons-react";
 import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import {
   useSessionStore,
@@ -26,20 +23,19 @@ import {
 } from "./AgentDelegationEventCard";
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
 import { NativeSubagentCard, SubagentCard } from "./SubagentCard";
+import { useStreamingTextNode } from "../hooks/useStreamingTextNode";
 import { projectToolCall, readRuntimeMetadata } from "../lib/toolIdentity";
 import { questionClosure } from "../lib/questionPresentation";
 import { requestSource } from "../lib/injectedTurns";
 import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { ToolInputDetails } from "./ToolInputDetails";
 import { nativeWorkKey } from "../lib/nativeOutput";
-
-const completedRemarkPlugins = [remarkGfm, remarkMath];
-const completedRehypePlugins = [rehypeKatex];
+import { chatRehypePlugins, chatRemarkPlugins } from "./chatMarkdown";
 
 // Store and composer updates still render the card's controls and attribution.
 // Only unchanged completed prose skips the synchronous Markdown pipeline.
 const CompletedMarkdown = memo(function CompletedMarkdown({ source }: { source: string }) {
-  return <Markdown remarkPlugins={completedRemarkPlugins} rehypePlugins={completedRehypePlugins}>
+  return <Markdown remarkPlugins={chatRemarkPlugins} rehypePlugins={chatRehypePlugins}>
     {source}
   </Markdown>;
 });
@@ -184,6 +180,11 @@ export function MessageBubble(props: MessageBubbleProps) {
     }</MessageDetails>;
 }
 
+function StreamingMessageText({ text }: { text: string }) {
+  const ref = useStreamingTextNode(text);
+  return <div ref={ref} className="msg-streaming-text whitespace-pre-wrap break-words" />;
+}
+
 function MessageBody({
   message,
   sessionId,
@@ -323,9 +324,7 @@ function MessageBody({
               </p>
             </>}
             {plain ? (
-              <div className="msg-streaming-text whitespace-pre-wrap break-words">
-                {message.content || ""}
-              </div>
+              <StreamingMessageText text={message.content || ""} />
             ) : (
               <CompletedMarkdown source={message.content || ""} />
             )}

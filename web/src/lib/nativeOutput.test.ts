@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from "vitest";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { useSessionStore } from "../stores/sessionStore";
-import { nativeCard, nativeChatMessages, nativeDetailAnchor } from "./nativeOutput";
+import { nativeAnswer, nativeCardState, nativeChatMessages, nativeDetailAnchor } from "./nativeOutput";
 import { projectToolCall } from "./toolIdentity";
 import { applyTranscript } from "./transcript";
 
@@ -31,7 +31,7 @@ test("a tool-only historical window exposes a saved child reference without inve
   const messages = [{ role: "tool" as const, type: "tool_result", seq: 40, content: "Saved tool output", runtime_metadata: identity("child") }];
   const cards = nativeChatMessages(messages);
   expect(cards).toHaveLength(1);
-  const card = nativeCard(messages, cards[0].tool_input!.card_id as string)!;
+  const card = nativeCardState(messages, cards[0].tool_input!.card_id as string)!;
   expect(card.status).toBe("unknown");
   expect(nativeDetailAnchor(messages, card)).toBe(40);
   expect(nativeDetailAnchor([
@@ -104,7 +104,9 @@ test("history pagination rebuilds native cards without child text leaking into m
   ], 1, false, { beforeSeq: 7, window: useSessionStore.getState().messageWindows.s });
   const state = useSessionStore.getState();
   expect(nativeChatMessages(state.messages.s).map((message) => message.seq)).toEqual([1, 8, 9]);
-  expect(nativeCard(state.messages.s, "c")).toMatchObject({ name: "/root/reviewer", status: "completed", summary: "Saved child" });
+  const card = nativeCardState(state.messages.s, "c")!;
+  expect(card).toMatchObject({ name: "/root/reviewer", status: "completed" });
+  expect(nativeAnswer(card, undefined, state.messages.s).text).toBe("Saved child");
   expect(state.lastAppliedSeq.s).toBe(20);
   expect(state.messages.s.map((message) => message.seq)).toEqual([1, 2, 7, 8, 9]);
   const fakeTool = { role: "assistant" as const, type: "tool_use", runtime_metadata: identity("root") };
@@ -116,8 +118,9 @@ test("a history window containing child text without its older status row still 
   const visible = nativeChatMessages(messages);
   expect(visible).toHaveLength(1);
   expect(visible[0].type).toBe("native_subagent");
-  const card = nativeCard(messages, visible[0].tool_input!.card_id as string);
-  expect(card).toMatchObject({ status: "unknown", summary: "Saved body", native_thread_id: "child", native_turn_id: "t" });
+  const card = nativeCardState(messages, visible[0].tool_input!.card_id as string)!;
+  expect(card).toMatchObject({ status: "unknown", native_thread_id: "child", native_turn_id: "t" });
+  expect(nativeAnswer(card, undefined, messages).text).toBe("Saved body");
   expect(messages[0].content).toBe("Saved body");
 });
 
@@ -129,7 +132,7 @@ test("a snapshot card remains visible when a 200-row tool window excludes its an
   const visible = nativeChatMessages(window, cache);
   expect(visible).toHaveLength(201);
   expect(visible[200].seq).toBeUndefined();
-  expect(nativeCard(window, "cached", cache[0])).toMatchObject({ status: "running", name: "/root/helper", native_turn_id: "t" });
+  expect(nativeCardState(window, "cached", cache[0])).toMatchObject({ status: "running", name: "/root/helper", native_turn_id: "t" });
   const paged = [{ role: "system" as const, type: "native_subagent", seq: 1, runtime_metadata: identity("child"),
     tool_input: { task_id: "child", card_id: "cached", native_thread_id: "child", native_turn_id: "t", status: "running" } }, ...window];
   expect(nativeChatMessages(paged, cache).filter((row) => row.type === "native_subagent")).toHaveLength(1);
