@@ -226,10 +226,16 @@ test("hidden question events leave history readable on first reveal, paging and 
   expect(pages).toHaveLength(1);
 });
 
-for (const native of [false, true]) {
-for (const selected of [false, true]) {
-  test(`saving a live reply preserves the ${selected ? "selected" : "reading"} paragraph (${native ? "native item" : "root text"})`, async ({ page }, info) => {
+for (const [native, selected, zoom] of [
+  [false, false, 1], [false, true, 1], [true, false, 1], [true, true, 1], [false, true, 2.25],
+] as const) {
+  const source = native ? "native item" : "root text";
+  test(`saving a live reply preserves the ${selected ? "selected" : "reading"} paragraph (${source}${zoom === 1 ? "" : `, CSS zoom ${zoom}`})`, async ({ page }, info) => {
     const { scroller, gap, send, settle } = await openChat(page);
+    if (zoom !== 1) {
+      await scroller.evaluate((element, scale) => { element.style.zoom = String(scale); }, zoom);
+      await settle();
+    }
     const content = Array.from({ length: 150 }, (_, index) =>
       `Section ${index + 100} contains part of the same reply, with enough words to wrap across the viewport.`).join(" ");
     const runtime = native ? { runtime_metadata: identity("root", "root-item") } : {};
@@ -243,7 +249,7 @@ for (const selected of [false, true]) {
       await settle();
     }
     await capturePaint(page, info, async (paintFrames) => {
-      const reading = await scroller.evaluateHandle((viewport, selected) => {
+      const reading = await scroller.evaluateHandle((viewport, { selected, zoom }) => {
         // Move inside the same tall live reply without creating an upward
         // input. This isolates the selection pause from history intent.
         if (selected) viewport.scrollTop -= 1120;
@@ -274,28 +280,36 @@ for (const selected of [false, true]) {
           return range.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset;
         };
         const savedText = () => viewport.querySelector('[data-message-key="message:41"] .msg-content p')?.firstChild;
-        const samples: { at: number; saved: boolean; delta: number | null }[] = [];
-        let frame = requestAnimationFrame(function sample(at) {
+        const nativeFrame = window.requestAnimationFrame;
+        let requested = 0;
+        if (zoom !== 1) window.requestAnimationFrame = (callback) => { requested++; return nativeFrame(callback); };
+        const samples: { at: number; saved: boolean; delta: number | null; requested: number }[] = [];
+        let frame = nativeFrame(function sample(at) {
           const saved = savedText();
-          samples.push({ at, saved: !!saved, delta: getOffset(saved ?? viewport.querySelector(".msg-streaming-text")?.firstChild) });
-          frame = requestAnimationFrame(sample);
+          samples.push({ at, saved: !!saved, delta: getOffset(saved ?? viewport.querySelector(".msg-streaming-text")?.firstChild), requested });
+          frame = nativeFrame(sample);
         });
-        return { paragraph: paragraph.toJSON(), currentOffset: () => getOffset(savedText()), stop: () => {
+        return { paragraph: paragraph.toJSON(), currentOffset: () => getOffset(savedText()), quietFrames: async () => {
+          for (let i = 0; i < 24; i++) await new Promise<void>((done) => nativeFrame(() => done()));
+        }, stop: () => {
           cancelAnimationFrame(frame);
+          if (zoom !== 1) window.requestAnimationFrame = nativeFrame;
           return samples;
         } };
-      }, selected);
-      await settle();
-      if (selected) await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
-      const savingAt = await page.evaluate(() => performance.timeOrigin + performance.now());
+      }, { selected, zoom });
       let evidence;
+      let savingAt: number | undefined;
       try {
+        await settle();
+        if (selected) await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
+        savingAt = await page.evaluate(() => performance.timeOrigin + performance.now());
         send({ type: "assistant_text", seq: 41, content, ...runtime });
         await expect(scroller.getByTestId("streaming-text")).toHaveCount(0);
         await expect.poll(() => reading.evaluate((frame) => Math.abs(frame.currentOffset() ?? Infinity))).toBeLessThanOrEqual(2);
         await expect.poll(gap).toBeGreaterThan(900);
         if (selected) await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toMatch(/^Section \d{3}$/);
-        await settle();
+        if (zoom === 1) await settle();
+        else await reading.evaluate((probe) => probe.quietFrames());
       } finally {
         evidence = await reading.evaluate((frame) => ({ samples: frame.stop(), paragraph: frame.paragraph }));
         await reading.dispose();
@@ -305,13 +319,18 @@ for (const selected of [false, true]) {
         "the saved text first appears at the selected paragraph").toBeLessThanOrEqual(2);
       else expect(evidence.samples.filter(({ delta }) => delta === null || Math.abs(delta) > 2),
         "the same paragraph stays in view through the transfer").toEqual([]);
+      if (zoom !== 1) {
+        const settled = evidence.samples.slice(-8);
+        expect(settled).toHaveLength(8);
+        expect(settled.every(({ requested }) => requested === settled[0].requested),
+          "the page stops requesting frames after the selected paragraph settles").toBe(true);
+      }
     });
     if (selected) {
       await page.evaluate(() => window.getSelection()?.removeAllRanges());
       await expect.poll(gap).toBeLessThanOrEqual(2);
     }
   });
-}
 }
 
 for (const opening of ["no displayed rows", "hidden question history", "saved history"]) {

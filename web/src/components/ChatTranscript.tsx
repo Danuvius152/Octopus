@@ -210,6 +210,11 @@ function scrollToTail(viewport: HTMLElement) {
   viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
 }
 
+function scrollDeltaForClientOffset(viewport: HTMLElement, offset: number) {
+  // Client rectangles include CSS zoom. scrollTop uses the scroller's own units.
+  return offset / (viewport.currentCSSZoom ?? 1);
+}
+
 function ChatRows(props: ListProps) {
   return <div {...props} data-chat-rows />;
 }
@@ -320,7 +325,8 @@ function alignReadingAnchor(operation: Extract<ViewportPosition, { kind: "histor
   const delta = top - viewport.getBoundingClientRect().top - offset;
   const before = viewport.scrollTop;
   const aligned = Math.abs(delta) <= 1;
-  if (!aligned && !writePosition(viewport, operation.view, () => { viewport.scrollTop = before + delta; })) return "superseded";
+  const scrollDelta = scrollDeltaForClientOffset(viewport, delta);
+  if (!aligned && !writePosition(viewport, operation.view, () => { viewport.scrollTop = before + scrollDelta; })) return "superseded";
   const selection = movedSelection && viewport.ownerDocument.getSelection();
   // Removing the preview collapses the original Range in place. A later
   // selection or an explicit clear has already taken ownership away from it.
@@ -1177,7 +1183,8 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
             const top = Array.from(restored.getClientRects())[0]?.top;
             if (top === undefined) return;
             const delta = top - viewport.getBoundingClientRect().top - selected.offset;
-            if (Math.abs(delta) <= 1 || !writePosition(viewport, view, () => { viewport.scrollTop += delta; })) return;
+            const scrollDelta = scrollDeltaForClientOffset(viewport, delta);
+            if (Math.abs(delta) <= 1 || !writePosition(viewport, view, () => { viewport.scrollTop += scrollDelta; })) return;
             if (!following.current) readingHandoff.current = { view, anchor: captureReadingAnchor(viewport) };
             measurePausedOutput();
           });
