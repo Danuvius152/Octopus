@@ -694,9 +694,10 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       if (gap > 0 && dt > 0 && current()) {
         const scale = window.devicePixelRatio * (viewport.currentCSSZoom ?? 1);
         const step = Math.max(1, 1 / scale, gap * (1 - Math.exp(-dt / 60)));
-        if (reducedMotion.current?.matches || gap - step <= 2) scrollToTail(viewport);
+        const target = Math.ceil(before.top + step);
+        if (reducedMotion.current?.matches || before.maximum - target <= 2) scrollToTail(viewport);
         else {
-          viewport.scrollTo({ top: Math.ceil(before.top + step), behavior: "instant" });
+          viewport.scrollTo({ top: target, behavior: "instant" });
           // A rounded intermediate step can leave a reachable tail. Test the
           // physical limit once if this view still owns the same range.
           if (current() && viewport.scrollTop === before.top &&

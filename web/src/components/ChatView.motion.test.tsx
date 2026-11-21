@@ -179,6 +179,15 @@ it("self-verifies Footer growth during reveal layout without another output or r
   expect(motion.pending()).toBe(0);
 });
 
+it("reaches the physical bottom when a rounded follow step enters the settling range", () => {
+  const motion = motionViewport();
+  motion.grow(4);
+  motion.tick(20);
+  expect(motion.writes.map(({ top }) => top)).toEqual([604]);
+  expect(motion.viewport.scrollTop).toBe(604);
+  expect(motion.pending()).toBe(0);
+});
+
 it("reaches the latest output on the first revealed frame, then resumes normal following", () => {
   const motion = motionViewport(0, 0, true);
   // The reveal layout has committed. A live line can still grow before the
