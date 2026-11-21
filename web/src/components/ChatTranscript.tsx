@@ -16,7 +16,7 @@ import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { MessageTime } from "./MessageTime";
 import { QuestionPrompt, type AnswerPayload } from "./QuestionPrompt";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
-import { TranscriptOutputLayout, backgroundOutputOutside, chatProjection, chatProjectionIndex,
+import { TranscriptOutputLayout, backgroundOutputOutside, chatProjection, chatProjectionIndex, collapsedBackgroundHasChangedText,
   collapsedHelperHasChangedText, matchTranscriptTransfers,
   readableChangeOutside, readableSpansOutside, recordTranscriptOutput,
   savedOutputHasBody, savedOutputOutside, scrollportBounds,
@@ -650,10 +650,14 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       pending.helpers.delete(work);
       if (first && collapsedHelperHasChangedText(change, first)) { offerReturn(); return; }
     }
-    if (pending.background.size) {
+    if (first && pending.background.size) {
       for (let index = 0; index < rows.length; index++) {
-        const task = projectBgTaskId(rows[index], committed.current.messages);
-        if (task && pending.background.has(task) && !state.bgTaskReadFailures[sid]?.includes(task) && outsideMountedRange(index)) {
+        const id = projectBgTaskId(rows[index], committed.current.messages);
+        const change = id && pending.background.get(id);
+        if (!id || !change || !outsideMountedRange(index) || state.bgTaskReadFailures[sid]?.includes(id)) continue;
+        const task = state.bgTasks[sid]?.find((task) => task.id === id);
+        pending.background.delete(id);
+        if (task && collapsedBackgroundHasChangedText(task, change, first)) {
           offerReturn();
           return;
         }

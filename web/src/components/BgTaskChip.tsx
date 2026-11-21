@@ -29,6 +29,7 @@ import { bgTaskOutputLine, cachedBgTaskOutput } from "../lib/bgTaskOutput";
 import { useTaskControl } from "../hooks/useTaskControl";
 import { TranscriptOutputLayout } from "./chatOutputVisibility";
 import { TaskControlFeedback } from "./TaskControlFeedback";
+import { bgTaskCardClass, bgTaskOutputClass, bgTaskStopDescription, bgTaskSummaryClass, bgTaskSummaryDetails } from "./bgTaskSummary";
 
 interface Props {
   sessionId: string;
@@ -61,26 +62,6 @@ function isRunning(task: Pick<BgTask, "status">): boolean {
   return task.status === "running" || task.status === "pending";
 }
 
-function stopDescription(task: BgTask): string | null {
-  switch (task.stop_reason) {
-    case "idle_timeout":
-      return task.idle_timeout_seconds == null
-        ? "Stopped at the idle timeout"
-        : `Stopped after ${task.idle_timeout_seconds}s without output`;
-    case "total_timeout":
-      return task.timeout_seconds == null
-        ? "Stopped at the total timeout"
-        : `Stopped at the ${task.timeout_seconds}s total timeout`;
-    case "user_cancel": return "Cancelled by the user";
-    case "work_cancelled": return "Cancelled with delegated work";
-    case "external_signal": return "Interrupted by an external signal";
-    case "server_shutdown": return "Interrupted when the server stopped";
-    case "server_restart": return "Interrupted after a server restart";
-    case "exit_nonzero": return "The command exited unsuccessfully";
-    default: return task.stop_reason ? `Stopped: ${task.stop_reason}` : null;
-  }
-}
-
 export function BgTaskChip({ sessionId, taskId }: Props) {
   const token = useSessionStore((s) => s.token);
   const account = useSessionStore((s) => s.accountGeneration);
@@ -94,7 +75,7 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
 
   if (!task) {
     return (
-      <div className="octo-bgtask-chip mt-2 overflow-hidden rounded-md border border-border bg-muted/40 text-muted-foreground">
+      <div className={cn(bgTaskCardClass, "border-border bg-muted/40 text-muted-foreground")}>
         <div className="flex h-8 items-center gap-2 px-2.5 text-xs">
           {failed ? <IconExclamationCircle size={12} /> : <IconLoader2 size={12} className="animate-spin" />}
           <span>{failed ? "Background task" : `Loading bg task ${taskId}…`}</span>
@@ -115,20 +96,14 @@ function SummaryLine({ task, sessionId, taskId, failed }: Props & { task?: BgTas
   useLayoutEffect(() => {
     if (output) onOutputLayout?.();
   }, [onOutputLayout, output, taskId]);
-  const stop = task && stopDescription(task);
-  const delivery = task?.delivery_disposition === "unknown" ? "Return admission unconfirmed" :
-    task?.delivery_disposition === "stopped" ? "Automatic return stopped" : null;
   return (
-    <div className="flex h-7 items-center gap-2 overflow-hidden border-t border-border/60 px-3 text-[11px] text-muted-foreground">
+    <div className={bgTaskSummaryClass}>
       {failed ? <span role="alert" className="shrink-0">Could not read summary</span> :
-        <span className="truncate font-mono" title={text} data-bg-output={output ? taskId : undefined}>{text}</span>}
-      {!failed && (task?.preview_truncated || task?.truncated || preview?.trimEnd().includes("\n")) &&
-        <span className="shrink-0">Preview truncated</span>}
+        <span className={bgTaskOutputClass} title={text} data-bg-output={output ? taskId : undefined}>{text}</span>}
       {failed && <button type="button" className="shrink-0 underline" aria-label="Retry task summary"
         onClick={() => confirmAuxiliaryTask("background", sessionId, taskId, "card")}>Retry</button>}
-      {stop && <span className="truncate" title={stop}>{stop}</span>}
-      {delivery && <span className="truncate" title={delivery}>{delivery}</span>}
-      {delivery && task?.delivery_error && <span className="truncate" title={task.delivery_error}>{task.delivery_error}</span>}
+      {bgTaskSummaryDetails(task, failed).map(({ key, className, title, text }) =>
+        <span key={key} className={className} title={title}>{text}</span>)}
     </div>
   );
 }
@@ -150,7 +125,7 @@ function BgTaskCard({ task, failed }: { task: BgTask; failed: boolean }) {
     interrupted: "border-border bg-muted/40",
   };
 
-  const stopReason = stopDescription(task);
+  const stopReason = bgTaskStopDescription(task);
   const idleLimit = task.idle_timeout_seconds == null
     ? "unknown" : task.idle_timeout_seconds === 0 ? "disabled" : `${task.idle_timeout_seconds}s`;
   const totalLimit = task.timeout_seconds == null ? "unknown" : `${task.timeout_seconds}s`;
@@ -158,7 +133,7 @@ function BgTaskCard({ task, failed }: { task: BgTask; failed: boolean }) {
   return (
     <div
       className={cn(
-        "octo-bgtask-chip mt-2 rounded-md border overflow-hidden",
+        bgTaskCardClass,
         headerStyle[task.status]
       )}
     >

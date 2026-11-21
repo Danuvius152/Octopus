@@ -5,9 +5,10 @@ import { isConfirmingBackgroundCompletion } from "../lib/hydrateSession";
 import { backgroundResultMessage } from "../lib/injectedTurns";
 import { isNativeChild, nativeAnswer, nativeCardState, nativeChatMessages, nativeItemKey, nativeWorkKey, nativeWorkPreviews } from "../lib/nativeOutput";
 import { readAttemptIdentity, readRuntimeMetadata, sameAttempt } from "../lib/toolIdentity";
-import { streamingTranscriptSource, type Message, type SubagentRun, type useSessionStore } from "../stores/sessionStore";
+import { streamingTranscriptSource, type BgTask, type Message, type SubagentRun, type useSessionStore } from "../stores/sessionStore";
 import type { RuntimeMetadata } from "../api";
 import { clippedMathmlSelector, formulaBodySelector, formulaProbeOptions, projectMarkdownOutput } from "./chatMarkdown";
+import { bgTaskCardClass, bgTaskOutputClass, bgTaskSummaryClass, bgTaskSummaryDetails } from "./bgTaskSummary";
 
 type SessionState = ReturnType<typeof useSessionStore.getState>;
 
@@ -129,8 +130,37 @@ function backgroundOutputHasBody(change: LiveOutputChange) {
   return Boolean(change.text.slice(start, end).trim());
 }
 
-export function backgroundOutputOutside(body: HTMLElement, change: LiveOutputChange, port: ReturnType<typeof scrollportBounds>) {
+export function backgroundOutputOutside(body: HTMLElement, change: LiveOutputChange, port?: ReturnType<typeof scrollportBounds>) {
   return readableSpansOutside(body, [changedCharacters(change.text, change.previous)], port, body.getBoundingClientRect());
+}
+
+export function collapsedBackgroundHasChangedText(task: BgTask, change: LiveOutputChange, row: HTMLElement) {
+  if (!row.clientWidth || bgTaskOutputLine(task.output_preview) !== change.text) return false;
+  const doc = row.ownerDocument;
+  const card = doc.createElement("div");
+  card.className = bgTaskCardClass;
+  const { fontFamily, direction } = getComputedStyle(row);
+  Object.assign(card.style, { position: "fixed", inset: "0 auto auto -10000px", width: `${row.clientWidth}px`,
+    visibility: "hidden", fontFamily, direction });
+  const summary = doc.createElement("div");
+  summary.className = bgTaskSummaryClass;
+  const output = doc.createElement("span");
+  output.className = bgTaskOutputClass;
+  output.textContent = change.text;
+  summary.append(output);
+  for (const { text, className } of bgTaskSummaryDetails(task, false)) {
+    const detail = doc.createElement("span");
+    detail.className = className;
+    detail.textContent = text;
+    summary.append(detail);
+  }
+  card.append(summary);
+  doc.body.append(card);
+  try {
+    return backgroundOutputOutside(output, change);
+  } finally {
+    card.remove();
+  }
 }
 
 function recordBackgroundOutput(pending: PendingTranscriptOutput["background"], sid: string, state: SessionState, before: SessionState) {

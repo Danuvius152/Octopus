@@ -763,18 +763,23 @@ test("a saved background result offers a return when its summary leaves the sele
   await expect(jump).toBeVisible();
 });
 
-for (const scenario of ["visible", "offscreen", "offscreen without the start event"] as const) {
-test(`a completed task's ${scenario} output preview respects reading without fetching full output`, async ({ page }) => {
-  const outsideViewport = scenario !== "visible";
-  const observesStart = scenario !== "offscreen without the start event";
+for (const { label, offscreen = false, observesStart = true, clipped = false, mounted = false } of [
+  { label: "visible output" },
+  { label: "offscreen output", offscreen: true },
+  { label: "offscreen output without the start event", offscreen: true, observesStart: false },
+  { label: "clipped output in an offscreen mounted card", offscreen: true, clipped: true, mounted: true },
+  { label: "clipped output in an unmounted card", offscreen: true, clipped: true },
+]) {
+test(`a completed task's ${label} respects reading without fetching full output`, async ({ page }) => {
   const { scroller, gap, send, settle } = await openChat(page, 4);
+  if (clipped) await page.addStyleTag({ content: ".chat-messages { max-width: 300px }" });
   const sessionId = "follow-output";
   const taskId = "background-preview";
   const startedAt = "2026-11-20T00:00:00Z";
-  const preview = "A newly saved background output preview";
+  const preview = clipped ? "\u00a0".repeat(110) + "RESULT" : "A newly saved background output preview";
   const reference = `/api/sessions/${sessionId}/messages/5`;
   await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
-    role: "assistant", type: "text", seq: 5, content: "Keep reading this reply.\n\n".repeat(55),
+    role: "assistant", type: "text", seq: 5, content: "Keep reading this reply.\n\n".repeat(mounted ? 9 : 55),
   } }));
   send({ type: "assistant_text", seq: 5, content: "Long reply preview", body_state: "preview", detail_ref: reference });
   if (observesStart) send({ type: "bg_started", task_id: taskId, command: "echo preview", started_at: startedAt });
@@ -785,10 +790,16 @@ test(`a completed task's ${scenario} output preview respects reading without fet
   await expect(toolRow).toBeInViewport();
   if (observesStart) await expect(scroller.getByRole("button", { name: "Expand bg task" })).toBeInViewport();
   else await expect(scroller.getByRole("button", { name: "Retry task summary" })).toBeInViewport();
-  if (outsideViewport) {
+  if (offscreen) {
     await scroller.getByRole("button", { name: "View full message" }).click();
-    await expect.poll(gap).toBeGreaterThan(500);
-    await expect(toolRow).toHaveCount(0);
+    if (mounted) {
+      await expect.poll(gap).toBeGreaterThan(80);
+      await expect(toolRow).toBeAttached();
+      await expect(toolRow).not.toBeInViewport();
+    } else {
+      await expect.poll(gap).toBeGreaterThan(500);
+      await expect(toolRow).toHaveCount(0);
+    }
   } else {
     const paragraph = scroller.getByText("Saved row 4", { exact: true });
     await expect(paragraph).toBeInViewport({ ratio: 1 });
@@ -812,6 +823,7 @@ test(`a completed task's ${scenario} output preview respects reading without fet
       description: null, status: "completed", started_at: startedAt, completed_at: "2026-11-20T00:01:00Z",
       exit_code: 0, output_preview: preview, has_output: true, preview_truncated: false } });
   });
+  const summary = page.waitForResponse((response) => response.url().endsWith(`/bg-task-summaries/${taskId}`));
   send({ type: "bg_completed", task_id: taskId, status: "completed", completed_at: "2026-11-20T00:01:00Z", exit_code: 0 });
   try {
     await expect.poll(() => summaryReads).toBe(1);
@@ -820,13 +832,37 @@ test(`a completed task's ${scenario} output preview respects reading without fet
   } finally {
     releaseSummary();
   }
-  if (outsideViewport) {
+  await (await summary).finished();
+  if (clipped) {
+    await settle();
+    const offers = await jump.count();
+    if (mounted) {
+      const output = scroller.locator("[data-bg-output]");
+      await expect(output).toBeAttached();
+      await expect(output).not.toBeInViewport();
+    }
+    await scroller.press("End");
+    const output = scroller.locator("[data-bg-output]");
+    await expect(output).toBeInViewport();
+    const clippedGlyphs = await output.evaluate((element) => {
+      const text = element.firstChild!;
+      const range = document.createRange();
+      range.setStart(text, text.textContent!.indexOf("RESULT"));
+      range.setEnd(text, text.textContent!.length);
+      return range.getBoundingClientRect().left >= element.getBoundingClientRect().right;
+    });
+    expect(clippedGlyphs).toBe(true);
+    expect(fullReads).toBe(0);
+    expect(offers).toBe(0);
+    return;
+  }
+  if (offscreen) {
     await expect(jump).toBeVisible();
     await jump.click();
   }
   await expect(scroller.getByText(preview, { exact: true })).toBeInViewport({ ratio: 1 });
   await expect(jump).toHaveCount(0);
-  if (!outsideViewport) expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Saved row 4");
+  if (!offscreen) expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Saved row 4");
   expect(fullReads).toBe(0);
 });
 }
@@ -859,6 +895,7 @@ test("clearing selected text uses the current navigation intent", async ({ page 
   await tail.evaluate((element) => window.getSelection()!.selectAllChildren(element));
   await page.mouse.wheel(0, 200);
   await expect.poll(selection).toContain("After clearing while reading");
+  await expect(jump).toHaveCount(0);
   const tailTop = (await tail.boundingBox())!.y;
   send({ type: "assistant_delta", content: output("After navigating with a selection") + "Static Footer final marker" });
   await expect(jump).toBeVisible();
