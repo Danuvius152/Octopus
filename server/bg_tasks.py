@@ -625,6 +625,14 @@ class BgTaskManager:
         if errors:
             raise BaseExceptionGroup("Original background resource retirement failed", errors)
 
+    async def list_task_summaries(self, session_id: str) -> list[dict[str, Any]]:
+        assert self._db is not None
+        return await self._db.list_bg_task_summaries(session_id)
+
+    async def get_task_summary(self, session_id: str, task_id: str) -> dict[str, Any] | None:
+        assert self._db is not None
+        return await self._db.get_bg_task_summary(session_id, task_id)
+
     async def list_tasks(self, session_id: str) -> list[BgTaskRecord]:
         assert self._db is not None
         rows = await self._db.list_bg_tasks_for_session(session_id)

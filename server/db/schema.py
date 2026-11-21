@@ -9,7 +9,7 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 12
+CURRENT_VERSION = 13
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -157,22 +157,40 @@ CREATE TABLE backend_credentials (
 CREATE TABLE bg_tasks (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
-    command TEXT NOT NULL,
-    description TEXT,
-    working_dir TEXT NOT NULL,
     status TEXT NOT NULL,                  -- 'pending'|'running'|'completed'|'failed'|'cancelled'|'interrupted'
     exit_code INTEGER,
-    stdout TEXT NOT NULL DEFAULT '',
-    stderr TEXT NOT NULL DEFAULT '',
     truncated INTEGER NOT NULL DEFAULT 0,  -- bool: at least one stream hit the cap
     started_at TEXT NOT NULL,
     completed_at TEXT,
     idle_timeout_seconds INTEGER,
     timeout_seconds INTEGER,
+    delivery_disposition TEXT CHECK(delivery_disposition IN ('stopped','unknown')),
+    -- Summary queries read this prefix without traversing the original fields'
+    -- overflow pages. Publication verifies the physical column order.
+    command_preview TEXT GENERATED ALWAYS AS (substr(command, 1, 120)) STORED,
+    description_preview TEXT GENERATED ALWAYS AS (substr(description, 1, 120)) STORED,
+    stop_reason_preview TEXT GENERATED ALWAYS AS (substr(stop_reason, 1, 120)) STORED,
+    delivery_error_preview TEXT GENERATED ALWAYS AS (substr(delivery_error, 1, 160)) STORED,
+    output_preview TEXT GENERATED ALWAYS AS (
+        substr(coalesce(nullif(rtrim(stdout, char(9,10,11,12,13,32)), ''),
+                        rtrim(stderr, char(9,10,11,12,13,32))), -120)
+    ) STORED,
+    has_output INTEGER GENERATED ALWAYS AS (stdout <> '' OR stderr <> '') STORED,
+    preview_truncated INTEGER GENERATED ALWAYS AS (
+        CASE
+            WHEN stdout = '' THEN rtrim(stderr, char(9,10,11,12,13,32)) <> output_preview
+            WHEN stderr = '' THEN rtrim(stdout, char(9,10,11,12,13,32)) <> output_preview
+            ELSE 1
+        END
+    ) STORED,
+    command TEXT NOT NULL,
+    description TEXT,
+    working_dir TEXT NOT NULL,
+    stdout TEXT NOT NULL DEFAULT '',
+    stderr TEXT NOT NULL DEFAULT '',
     stop_reason TEXT,
     work_id TEXT,
     knowledge_context TEXT,
-    delivery_disposition TEXT CHECK(delivery_disposition IN ('stopped','unknown')),
     delivery_error TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );

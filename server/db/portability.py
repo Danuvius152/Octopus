@@ -14,8 +14,7 @@ from .schema import _SCHEMA, CURRENT_VERSION
 
 OWNED = ("users", "agents", "backend_credentials", "connector_installations", "notifiers", "applications")
 RELATED = ("credential_secrets", "connector_installation_secrets", "agent_connectors", "custom_connectors", "connector_oauth_clients")
-# Message-private Git baseline observations leave with chats; they add no root
-# and grant no file-revert authority to a restored account.
+# Chat exclusions include message-private Git baselines and generated BG summaries.
 EXCLUDED = {"auth_tokens", "invites", "sessions", "messages", "schedules", "bg_tasks", "client_submissions",
             "research_jobs", "wiki_job_notifications"}
 

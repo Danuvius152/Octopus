@@ -19,17 +19,20 @@ function makeTask(overrides: Partial<BgTask> = {}): BgTask {
     session_id: "s1",
     command: "yes | head -c 100",
     description: "fill buffer",
-    working_dir: "/tmp",
     status: "running",
     exit_code: null,
-    stdout: "",
-    stderr: "",
+    output_preview: "",
+    has_output: false,
+    preview_truncated: false,
     truncated: false,
     started_at: "2026-05-18T00:00:00Z",
     completed_at: null,
     ...overrides,
   };
 }
+
+const saved = (task: BgTask, fields?: { stdout?: string; stderr?: string; command?: string }) =>
+  ({ ...task, stdout: "", stderr: "", ...fields });
 
 beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);
@@ -44,6 +47,169 @@ afterEach(() => {
 });
 
 describe("BgTaskChip", () => {
+  it("uses summaries for 200 folded cards and a miss outside the list window", async () => {
+    const sessionPath = "/api/sessions/s1";
+    const summary = { ...makeTask({ status: "completed" }), output_preview: "preview", has_output: true, preview_truncated: true };
+    const ids = Array.from({ length: 200 }, (_, index) => `recent-${index}`);
+    const fetcher = vi.fn(async (url: string) => {
+      const path = new URL(url).pathname;
+      if (path === `${sessionPath}/bg-task-summaries`) {
+        return Response.json(ids.map((id) => ({ ...summary, id })));
+      }
+      if (path === `${sessionPath}/bg-task-summaries/t1`) return Response.json(summary);
+      return Response.json({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => loadBgTaskSnapshot("s1"));
+    const cards = render(<>{[...ids, "t1"].map((id) => <BgTaskChip key={id} sessionId="s1" taskId={id} />)}</>);
+    await waitFor(() => expect(cards.container.querySelectorAll('button[aria-label="Expand bg task"]')).toHaveLength(201));
+    expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+      `${sessionPath}/bg-task-summaries`, `${sessionPath}/bg-task-summaries/t1`,
+    ]);
+  });
+
+  it.each(["mounted", "mounted later", "hidden"] as const)("refreshes an omitted terminal card and active tasks without reading cached history (%s)", async (view) => {
+    const current = makeTask({ status: "completed", delivery_disposition: "unknown", delivery_error: "Old return diagnosis" });
+    const history = Array.from({ length: 450 }, (_, index) => ({ ...current, id: `history-${index}` }));
+    const active = makeTask({ id: "active" });
+    useSessionStore.getState().setActiveSessionId("s1");
+    useSessionStore.getState().setBgTasks("s1", [...history, current, active]);
+    const fetcher = vi.fn(async (url: string) => {
+      const id = new URL(url).pathname.split("/").at(-1);
+      if (id === "bg-task-summaries") return Response.json(history.slice(0, 200));
+      return Response.json({ ...current, id, delivery_disposition: null, delivery_error: null });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const card = () => render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    if (view !== "mounted later") {
+      card();
+      expect(screen.getByText("Old return diagnosis")).toBeInTheDocument();
+    }
+    if (view === "hidden") act(() => useSessionStore.getState().openAgentForm("agent"));
+    await act(async () => loadBgTaskSnapshot("s1"));
+    if (view === "mounted later") {
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      card();
+    }
+    if (view === "hidden") {
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("Old return diagnosis")).toBeInTheDocument();
+      await act(async () => { useSessionStore.getState().showChat(); });
+    }
+    await waitFor(() => expect(screen.queryByText("Old return diagnosis")).toBeNull());
+    const paths = fetcher.mock.calls.map(([url]) => new URL(url).pathname.split("/").at(-1));
+    expect(paths).toEqual(["bg-task-summaries", "active", "t1"]);
+  });
+
+  it("retains confirmed terminal output after a failed refresh and through a virtual row remount", async () => {
+    const task = makeTask({ status: "completed" });
+    useSessionStore.setState({ activeSessionId: "s1" });
+    useSessionStore.getState().upsertBgTask("s1", task);
+    const fetcher = vi.fn(async () => Response.json(saved(task, { stdout: "Original terminal body" })))
+      .mockResolvedValueOnce(Response.json(saved(task, { stdout: "Original terminal body" })))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }));
+    vi.stubGlobal("fetch", fetcher);
+    const renderCard = () => render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    const card = renderCard();
+    const open = () => act(() => screen.getByRole("button", { name: "Expand bg task" }).click());
+    open();
+    expect(await screen.findByText("Original terminal body")).toBeVisible();
+    act(() => screen.getByRole("button", { name: "Refresh output" }).click());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load saved output");
+    expect(screen.getByText("Original terminal body")).toBeVisible();
+    card.unmount();
+    const remounted = renderCard();
+    open();
+    expect(screen.getByText("Original terminal body")).toBeVisible();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    remounted.unmount();
+    act(() => {
+      useSessionStore.setState({ activeSessionId: "other" });
+      useSessionStore.setState({ activeSessionId: "s1" });
+    });
+    renderCard();
+    open();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(await screen.findByText("Original terminal body")).toBeVisible();
+  });
+
+  it.each([true, false])("withdraws the card without retiring an independent event read (%s)", async (event) => {
+    const summary = makeTask({ status: "completed" });
+    let finishFirst!: (response: Response) => void;
+    let firstSignal: AbortSignal | null | undefined;
+    const fetcher = vi.fn(async () => Response.json(summary)).mockImplementationOnce((_url?: string, init?: RequestInit) => {
+      firstSignal = init?.signal;
+      return new Promise((resolve) => { finishFirst = resolve; });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const card = render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    if (event) act(() => handleWsMessage({
+      type: "bg_completed", session_id: "s1", task_id: "t1", status: "completed", completed_at: "done",
+    }));
+    card.unmount();
+    expect(firstSignal?.aborted).toBe(!event);
+    await act(async () => finishFirst(Response.json(summary)));
+    expect(useSessionStore.getState().bgTasks.s1?.[0].status).toBe(event ? "completed" : undefined);
+  });
+
+  it("cancels a saved output refresh when a retained chat is left and revisited in one commit", async () => {
+    const task = makeTask({ status: "completed", delivery_disposition: "unknown", delivery_error: "Original diagnosis" });
+    useSessionStore.setState({ activeSessionId: "s1" });
+    useSessionStore.getState().upsertBgTask("s1", task);
+    let finishRefresh!: (response: Response) => void;
+    let signal: AbortSignal | null | undefined;
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+      signal = init?.signal;
+      return new Promise<Response>((resolve) => { finishRefresh = resolve; });
+    }).mockResolvedValueOnce(Response.json(saved(task, { stdout: "Confirmed output" })));
+    vi.stubGlobal("fetch", fetcher);
+    const card = render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    act(() => screen.getByRole("button", { name: "Expand bg task" }).click());
+    expect(await screen.findByText("Confirmed output")).toBeVisible();
+    act(() => screen.getByRole("button", { name: "Refresh output" }).click());
+    act(() => {
+      useSessionStore.setState({ mainView: "schedules" });
+      useSessionStore.setState({ mainView: "chat" });
+    });
+    expect(signal?.aborted).toBe(true);
+    await act(async () => finishRefresh(Response.json(saved({
+      ...task, delivery_error: "Obsolete diagnostic",
+    }, { stdout: "Obsolete output" }))));
+    expect(screen.getByText("Confirmed output")).toBeVisible();
+    expect(screen.queryByText("Obsolete output")).toBeNull();
+    expect(useSessionStore.getState().bgTasks.s1[0].delivery_error).toBe("Original diagnosis");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    card.unmount();
+    fetcher.mockResolvedValueOnce(Response.json(saved(task, { stdout: "Fresh output" })));
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    act(() => screen.getByRole("button", { name: "Expand bg task" }).click());
+    expect(await screen.findByText("Fresh output")).toBeVisible();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("reads saved output only on expansion or explicit refresh even after a reconnect", async () => {
+    const summary = makeTask({ status: "completed", output_preview: "😀".repeat(100), has_output: true });
+    const diagnostic = "x".repeat(160) + "Original unabridged explanation";
+    const detail = { ...saved(summary), delivery_disposition: "unknown", delivery_error: diagnostic };
+    useSessionStore.setState({ connected: true });
+    useSessionStore.getState().upsertBgTask("s1", summary);
+    const fetcher = vi.fn(async () => Response.json(detail)).mockResolvedValueOnce(new Response(null, { status: 503 }));
+    vi.stubGlobal("fetch", fetcher);
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    expect(screen.getByText(summary.output_preview!)).toHaveAttribute("title", summary.output_preview);
+    expect(screen.queryByText("Preview truncated")).toBeNull();
+    act(() => screen.getByRole("button", { name: "Expand bg task" }).click());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load saved output");
+    act(() => useSessionStore.setState({ connected: false }));
+    act(() => useSessionStore.setState({ connected: true }));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    act(() => screen.getByRole("button", { name: "Refresh output" }).click());
+    const disclosure = await screen.findByText("Return diagnostic from the saved read");
+    act(() => disclosure.click());
+    expect(screen.getByText(diagnostic)).toBeVisible();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("shows a cancellation conflict without overwriting execution or delivery", async () => {
     useSessionStore.getState().setBgTasks("s1", [makeTask({ delivery_disposition: "unknown", delivery_error: "Original return error" })]);
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "Task is retiring" }, { status: 409 })));
@@ -70,7 +236,7 @@ describe("BgTaskChip", () => {
         delivery_error: disposition ? "New delivery" : null }]));
       await list;
     });
-    await act(async () => detailResponse(Response.json({ ...old, stdout: "Full HTTP detail" })));
+    await act(async () => detailResponse(Response.json(saved(old, { stdout: "Full HTTP detail" }))));
     expect(screen.getByText("Full HTTP detail")).toBeInTheDocument();
     expect(screen.queryByText("Old delivery")).toBeNull();
     if (disposition) expect(screen.getByText("New delivery")).toBeInTheDocument();
@@ -81,7 +247,9 @@ describe("BgTaskChip", () => {
 
   it("keeps completed WS facts while a late running detail supplies output", async () => {
     let respond!: (response: Response) => void;
-    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; })));
+    vi.stubGlobal("fetch", vi.fn((url: string) => url.includes("/bg-tasks/")
+      ? new Promise<Response>((resolve) => { respond = resolve; })
+      : Promise.resolve(Response.json(makeTask({ status: "completed", truncated: true, exit_code: 0, completed_at: "finished" })))));
     useSessionStore.getState().upsertBgTask("s1", makeTask());
     render(<BgTaskChip sessionId="s1" taskId="t1" />);
     await act(async () => screen.getByRole("button", { expanded: false }).click());
@@ -91,25 +259,38 @@ describe("BgTaskChip", () => {
       handleWsMessage({ type: "bg_delivery", session_id: "s1", task_id: "t1",
         delivery_disposition: "unknown", delivery_error: "Later delivery error" });
     });
-    await act(async () => respond(Response.json(makeTask({ stdout: "Full original output" }))));
+    await act(async () => respond(Response.json(saved(makeTask(), { stdout: "Full original output" }))));
     expect(screen.getByText("bg · completed")).toBeInTheDocument();
     expect(screen.getByText("Full original output")).toBeInTheDocument();
     expect(screen.getByText("Later delivery error")).toBeInTheDocument();
     expect(useSessionStore.getState().bgTasks.s1[0]).toMatchObject({
       status: "completed", exit_code: 0, completed_at: "finished", truncated: true,
     });
+    act(() => screen.getByRole("button", { name: "Collapse bg task" }).click());
+    act(() => screen.getByRole("button", { name: "Expand bg task" }).click());
+    expect(screen.getByRole("status")).toHaveTextContent("Loading saved output");
+    await act(async () => respond(Response.json(saved(makeTask({
+      status: "completed", completed_at: "finished", exit_code: 0, truncated: true,
+    })))));
+    expect(screen.getByText("No saved output")).toBeInTheDocument();
+    const beforeReopen = vi.mocked(fetch).mock.calls.length;
+    act(() => screen.getByRole("button", { name: "Collapse bg task" }).click());
+    act(() => screen.getByRole("button", { name: "Expand bg task" }).click());
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(beforeReopen);
+    expect(screen.getByText("No saved output")).toBeInTheDocument();
   });
 
   it.each(["unmount", "account", "service"] as const)("discards details after %s invalidates the observation", async (boundary) => {
     let respond!: (response: Response) => void;
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; })));
     const view = render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    const original = respond;
     act(() => {
       if (boundary === "unmount") view.unmount();
       else if (boundary === "account") useSessionStore.setState({ accountGeneration: 22 });
       else useSessionStore.setState({ dispatchGeneration: "replacement" });
     });
-    await act(async () => respond(Response.json(makeTask({ status: "completed", stdout: "obsolete" }))));
+    await act(async () => original(Response.json(makeTask({ status: "completed", output_preview: "obsolete" }))));
     expect(useSessionStore.getState().bgTasks.s1).toBeUndefined();
   });
 
@@ -125,8 +306,8 @@ describe("BgTaskChip", () => {
       useSessionStore.getState().setBgTasks("s1", [old], baseline);
     });
     await act(async () => respond(new Response(JSON.stringify({ ...old,
-      delivery_disposition: "unknown", delivery_error: "New reason", stdout: "Full fetched output" }), { status: 200 })));
-    await waitFor(() => expect(screen.getByText("Full fetched output")).toBeInTheDocument());
+      delivery_disposition: "unknown", delivery_error: "New reason", output_preview: "Fetched preview" }), { status: 200 })));
+    await waitFor(() => expect(screen.getByText("Fetched preview")).toBeInTheDocument());
     expect(screen.getByText("Return admission unconfirmed")).toBeInTheDocument();
     expect(screen.getByText("New reason")).toBeInTheDocument();
   });
@@ -153,8 +334,10 @@ describe("BgTaskChip", () => {
       handleWsMessage({ type: "bg_delivery", session_id: "s1", task_id: "t1",
         delivery_disposition: disposition, delivery_error: disposition ? "New reason" : null });
     });
-    await act(async () => respond(new Response(JSON.stringify({ ...old, stdout: "Full fetched output" }), { status: 200 })));
-    await waitFor(() => expect(screen.getByText("Full fetched output")).toBeInTheDocument());
+    const body = entry === "expanded" ? saved(old, { stdout: "Fetched output" }) :
+      { ...old, output_preview: "Fetched output" };
+    await act(async () => respond(Response.json(body)));
+    await waitFor(() => expect(screen.getByText("Fetched output")).toBeInTheDocument());
     if (disposition) {
       expect(screen.getByText(disposition === "unknown" ? "Return admission unconfirmed" : "Automatic return stopped")).toBeInTheDocument();
       expect(screen.getByText("New reason")).toBeInTheDocument();
@@ -278,20 +461,13 @@ describe("BgTaskChip", () => {
   });
 
   it("expanding shows full stdout/stderr panes", async () => {
-    // Stub fetch to return an empty JSON object — the chip's mount-time
-    // refetch shouldn't crash the test; we already pre-seeded the store.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("{}", { status: 200 }))
-    );
+    const summary = makeTask({ status: "completed", exit_code: 0, output_preview: "line three", has_output: true, preview_truncated: true });
+    const detail = saved(summary, { command: "complete saved command", stdout: "line one\nline two\nline three", stderr: "saved stderr" });
+    const fetcher = vi.fn(async () => Response.json(detail));
+    vi.stubGlobal("fetch", fetcher);
     useSessionStore.getState().upsertBgTask(
       "s1",
-      makeTask({
-        status: "completed",
-        exit_code: 0,
-        stdout: "line one\nline two\nline three",
-        stderr: "",
-      })
+      summary
     );
     render(<BgTaskChip sessionId="s1" taskId="t1" />);
     // Last line is shown as the collapsed preview.
@@ -302,8 +478,16 @@ describe("BgTaskChip", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument()
     );
-    expect(screen.getByText(/stdout/i)).toBeInTheDocument();
+    expect(await screen.findByText(/line one/)).toBeInTheDocument();
+    expect(screen.getByText("complete saved command")).toBeInTheDocument();
+    expect(screen.getByText("saved stderr")).toBeInTheDocument();
+    act(() => screen.getByRole("button", { name: "Collapse bg task" }).click());
+    act(() => screen.getByRole("button", { name: "Expand bg task" }).click());
     expect(screen.getByText(/line one/)).toBeInTheDocument();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    act(() => screen.getByRole("button", { name: "Refresh output" }).click());
+    expect(await screen.findByText("saved stderr")).toBeInTheDocument();
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it("clicking cancel POSTs to the cancel endpoint", async () => {

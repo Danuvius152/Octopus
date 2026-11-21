@@ -392,7 +392,8 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
     case "bg_completed":
     case "bg_delivery": {
       getState().applyBgTaskEvent(data);
-      if (data.type !== "bg_started") confirmAuxiliaryTask("background", sessionId, data.task_id, "event");
+      if (data.type === "bg_completed") confirmAuxiliaryTask("background", sessionId, data.task_id, "completion");
+      if (data.type === "bg_delivery") confirmAuxiliaryTask("background", sessionId, data.task_id, "event");
       break;
     }
 

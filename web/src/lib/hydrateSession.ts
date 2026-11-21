@@ -1,5 +1,6 @@
 import { accountFetch as fetch } from "./accountFetch";
-import { captureStreamingRead, useSessionStore, type SessionInfo, type StreamingReadBasis } from "../stores/sessionStore";
+import { bgTaskOutputOwner } from "./bgTaskOutput";
+import { bgTaskPreviewText, captureStreamingRead, useSessionStore, type SessionInfo, type StreamingReadBasis } from "../stores/sessionStore";
 import { applyTranscript } from "./transcript";
 import { readDispatchState } from "./sessionDispatch";
 import { isSelectedChat, sessions, type SessionObservation } from "./sessionList";
@@ -7,6 +8,7 @@ import { observeDelegations } from "./delegationReads";
 import { qualifyPairedSnapshot, SessionSnapshotFlights, type DetailGeneration, type DetailPair, type SnapshotStart } from "./sessionSnapshotFlights";
 import { SnapshotReads, TaskSnapshotReads } from "./snapshotReads";
 import { isResearchJob } from "./researchProjection";
+import type { BgTaskResponse } from "../api";
 import type { BgTask, PendingQuestion, ResearchJob, SessionAuxiliaryKind, SubagentRun } from "../stores/sessionStore";
 
 const API = window.location.origin;
@@ -157,7 +159,7 @@ function readSession(sessionId: string, purpose: SessionReadPurpose, share: bool
   if (purpose === "complete") {
     const pair = { accepted: done, generation: snapshot.generation };
     for (const kind of ["background", "research"] as const) {
-      const reading = observeAuxiliarySnapshot(sessionId, kind, start, pair, share);
+      const reading = observeAuxiliarySnapshot(sessionId, { kind }, start, pair, share);
       void reading.done.catch(() => {});
       auxiliary.push(reading);
     }
@@ -178,7 +180,89 @@ export async function loadBgTaskSnapshot(sessionId: string): Promise<void> {
 
 /** Cancelling a view's observation never cancels the server's job. */
 export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliaryKind, taskId?: string) {
-  return observeAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), undefined, false, undefined, taskId);
+  return observeAuxiliarySnapshot(sessionId, { kind, taskId }, useSessionStore.getState());
+}
+
+export function observeBgTaskOutput(task: BgTask) {
+  const owner = bgTaskOutputOwner(task);
+  let retired = false;
+  const current = () => !retired && owner.current();
+  const read = observeAuxiliarySnapshot(task.session_id, { kind: "background", outputTask: task },
+    useSessionStore.getState(), undefined, false, current);
+  const unsubscribe = useSessionStore.subscribe((next, previous) => {
+    if (next.connected !== previous.connected || !current()) cancel();
+  });
+  function cancel() {
+    retired = true;
+    unsubscribe();
+    read.cancel();
+  }
+  if (!current()) cancel();
+  const done = read.done.then((rows) => {
+    const row = rows?.[0] as BgTaskResponse | undefined;
+    return row && current() ? owner.accept(row) : undefined;
+  }).finally(unsubscribe);
+  return { done, cancel, current };
+}
+
+const pendingBackgroundLists = new Map<string, SessionObservation>();
+const bgTaskWindows = new Map<string, { observation: SessionObservation; covered: Set<string> }>();
+const mountedBgCards = new Map<string, Map<string, number>>();
+
+function currentBgTaskObservation(observation: SessionObservation) {
+  return sessions.current(observation) || sessions.initialGenerationCurrent(observation);
+}
+
+function currentBgTaskWindow(sessionId: string) {
+  const window = bgTaskWindows.get(sessionId);
+  return window && currentBgTaskObservation(window.observation) ? window : undefined;
+}
+
+useSessionStore.subscribe((next, previous) => {
+  // A summary window can be accepted while the same chat is hidden.
+  if (next.accountGeneration !== previous.accountGeneration || next.token !== previous.token ||
+      next.dispatchGeneration !== previous.dispatchGeneration ||
+      next.activeSessionId !== previous.activeSessionId) bgTaskWindows.clear();
+  const sessionId = next.activeSessionId;
+  if (sessionId && isSelectedChat(sessionId, next) && !isSelectedChat(sessionId, previous)) {
+    // Selection may start a fresh list in the same turn.
+    void Promise.resolve().then(() => reconcileBgTaskCards(sessionId));
+  }
+});
+sessions.onDeleted((id) => bgTaskWindows.delete(id));
+
+function reconcileBgTaskCards(sessionId: string, taskIds: Iterable<string> | undefined = mountedBgCards.get(sessionId)?.keys()) {
+  if (!taskIds) return;
+  const state = useSessionStore.getState();
+  if (!state.token || state.mainView !== "chat" || (state.activeSessionId !== null && state.activeSessionId !== sessionId)) return;
+  const pending = pendingBackgroundLists.get(sessionId);
+  if (pending && currentBgTaskObservation(pending)) return;
+  const covered = currentBgTaskWindow(sessionId)?.covered;
+  for (const taskId of taskIds) {
+    const confirmed = covered ? covered.has(taskId) : state.bgTasks[sessionId]?.some((task) => task.id === taskId);
+    if (!confirmed && !state.bgTaskReadFailures[sessionId]?.includes(taskId)) {
+      confirmAuxiliaryTask("background", sessionId, taskId, "card");
+    }
+  }
+}
+
+/** A mounted reader can see updates to saved return diagnostics outside the list window. */
+export function observeBgTaskCard(sessionId: string, taskId: string) {
+  const cards = mountedBgCards.get(sessionId) ?? new Map<string, number>();
+  if (!mountedBgCards.has(sessionId)) mountedBgCards.set(sessionId, cards);
+  const existing = cards.get(taskId) ?? 0;
+  cards.set(taskId, existing + 1);
+  reconcileBgTaskCards(sessionId, [taskId]);
+  return () => {
+    const users = cards.get(taskId) ?? 0;
+    if (users > 1) cards.set(taskId, users - 1);
+    else {
+      cards.delete(taskId);
+      const pending = taskConfirmations.get(confirmationKey("background", sessionId, taskId));
+      if (pending && !pending.independent) pending.finish();
+    }
+    if (!cards.size) mountedBgCards.delete(sessionId);
+  };
 }
 
 // Outstanding reads order replaceable fields and errors. Valid older successes
@@ -192,18 +276,25 @@ const auxiliaryTaskReads = {
 };
 
 // Confirmation owns the request demand and its original observation.
-const taskConfirmations = new Map<string, { current: () => boolean; dirty: boolean; resumeIfIdle: () => void }>();
-export function confirmAuxiliaryTask(kind: SessionAuxiliaryKind, sessionId: string, taskId: string, source: "event" | "list" | "retry"): void {
-  const key = JSON.stringify([kind, sessionId, taskId]);
+const taskConfirmations = new Map<string, {
+  current: () => boolean; dirty: boolean; independent: boolean; resumeIfIdle: () => void; finish: () => void;
+}>();
+const confirmationKey = (kind: SessionAuxiliaryKind, sessionId: string, taskId: string) => JSON.stringify([kind, sessionId, taskId]);
+export function confirmAuxiliaryTask(kind: SessionAuxiliaryKind, sessionId: string, taskId: string, source: "event" | "completion" | "list" | "retry" | "card"): void {
+  const key = confirmationKey(kind, sessionId, taskId);
   const pending = taskConfirmations.get(key);
   if (pending?.current()) {
-    if (source === "event") pending.dirty = true;
+    if (source !== "card") pending.independent = true;
+    if (source === "event" || source === "completion") pending.dirty = true;
     pending.resumeIfIdle();
     return;
   }
+  pending?.finish();
   const start = useSessionStore.getState();
   const tasks = kind === "background" ? start.bgTasks[sessionId] : start.research[sessionId];
-  if (!start.token || kind === "research" && !isSelectedChat(sessionId, start) || source === "event" && tasks?.some(task => task.id === taskId)) return;
+  if (!start.token || kind === "research" && !isSelectedChat(sessionId, start) ||
+      source === "event" && tasks?.some(task => task.id === taskId) ||
+      source === "completion" && start.bgTasks[sessionId]?.some(task => task.id === taskId && task.output_preview !== undefined)) return;
   const lifetime = sessions.observe(sessionId, start);
   let read: ReturnType<typeof observeAuxiliarySnapshot> | undefined;
   const failed = (state: SnapshotStart) => state.researchReadFailures[sessionId]?.includes(taskId);
@@ -211,7 +302,9 @@ export function confirmAuxiliaryTask(kind: SessionAuxiliaryKind, sessionId: stri
     current: () => taskConfirmations.get(key) === demand &&
       (sessions.current(lifetime.observation) || sessions.initialGenerationCurrent(lifetime.observation)),
     dirty: false,
+    independent: source !== "card",
     resumeIfIdle: () => { if (!read) void run(); },
+    finish,
   };
   const unsubscribe = kind === "research" ? useSessionStore.subscribe((state) => {
     if (!isSelectedChat(sessionId, state) || !demand.current()) finish();
@@ -231,7 +324,7 @@ export function confirmAuxiliaryTask(kind: SessionAuxiliaryKind, sessionId: stri
       demand.dirty = false;
       // Each pass starts after the events it confirms, with a fresh merge baseline.
       const baseline = useSessionStore.getState();
-      read = observeAuxiliarySnapshot(sessionId, kind, baseline, undefined, false, demand.current, taskId);
+      read = observeAuxiliarySnapshot(sessionId, { kind, taskId }, baseline, undefined, false, demand.current);
       await read.done.catch(() => {}); // Existing auxiliary error/retry UI owns failures.
       read = undefined;
       // Establishing the first service preserves the demand and retires the old read.
@@ -254,19 +347,36 @@ interface AuxiliarySnapshot {
   finish: () => void;
 }
 const auxiliaryFlights = new SessionSnapshotFlights<AuxiliarySnapshot>();
+type AuxiliaryTarget = { kind: SessionAuxiliaryKind; taskId?: string } | { kind: "background"; outputTask: BgTask };
 
-function issueAuxiliarySnapshot(sessionId: string, kind: SessionAuxiliaryKind, start: SnapshotStart,
-  signal: AbortSignal, generation?: DetailGeneration, taskId?: string): AuxiliarySnapshot {
+function issueAuxiliarySnapshot(sessionId: string, target: AuxiliaryTarget, start: SnapshotStart,
+  signal: AbortSignal, original: SessionObservation, generation?: DetailGeneration): AuxiliarySnapshot {
+  const { kind } = target;
+  const outputTask = "outputTask" in target ? target.outputTask : undefined;
+  const taskId = "outputTask" in target ? target.outputTask.id : target.taskId;
   const read = taskId ? undefined : auxiliaryReads[kind].begin(sessionId);
   const taskRead = auxiliaryTaskReads[kind].success.begin(sessionId);
   // A failed detail can own its task's Retry while older successes still fill data.
   const taskOutcome = auxiliaryTaskReads[kind].outcome.begin(sessionId);
-  const finish = () => { read?.finish(); taskRead.finish(); taskOutcome.finish(); };
+  let settleList: (() => void) | undefined;
+  if (kind === "background" && !taskId) {
+    pendingBackgroundLists.set(sessionId, original);
+    settleList = () => {
+      if (pendingBackgroundLists.get(sessionId) !== original) return;
+      pendingBackgroundLists.delete(sessionId);
+      // Mounted cards can still read exact summaries if the paired detail
+      // rejected the list. Give any replacement list the first chance to read.
+      void Promise.resolve().then(() => {
+        if (currentBgTaskObservation(original)) reconcileBgTaskCards(sessionId);
+      });
+    };
+  }
+  const finish = () => { settleList?.(); read?.finish(); taskRead.finish(); taskOutcome.finish(); };
   if (read) useSessionStore.getState().setSessionAuxiliaryError(sessionId, kind, null);
   const label = kind === "background" ? "background task details" : "research updates";
-  const path = kind === "background" ? "bg-tasks" : "research";
-  const target = taskId ? `/${encodeURIComponent(taskId)}` : "";
-  const response: Promise<AuxiliaryResult> = fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/${path}${target}`, {
+  const path = kind === "background" ? outputTask ? "bg-tasks" : "bg-task-summaries" : "research";
+  const suffix = taskId ? `/${encodeURIComponent(taskId)}` : "";
+  const response: Promise<AuxiliaryResult> = fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/${path}${suffix}`, {
     headers: { Authorization: `Bearer ${start.token}` }, signal,
   }).then(async (res) => {
     if (!res.ok) throw new Error(`Could not refresh ${label} (HTTP ${res.status}).`);
@@ -278,6 +388,13 @@ function issueAuxiliarySnapshot(sessionId: string, kind: SessionAuxiliaryKind, s
     const rows: unknown = taskId ? [data] : data;
     if (!Array.isArray(rows)) throw new Error(`Could not read ${label}.`);
     if (kind === "research" && !rows.every((row) => isResearchJob(row, sessionId))) throw new Error(`Could not read ${label}.`);
+    if (kind === "background" && !rows.every((row) => {
+      if (!row || typeof row !== "object" || typeof row.id !== "string" || row.session_id !== sessionId ||
+          typeof row.started_at !== "string" || !["pending", "running", "completed", "failed", "cancelled", "interrupted"].includes(row.status)) return false;
+      if (outputTask) return row.started_at === outputTask.started_at &&
+        typeof row.stdout === "string" && typeof row.stderr === "string" && typeof row.command === "string";
+      return typeof row.output_preview === "string" && typeof row.has_output === "boolean" && typeof row.preview_truncated === "boolean";
+    })) throw new Error(`Could not read ${label}.`);
     return rows;
   }).then((rows) => ({ rows }), (error: unknown) => ({ error }));
   let published = false;
@@ -288,7 +405,10 @@ function issueAuxiliarySnapshot(sessionId: string, kind: SessionAuxiliaryKind, s
     // replacing a newer snapshot's delivery diagnostics or explicit clearing.
     const ownsError = read?.claim() ?? false;
     const store = useSessionStore.getState();
-    if (taskId && taskOutcome.claim(taskId)) store.setAuxiliaryTaskFailure(kind, sessionId, taskId, "error" in result);
+    if (taskId && !outputTask && taskOutcome.claim(taskId)) {
+      if (kind === "background") currentBgTaskWindow(sessionId)?.covered.add(taskId);
+      store.setAuxiliaryTaskFailure(kind, sessionId, taskId, "error" in result);
+    }
     if ("error" in result) {
       if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, `Could not refresh ${label}.`);
       return;
@@ -296,8 +416,26 @@ function issueAuxiliarySnapshot(sessionId: string, kind: SessionAuxiliaryKind, s
     if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, null);
     if (taskId) {
       const advanceOnly = !taskRead.claim(taskId);
-      if (kind === "background") store.upsertBgTask(sessionId, result.rows[0] as BgTask,
-        start.bgTasks[sessionId]?.find((task) => task.id === taskId) ?? null, advanceOnly);
+      if (kind === "background") {
+        const basis = start.bgTasks[sessionId]?.find((task) => task.id === taskId) ?? null;
+        const current = store.bgTasks[sessionId]?.find((task) => task.id === taskId);
+        if (outputTask && current?.started_at !== outputTask.started_at) return;
+        const row = result.rows[0] as BgTaskResponse;
+        const summary = outputTask ? {
+          id: row.id, session_id: row.session_id, command: current?.command ?? outputTask.command,
+          description: current ? current.description : outputTask.description,
+          started_at: row.started_at, status: row.status, exit_code: row.exit_code, completed_at: row.completed_at,
+          truncated: row.truncated, idle_timeout_seconds: row.idle_timeout_seconds, timeout_seconds: row.timeout_seconds,
+          stop_reason: row.stop_reason == null ? row.stop_reason : bgTaskPreviewText(row.stop_reason, 120),
+          delivery_disposition: row.delivery_disposition,
+          delivery_error: row.delivery_error == null ? row.delivery_error : bgTaskPreviewText(row.delivery_error, 160),
+        } : result.rows[0] as BgTask;
+        store.upsertBgTask(sessionId, summary, basis, advanceOnly);
+        if (outputTask && summary.status !== "pending" && summary.status !== "running" &&
+            current?.status !== summary.status) {
+          confirmAuxiliaryTask("background", sessionId, taskId, "completion");
+        }
+      }
       else store.applyResearchDetail(sessionId, result.rows[0] as ResearchJob,
         start.research[sessionId]?.find((job) => job.id === taskId), advanceOnly);
       return;
@@ -312,13 +450,15 @@ function issueAuxiliarySnapshot(sessionId: string, kind: SessionAuxiliaryKind, s
       const basis = start.bgTasks[sessionId] ?? [];
       store.setBgTasks(sessionId, rows, basis, taskRead.claim);
 
-      // A bounded list cannot settle a previously known active task outside
-      // its window. Recheck those tasks by id even when their cards are folded.
-      const listed = new Set(rows.map(task => task.id));
-      const known = new Set(basis.map(task => task.id));
-      for (const task of store.bgTasks[sessionId] ?? []) {
-        if ((task.status === "pending" || task.status === "running") && known.has(task.id) && !listed.has(task.id)) {
-          confirmAuxiliaryTask("background", sessionId, task.id, "list");
+      if (ownsError) {
+        // This window also qualifies subsequent mounts. Once an omitted card
+        // is checked, remounting it alone does not issue another request.
+        const covered = new Set(rows.map((task) => task.id));
+        bgTaskWindows.set(sessionId, { observation: original, covered });
+        for (const task of basis) {
+          if (!covered.has(task.id) && (task.status === "pending" || task.status === "running")) {
+            confirmAuxiliaryTask(kind, sessionId, task.id, "list");
+          }
         }
       }
     } else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] ?? [], taskRead.claim);
@@ -327,12 +467,12 @@ function issueAuxiliarySnapshot(sessionId: string, kind: SessionAuxiliaryKind, s
 }
 
 function observeAuxiliarySnapshot(
-  sessionId: string, kind: SessionAuxiliaryKind, start: SnapshotStart,
-  pair?: DetailPair, share = false, current = () => true, taskId?: string,
+  sessionId: string, target: AuxiliaryTarget, start: SnapshotStart,
+  pair?: DetailPair, share = false, current = () => true,
 ): { done: Promise<unknown[] | null>; cancel: () => void } {
   if (!start.token || !sessions.current(sessions.capture(start))) return { done: Promise.resolve(null), cancel: () => {} };
-  const lease = auxiliaryFlights.acquire(sessionId, kind, start, share,
-    (_original, signal) => issueAuxiliarySnapshot(sessionId, kind, start, signal, pair?.generation, taskId));
+  const lease = auxiliaryFlights.acquire(sessionId, target.kind, start, share,
+    (original, signal) => issueAuxiliarySnapshot(sessionId, target, start, signal, original, pair?.generation));
   const { snapshot, observation, original } = lease;
   let next: ReturnType<typeof observeAuxiliarySnapshot> | undefined;
   const done = (async () => {
@@ -345,7 +485,7 @@ function observeAuxiliarySnapshot(
       const qualify = () => qualifyPairedSnapshot(observation, original, generation, snapshot.generation);
       if (lease.active() && current() && qualify() === "new-generation") {
         lease.release();
-        next = observeAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), pair, share, current, taskId);
+        next = observeAuxiliarySnapshot(sessionId, target, useSessionStore.getState(), pair, share, current);
         return await next.done;
       }
       const result = await lease.wait(snapshot.response);

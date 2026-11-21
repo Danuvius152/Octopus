@@ -9,7 +9,7 @@ import { loadBgTaskSnapshot, observeSession } from "./hydrateSession";
 import { sessions } from "./sessionList";
 
 const running = { id: "cold-task", session_id: "cold-session", command: "echo complete", description: "Cold task", status: "running",
-  stdout: "", stderr: "", started_at: "now", exit_code: null } as BgTask;
+  output_preview: "", has_output: false, preview_truncated: false, started_at: "now", completed_at: null, exit_code: null } satisfies BgTask;
 const completed = { ...running, status: "completed", exit_code: 0, completed_at: "later" } as BgTask;
 const reads: ReturnType<typeof deferred<Response>>[] = [];
 const start = () => handleWsMessage({ type: "bg_started", session_id: running.session_id, task_id: running.id,
@@ -18,7 +18,13 @@ const completion = () => handleWsMessage({ type: "bg_completed", session_id: run
   status: "completed", exit_code: 0, completed_at: "later" });
 const delivery = () => handleWsMessage({ type: "bg_delivery", session_id: running.session_id, task_id: running.id,
   delivery_disposition: "unknown", delivery_error: "Return not confirmed" });
-const card = () => render(<><SessionAuxiliaryNotice sessionId={running.session_id} /><BgTaskChip sessionId={running.session_id} taskId={running.id} /></>);
+const card = () => {
+  useSessionStore.getState().setMessages(running.session_id, [{
+    role: "assistant", type: "tool_use", tool_name: "mcp__bg__run",
+    runtime_metadata: { request_id: "request", attempt_id: "attempt", receipt: { kind: "bg", task_id: running.id } },
+  }]);
+  return render(<><SessionAuxiliaryNotice sessionId={running.session_id} /><BgTaskChip sessionId={running.session_id} taskId={running.id} /></>);
+};
 beforeEach(() => {
   useSessionStore.getState().setToken("");
   useSessionStore.getState().setToken("cold-token");
@@ -31,7 +37,7 @@ afterEach(() => { cleanup(); useSessionStore.getState().setToken(""); vi.unstubA
 it("keeps the terminal card and both output streams across delayed start and completion events", async () => {
   const list = loadBgTaskSnapshot(running.session_id);
   const result = { ...completed, stdout: "stdout first line\nstdout last line", stderr: "stderr first line\nstderr last line", truncated: true };
-  await act(async () => { reads[0].resolve(Response.json([result])); await list; });
+  await act(async () => { reads[0].resolve(Response.json([completed])); await list; });
   card();
   fireEvent.click(screen.getByRole("button", { name: "Expand bg task" }));
 
@@ -40,14 +46,14 @@ it("keeps the terminal card and both output streams across delayed start and com
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
     expect(screen.getByText(/stdout first line/)).toHaveTextContent("stdout first line stdout last line");
     expect(screen.getByText(/stderr first line/)).toHaveTextContent("stderr first line stderr last line");
-    expect(screen.getByText("(truncated)")).toBeVisible();
+    expect(screen.getByText("Saved output (truncated)")).toBeVisible();
   };
+  await act(async () => reads[1].resolve(Response.json(result)));
   expectResult();
   act(start);
   expectResult();
   act(() => { completion(); });
   expectResult();
-  await act(async () => reads[1].resolve(Response.json(result)));
 });
 
 it.each([false, true])("fills omitted terminal fields and streams from a detail read (newer running list=%s)", async (overlap) => {
@@ -63,9 +69,12 @@ it.each([false, true])("fills omitted terminal fields and streams from a detail 
 
   await act(async () => reads[0].resolve(Response.json({ ...completed, status: "failed", exit_code: 2,
     truncated: true, stop_reason: "exit_nonzero", stdout: "Saved stdout", stderr: "Saved stderr" })));
-  for (const text of ["exit 2", "(truncated)", "The command exited unsuccessfully", "Saved stdout", "Saved stderr"]) {
+  for (const text of ["exit 2", "Saved output (truncated)", "The command exited unsuccessfully", "Saved stdout", "Saved stderr"]) {
     expect(screen.getByText(text)).toBeVisible();
   }
+  await act(async () => reads[overlap ? 2 : 1].resolve(Response.json({
+    ...completed, status: "failed", exit_code: 2, truncated: true, output_preview: "Saved stdout",
+  })));
 });
 
 it.each([
@@ -79,7 +88,8 @@ it.each([
   fireEvent.click(screen.getByRole("button", { name: "Expand bg task" }));
   act(() => handleWsMessage({ type: "bg_delivery", session_id: running.session_id, task_id: running.id, ...patch }));
   act(() => { completion(); });
-  await act(async () => reads[1].resolve(Response.json({ ...completed, delivery_disposition: "stopped", delivery_error: "HTTP diagnosis" })));
+  await act(async () => reads[1].resolve(Response.json({ ...completed, stdout: "", stderr: "",
+    delivery_disposition: "stopped", delivery_error: "HTTP diagnosis" })));
   expect(useSessionStore.getState().bgTasks[running.session_id][0]).toMatchObject(expected);
   expect(screen.queryByText("Old diagnosis")).toBeNull();
   if (expected.delivery_disposition) expect(screen.getByText("Automatic return stopped")).toBeVisible();
@@ -107,7 +117,7 @@ it.each([true, false])("confirms an unknown completion without letting the cold 
   const list = loadBgTaskSnapshot(running.session_id);
   completion();
   expect(fetch).toHaveBeenCalledTimes(2);
-  expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain(`/bg-tasks/${running.id}`);
+  expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain(`/bg-task-summaries/${running.id}`);
   if (detailFirst) {
     await act(async () => reads[1].resolve(Response.json(completed)));
     card();
@@ -130,8 +140,8 @@ it.each([
   vi.stubGlobal("fetch", vi.fn((url: unknown) => {
     const path = String(url);
     if (path.endsWith("?view=browser")) return detail.promise;
-    if (path.endsWith("/bg-tasks")) return list.promise;
-    if (path.endsWith(`/bg-tasks/${running.id}`)) {
+    if (path.endsWith("/bg-task-summaries")) return list.promise;
+    if (path.endsWith(`/bg-task-summaries/${running.id}`)) {
       const read = deferred<Response>(); taskReads.push(read); return read.promise;
     }
     return Promise.resolve(Response.json([]));
@@ -182,15 +192,15 @@ it.each([true, false])("retains a delivery confirmation demand while detail is p
   expect(reads).toHaveLength(3);
 });
 
-it("shows a failed unknown-event read and recovers through the existing auxiliary Retry", async () => {
+it("shows a failed unknown-event read and recovers from the card's Retry", async () => {
   const list = loadBgTaskSnapshot(running.session_id);
   delivery();
   await act(async () => reads[1].resolve(Response.json({ detail: "offline" }, { status: 503 })));
   await act(async () => { reads[0].resolve(Response.json([running])); await list; });
   card();
-  expect(screen.getByRole("alert")).toHaveTextContent("Could not refresh background task details.");
-  fireEvent.click(screen.getByRole("button", { name: "Retry background task details" }));
-  expect(String(vi.mocked(fetch).mock.calls[2][0])).toContain(`/bg-tasks/${running.id}`);
+  expect(screen.getByRole("alert")).toHaveTextContent("Could not read summary");
+  fireEvent.click(screen.getByRole("button", { name: "Retry task summary" }));
+  expect(String(vi.mocked(fetch).mock.calls[2][0])).toContain(`/bg-task-summaries/${running.id}`);
   await act(async () => reads[2].resolve(Response.json({ ...completed, delivery_disposition: "unknown", delivery_error: "Return not confirmed" })));
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.getByText("Return not confirmed")).toBeVisible();
@@ -224,7 +234,7 @@ it.each(["account", "deletion", "service", "disconnect"])("retires a published t
   completion();
   await act(async () => reads[0].resolve(new Response(null, { status: 503 })));
   card();
-  expect(screen.getByRole("button", { name: "Retry background task details" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Retry task summary" })).toBeVisible();
 
   act(() => {
     if (reason === "account") useSessionStore.getState().setToken("another-token");
@@ -236,11 +246,18 @@ it.each(["account", "deletion", "service", "disconnect"])("retires a published t
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
-it("patches a known task without starting a redundant confirmation", () => {
+it("confirms a known task's completed preview once and patches later delivery events", async () => {
   useSessionStore.getState().upsertBgTask(running.session_id, running);
   card();
-  act(() => { completion(); delivery(); });
-  expect(reads).toHaveLength(0);
+  act(completion);
+  expect(reads).toHaveLength(1);
+  expect(screen.getByText("Output preview not read")).toBeVisible();
+  await act(async () => reads[0].resolve(Response.json({
+    ...completed, output_preview: "New saved preview", has_output: true,
+  })));
+  expect(screen.getByText("New saved preview")).toBeVisible();
+  act(delivery);
+  expect(reads).toHaveLength(1);
   expect(screen.getByText("Return not confirmed")).toBeVisible();
   expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
 });

@@ -17,7 +17,7 @@ import type {
   ApplicationRead as ApiApplicationRead,
   AttachmentMetadata as ApiAttachmentMetadata,
   BackendKind as ApiBackendKind,
-  BgTaskResponse as ApiBgTaskResponse,
+  BgTaskSummaryResponse as ApiBgTaskSummaryResponse,
   DelegationResponse as ApiDelegationResponse,
   ConnectorCatalogEntry as ApiConnectorCatalogEntry,
   ConnectorInstallationInfo as ApiConnectorInstallationInfo,
@@ -535,15 +535,27 @@ function updateResearch(s: SessionStore, sessionId: string, id: string, merge: (
   return { research: { ...s.research, [sessionId]: rows } };
 }
 
-// HTTP responses are complete; live events may omit fields the card has yet to observe.
+// Live events may omit summary fields the card has yet to observe.
 type BgOptionalField = "exit_code" | "truncated" | "idle_timeout_seconds" | "timeout_seconds"
-  | "stop_reason" | "delivery_disposition" | "delivery_error";
-export type BgTask = Omit<ApiBgTaskResponse, "work_id" | BgOptionalField>
-  & Partial<Pick<ApiBgTaskResponse, BgOptionalField>>;
+  | "stop_reason" | "delivery_disposition" | "delivery_error"
+  | "output_preview" | "has_output" | "preview_truncated";
+export type BgTask = Omit<ApiBgTaskSummaryResponse, BgOptionalField>
+  & Partial<Pick<ApiBgTaskSummaryResponse, BgOptionalField>>;
+
+export function bgTaskPreviewText(text: string, limit: number): string {
+  let end = 0;
+  for (const character of text) {
+    if (limit === 0) return text.slice(0, end);
+    end += character.length;
+    limit--;
+  }
+  return text;
+}
 
 type BgTaskEvent = Extract<WsEvent, { type: "bg_started" | "bg_completed" | "bg_delivery" }>;
 const bgCompletionFields = ["exit_code", "completed_at", "stop_reason", "truncated"] as const;
 const bgDeliveryFields = ["delivery_disposition", "delivery_error"] as const;
+const bgPreviewFields = ["output_preview", "has_output", "preview_truncated"] as const;
 type BgEventField = (typeof bgCompletionFields | typeof bgDeliveryFields)[number];
 // Only a WS event carrying a field advances its marker. Snapshots inherit the
 // markers so an in-flight read cannot undo a newer observation of that field.
@@ -571,6 +583,9 @@ function mergeBgTask(previous: BgTask, patch: Partial<BgTask>, source: BgTaskSou
         Object.assign(updated, { [field]: undefined });
       }
     }
+    if (source.event === "bg_completed" && !terminal) {
+      for (const field of bgPreviewFields) delete updated[field];
+    }
     bgFieldUpdates.set(updated, observed);
   } else {
     const basis = source.baseline ? bgFieldUpdates.get(source.baseline) : undefined;
@@ -586,16 +601,25 @@ function mergeBgTask(previous: BgTask, patch: Partial<BgTask>, source: BgTaskSou
         Object.assign(updated, { [field]: previous[field] });
       }
     }
-    for (const field of ["stdout", "stderr"] as const) {
-      const previousLength = previous[field]?.length ?? 0;
-      const nextLength = updated[field]?.length ?? 0;
-      if (previousLength > nextLength || previousLength === nextLength && (keepStatus || source.advanceOnly)) {
-        updated[field] = previous[field];
+    if (keepStatus || source.advanceOnly && previous.output_preview !== undefined && !replacesStatus) {
+      for (const field of bgPreviewFields) {
+        Object.assign(updated, { [field]: previous[field] });
       }
+    } else if (replacesStatus && isTerminalBgStatus(patch.status) && patch.output_preview === undefined) {
+      for (const field of bgPreviewFields) delete updated[field];
     }
     if (markers) bgFieldUpdates.set(updated, markers);
   }
   return updated;
+}
+
+function isTerminalBgStatus(status: BgTask["status"] | undefined): boolean {
+  return status !== undefined && status !== "running" && status !== "pending";
+}
+
+function mergeBgTaskSnapshot(previous: BgTask, task: BgTask, baseline: BgTask | null | undefined, advanceOnly: boolean) {
+  if (previous.started_at !== task.started_at) return advanceOnly ? previous : task;
+  return mergeBgTask(previous, task, { baseline, advanceOnly });
 }
 
 // Live record of an agent-to-agent delegation, mirrored from
@@ -1428,7 +1452,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set((s) => {
       const current = s.bgTasks[sessionId] || [];
       const idx = current.findIndex((t) => t.id === task.id);
-      const updated = idx >= 0 ? mergeBgTask(current[idx], task, { baseline, advanceOnly }) : task;
+      const updated = idx >= 0 ? mergeBgTaskSnapshot(current[idx], task, baseline, advanceOnly) : task;
       const next = idx >= 0
         ? [...current.slice(0, idx), updated, ...current.slice(idx + 1)]
         : [...current, updated];
@@ -1446,15 +1470,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         if (previous && previous.status !== "pending") return s;
         const started = {
           status: "running" as const,
-          command: event.command,
+          command: bgTaskPreviewText(event.command, 120),
           started_at: event.started_at,
-          ...(event.description !== undefined && { description: event.description }),
+          ...(event.description !== undefined && { description: event.description == null ? null : bgTaskPreviewText(event.description, 120) }),
           ...(event.idle_timeout_seconds !== undefined && { idle_timeout_seconds: event.idle_timeout_seconds }),
           ...(event.timeout_seconds !== undefined && { timeout_seconds: event.timeout_seconds }),
         };
         updated = previous ? mergeBgTask(previous, started, { event: event.type }) : {
-          id: event.task_id, session_id: sessionId, description: null, working_dir: "",
-          completed_at: null, stdout: "", stderr: "",
+          id: event.task_id, session_id: sessionId, description: null, completed_at: null,
           ...started,
         };
       } else {
@@ -1465,14 +1488,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
             completed_at: event.completed_at,
             ...(event.exit_code !== undefined && { exit_code: event.exit_code }),
             ...(event.truncated !== undefined && { truncated: event.truncated }),
-            ...(event.stop_reason !== undefined && { stop_reason: event.stop_reason }),
+            ...(event.stop_reason !== undefined && { stop_reason: event.stop_reason == null ? null : bgTaskPreviewText(event.stop_reason, 120) }),
             ...(event.idle_timeout_seconds !== undefined && { idle_timeout_seconds: event.idle_timeout_seconds }),
             ...(event.timeout_seconds !== undefined && { timeout_seconds: event.timeout_seconds }),
           }, { event: event.type });
         } else {
           updated = mergeBgTask(previous, {
             ...(event.delivery_disposition !== undefined && { delivery_disposition: event.delivery_disposition }),
-            ...(event.delivery_error !== undefined && { delivery_error: event.delivery_error }),
+            ...(event.delivery_error !== undefined && { delivery_error: event.delivery_error == null ? null : bgTaskPreviewText(event.delivery_error, 160) }),
           }, { event: event.type });
         }
       }
@@ -1488,7 +1511,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const rows = tasks.map((task) => {
         const existing = previous.get(task.id);
         const advanceOnly = claim ? !claim(task.id) : false;
-        return existing ? mergeBgTask(existing, task, { baseline: start?.get(task.id), advanceOnly }) : task;
+        return existing ? mergeBgTaskSnapshot(existing, task, start?.get(task.id), advanceOnly) : task;
       });
       const incoming = new Set(tasks.map((task) => task.id));
       // The server only returns its most recent window. Omission does not

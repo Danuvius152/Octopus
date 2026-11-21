@@ -9,7 +9,8 @@ import { useSessionStore, type BgTask, type Delegation, type Message, type Resea
 import { deferred } from "../test-support/deferred";
 
 const research: ResearchJob = { id: "task", session_id: "s1", question: "Original research", status: "running", phase: "search" };
-const background = { id: "task", session_id: "s1", status: "running", command: "original", stdout: "", stderr: "", exit_code: null } as BgTask;
+const background = { id: "task", session_id: "s1", status: "running", command: "original", description: null, started_at: "start", completed_at: null,
+  output_preview: "", has_output: false, preview_truncated: false, exit_code: null } satisfies BgTask;
 const delegation = { delegation_id: "child", parent_session_id: "s1", work_id: "task", state: "running", target_agent_name: "Vera" } as Delegation;
 const request: Message = { role: "assistant", type: "tool_use", tool_name: "mcp__ask_agent__ask", tool_use_id: "call",
   runtime_metadata: { request_id: "request", attempt_id: "attempt", tool_call_id: "call" } };
@@ -40,7 +41,7 @@ it.each(kinds)("%s shows an unknown network result and confirms through a read w
     if (init?.method === "POST") throw new TypeError("Connection lost after the server may have cancelled");
     const path = String(url);
     if (path.endsWith(`/research/${research.id}`)) return Response.json({ ...research, status: completed ? "cancelled" : "running" });
-    if (path.includes("/bg-tasks")) return Response.json({ ...background, status: completed ? "cancelled" : "running" });
+    if (path.includes("/bg-task-summaries")) return Response.json({ ...background, status: completed ? "cancelled" : "running" });
     return Response.json([{ ...delegation, state: completed ? "cancelled" : "running" }]);
   });
   vi.stubGlobal("fetch", fetcher);

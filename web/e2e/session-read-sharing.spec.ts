@@ -5,7 +5,7 @@ test("returning to a session shares its pending detail, BG, Research and delegat
   const agent = { id: "navigation-agent", name: "Octo", backend: "codex", pinned: true, is_system: true };
   const sessions = ["a", "b"].map((id) => ({ id, agent_id: agent.id, name: `Session ${id.toUpperCase()}`,
     backend: "codex", status: "idle", archived: false, working_dir: "/tmp", created_at: "2026-11-02T00:00:00Z" }));
-  const suffixes = ["", "/bg-tasks", "/research", "/delegations"];
+  const suffixes = ["", "/bg-task-summaries", "/research", "/delegations"];
   const counts = new Map<string, number>();
   const sessionReads = (id: string) => suffixes.map((suffix) => counts.get(`/api/sessions/${id}${suffix}`) ?? 0);
   let releaseA!: () => void;

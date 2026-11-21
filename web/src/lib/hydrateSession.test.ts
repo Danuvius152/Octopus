@@ -232,8 +232,8 @@ it.each(["claude-code", "codex"].flatMap((backend) => [false, true].map((newAtte
   }
 );
 
-const backgroundTask = (id: string, fields: Partial<BgTask> = {}) => ({ id, session_id: "s", status: "completed", stdout: "",
-  delivery_disposition: "unknown", delivery_error: "Old admission error", ...fields } as BgTask);
+const backgroundTask = (id: string, fields: Partial<BgTask> = {}) => ({ id, session_id: "s", status: "completed", command: "echo", description: null, started_at: "start", completed_at: "finish",
+  output_preview: "", has_output: false, preview_truncated: false, delivery_disposition: "unknown", delivery_error: "Old admission error", ...fields } as BgTask);
 
 it.each([200, 503])("another task's newer HTTP %s cannot prevent this detail from clearing delivery diagnostics", async (status) => {
   useSessionStore.getState().setBgTasks("s", [backgroundTask("a"), backgroundTask("b")]);
@@ -243,24 +243,24 @@ it.each([200, 503])("another task's newer HTTP %s cannot prevent this detail fro
   const b = observeSessionAuxiliary("s", "background", "b").done.catch(() => {});
   second.resolve(status === 200 ? json(backgroundTask("b")) : new Response("Unavailable", { status }));
   await b;
-  first.resolve(json(backgroundTask("a", { stdout: "Complete original output", delivery_disposition: null, delivery_error: null })));
+  first.resolve(json(backgroundTask("a", { output_preview: "Complete original output", delivery_disposition: null, delivery_error: null })));
   await a;
   expect(useSessionStore.getState().bgTasks.s.find((row) => row.id === "a")).toMatchObject({
-    stdout: "Complete original output", delivery_disposition: null, delivery_error: null,
+    output_preview: "Complete original output", delivery_disposition: null, delivery_error: null,
   });
   expect(useSessionStore.getState().bgTaskReadFailures.s).toEqual(status === 503 ? ["b"] : undefined);
 });
 
 it.each([false, true])("a list fills final output across an execution event while respecting delivery events (%s)", async (delivery) => {
-  useSessionStore.getState().setBgTasks("s", [backgroundTask("a", { status: "running", stdout: "short" })]);
+  useSessionStore.getState().setBgTasks("s", [backgroundTask("a", { status: "running", output_preview: "short" })]);
   const reply = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn(() => reply.promise));
   const reading = loadBgTaskSnapshot("s");
   handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "a", status: "completed", exit_code: 0, completed_at: "now" });
   if (delivery) handleWsMessage({ type: "bg_delivery", session_id: "s", task_id: "a", delivery_disposition: "unknown", delivery_error: "New live error" });
-  reply.resolve(json([backgroundTask("a", { stdout: "Complete original output", delivery_disposition: null, delivery_error: null })]));
+  reply.resolve(json([backgroundTask("a", { output_preview: "Complete original output", delivery_disposition: null, delivery_error: null })]));
   await reading;
-  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ status: "completed", stdout: "Complete original output",
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ status: "completed", output_preview: "Complete original output",
     delivery_error: delivery ? "New live error" : null, delivery_disposition: delivery ? "unknown" : null });
 });
 
@@ -269,26 +269,26 @@ it.each([true, false])("a finished newer detail or list retains per-task authori
   vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise));
   const older = observeSessionAuxiliary("s", "background", listFirst ? undefined : "a").done;
   const newer = observeSessionAuxiliary("s", "background", listFirst ? "a" : undefined).done;
-  const current = backgroundTask("a", { stdout: "New output", delivery_error: null, delivery_disposition: null });
+  const current = backgroundTask("a", { output_preview: "New output", delivery_error: null, delivery_disposition: null });
   fresh.resolve(json(listFirst ? current : [current]));
   await newer;
-  const previous = backgroundTask("a", { stdout: "Old output with more bytes" });
+  const previous = backgroundTask("a", { output_preview: "Old output with more bytes" });
   old.resolve(json(listFirst ? [previous] : previous));
   await older;
-  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ stdout: "Old output with more bytes", delivery_error: null, delivery_disposition: null });
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ output_preview: "New output", delivery_error: null, delivery_disposition: null });
 });
 
-it.each([true, false])("same-task successes use request order and preserve complete output (newer returns first=%s)", async (newerFirst) => {
+it.each([true, false])("same-task successes use request order for the preview (newer returns first=%s)", async (newerFirst) => {
   useSessionStore.getState().setBgTasks("s", [backgroundTask("a")]);
   const old = deferred<Response>(), fresh = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise));
   const older = observeSessionAuxiliary("s", "background", "a").done;
   const newer = observeSessionAuxiliary("s", "background", "a").done;
-  const oldData = backgroundTask("a", { stdout: "Complete original output", delivery_error: "Older diagnosis" });
-  const newData = backgroundTask("a", { stdout: "Complete", delivery_error: "New diagnosis" });
+  const oldData = backgroundTask("a", { output_preview: "Complete original output", delivery_error: "Older diagnosis" });
+  const newData = backgroundTask("a", { output_preview: "Complete", delivery_error: "New diagnosis" });
   if (newerFirst) { fresh.resolve(json(newData)); await newer; old.resolve(json(oldData)); await older; }
   else { old.resolve(json(oldData)); await older; fresh.resolve(json(newData)); await newer; }
-  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ stdout: "Complete original output", delivery_error: "New diagnosis" });
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ output_preview: "Complete", delivery_error: "New diagnosis" });
 });
 
 it("a newer same-task failure owns only the error surface, leaving older successful data useful", async () => {
@@ -298,8 +298,8 @@ it("a newer same-task failure owns only the error surface, leaving older success
   const older = observeSessionAuxiliary("s", "background", "a").done;
   const newer = observeSessionAuxiliary("s", "background", "a").done.catch(() => {});
   fresh.resolve(new Response("Unavailable", { status: 503 })); await newer;
-  old.resolve(json(backgroundTask("a", { stdout: "Saved output", delivery_error: null, delivery_disposition: null }))); await older;
-  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ stdout: "Saved output", delivery_error: null });
+  old.resolve(json(backgroundTask("a", { output_preview: "Saved output", delivery_error: null, delivery_disposition: null }))); await older;
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({ output_preview: "Saved output", delivery_error: null });
   expect(useSessionStore.getState().bgTaskReadFailures.s).toEqual(["a"]);
 });
 
@@ -308,9 +308,13 @@ it.each([false, true])("a newer list only supersedes detail errors for tasks it 
   const other = backgroundTask("other");
   useSessionStore.getState().setBgTasks("s", [task, other]);
   const detail = deferred<Response>();
-  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(detail.promise)
-    .mockResolvedValueOnce(json(covered ? [task, other] : [other]))
-    .mockResolvedValueOnce(json([other])).mockResolvedValueOnce(json([task, other])));
+  const retry = deferred<Response>();
+  let lists = 0, exact = 0;
+  vi.stubGlobal("fetch", vi.fn((url: string) => {
+    if (url.endsWith(task.id)) return ++exact === 1 ? detail.promise : retry.promise;
+    lists++;
+    return Promise.resolve(json(lists === 1 && covered || lists === 3 ? [task, other] : [other]));
+  }));
   const older = observeSessionAuxiliary("s", "background", task.id).done.catch(() => {});
   await loadBgTaskSnapshot("s");
   detail.resolve(new Response(null, { status: 503 }));
@@ -320,6 +324,7 @@ it.each([false, true])("a newer list only supersedes detail errors for tasks it 
   expect(useSessionStore.getState().bgTaskReadFailures.s).toEqual(covered ? undefined : [task.id]);
   await loadBgTaskSnapshot("s");
   expect(useSessionStore.getState().bgTaskReadFailures.s).toBeUndefined();
+  retry.resolve(json(task));
 });
 
 it("view cancellation releases a read without publishing its late data or poisoning future reads", async () => {
@@ -367,15 +372,15 @@ it("captures detail state before fetch and keeps newer WS rows, questions and su
 });
 
 it("captures the background baseline before fetch", async () => {
-  const bg = { id: "bg", status: "running" } as BgTask;
+  const bg = backgroundTask("bg", { status: "running" });
   useSessionStore.getState().setBgTasks("s", [bg]);
   const response = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn(() => response.promise));
   const loaded = loadBgTaskSnapshot("s");
-  useSessionStore.getState().upsertBgTask("s", { ...bg, status: "completed", stdout: "live output" });
+  useSessionStore.getState().upsertBgTask("s", { ...bg, status: "completed", output_preview: "live output" });
   response.resolve(json([bg]));
   await loaded;
-  expect(useSessionStore.getState().bgTasks.s[0].stdout).toBe("live output");
+  expect(useSessionStore.getState().bgTasks.s[0].output_preview).toBe("live output");
 });
 
 it.each(["new-attempt", "attempt-cleared", "new-dispatch"])("rejects an old execution snapshot after %s was observed", async (observation) => {
@@ -428,7 +433,7 @@ it.each([false, true])("fills reconnect history and task results with one confir
   let detailReads = 0;
   vi.stubGlobal("fetch", vi.fn((url: string) => {
     if (new URL(url).pathname === "/api/sessions/s") return ++detailReads === 1 ? first.promise : confirmation.promise;
-    if (url.endsWith("bg-tasks")) return Promise.resolve(json([{ id: "bg", status: "completed", stdout: "Saved output" }]));
+    if (url.endsWith("bg-task-summaries")) return Promise.resolve(json([backgroundTask("bg", { output_preview: "Saved output" })]));
     return Promise.resolve(json([]));
   }));
   const read = observeSession("s");
@@ -441,7 +446,7 @@ it.each([false, true])("fills reconnect history and task results with one confir
     await read.done;
     expect(useSessionStore.getState().messages.s.map((row) => row.content)).toEqual(["Missing history", "Live tail"]);
     expect(useSessionStore.getState().subagents.s.native.summary).toBe("Saved child answer");
-    await vi.waitFor(() => expect(useSessionStore.getState().bgTasks.s?.[0].stdout).toBe("Saved output"));
+    await vi.waitFor(() => expect(useSessionStore.getState().bgTasks.s?.[0].output_preview).toBe("Saved output"));
     expect(useSessionStore.getState().dispatchStates.s.revision).toBe(2);
     expect(detailReads).toBe(2);
     if (changedAgain) handleWsMessage({ type: "attempt_started", session_id: "s", request_id: "r", attempt_id: "latest-a3" });
@@ -486,7 +491,7 @@ it("retains the service identity captured by its own read", async () => {
 
 it.each(["detail", "select"])("%s accepts its initial service after another session first establishes that generation", async (entry) => {
   const response = deferred<Response>();
-  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("bg-tasks") ? Promise.resolve(json([])) : response.promise));
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("bg-task-summaries") ? Promise.resolve(json([])) : response.promise));
   const loaded = entry === "detail" ? loadSessionSnapshot("selected") : selectSession("selected");
   handleWsMessage({ type: "dispatch_state", session_id: "other", dispatch_state: dispatch("service") });
   response.resolve(json({ id: "selected", status: "idle", archived: false,
@@ -526,7 +531,7 @@ it("rejects a late archived body after a different session changes service gener
 });
 
 it("select adopts detail in the same account as the transcript", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-task-summaries") ? [] : {
     id: "private", name: "Private old account", messages: [], dispatch_state: dispatch("service"),
   })));
   const unsubscribe = useSessionStore.subscribe((state, previous) => {
@@ -557,7 +562,7 @@ it("hydrates missing metadata without requesting or applying chat history", asyn
 it("shows selected history and finishes navigation while background data is still pending", async () => {
   const detail = deferred<Response>();
   const background = deferred<Response>();
-  const fetcher = vi.fn((url: string) => url.endsWith("bg-tasks") ? background.promise : detail.promise);
+  const fetcher = vi.fn((url: string) => url.endsWith("bg-task-summaries") ? background.promise : detail.promise);
   vi.stubGlobal("fetch", fetcher);
   const loaded = selectSession("selected", "agent");
   expect(fetcher).toHaveBeenCalledTimes(4);
@@ -577,7 +582,7 @@ it("shows selected history and finishes navigation while background data is stil
 it("keeps archived history available when background refresh fails", async () => {
   const detail = deferred<Response>();
   const background = deferred<Response>();
-  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("bg-tasks") ? background.promise : detail.promise));
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("bg-task-summaries") ? background.promise : detail.promise));
   const loaded = loadSessionSnapshots("archived");
   detail.resolve(json({ id: "archived", archived: true, messages: [], dispatch_state: null }));
   background.reject(new Error("offline"));
@@ -586,7 +591,7 @@ it("keeps archived history available when background refresh fails", async () =>
   expect(useSessionStore.getState().messages.archived).toEqual([]);
   expect(useSessionStore.getState().dispatchUnavailable.archived).toBeUndefined();
 
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : { id: "archived", archived: true, messages: [], dispatch_state: null })));
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-task-summaries") ? [] : { id: "archived", archived: true, messages: [], dispatch_state: null })));
   await loadSessionSnapshots("archived");
   expect(useSessionStore.getState().messages.archived).toEqual([]);
   expect(useSessionStore.getState().sessions).toEqual([]);
@@ -598,7 +603,7 @@ it("keeps a background body from an obsolete service out of the current cards", 
   vi.stubGlobal("fetch", vi.fn(() => background.promise));
   const loaded = loadBgTaskSnapshot("s");
   useSessionStore.getState().applyDispatchState("s", dispatch("new"));
-  background.resolve(json([{ id: "retired", status: "running" }]));
+  background.resolve(json([backgroundTask("retired", { status: "running" })]));
   await loaded;
   expect(useSessionStore.getState().bgTasks.s).toBeUndefined();
   expect(useSessionStore.getState().sessionAuxiliaryErrors.s).toBeUndefined();
@@ -622,7 +627,7 @@ it.each(["background", "research"] as const)("a newer %s success retires an olde
 it("does not let a pending research body delay selected history", async () => {
   const research = deferred<Response>();
   vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/research") ? research.promise : Promise.resolve(json(
-    url.endsWith("/bg-tasks") ? [] : { id: "s", dispatch_state: dispatch("service"), messages: [] },
+    url.endsWith("/bg-task-summaries") ? [] : { id: "s", dispatch_state: dispatch("service"), messages: [] },
   ))));
   await selectSession("s");
   expect(useSessionStore.getState().messages.s).toEqual([]);
@@ -632,7 +637,7 @@ it("does not let a pending research body delay selected history", async () => {
 
 it("holds early auxiliary data until the detail accepts its service", async () => {
   const detail = deferred<Response>();
-  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/bg-tasks") ? Promise.resolve(json([{ id: "bg", status: "running" }])) :
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/bg-task-summaries") ? Promise.resolve(json([backgroundTask("bg", { status: "running" })])) :
     url.endsWith("/research") ? Promise.resolve(json([])) : detail.promise));
   const loaded = loadSessionSnapshots("s");
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -643,7 +648,7 @@ it("holds early auxiliary data until the detail accepts its service", async () =
 });
 
 it("does not publish auxiliary data when authoritative detail fails", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith("/bg-tasks") ? json([{ id: "bg", status: "running" }]) :
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith("/bg-task-summaries") ? json([backgroundTask("bg", { status: "running" })]) :
     new Response(null, { status: 503 })));
   await expect(loadSessionSnapshots("s")).rejects.toThrow("HTTP 503");
   expect(useSessionStore.getState().bgTasks.s).toBeUndefined();
@@ -652,7 +657,7 @@ it("does not publish auxiliary data when authoritative detail fails", async () =
 });
 
 it("routes a selected archived detail to read-only history and its owning agent", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-task-summaries") ? [] : {
     id: "archived", agent_id: "archive-owner", archived: true, messages: [], dispatch_state: null,
   })));
   await selectSession("archived");
@@ -732,7 +737,7 @@ it("ends all parts of an observation without cancelling server work", async () =
   expect(fetch).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ method: "POST" }));
 });
 
-const auxiliarySuffixes = ["/bg-tasks", "/research", "/delegations"] as const;
+const auxiliarySuffixes = ["/bg-task-summaries", "/research", "/delegations"] as const;
 const suffixes = ["", ...auxiliarySuffixes] as const;
 const pathFor = (id: string, suffix: string) => `/api/sessions/${id}${suffix}`;
 const selectionInfo = (id: string) => ({ id, agent_id: `agent-${id}`, name: id, status: "idle", archived: false } as SessionInfo);
@@ -740,7 +745,7 @@ const selectionDetail = (id: string, generation = "service", content = `Cached $
   ...selectionInfo(id), messages: [{ type: "text", role: "user", seq: 0, content }], dispatch_state: dispatch(generation),
 });
 const selectionRows = (id: string, prefix: string) => ({
-  "/bg-tasks": [backgroundTask(`${prefix}-bg`, { session_id: id })],
+  "/bg-task-summaries": [backgroundTask(`${prefix}-bg`, { session_id: id })],
   "/research": [{ id: `${prefix}-research`, session_id: id, status: "completed", question: "Research complete", phase: null }],
   "/delegations": [{ delegation_id: `${prefix}-child`, work_id: `${prefix}-work`, state: "completed", parent_session_id: id }],
 });

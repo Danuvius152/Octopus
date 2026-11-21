@@ -12,6 +12,15 @@ from typing import Any
 
 from .applications import require_application_writable
 from .base import DatabaseBase
+from .projection import RecordProjection
+
+_SUMMARY = RecordProjection(
+    "id", "session_id", "status", "exit_code", "truncated", "started_at", "completed_at",
+    "idle_timeout_seconds", "timeout_seconds", "delivery_disposition",
+    ("command", "command_preview"), ("description", "description_preview"),
+    ("stop_reason", "stop_reason_preview"), ("delivery_error", "delivery_error_preview"),
+    "output_preview", "has_output", "preview_truncated",
+)
 
 
 class BgTasksMixin(DatabaseBase):
@@ -80,6 +89,22 @@ class BgTasksMixin(DatabaseBase):
             )
             row = await cursor.fetchone()
             return self._row_to_bg_task(row) if row else None
+
+    async def list_bg_task_summaries(self, session_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(
+                f"SELECT {_SUMMARY} FROM bg_tasks WHERE session_id = ? ORDER BY started_at DESC LIMIT ?",
+                (session_id, limit),
+            )
+            return [_SUMMARY.read(row) for row in rows]
+
+    async def get_bg_task_summary(self, session_id: str, task_id: str) -> dict[str, Any] | None:
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                f"SELECT {_SUMMARY} FROM bg_tasks WHERE id = ? AND session_id = ?",
+                (task_id, session_id),
+            )
+            return _SUMMARY.read(row) if row else None
 
     async def mark_in_flight_bg_tasks_interrupted(
         self, completed_at: str

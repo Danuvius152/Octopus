@@ -1134,6 +1134,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/bg-task-summaries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Bg Task Summaries */
+        get: operations["list_bg_task_summaries_api_sessions__session_id__bg_task_summaries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/bg-task-summaries/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Bg Task Summary */
+        get: operations["get_bg_task_summary_api_sessions__session_id__bg_task_summaries__task_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/bg-tasks/{task_id}/cancel": {
         parameters: {
             query?: never;
@@ -3698,8 +3732,6 @@ export interface components {
             command: string;
             /** Description */
             description: string | null;
-            /** Working Dir */
-            working_dir: string;
             /**
              * Status
              * @enum {string}
@@ -3707,10 +3739,6 @@ export interface components {
             status: "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
             /** Exit Code */
             exit_code: number | null;
-            /** Stdout */
-            stdout: string;
-            /** Stderr */
-            stderr: string;
             /** Truncated */
             truncated: boolean;
             /** Started At */
@@ -3723,12 +3751,58 @@ export interface components {
             timeout_seconds: number | null;
             /** Stop Reason */
             stop_reason: string | null;
-            /** Work Id */
-            work_id: string | null;
             /** Delivery Disposition */
             delivery_disposition: ("stopped" | "unknown") | null;
             /** Delivery Error */
             delivery_error: string | null;
+            /** Working Dir */
+            working_dir: string;
+            /** Stdout */
+            stdout: string;
+            /** Stderr */
+            stderr: string;
+            /** Work Id */
+            work_id: string | null;
+        };
+        /** BgTaskSummaryResponse */
+        BgTaskSummaryResponse: {
+            /** Id */
+            id: string;
+            /** Session Id */
+            session_id: string;
+            /** Command */
+            command: string;
+            /** Description */
+            description: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+            /** Exit Code */
+            exit_code: number | null;
+            /** Truncated */
+            truncated: boolean;
+            /** Started At */
+            started_at: string;
+            /** Completed At */
+            completed_at: string | null;
+            /** Idle Timeout Seconds */
+            idle_timeout_seconds: number | null;
+            /** Timeout Seconds */
+            timeout_seconds: number | null;
+            /** Stop Reason */
+            stop_reason: string | null;
+            /** Delivery Disposition */
+            delivery_disposition: ("stopped" | "unknown") | null;
+            /** Delivery Error */
+            delivery_error: string | null;
+            /** Output Preview */
+            output_preview: string;
+            /** Has Output */
+            has_output: boolean;
+            /** Preview Truncated */
+            preview_truncated: boolean;
         };
         /**
          * BrowserMessageContent
@@ -9285,6 +9359,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BgTaskResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_bg_task_summaries_api_sessions__session_id__bg_task_summaries_get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BgTaskSummaryResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_bg_task_summary_api_sessions__session_id__bg_task_summaries__task_id__get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BgTaskSummaryResponse"];
                 };
             };
             /** @description Validation Error */

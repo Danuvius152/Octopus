@@ -288,7 +288,7 @@ it("loads retained research when viewing archived history", async () => {
     const path = String(url);
     if (path.includes("include_archived")) return Response.json([archived]);
     if (path.endsWith("/research")) return Response.json([{ ...job, status: "completed" }]);
-    if (path.endsWith("/bg-tasks")) return Response.json([]);
+    if (path.endsWith("/bg-task-summaries")) return Response.json([]);
     return Response.json({ ...archived, messages: [], dispatch_state: null });
   }));
   render(<ArchivedSessionsDialog open onOpenChange={() => {}} />);

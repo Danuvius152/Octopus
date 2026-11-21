@@ -99,17 +99,17 @@ it("retains a delivery observation through list and completion updates while a d
   const listStart = useSessionStore.getState().bgTasks.s;
   store.setBgTasks("s", [{ ...original, delivery_disposition: "unknown", delivery_error: "ACK lost" }], listStart);
   handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "bg", status: "completed", exit_code: 0, completed_at: "now" });
-  store.upsertBgTask("s", { ...original, stdout: "Full fetched output" }, original);
+  store.upsertBgTask("s", { ...original, output_preview: "Full fetched output" }, original);
   expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({
-    delivery_disposition: "unknown", delivery_error: "ACK lost", stdout: "Full fetched output",
+    delivery_disposition: "unknown", delivery_error: "ACK lost", output_preview: "Full fetched output",
   });
   // A detail request begun after that observation may report its later
   // reconciliation. The old event alone must not freeze unknown forever.
   const detailStart = useSessionStore.getState().bgTasks.s[0];
   handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "bg", status: "completed", exit_code: 0, completed_at: "now" });
-  store.upsertBgTask("s", { ...original, stdout: "Later fetched output" }, detailStart);
+  store.upsertBgTask("s", { ...original, output_preview: "Later fetched output" }, detailStart);
   expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({
-    delivery_disposition: null, delivery_error: null, stdout: "Later fetched output",
+    delivery_disposition: null, delivery_error: null, output_preview: "Later fetched output",
   });
 });
 
@@ -120,10 +120,10 @@ it("merges background and research snapshots using request-start entities", () =
   store.setBgTasks("s", [bg]);
   store.setResearch("s", [research]);
   const before = useSessionStore.getState();
-  store.upsertBgTask("s", { ...bg, status: "completed", stdout: "new result" });
+  store.upsertBgTask("s", { ...bg, status: "completed", output_preview: "new result" });
   handleWsMessage({ type: "research_completed", session_id: "s", research_id: "research", verified: 2 });
   store.setBgTasks("s", [bg], before.bgTasks.s);
   store.setResearch("s", [research], before.research.s);
-  expect(useSessionStore.getState().bgTasks.s[0].stdout).toBe("new result");
+  expect(useSessionStore.getState().bgTasks.s[0].output_preview).toBe("new result");
   expect(useSessionStore.getState().research.s[0].verified).toBe(2);
 });

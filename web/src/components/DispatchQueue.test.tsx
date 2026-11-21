@@ -91,7 +91,7 @@ it("waits for a real snapshot and then accepts an explicitly empty queue", () =>
 });
 
 it("shows an explicit failure when a live detail has no current dispatch snapshot", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => Response.json(url.endsWith("/bg-tasks") ? [] : {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => Response.json(url.endsWith("/bg-task-summaries") ? [] : {
     id: "session", archived: false, messages: [], pending_queue: ["Obsolete queue text"],
   })));
   render(<DispatchQueue sessionId="session" />);
@@ -166,7 +166,7 @@ it("ignores a malformed Resume response after a newer WS confirmation", async ()
 });
 
 it("finishes archived viewing without an active snapshot or loading state", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => Response.json(url.endsWith("/bg-tasks") ? [] : {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => Response.json(url.endsWith("/bg-task-summaries") ? [] : {
     id: "session", archived: true, messages: [], dispatch_state: null,
   })));
   render(<DispatchQueue sessionId="session" archived readOnly />);

@@ -46,11 +46,14 @@ def verify_main(db: sqlite3.Connection) -> int:
         raise RuntimeError("Primary database does not match the current storage format")
     catalog = "SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'"
     actual = {(kind, name): definition(kind, sql) for kind, name, sql in db.execute(catalog)}
+    task_columns = "SELECT name FROM pragma_table_xinfo('bg_tasks') ORDER BY cid"
     with closing(sqlite3.connect(":memory:")) as reference:
         for statement in statements(_SCHEMA):
             reference.execute(statement)
         expected = {(kind, name): definition(kind, sql) for kind, name, sql in reference.execute(catalog)}
-    if actual != expected:
+        # Bounded summary reads rely on the compact fields preceding body fields.
+        bg_layout_matches = [row[0] for row in db.execute(task_columns)] == [row[0] for row in reference.execute(task_columns)]
+    if actual != expected or not bg_layout_matches:
         raise RuntimeError("Primary database does not have the complete current structure")
     _verify_main_facts(db)
     for (identity,) in db.execute("SELECT external_account_id FROM connector_installations WHERE kind='github'"):

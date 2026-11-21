@@ -264,7 +264,7 @@ describe("ApplicationView", () => {
     // have it — without adopting it here the chat header can't name it.
     fetchMock.mockImplementation(async (url: unknown) =>
       String(url).includes("/api/sessions/s1") &&
-      !String(url).includes("bg-tasks")
+      !String(url).includes("bg-task-summaries")
         ? new Response(
             JSON.stringify({
               id: "s1",

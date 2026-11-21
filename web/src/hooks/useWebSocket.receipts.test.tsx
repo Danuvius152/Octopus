@@ -185,13 +185,14 @@ it("keeps live card completions across delayed reconnect responses and accepts n
   });
   const finish = async (status: string, newJobs = false) => {
     await act(async () => {
+      const task = { id: "bg", session_id: "s", started_at: "now", status, output_preview: "", has_output: false, preview_truncated: false };
       waiting.get("/api/sessions/s")!(Response.json({ messages: [], active_attempt: null,
         dispatch_state: { generation: "g", revision: 1, active_request_id: "r", active_operation: "message" as const, paused: false, items: [] }, subagents: [
         { task_id: "child", tool_call_id: "call", status, summary: "snapshot" },
       ] }));
-      waiting.get("/api/sessions/s/bg-tasks")!(Response.json(newJobs
-        ? [{ id: "bg", status: "completed" }, { id: "bg-next", status }]
-        : [{ id: "bg", status }]));
+      waiting.get("/api/sessions/s/bg-task-summaries")!(Response.json(newJobs
+        ? [{ ...task, status: "completed" }, { ...task, id: "bg-next" }]
+        : [task]));
     });
     // Research publication waits for detail to establish its service identity.
     await act(async () => {

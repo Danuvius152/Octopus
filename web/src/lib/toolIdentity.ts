@@ -40,18 +40,46 @@ function usableReceipt(receipt: ToolReceipt | null | undefined): ToolReceipt | u
   return undefined;
 }
 
+function resultKey(identity: RuntimeMetadata) {
+  return JSON.stringify([identity.request_id, identity.attempt_id, identity.tool_call_id]);
+}
+
+const toolResultsByTranscript = new WeakMap<Message[], Map<string, Message>>();
+
+function toolResults(messages: Message[]) {
+  let results = toolResultsByTranscript.get(messages);
+  if (!results) {
+    results = new Map();
+    for (const row of messages) {
+      if (row.type !== "tool_result") continue;
+      const identity = readRuntimeMetadata(row.runtime_metadata);
+      if (!identity?.tool_call_id) continue;
+      const key = resultKey(identity);
+      if (!results.has(key)) results.set(key, row);
+    }
+    toolResultsByTranscript.set(messages, results);
+  }
+  return results;
+}
+
 /** One projection for live, snapshot and paged tool messages; provider IDs grant no association. */
 export function projectToolCall(message: Message, messages: Message[] | undefined) {
   const identity = readRuntimeMetadata(message.runtime_metadata);
-  const result = identity?.tool_call_id ? messages?.find((row) => {
-    const candidate = readRuntimeMetadata(row.runtime_metadata);
-    return row.type === "tool_result" && candidate && candidate.tool_call_id === identity.tool_call_id &&
-      candidate.request_id === identity.request_id && candidate.attempt_id === identity.attempt_id;
-  }) : undefined;
+  const result = identity?.tool_call_id && messages ? toolResults(messages).get(resultKey(identity)) : undefined;
   return {
     toolCallId: identity?.tool_call_id,
     result: result || undefined,
     failed: Boolean(result?.is_error),
     receipt: result?.is_error ? undefined : usableReceipt(result?.runtime_metadata?.receipt ?? identity?.receipt),
   };
+}
+
+export function representedBgTaskIds(messages: Message[] | undefined): Set<string> {
+  const ids = new Set<string>();
+  for (const message of messages ?? []) {
+    if (message.type !== "tool_use" || message.tool_name !== "mcp__bg__run") continue;
+    const receipt = projectToolCall(message, messages).receipt;
+    if (receipt?.kind === "bg" && typeof receipt.task_id === "string") ids.add(receipt.task_id);
+  }
+  return ids;
 }

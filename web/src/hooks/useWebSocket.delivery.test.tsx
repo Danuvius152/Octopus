@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { useSessionStore } from "../stores/sessionStore";
 import { BgTaskChip } from "../components/BgTaskChip";
 import { SessionAuxiliaryNotice } from "../components/SessionAuxiliaryNotice";
-import { loadBgTaskSnapshot } from "../lib/hydrateSession";
+import { loadBgTaskSnapshot, loadSessionSnapshot } from "../lib/hydrateSession";
 import { deferred } from "../test-support/deferred";
 import { useWebSocket } from "./useWebSocket";
 
@@ -29,7 +29,8 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
     items: [{ request_id: "pending-bg", operation: "message" as const, source: "bg", summary: "Queued result", priority: false }],
   };
   const question = { question_id: "live-question", questions: [{ header: "Next", question: "Continue?", options: [] }] };
-  const task = { id: "exact-bg-task", session_id: sid, status: "completed", command: "run tests" };
+  const task = { id: "exact-bg-task", session_id: sid, status: "completed", command: "run tests", started_at: "start",
+    output_preview: "", has_output: false, preview_truncated: false };
   const delegation = {
     delegation_id: "child", sub_session_id: "child", parent_session_id: sid,
     target_agent_id: "worker", target_agent_name: "Worker", request: "Check", work_id: "exact-round",
@@ -42,7 +43,7 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
         id: sid, status: "idle", messages: [{ role: "system", type: "result", seq: 2, content: outcome }],
         next_message_seq: 3, dispatch_state: dispatch, active_attempt: null, pending_questions: [question], subagents: [],
       };
-    } else if (url.endsWith("/bg-tasks")) body = [task];
+    } else if (url.endsWith("/bg-task-summaries")) body = [task];
     else if (url.includes("/api/sessions") && !url.includes(`/api/sessions/${sid}`)) body = [{ id: sid, status: "idle", archived: false }];
     else if (url.endsWith("/delegations")) body = [delegation];
     return { ok: true, json: async () => body };
@@ -86,27 +87,56 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
   }
 });
 
-it.each([["mounted", false], ["remounted", false], ["mounted", true]] as const)(
-  "rechecks an omitted running task after reconnect with the collapsed card %s (detail fails=%s)", async (mount, fails) => {
+it.each([
+  ["mounted", false, false, "visible"],
+  ["remounted", false, false, "visible"],
+  ["mounted", true, false, "visible"],
+  ["missing", true, false, "visible"],
+  ["missing", true, true, "visible"],
+  ["missing", true, false, "returns after list"],
+  ["missing", true, true, "returns after list"],
+  ["missing", true, false, "returns while list is pending"],
+] as const)(
+  "rechecks an omitted task after reconnect with the collapsed card %s (summary fails=%s, session detail fails=%s, %s)", async (mount, fails, detailFails, visibility) => {
   vi.useFakeTimers();
   Socket.reset(0);
   vi.stubGlobal("WebSocket", Socket);
   const sid = "reconnect-background-session";
   const taskId = "background-before-reconnect";
   const dispatch = { generation: "same-service", revision: 0, paused: false, items: [], active_request_id: null, active_operation: null };
-  const running = { id: taskId, session_id: sid, status: "running", command: "collect output", stdout: "", stderr: "",
+  const running = { id: taskId, session_id: sid, status: "running", command: "collect output",
+    output_preview: "", has_output: false, preview_truncated: false,
     started_at: "2026-11-19T10:00:00Z", completed_at: null, exit_code: null };
   const recent = Array.from({ length: 200 }, (_, i) => ({ ...running, id: `recent-${i}`, status: "completed", started_at: "2026-11-19T11:00:00Z" }));
   const detail = deferred<Response>();
   const retry = deferred<Response>();
+  const abandoned = deferred<Response>();
+  const heldList = deferred<Response>();
+  const newerWindow = [{ ...recent[0], description: "Accepted reconnect window" }, ...recent.slice(1)];
+  const missing = mount === "missing";
   const taskDetails = vi.fn(() => retry.promise).mockReturnValueOnce(detail.promise);
-  const taskList = vi.fn(() => Response.json(reconnected ? recent : [running]));
+  if (missing) taskDetails.mockReset().mockReturnValue(retry.promise)
+    .mockReturnValueOnce(abandoned.promise).mockReturnValueOnce(detail.promise);
+  const taskList = vi.fn(() => {
+    if (!reconnected) return Response.json(missing ? recent : [running]);
+    if (visibility === "returns while list is pending") return heldList.promise;
+    return Response.json(newerWindow);
+  });
+  const messages = [{ role: "assistant", type: "tool_use", tool_name: "mcp__bg__run", seq: 0,
+    runtime_metadata: { request_id: "request", attempt_id: "attempt", receipt: { kind: "bg", task_id: taskId } } }];
   let reconnected = false;
+  let detailFailed = false;
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     const path = new URL(url).pathname;
-    if (path.endsWith(`/bg-tasks/${taskId}`)) return taskDetails();
-    if (path.endsWith("/bg-tasks")) return taskList();
-    if (path === `/api/sessions/${sid}`) return Response.json({ id: sid, status: "idle", messages: [], dispatch_state: dispatch });
+    if (path.endsWith(`/bg-task-summaries/${taskId}`)) return taskDetails();
+    if (path.endsWith("/bg-task-summaries")) return taskList();
+    if (path === `/api/sessions/${sid}`) {
+      if (detailFails && reconnected && !detailFailed) {
+        detailFailed = true;
+        return new Response("Unavailable", { status: 503 });
+      }
+      return Response.json({ id: sid, status: "idle", messages, dispatch_state: dispatch });
+    }
     if (path === "/api/sessions") return Response.json([{ id: sid, status: "idle", archived: false }]);
     return Response.json([]);
   }));
@@ -119,9 +149,11 @@ it.each([["mounted", false], ["remounted", false], ["mounted", true]] as const)(
     const first = Socket.instances[0];
     await act(async () => { first.readyState = 1; first.onopen?.(); });
     const original = card();
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeVisible();
-    expect(taskDetails).not.toHaveBeenCalled();
+    if (missing) expect(screen.getByText(/Loading bg task/)).toBeVisible();
+    else expect(screen.getByRole("button", { name: "Cancel" })).toBeVisible();
+    expect(taskDetails).toHaveBeenCalledTimes(missing ? 1 : 0);
     if (mount === "remounted") original.unmount();
+    if (visibility !== "visible") act(() => useSessionStore.getState().openAgentForm("agent"));
     act(() => {
       first.readyState = 3;
       first.onclose?.({ code: 1006 });
@@ -130,29 +162,49 @@ it.each([["mounted", false], ["remounted", false], ["mounted", true]] as const)(
     reconnected = true;
     const second = Socket.instances[1];
     await act(async () => { second.readyState = 1; second.onopen?.(); });
+    if (visibility !== "visible") {
+      expect(taskDetails).toHaveBeenCalledTimes(1);
+      if (visibility === "returns after list" && !detailFails) {
+        expect(useSessionStore.getState().bgTasks[sid][0].description).toBe("Accepted reconnect window");
+      }
+      await act(async () => { useSessionStore.getState().showChat(); });
+      if (visibility === "returns while list is pending") {
+        expect(taskDetails).toHaveBeenCalledTimes(1);
+        await act(async () => heldList.resolve(Response.json(newerWindow)));
+      }
+    }
+    if (detailFails) {
+      expect(useSessionStore.getState().transcriptReadErrors[sid]).toContain("HTTP 503");
+      expect(taskDetails).toHaveBeenCalledTimes(2);
+      await act(async () => { await loadSessionSnapshot(sid); });
+      expect(useSessionStore.getState().transcriptReadErrors[sid]).toBeUndefined();
+    }
     if (mount === "remounted") card();
-    expect(taskDetails).toHaveBeenCalledTimes(1);
-    await act(async () => { await loadBgTaskSnapshot(sid); });
-    expect(taskDetails).toHaveBeenCalledTimes(1);
+    if (missing) await act(async () => abandoned.resolve(Response.json({ ...running, output_preview: "Old connection" })));
+    expect(screen.queryByText("Old connection")).toBeNull();
+    const count = missing ? 2 : 1;
+    expect(taskDetails).toHaveBeenCalledTimes(count);
+    if (visibility !== "returns while list is pending") await act(async () => { await loadBgTaskSnapshot(sid); });
+    expect(taskDetails).toHaveBeenCalledTimes(count);
 
     if (fails) {
       await act(async () => detail.resolve(new Response("Unavailable", { status: 503 })));
-      expect(screen.getByRole("alert")).toHaveTextContent("Could not refresh background task details.");
-      expect(screen.getByText("bg · running")).toBeVisible();
+      expect(screen.getByRole("alert")).toHaveTextContent("Could not read summary");
+      if (!missing) expect(screen.getByText("bg · running")).toBeVisible();
       const listCalls = taskList.mock.calls.length;
-      fireEvent.click(screen.getByRole("button", { name: "Retry background task details" }));
+      fireEvent.click(screen.getByRole("button", { name: "Retry task summary" }));
       expect(taskList).toHaveBeenCalledTimes(listCalls);
-      expect(taskDetails).toHaveBeenCalledTimes(2);
+      expect(taskDetails).toHaveBeenCalledTimes(count + 1);
     }
     await act(async () => (fails ? retry : detail).resolve(Response.json({ ...running, status: "completed", exit_code: 0,
-      completed_at: "2026-11-19T10:01:00Z", stdout: "Saved stdout", stderr: "Saved stderr" })));
+      completed_at: "2026-11-19T10:01:00Z", output_preview: "Saved stdout", has_output: true, preview_truncated: true })));
     expect(screen.getByRole("button", { name: "Expand bg task" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("bg · completed")).toBeVisible();
     expect(screen.getByText("Saved stdout")).toBeVisible();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
-    expect(useSessionStore.getState().bgTasks[sid].find(task => task.id === taskId)?.stderr).toBe("Saved stderr");
-    expect(taskDetails).toHaveBeenCalledTimes(fails ? 2 : 1);
+    expect(useSessionStore.getState().bgTasks[sid].find(task => task.id === taskId)?.preview_truncated).toBe(true);
+    expect(taskDetails).toHaveBeenCalledTimes(count + Number(fails));
   } finally {
     act(() => {
       hook.unmount();

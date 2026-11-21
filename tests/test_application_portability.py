@@ -50,6 +50,10 @@ async def test_current_github_account_archive_preserves_installation_grant_and_a
         await database.set_owned_agent_connector(agent["id"], "github-original", True, owner["id"])
         original = await database.get_connector_installation("github-original", owner["id"])
         await database.save_session("excluded-chat", "Source conversation", str(working), "time", user_id=owner["id"])
+        await database.create_bg_task("excluded-task", "excluded-chat", "echo saved", None, str(working), "time")
+        await database.update_bg_task("excluded-task", status="completed", stdout="Saved command output")
+        summary = await database.get_bg_task_summary("excluded-chat", "excluded-task")
+        assert summary["output_preview"] == "Saved command output"
     finally:
         await database.close()
     archive = tmp_path / "current-account.zip"
@@ -66,6 +70,7 @@ async def test_current_github_account_archive_preserves_installation_grant_and_a
         token = await ConnectorManager(copied).get_access_token(enabled[0].id, owner["id"])
         assert token["access_token"] == "original-account-grant"
         assert await copied.load_sessions(user_id=owner["id"], include_archived=True) == []
+        assert await copied.get_bg_task("excluded-task") is None
     finally:
         await copied.close()
 

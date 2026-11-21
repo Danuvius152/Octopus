@@ -1168,10 +1168,10 @@ def test_render_delivery_prompt_handles_truncation_and_stderr():
 
 
 @pytest.fixture
-async def api_client(tmp_path, monkeypatch):
-    """In-memory DB + ASGI client + a manager wired in the same shape
+async def api_client(tmp_path, monkeypatch, request):
+    """ASGI client and a manager wired in the same shape
     as production's lifespan. Mirrors test_attachments.client."""
-    db = Database(":memory:")
+    db = Database(str(tmp_path / "summary.db") if getattr(request, "param", None) == "file" else ":memory:")
     await db.initialize()
     _, bearer = await create_account(db, extra_roots=[tmp_path])
     session_manager.sessions.clear()
@@ -1249,6 +1249,66 @@ async def test_rest_start_and_get_bg_task(api_client):
         assert projection.keys() == body.keys()
         assert projection["status"] == "completed" and projection["exit_code"] == 0
         assert projection["delivery_disposition"] == "unknown" and projection["delivery_error"] == "Original ACK lost"
+
+
+@pytest.mark.parametrize("api_client", ["file"], indirect=True)
+async def test_rest_bg_summary_window_and_old_task_have_bounded_payloads(api_client):
+    client, wd = api_client
+    db = session_manager.db
+    session = await session_manager.create_session(
+        (await db.get_system_agent())["id"], name="summary", working_dir=str(wd),
+    )
+    command = ("界\\\n" * 2_000) + " end"
+    stdout = ("界\\\n" * 40_000) + "stdout tail"
+    stderr = "stderr: " + "y" * 200_000
+    for index in range(201):
+        task_id = f"task-{index:03}"
+        await db.create_bg_task(task_id, session.id, command, None, str(wd), f"{index:03}")
+        await db.update_bg_task(
+            task_id, status="completed", stdout=stdout, stderr=stderr,
+            truncated=True, delivery_disposition="unknown", delivery_error=command,
+        )
+
+    base = f"/api/sessions/{session.id}"
+    listing = await client.get(f"{base}/bg-task-summaries")
+    assert listing.status_code == 200
+    rows = listing.json()
+    assert len(rows) == 200 and rows[0]["id"] == "task-200"
+    assert not any(row["id"] == "task-000" for row in rows)
+    assert len(listing.content) < 350_000
+    detail = await client.get(f"{base}/bg-task-summaries/task-000")
+    assert detail.status_code == 200 and len(detail.content) < 1_750
+    summary = detail.json()
+    assert summary["output_preview"].endswith("stdout tail")
+    assert summary["preview_truncated"] and summary["truncated"]
+    assert summary["delivery_disposition"] == "unknown"
+    assert not {"stdout", "stderr", "working_dir", "knowledge_context"} & summary.keys()
+    other = await session_manager.create_session(
+        (await db.get_system_agent())["id"], name="other", working_dir=str(wd),
+    )
+    assert (await client.get(f"/api/sessions/{other.id}/bg-task-summaries/task-000")).status_code == 404
+    full = (await client.get(f"{base}/bg-tasks/task-000")).json()
+    assert (full["command"], full["stdout"], full["stderr"], full["delivery_error"]) == (command, stdout, stderr, command)
+
+    print(f"Encoded summary: {len(listing.content):,} B list, {len(detail.content):,} B exact")
+    # Linux counts bytes delivered by read/pread, including page cache hits.
+    # A fresh connection prevents the test from hiding overflow reads in SQLite's cache.
+    meter = Path("/proc/self/io")
+    if meter.is_file():
+        reads = []
+        for lookup, max_bytes in ((lambda db: db.list_bg_task_summaries(session.id), 2_000_000),
+                                  (lambda db: db.get_bg_task_summary(session.id, "task-000"), 65_536)):
+            cold = Database(str(wd / "summary.db"))
+            await cold.initialize()
+            try:
+                before = int(meter.read_text().split()[1])
+                await lookup(cold)
+                read = int(meter.read_text().split()[1]) - before
+                assert read < max_bytes
+                reads.append(read)
+            finally:
+                await cold.close()
+        print(f"Cold SQLite reads: {reads[0]:,} B list, {reads[1]:,} B exact")
 
 
 async def test_rest_rejects_client_supplied_knowledge_context(api_client):

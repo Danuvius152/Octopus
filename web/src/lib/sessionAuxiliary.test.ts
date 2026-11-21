@@ -4,7 +4,8 @@ import { loadBgTaskSnapshot, loadResearchSnapshot, observeSessionAuxiliary } fro
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { useSessionStore, type BgTask, type ResearchJob } from "../stores/sessionStore";
 
-const bg = { id: "task", session_id: "s", status: "running" } as BgTask;
+const bg = { id: "task", session_id: "s", status: "running", command: "echo", description: null,
+  started_at: "start", completed_at: null, output_preview: "", has_output: false, preview_truncated: false } satisfies BgTask;
 const research = { id: "task", session_id: "s", question: "A question", status: "running", phase: "search" } as ResearchJob;
 beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);
@@ -69,13 +70,14 @@ it.each(["unknown", null] as const)("allows an old list's terminal fact without 
   vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
   const list = loadBgTaskSnapshot("s");
   const detail = observeSessionAuxiliary("s", "background", "task");
-  b.resolve(Response.json({ ...bg, stdout: "Complete fetched output", delivery_disposition: disposition,
+  b.resolve(Response.json({ ...bg, delivery_disposition: disposition,
     delivery_error: disposition ? "New delivery" : null }));
   await detail.done;
-  a.resolve(Response.json([{ ...bg, status: "completed", delivery_disposition: "stopped", delivery_error: "Old delivery" }]));
+  a.resolve(Response.json([{ ...bg, status: "completed", output_preview: "Terminal preview", has_output: true,
+    delivery_disposition: "stopped", delivery_error: "Old delivery" }]));
   await list;
   expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({
-    status: "completed", stdout: "Complete fetched output",
+    status: "completed", output_preview: "Terminal preview",
     delivery_disposition: disposition, delivery_error: disposition ? "New delivery" : null,
   });
 });

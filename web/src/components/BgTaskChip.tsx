@@ -7,14 +7,11 @@
  * badge, exit code, last-line output preview) and exposes a Cancel
  * button while the task is running.
  *
- * State source: zustand `bgTasks[sessionId]`, populated by the WS
- * handler from `bg_started` / `bg_completed` events. Full output is
- * fetched on demand via `GET /api/sessions/{id}/bg-tasks/{task_id}`
- * when the user opens the popover (we don't ship 200 KB on every
- * WS event).
+ * Store observations carry status and a bounded preview. The open card
+ * owns its saved stdout/stderr read and can reuse a confirmed terminal body.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   IconCheck,
   IconChevronDown,
@@ -25,9 +22,10 @@ import {
   IconX,
 } from "@tabler/icons-react";
 
-import { useSessionStore, type BgTask } from "../stores/sessionStore";
+import { bgTaskPreviewText, useSessionStore, type BgTask } from "../stores/sessionStore";
 import { cn } from "../lib/utils";
-import { observeSessionAuxiliary } from "../lib/hydrateSession";
+import { confirmAuxiliaryTask, observeBgTaskCard, observeBgTaskOutput, observeSessionAuxiliary } from "../lib/hydrateSession";
+import { cachedBgTaskOutput } from "../lib/bgTaskOutput";
 import { useTaskControl } from "../hooks/useTaskControl";
 import { TaskControlFeedback } from "./TaskControlFeedback";
 
@@ -61,7 +59,11 @@ function StatusIcon({ status }: { status: BgTask["status"] }) {
 function lastLine(text: string): string {
   const trimmed = text.replace(/\s+$/, "");
   const lines = trimmed.split("\n");
-  return lines[lines.length - 1]?.slice(0, 120) || "";
+  return lines[lines.length - 1] || "";
+}
+
+function isRunning(task: Pick<BgTask, "status">): boolean {
+  return task.status === "running" || task.status === "pending";
 }
 
 function stopDescription(task: BgTask): string | null {
@@ -86,31 +88,56 @@ function stopDescription(task: BgTask): string | null {
 
 export function BgTaskChip({ sessionId, taskId }: Props) {
   const token = useSessionStore((s) => s.token);
+  const account = useSessionStore((s) => s.accountGeneration);
+  const generation = useSessionStore((s) => s.dispatchGeneration);
   const task = useSessionStore((s) =>
     (s.bgTasks[sessionId] || []).find((t) => t.id === taskId)
   );
-  const [expanded, setExpanded] = useState(false);
-  const control = useTaskControl(sessionId, taskId);
+  const failed = useSessionStore((s) => s.bgTaskReadFailures[sessionId]?.includes(taskId) ?? false);
 
-  // The read owns its observation until this view ends it. A WS insert while
-  // it waits must not cancel a valid response that can still supply full output.
-  useEffect(() => {
-    if (!expanded && useSessionStore.getState().bgTasks[sessionId]?.some((item) => item.id === taskId)) return;
-    const read = observeSessionAuxiliary(sessionId, "background", taskId);
-    void read.done.catch(() => {});
-    return read.cancel;
-  }, [expanded, sessionId, taskId, token]);
+  useEffect(() => observeBgTaskCard(sessionId, taskId), [sessionId, taskId, token, account, generation]);
 
   if (!task) {
     return (
-      <div className="octo-bgtask-chip mt-2 inline-flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground">
-        <IconLoader2 size={12} className="animate-spin" />
-        <span>Loading bg task {taskId}…</span>
+      <div className="octo-bgtask-chip mt-2 overflow-hidden rounded-md border border-border bg-muted/40 text-muted-foreground">
+        <div className="flex h-8 items-center gap-2 px-2.5 text-xs">
+          {failed ? <IconExclamationCircle size={12} /> : <IconLoader2 size={12} className="animate-spin" />}
+          <span>{failed ? "Background task" : `Loading bg task ${taskId}…`}</span>
+        </div>
+        <SummaryLine sessionId={sessionId} taskId={taskId} failed={failed} />
       </div>
     );
   }
+  return <BgTaskCard key={JSON.stringify([account, generation, sessionId, taskId, task.started_at])} task={task} failed={failed} />;
+}
 
-  const isRunning = task.status === "running" || task.status === "pending";
+function SummaryLine({ task, sessionId, taskId, failed }: Props & { task?: BgTask; failed: boolean }) {
+  const preview = task?.output_preview;
+  const text = preview === undefined ? "Output preview not read" :
+    lastLine(preview) || (task?.has_output ? "Output available" : "No saved output");
+  const stop = task && stopDescription(task);
+  const delivery = task?.delivery_disposition === "unknown" ? "Return admission unconfirmed" :
+    task?.delivery_disposition === "stopped" ? "Automatic return stopped" : null;
+  return (
+    <div className="flex h-7 items-center gap-2 overflow-hidden border-t border-border/60 px-3 text-[11px] text-muted-foreground">
+      {failed ? <span role="alert" className="shrink-0">Could not read summary</span> :
+        <span className="truncate font-mono" title={text}>{text}</span>}
+      {!failed && (task?.preview_truncated || task?.truncated || preview?.trimEnd().includes("\n")) &&
+        <span className="shrink-0">Preview truncated</span>}
+      {failed && <button type="button" className="shrink-0 underline" aria-label="Retry task summary"
+        onClick={() => confirmAuxiliaryTask("background", sessionId, taskId, "card")}>Retry</button>}
+      {stop && <span className="truncate" title={stop}>{stop}</span>}
+      {delivery && <span className="truncate" title={delivery}>{delivery}</span>}
+      {delivery && task?.delivery_error && <span className="truncate" title={task.delivery_error}>{task.delivery_error}</span>}
+    </div>
+  );
+}
+
+function BgTaskCard({ task, failed }: { task: BgTask; failed: boolean }) {
+  const sessionId = task.session_id, taskId = task.id;
+  const [expanded, setExpanded] = useState(false);
+  const control = useTaskControl(sessionId, taskId);
+  const running = isRunning(task);
 
   const cancel = () => control.cancel(`${window.location.origin}/api/sessions/${encodeURIComponent(sessionId)}/bg-tasks/${encodeURIComponent(taskId)}/cancel`);
 
@@ -123,7 +150,6 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
     interrupted: "border-border bg-muted/40",
   };
 
-  const lastOut = lastLine(task.stdout) || lastLine(task.stderr);
   const stopReason = stopDescription(task);
   const idleLimit = task.idle_timeout_seconds == null
     ? "unknown" : task.idle_timeout_seconds === 0 ? "disabled" : `${task.idle_timeout_seconds}s`;
@@ -136,13 +162,13 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
         headerStyle[task.status]
       )}
     >
-      <div className="flex items-center gap-2 px-2.5 py-1.5 text-xs">
+      <div className="flex h-8 items-center gap-2 px-2.5 text-xs">
         {/* The expand-toggle is its own button — siblings (exit-code
          * badge, cancel button) live outside so we don't nest <button>
          * inside <button>, which is invalid HTML and breaks a11y. */}
         <button
           type="button"
-          onClick={() => setExpanded((e) => !e)}
+          onClick={() => setExpanded((view) => !view)}
           className="flex flex-1 min-w-0 items-center gap-2 text-left hover:bg-accent/40 -mx-1 px-1 py-0.5 rounded transition-colors"
           aria-expanded={expanded}
           aria-label={expanded ? "Collapse bg task" : "Expand bg task"}
@@ -168,7 +194,7 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
             exit {task.exit_code}
           </span>
         )}
-        {isRunning && (
+        {running && (
           <button
             type="button"
             onClick={cancel}
@@ -182,23 +208,19 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
         )}
       </div>
       <TaskControlFeedback control={control} onRefresh={() => { void control.refresh(() => observeSessionAuxiliary(sessionId, "background", taskId)); }} />
-      {stopReason && (
+      {expanded && stopReason && (
         <div className="border-t border-border/60 px-3 py-1 text-[11px] text-muted-foreground">
           {stopReason}
         </div>
       )}
-      {task.delivery_disposition && (
+      {expanded && task.delivery_disposition && (
         <div className="border-t border-border/60 px-3 py-1 text-[11px] text-muted-foreground">
           <span>{task.delivery_disposition === "unknown"
             ? "Return admission unconfirmed" : "Automatic return stopped"}</span>
           {task.delivery_error && <div>{task.delivery_error}</div>}
         </div>
       )}
-      {!expanded && lastOut && (
-        <div className="border-t border-border/60 px-3 py-1 font-mono text-[11px] text-muted-foreground truncate">
-          {lastOut}
-        </div>
-      )}
+      {(!expanded || failed) && <SummaryLine task={expanded ? undefined : task} sessionId={sessionId} taskId={taskId} failed={failed} />}
       {expanded && (
         <div className="border-t border-border/60 bg-card/60 px-3 py-2 space-y-2">
           <div className="text-[11px] text-muted-foreground">
@@ -208,39 +230,73 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
             && task.status !== "completed" && (
             <div className="text-[11px] text-muted-foreground">Stop reason not recorded</div>
           )}
-          <div className="text-[11px] text-muted-foreground">
-            <span className="font-semibold">command</span>{" "}
-            <code className="font-mono">{task.command}</code>
-          </div>
-          {task.stdout && (
-            <div>
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
-                stdout
-                {task.truncated && (
-                  <span className="ml-2 text-destructive">(truncated)</span>
-                )}
-              </div>
-              <pre className="m-0 max-h-64 overflow-auto rounded bg-muted/40 px-2 py-1.5 text-[11px] font-mono whitespace-pre-wrap break-words">
-                {task.stdout}
-              </pre>
-            </div>
-          )}
-          {task.stderr && (
-            <div>
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-destructive mb-1">
-                stderr
-              </div>
-              <pre className="m-0 max-h-64 overflow-auto rounded bg-destructive/5 px-2 py-1.5 text-[11px] font-mono whitespace-pre-wrap break-words text-destructive">
-                {task.stderr}
-              </pre>
-            </div>
-          )}
-          {!task.stdout && !task.stderr && task.status !== "running" && (
-            <div className="text-[11px] text-muted-foreground italic">
-              (no output)
-            </div>
-          )}
         </div>
+      )}
+      {expanded && <SavedBgOutput task={task} />}
+    </div>
+  );
+}
+
+function SavedBgOutput({ task }: { task: BgTask }) {
+  const [detail, setDetail] = useState(() => cachedBgTaskOutput(task));
+  const [phase, setPhase] = useState<"loading" | "ready" | "failed">(detail ? "ready" : "loading");
+  const activeRead = useRef<ReturnType<typeof observeBgTaskOutput> | null>(null);
+  const { session_id: sessionId, id: taskId, started_at: startedAt } = task;
+
+  const readOutput = useCallback(() => {
+    const current = useSessionStore.getState().bgTasks[sessionId]?.find((row) => row.id === taskId);
+    if (!current || current.started_at !== startedAt) return;
+    activeRead.current?.cancel();
+    const read = observeBgTaskOutput(current);
+    activeRead.current = read;
+    const settle = (output?: Awaited<typeof read.done>) => {
+      if (activeRead.current !== read) return;
+      activeRead.current = null;
+      const accepted = read.current() ? output : undefined;
+      setPhase(accepted ? "ready" : "failed");
+      if (accepted) setDetail((previous) => previous && !isRunning(previous) && isRunning(accepted) ? previous : accepted);
+    };
+    void read.done.then(settle, () => settle());
+  }, [sessionId, taskId, startedAt]);
+
+  useEffect(() => {
+    if (!cachedBgTaskOutput({ session_id: sessionId, id: taskId, started_at: startedAt })) readOutput();
+    return () => {
+      activeRead.current?.cancel();
+      activeRead.current = null;
+    };
+  }, [readOutput, sessionId, taskId, startedAt]);
+
+  const diagnostic = detail?.delivery_error;
+  const preview = diagnostic && bgTaskPreviewText(diagnostic, 160);
+  const additionalDiagnostic = diagnostic && diagnostic !== preview && preview === task.delivery_error &&
+    detail?.delivery_disposition === task.delivery_disposition ? diagnostic : null;
+  return (
+    <div className="space-y-2 bg-card/60 px-3 pb-2 text-[11px] text-muted-foreground">
+      <div className="flex items-center justify-between gap-2">
+        <span>{detail?.truncated ? "Saved output (truncated)" : "Saved output"}</span>
+        <button type="button" className="shrink-0 underline" onClick={() => {
+          setPhase("loading");
+          readOutput();
+        }}>Refresh output</button>
+      </div>
+      {phase === "loading" && <p role="status">Loading saved output…</p>}
+      {phase === "failed" && <p role="alert">Could not load saved output.</p>}
+      {detail && (
+        <>
+          <div><strong>command</strong>{" "}<code className="break-words font-mono">{detail.command}</code></div>
+          {additionalDiagnostic && <details>
+            <summary>Return diagnostic from the saved read</summary>
+            <div className="whitespace-pre-wrap break-words">{additionalDiagnostic}</div>
+          </details>}
+          {(["stdout", "stderr"] as const).map((stream) => detail[stream] && (
+            <div key={stream} className={stream === "stderr" ? "text-destructive" : undefined}>
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider">{stream}</div>
+              <pre className="m-0 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 px-2 py-1.5 font-mono">{detail[stream]}</pre>
+            </div>
+          ))}
+          {!detail.stdout && !detail.stderr && <p>{isRunning(detail) ? "No saved output yet" : "No saved output"}</p>}
+        </>
       )}
     </div>
   );

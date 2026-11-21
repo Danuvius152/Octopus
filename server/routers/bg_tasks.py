@@ -32,25 +32,34 @@ class StartBgTaskRequest(BgTaskLimits):
     description: str | None = None
 
 
-class BgTaskResponse(BaseModel):
+class BgTaskMetadata(BaseModel):
     id: str
     session_id: str
     command: str
     description: str | None
-    working_dir: str
     status: Literal["pending", "running", "completed", "failed", "cancelled", "interrupted"]
     exit_code: int | None
-    stdout: str
-    stderr: str
     truncated: bool
     started_at: str
     completed_at: str | None
     idle_timeout_seconds: int | None
     timeout_seconds: int | None
     stop_reason: str | None
-    work_id: str | None
     delivery_disposition: Literal["stopped", "unknown"] | None
     delivery_error: str | None
+
+
+class BgTaskResponse(BgTaskMetadata):
+    working_dir: str
+    stdout: str
+    stderr: str
+    work_id: str | None
+
+
+class BgTaskSummaryResponse(BgTaskMetadata):
+    output_preview: str
+    has_output: bool
+    preview_truncated: bool
 
 
 def _require_session(
@@ -146,6 +155,39 @@ async def get_bg_task(
     return rec
 
 
+@router.get("/{session_id}/bg-task-summaries", response_model=list[BgTaskSummaryResponse])
+async def list_bg_task_summaries(
+    session_manager: SessionMgr,
+    session_id: str,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+) -> list[dict[str, Any]]:
+    if not await session_manager.session_belongs_to(session_id, user_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    return await bg_task_manager.list_task_summaries(session_id)
+
+
+@router.get("/{session_id}/bg-task-summaries/{task_id}", response_model=BgTaskSummaryResponse)
+async def get_bg_task_summary(
+    session_manager: SessionMgr,
+    session_id: str,
+    task_id: str,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+) -> dict[str, Any]:
+    return await _require_task_summary(session_manager, session_id, task_id, user_id)
+
+
+async def _require_task_summary(
+    session_manager: SessionManager, session_id: str, task_id: str, user_id: str | None,
+) -> dict[str, Any]:
+    if await session_manager.session_belongs_to(session_id, user_id):
+        summary = await bg_task_manager.get_task_summary(session_id, task_id)
+        if summary is not None:
+            return summary
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "Background task not found")
+
+
 @router.post("/{session_id}/bg-tasks/{task_id}/cancel")
 async def cancel_bg_task(
     session_manager: SessionMgr,
@@ -157,12 +199,6 @@ async def cancel_bg_task(
     """Best-effort cancel. Returns {cancelled: bool}; cancelled=False
     means the task wasn't currently running (already finished, or
     server restarted and lost the in-memory handle)."""
-    rec = await bg_task_manager.get_task(task_id)
-    if (
-        rec is None
-        or rec.session_id != session_id
-        or not await session_manager.session_belongs_to(session_id, user_id)
-    ):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Background task not found")
+    await _require_task_summary(session_manager, session_id, task_id, user_id)
     cancelled = await bg_task_manager.cancel_task(task_id)
     return {"cancelled": cancelled, "task_id": task_id}

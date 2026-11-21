@@ -11,8 +11,8 @@ const metadata = (call: string, receipt?: ToolReceipt) => ({
   receipt: receipt ?? null,
 });
 const task = (id: string, status: BgTask["status"]): BgTask => ({
-  id, session_id: "parent", working_dir: "/tmp", command: "pytest tests/", description: "Run backend tests", status,
-  stdout: status === "completed" ? "All passed" : "", stderr: "", exit_code: status === "completed" ? 0 : null,
+  id, session_id: "parent", command: "pytest tests/", description: "Run backend tests", status,
+  output_preview: status === "completed" ? "All passed" : "", exit_code: status === "completed" ? 0 : null,
   truncated: false, started_at: "2026-10-14T00:00:00Z", completed_at: null,
 });
 const toolUse = (call: string): Message => ({
