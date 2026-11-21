@@ -221,8 +221,9 @@ describe("AccountPage — where you can work", () => {
       workspace,
     });
     render(<AccountPage />);
-    await waitFor(() => expect(screen.getByLabelText("Add a directory")).toBeTruthy());
-    fireEvent.change(screen.getByLabelText("Add a directory"), {
+    const directory = await screen.findByLabelText("Add a directory");
+    await waitFor(() => expect(directory).toBeEnabled());
+    fireEvent.change(directory, {
       target: { value: "/home/you/another-repo" },
     });
     fireEvent.click(screen.getByText("Add"));
@@ -240,10 +241,9 @@ describe("AccountPage — where you can work", () => {
       workspace,
     });
     render(<AccountPage />);
-    await waitFor(() =>
-      expect(screen.getByLabelText("Stop allowing /home/you/Octopus")).toBeTruthy()
-    );
-    fireEvent.click(screen.getByLabelText("Stop allowing /home/you/Octopus"));
+    const remove = await screen.findByLabelText("Stop allowing /home/you/Octopus");
+    await waitFor(() => expect(remove).toBeEnabled());
+    fireEvent.click(remove);
     await waitFor(() =>
       expect(posts).toContainEqual({
         path: "/users/u1/extra-roots",

@@ -763,20 +763,27 @@ test("a saved background result offers a return when its summary leaves the sele
   await expect(jump).toBeVisible();
 });
 
-for (const { label, offscreen = false, observesStart = true, clipped = false, mounted = false } of [
+for (const { label, offscreen = false, observesStart = true, clipping, mounted = false } of [
   { label: "visible output" },
   { label: "offscreen output", offscreen: true },
   { label: "offscreen output without the start event", offscreen: true, observesStart: false },
-  { label: "clipped output in an offscreen mounted card", offscreen: true, clipped: true, mounted: true },
-  { label: "clipped output in an unmounted card", offscreen: true, clipped: true },
+  { label: "clipped output in an offscreen mounted card", offscreen: true, clipping: "outside", mounted: true },
+  { label: "clipped output in an unmounted card", offscreen: true, clipping: "outside" },
+  { label: "ellipsis-replaced output in an offscreen mounted card", offscreen: true, clipping: "ellipsis", mounted: true },
+  { label: "ellipsis-replaced output in an unmounted card", offscreen: true, clipping: "ellipsis" },
+  { label: "one readable glyph in an unmounted card", offscreen: true, clipping: "one glyph" },
 ]) {
 test(`a completed task's ${label} respects reading without fetching full output`, async ({ page }) => {
   const { scroller, gap, send, settle } = await openChat(page, 4);
-  if (clipped) await page.addStyleTag({ content: ".chat-messages { max-width: 300px }" });
+  if (clipping) await page.addStyleTag({ content: ".chat-messages { max-width: 300px }" });
+  if (clipping === "ellipsis" || clipping === "one glyph") {
+    await page.addStyleTag({ content: ".octo-bgtask-chip .font-mono.truncate { max-width: 19.5ch }" });
+  }
   const sessionId = "follow-output";
   const taskId = "background-preview";
   const startedAt = "2026-11-20T00:00:00Z";
-  const preview = clipped ? "\u00a0".repeat(110) + "RESULT" : "A newly saved background output preview";
+  const prefix = clipping === "ellipsis" ? 18 : clipping === "one glyph" ? 17 : 110;
+  const preview = clipping ? "\u00a0".repeat(prefix) + "RESULT" : "A newly saved background output preview";
   const reference = `/api/sessions/${sessionId}/messages/5`;
   await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
     role: "assistant", type: "text", seq: 5, content: "Keep reading this reply.\n\n".repeat(mounted ? 9 : 55),
@@ -833,7 +840,7 @@ test(`a completed task's ${label} respects reading without fetching full output`
     releaseSummary();
   }
   await (await summary).finished();
-  if (clipped) {
+  if (clipping) {
     await settle();
     const offers = await jump.count();
     if (mounted) {
@@ -844,16 +851,34 @@ test(`a completed task's ${label} respects reading without fetching full output`
     await scroller.press("End");
     const output = scroller.locator("[data-bg-output]");
     await expect(output).toBeInViewport();
-    const clippedGlyphs = await output.evaluate((element) => {
+    const glyphSpace = await output.evaluate((element) => {
       const text = element.firstChild!;
       const range = document.createRange();
-      range.setStart(text, text.textContent!.indexOf("RESULT"));
-      range.setEnd(text, text.textContent!.length);
-      return range.getBoundingClientRect().left >= element.getBoundingClientRect().right;
+      const start = text.textContent!.indexOf("RESULT");
+      range.setStart(text, start);
+      range.setEnd(text, start + 1);
+      const glyph = range.getBoundingClientRect();
+      return { advance: glyph.width, remaining: element.getBoundingClientRect().right - glyph.left };
     });
-    expect(clippedGlyphs).toBe(true);
+    if (clipping === "outside") {
+      expect(glyphSpace.remaining).toBeLessThanOrEqual(0);
+    } else {
+      const cells = clipping === "ellipsis" ? 1 : 2;
+      expect(glyphSpace.remaining).toBeGreaterThanOrEqual(glyphSpace.advance * cells - 0.02);
+      expect(glyphSpace.remaining).toBeLessThan(glyphSpace.advance * (cells + 1));
+      // An equal-width substitution changes the paint only when the first
+      // output glyph survives the browser's ellipsis.
+      const originalPaint = await output.screenshot();
+      const paintChanged = await output.evaluate((element) => {
+        const text = element.firstChild as Text;
+        text.data = text.data.replace("RESULT", "XESULT");
+        return text.data.endsWith("XESULT");
+      });
+      expect(paintChanged).toBe(true);
+      expect(originalPaint.equals(await output.screenshot())).toBe(clipping === "ellipsis");
+    }
     expect(fullReads).toBe(0);
-    expect(offers).toBe(0);
+    expect(offers).toBe(clipping === "one glyph" ? 1 : 0);
     return;
   }
   if (offscreen) {

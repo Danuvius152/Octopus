@@ -131,7 +131,53 @@ function backgroundOutputHasBody(change: LiveOutputChange) {
 }
 
 export function backgroundOutputOutside(body: HTMLElement, change: LiveOutputChange, port?: ReturnType<typeof scrollportBounds>) {
-  return readableSpansOutside(body, [changedCharacters(change.text, change.previous)], port, body.getBoundingClientRect());
+  const clip = body.getBoundingClientRect();
+  if (!clip.width || (port && clip.top >= port.top - 1 && clip.bottom <= port.bottom + 1)) return false;
+  const changed = changedCharacters(change.text, change.previous);
+  const text = body.firstChild;
+  if (!text || text.nodeType !== Node.TEXT_NODE) return false;
+  const range = body.ownerDocument.createRange();
+  range.selectNodeContents(text);
+  const style = getComputedStyle(body);
+  const rtl = style.direction === "rtl";
+  const leadingEdge = (box: DOMRect) => rtl ? clip.right - box.right : box.left - clip.left;
+  const trailingEdge = (box: DOMRect) => rtl ? clip.right - box.left : box.right - clip.left;
+  const line = Array.from(range.getClientRects());
+  if (style.textOverflow !== "ellipsis" || !line.some((box) => trailingEdge(box) > clip.width)) {
+    return readableSpansOutside(body, [changed], port, clip);
+  }
+
+  // Ellipsed text retains its layout boxes. Measure the ellipsis with the
+  // same font and scale, then count only changed graphemes that fit before it.
+  const ellipsis = body.ownerDocument.createElement("span");
+  ellipsis.textContent = "…";
+  Object.assign(ellipsis.style, { position: "absolute", inset: "0 auto auto 0", visibility: "hidden" });
+  body.append(ellipsis);
+  let available: number;
+  try {
+    available = clip.width - ellipsis.getBoundingClientRect().width;
+  } finally {
+    ellipsis.remove();
+  }
+  const firstEdge = Math.min(...line.map(leadingEdge));
+  for (const { index, segment } of new Intl.Segmenter().segment(change.text)) {
+    if (index >= changed.end) break;
+    const end = index + segment.length;
+    if (end <= changed.start || !segment.trim()) continue;
+    range.setStart(text, index);
+    range.setEnd(text, end);
+    const readable = Array.from(range.getClientRects()).some((box) => {
+      // The browser retains the first visual grapheme even if the ellipsis
+      // cannot fit beside it. It still needs to fit inside the card itself.
+      const leading = leadingEdge(box), trailing = trailingEdge(box);
+      if (box.width <= 0 || leading < 0 || trailing > clip.width ||
+        (trailing > available && leading !== firstEdge)) return false;
+      const top = Math.max(box.top, clip.top), bottom = Math.min(box.bottom, clip.bottom);
+      return bottom - top > 1 && (!port || top < port.top - 1 || bottom > port.bottom + 1);
+    });
+    if (readable) return true;
+  }
+  return false;
 }
 
 export function collapsedBackgroundHasChangedText(task: BgTask, change: LiveOutputChange, row: HTMLElement) {
