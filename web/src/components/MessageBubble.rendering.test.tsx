@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
 import { MessageBubble } from "./MessageBubble";
+import { projectMarkdownOutput } from "./chatMarkdown";
 import { mockChatViewport } from "./chatViewport.test-support";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
@@ -50,6 +51,75 @@ it("keeps streaming text literal and renders the completed content through Markd
   view.rerender(<MessageBubble sessionId={session.id} message={message} />);
   expect(screen.getByText("Still arriving").tagName).toBe("STRONG");
   expect(observed.sources).toEqual([message.content]);
+});
+
+it("keeps native Markdown structure and applies the original image entry to standalone images", () => {
+  const content = [
+    "- ![](/list.png)",
+    "",
+    "Before [![Small icon](/icon.png)](/help) after.",
+    "",
+    "**[*![Framed diagram](/plot.png)*](/report)**",
+    "",
+    "![Blocked protocol](javascript:bad)",
+  ].join("\n");
+  const view = render(<MessageBubble sessionId={session.id} message={{ role: "assistant", type: "text", content }} />);
+
+  const original = screen.getByRole("link", { name: /^Open original image$/ });
+  expect(screen.getByRole("listitem")).toContainElement(original);
+  expect(original).toHaveAttribute("href", "/list.png");
+  expect(original.querySelector("img")).toHaveAttribute("alt", "");
+
+  const inline = screen.getByRole("link", { name: "Small icon" });
+  expect(inline).toHaveAttribute("href", "/help");
+  expect(screen.getByRole("img", { name: "Small icon" }).parentElement).toBe(inline);
+  expect(inline.parentElement?.tagName).toBe("P");
+  expect(inline.parentElement).toHaveTextContent("Before after.");
+
+  const diagram = screen.getByRole("img", { name: "Framed diagram" });
+  const authored = screen.getByRole("link", { name: "Framed diagram" });
+  expect(authored).toHaveAttribute("href", "/report");
+  expect(diagram.closest("em")?.closest("a")).toBe(authored);
+  expect(authored.closest("strong")).not.toBeNull();
+  const originalDiagram = screen.getByRole("link", { name: "Open original image: Framed diagram" });
+  expect(originalDiagram).toHaveAttribute("href", "/plot.png");
+  expect(authored.closest("p")).toContainElement(originalDiagram);
+  expect(screen.queryByRole("link", { name: "Open original image: Blocked protocol" })).toBeNull();
+  expect(screen.getByRole("img", { name: "Blocked protocol" })).not.toHaveAttribute("src", "javascript:bad");
+  expect(view.container.querySelector("a a, p p, p div")).toBeNull();
+});
+
+it("preserves image order and transcript text offsets when rendering standalone image paragraphs", () => {
+  const passage = "The paragraph below the images.";
+  const content = [
+    "[ ![Padded](/padded.png) ](/author)",
+    "![Trailing space](/space.png) &#32;",
+    "- ![In a tight list](/list.png)\n  - Nested item",
+    passage,
+    "Before ![Inline](/inline.png) after.",
+    "![Nonbreaking space](/nbsp.png)&nbsp;",
+    "![First of two](/first.png) ![Second of two](/second.png)",
+  ].join("\n\n");
+  const view = render(<MessageBubble sessionId={session.id} message={{ role: "assistant", type: "text", content }} />);
+  const body = view.container.querySelector(".markdown")!;
+
+  const padded = screen.getByRole("link", { name: "Padded" });
+  expect(padded).toHaveAttribute("href", "/author");
+  expect(padded.textContent).toBe("  ");
+  expect(screen.getByRole("link", { name: "Open original image: Padded" })).toHaveAttribute("href", "/padded.png");
+  expect(screen.getByRole("link", { name: "Open original image: Trailing space" })).toHaveAttribute("href", "/space.png");
+  const inList = screen.getByRole("link", { name: "Open original image: In a tight list" });
+  expect(inList.closest("li")).toContainElement(screen.getByText("Nested item"));
+  expect(inList.closest("p")).toBeNull();
+  expect(screen.getAllByRole("link", { name: /^Open original image:/ })).toHaveLength(3);
+
+  expect([...body.querySelectorAll("img")].map((image) => image.alt)).toEqual([
+    "Padded", "Trailing space", "In a tight list", "Inline", "Nonbreaking space", "First of two", "Second of two",
+  ]);
+  const start = content.indexOf(passage);
+  const selection = projectMarkdownOutput(content, { start, end: start + passage.length }, "selection");
+  expect(body.textContent).toBe(selection.text);
+  expect(selection.spans.map(({ start, end }) => body.textContent!.slice(start, end)).join("")).toBe(passage);
 });
 
 it("parses only actual preview/full content changes while the full-message request settles", async () => {

@@ -31,11 +31,12 @@ import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { ToolInputDetails } from "./ToolInputDetails";
 import { nativeWorkKey } from "../lib/nativeOutput";
 import { chatRehypePlugins, chatRemarkPlugins } from "./chatMarkdown";
+import { markdownImageOptions } from "./MarkdownImage";
 
 // Store and composer updates still render the card's controls and attribution.
 // Only unchanged completed prose skips the synchronous Markdown pipeline.
 const CompletedMarkdown = memo(function CompletedMarkdown({ source }: { source: string }) {
-  return <Markdown remarkPlugins={chatRemarkPlugins} rehypePlugins={chatRehypePlugins}>
+  return <Markdown remarkPlugins={chatRemarkPlugins} rehypePlugins={chatRehypePlugins} {...markdownImageOptions}>
     {source}
   </Markdown>;
 });

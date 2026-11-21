@@ -428,6 +428,28 @@ body {
   margin: 0.4rem 0;
 }
 
+.msg-assistant .markdown img {
+  display: inline-block;
+}
+
+.markdown-image-preview img,
+.markdown-image-author-link a {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-md);
+}
+
+.markdown-image-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.markdown-image-author-link a:focus-visible {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
+}
+
 .msg-assistant .markdown ul, .msg-assistant .markdown ol {
   padding-left: 1.5rem;
   margin: 0.4rem 0;
