@@ -15,7 +15,8 @@ import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { MessageTime } from "./MessageTime";
 import { QuestionPrompt, type AnswerPayload } from "./QuestionPrompt";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
-import { HelperOutputLayout, chatProjection, chatProjectionIndex, collapsedHelperHasChangedText, matchTranscriptTransfers,
+import { TranscriptOutputLayout, backgroundOutputOutside, backgroundOutputRow, chatProjection, chatProjectionIndex,
+  collapsedHelperHasChangedText, matchTranscriptTransfers,
   readableChangeOutside, readableSpansOutside, recordTranscriptOutput,
   savedOutputHasBody, savedOutputOutside, scrollportBounds,
   type PendingTranscriptOutput } from "./chatOutputVisibility";
@@ -23,6 +24,8 @@ import { projectMarkdownOutput } from "./chatMarkdown";
 
 const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_SUBAGENTS: Record<string, SubagentRun> = {};
+const emptyPausedOutput = (): PendingTranscriptOutput =>
+  ({ saved: new Map(), live: new Map(), helpers: new Map(), background: new Map() });
 // An avatar-height row and its list spacing are a better unknown than the
 // height of whichever conversation card Virtuoso happens to probe first.
 const DEFAULT_CHAT_ROW_HEIGHT = 48;
@@ -463,7 +466,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   const [readingBoundary, setReadingBoundary] = useState(false);
   const [scrolledIntoHistory, setScrolledIntoHistory] = useState(false);
   const [outputOutside, setOutputOutside] = useState(false);
-  const pausedOutput = useRef<PendingTranscriptOutput | null>({ saved: new Map(), live: new Map(), helpers: new Map() });
+  const pausedOutput = useRef<PendingTranscriptOutput | null>(emptyPausedOutput());
   const pausedOutputFrame = useRef<number | null>(null);
   const cancelPausedOutputMeasurement = useCallback(() => {
     if (pausedOutputFrame.current === null) return;
@@ -473,9 +476,13 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
   const resetPausedOutput = useCallback((keepOffer = false) => {
     cancelPausedOutputMeasurement();
     const pending = pausedOutput.current;
-    if (pending) { pending.live.clear(); pending.saved.clear(); pending.helpers.clear(); }
-    else if (!keepOffer) {
-      pausedOutput.current = { saved: new Map(), live: new Map(), helpers: new Map() };
+    if (pending) {
+      pending.live.clear();
+      pending.saved.clear();
+      pending.helpers.clear();
+      pending.background.clear();
+    } else if (!keepOffer) {
+      pausedOutput.current = emptyPausedOutput();
       setOutputOutside(false);
     }
   }, [cancelPausedOutputMeasurement]);
@@ -566,7 +573,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     const view = currentView.current;
     const viewport = scroller.current;
     if (pausedOutputFrame.current !== null || !pending ||
-      (!pending.live.size && !pending.saved.size && !pending.helpers.size) || !view?.sessionId ||
+      (!pending.live.size && !pending.saved.size && !pending.helpers.size && !pending.background.size) || !view?.sessionId ||
       !viewport?.clientHeight || document.hidden || (position.current && position.current.kind !== "initial") ||
       !currentViewportView(view) || (following.current && !selectionPaused(viewport))) return;
     const port = scrollportBounds(viewport);
@@ -595,7 +602,16 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         if (readableSpansOutside(body, change.spans, port, clip)) { offerReturn(); return; }
       }
     }
-    if (!pending.saved.size && !pending.helpers.size) return;
+    if (pending.background.size) {
+      for (const body of viewport.querySelectorAll<HTMLElement>("[data-bg-output]")) {
+        const task = body.dataset.bgOutput!;
+        const change = pending.background.get(task);
+        if (!change || body.textContent !== change.text) continue;
+        pending.background.delete(task);
+        if (backgroundOutputOutside(body, change, port)) { offerReturn(); return; }
+      }
+    }
+    if (!pending.saved.size && !pending.helpers.size && !pending.background.size) return;
     const state = useSessionStore.getState();
     const sid = view.sessionId;
     if (committed.current.messages !== (state.messages[sid] ?? EMPTY_MESSAGES) ||
@@ -632,6 +648,15 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       if (!helper || !outsideMountedRange(helper.index)) continue;
       pending.helpers.delete(work);
       if (first && collapsedHelperHasChangedText(change, first)) { offerReturn(); return; }
+    }
+    if (pending.background.size) {
+      for (let index = 0; index < rows.length; index++) {
+        const task = backgroundOutputRow(rows[index], committed.current.messages);
+        if (task && pending.background.has(task) && !state.bgTaskReadFailures[sid]?.includes(task) && outsideMountedRange(index)) {
+          offerReturn();
+          return;
+        }
+      }
     }
   }, [currentViewportView, selectionPaused]);
   const followMeasuredOutput = useCallback(() => {
@@ -1565,14 +1590,15 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       // for cards that subscribe directly to the store.
       if (view && viewport) settleContactBeforeLayout(viewport, view);
       const outputChanged = sid && (messagesChanged || state.streamingText[sid] !== before.streamingText[sid] ||
-        state.streamingItems[sid] !== before.streamingItems[sid] || state.subagents[sid] !== before.subagents[sid]);
+        state.streamingItems[sid] !== before.streamingItems[sid] || state.subagents[sid] !== before.subagents[sid] ||
+        state.bgTasks[sid] !== before.bgTasks[sid]);
       if (!sid || !outputChanged || !view || !viewport || !currentViewportView(view) ||
         (following.current && !selectionPaused(viewport))) return;
       const transfers = matchTranscriptTransfers(sid, state, before);
       if (pausedOutput.current && recordTranscriptOutput(pausedOutput.current, sid, state, before, transfers) &&
         !messagesChanged && state.subagents[sid] === before.subagents[sid] &&
         pausedOutputFrame.current === null && !document.hidden) {
-        // Unmounted helpers have no layout effect. Wait for this publication's
+        // Unmounted cards have no layout effect. Wait for this publication's
         // other cards to commit too: a preview eviction can move the new text.
         pausedOutputFrame.current = requestAnimationFrame(() => {
           pausedOutputFrame.current = null;
@@ -2084,7 +2110,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
           if (contact.source === "touch") considerContactNavigation(contact, event.target, up);
         }}
       >
-      <HelperOutputLayout.Provider value={measurePausedOutput}>
+      <TranscriptOutputLayout.Provider value={measurePausedOutput}>
       <Virtuoso
         // Apply the first row measurements within their layout cycle. A
         // deferred range update can otherwise move the tail after reveal.
@@ -2160,7 +2186,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
         components={{ Header: olderHeader, List: ChatRows, Footer: ChatFooter }}
         context={footerContext}
       />
-      </HelperOutputLayout.Provider>
+      </TranscriptOutputLayout.Provider>
 
       {(presentation.phase === "preparing" || presentation.phase === "incomplete") && <div data-chat-initial-surface
         data-chat-preparation={!transcriptBaseline || presentation.phase === "incomplete" || undefined}

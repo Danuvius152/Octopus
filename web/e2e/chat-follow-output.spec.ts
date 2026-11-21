@@ -744,6 +744,89 @@ test(`a reply selection keeps the current paragraph visible until ${release}`, a
 });
 }
 
+test("a saved background result offers a return when its summary leaves the selection viewport", async ({ page }) => {
+  const { scroller, send, settle } = await openChat(page);
+  const paragraph = scroller.getByText("Saved row 40", { exact: true });
+  await expect(paragraph).toBeInViewport({ ratio: 1 });
+  await paragraph.evaluate((element) => window.getSelection()!.selectAllChildren(element));
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
+
+  const summary = "Background task finished with its result. ".repeat(18).trim();
+  send({ type: "user_message", seq: 41, content: `[bg-task-result] ${summary}\nDetails remain collapsed.` });
+  const result = scroller.getByRole("button", { name: summary });
+  await expect(result).toBeAttached();
+  await settle();
+  await expect(paragraph).toBeInViewport({ ratio: 1 });
+  await expect(result).not.toBeInViewport({ ratio: 1 });
+  await expect(page.getByText("Details remain collapsed.", { exact: true })).toHaveCount(0);
+  await expect(jump).toBeVisible();
+});
+
+for (const outsideViewport of [false, true]) {
+test(`a completed task's ${outsideViewport ? "offscreen output preview offers a return" : "visible output preview keeps the selection"} without fetching full output`, async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page, 4);
+  const sessionId = "follow-output";
+  const taskId = "background-preview";
+  const startedAt = "2026-11-20T00:00:00Z";
+  const preview = "A newly saved background output preview";
+  const reference = `/api/sessions/${sessionId}/messages/5`;
+  await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+    role: "assistant", type: "text", seq: 5, content: "Keep reading this reply.\n\n".repeat(55),
+  } }));
+  send({ type: "assistant_text", seq: 5, content: "Long reply preview", body_state: "preview", detail_ref: reference });
+  send({ type: "bg_started", task_id: taskId, command: "echo preview", started_at: startedAt });
+  send({ type: "tool_use", seq: 6, tool: "mcp__bg__run", input: { command: "echo preview" },
+    runtime_metadata: { request_id: "request", attempt_id: "attempt", tool_call_id: taskId,
+      receipt: { kind: "bg", task_id: taskId } } });
+  const expandTask = scroller.getByRole("button", { name: "Expand bg task" });
+  await expect(expandTask).toBeInViewport();
+  if (outsideViewport) {
+    await scroller.getByRole("button", { name: "View full message" }).click();
+    await expect.poll(gap).toBeGreaterThan(500);
+    await expect(expandTask).toHaveCount(0);
+  } else {
+    const paragraph = scroller.getByText("Saved row 4", { exact: true });
+    await expect(paragraph).toBeInViewport({ ratio: 1 });
+    await paragraph.evaluate((element) => window.getSelection()!.selectAllChildren(element));
+  }
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
+
+  let summaryReads = 0;
+  let fullReads = 0;
+  let releaseSummary!: () => void;
+  const holdSummary = new Promise<void>((resolve) => { releaseSummary = resolve; });
+  await page.route(`**/api/sessions/${sessionId}/bg-tasks/${taskId}`, (route) => {
+    fullReads++;
+    return route.fulfill({ status: 503, json: {} });
+  });
+  await page.route(`**/api/sessions/${sessionId}/bg-task-summaries/${taskId}`, async (route) => {
+    summaryReads++;
+    await holdSummary;
+    return route.fulfill({ json: { id: taskId, session_id: sessionId, command: "echo preview",
+      description: null, status: "completed", started_at: startedAt, completed_at: "2026-11-20T00:01:00Z",
+      exit_code: 0, output_preview: preview, has_output: true, preview_truncated: false } });
+  });
+  send({ type: "bg_completed", task_id: taskId, status: "completed", completed_at: "2026-11-20T00:01:00Z", exit_code: 0 });
+  try {
+    await expect.poll(() => summaryReads).toBe(1);
+    await settle();
+    await expect(jump).toHaveCount(0);
+  } finally {
+    releaseSummary();
+  }
+  if (outsideViewport) {
+    await expect(jump).toBeVisible();
+    await jump.click();
+  }
+  await expect(scroller.getByText(preview, { exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(jump).toHaveCount(0);
+  if (!outsideViewport) expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Saved row 4");
+  expect(fullReads).toBe(0);
+});
+}
+
 test("clearing selected text uses the current navigation intent", async ({ page }) => {
   const { scroller, gap, send, settle, output } = await openChat(page);
   const paragraph = scroller.getByText("Saved row 40", { exact: true });
@@ -1259,6 +1342,25 @@ test(`a ${mounted ? "mounted" : "unmounted"} ${painted ? "stylesheet formula str
 });
 }
 }
+
+test("an unmounted empty Markdown image does not offer a return", async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page, 4);
+  const reference = "/api/sessions/follow-output/messages/5";
+  await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+    role: "assistant", type: "text", seq: 5, content: "Reading a long reply.\n\n".repeat(55),
+  } }));
+  send({ type: "assistant_text", seq: 5, content: "Long reply preview", body_state: "preview", detail_ref: reference });
+  await scroller.getByRole("button", { name: "View full message" }).click();
+  await expect.poll(gap).toBeGreaterThan(500);
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toHaveCount(0);
+  send({ type: "assistant_text", seq: 6, content: "![]()" });
+  await settle();
+  await expect(scroller.locator('[data-message-key="message:6"]')).toHaveCount(0);
+  await expect(jump).toHaveCount(0);
+  send({ type: "assistant_text", seq: 7, content: "A readable line" });
+  await expect(jump).toBeVisible();
+});
 
 for (const kind of ["root reply", "first helper answer", "tool result"] as const) {
 test(`a new saved ${kind} outside the mounted rows offers a return`, async ({ page }) => {

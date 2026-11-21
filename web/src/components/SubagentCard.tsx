@@ -13,7 +13,7 @@ import {
 import { useSessionStore, type Message, type SubagentRun } from "../stores/sessionStore";
 import { nativeAnswer, nativeCardState, nativeDetailAnchor, nativeWorkKey, nativeWorkPreviews } from "../lib/nativeOutput";
 import { NativeSubagentDetails } from "./NativeSubagentDetails";
-import { HelperOutputLayout, collapsedHelperAnswerClass, helperAnswerCardWidthClass, legacyHelperWork } from "./chatOutputVisibility";
+import { TranscriptOutputLayout, collapsedHelperAnswerClass, helperAnswerCardWidthClass, legacyHelperWork } from "./chatOutputVisibility";
 import { useStreamingTextNode } from "../hooks/useStreamingTextNode";
 
 const EMPTY_MESSAGES: Message[] = [];
@@ -135,7 +135,7 @@ export function SubagentCard({
   const owner = useMemo(() => ({ account, sessionId, toolCallId, work, reference }), [account, sessionId, toolCallId, work, reference]);
   const [openOwner, setOpenOwner] = useState<object | null>(null);
   const open = openOwner === owner;
-  const onOutputLayout = useContext(HelperOutputLayout);
+  const onOutputLayout = useContext(TranscriptOutputLayout);
   const answer = useMemo(() => observedAnswer ?? (run && nativeAnswer(run, undefined)), [observedAnswer, run]);
   const answerText = answer?.text;
   const outputWork = work ?? legacyHelperWork(toolCallId);

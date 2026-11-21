@@ -24,6 +24,30 @@ transactions protect different responsibilities: external refresh/binding versus
 atomic installation-and-secret writes. See the
 [account and MCP contract](multi-tenancy.md).
 
+## Agent binding writes
+
+An Agent binding read returns the committed installation IDs and any pending
+binding operations for that Agent. A toggle reserves one proposed value for
+the account, Agent and installation. Applying the reservation requires both
+its operation ID and the original intent ID. The manager checks ownership and
+serializes binding reads, writes and settlement. The committed binding and
+the applied receipt are recorded before releasing that boundary even when the
+HTTP waiter is cancelled.
+
+Settlement reports what happened to that operation and separately reads the
+current binding. It can retire a pending reservation before its write reaches
+the boundary. Applied intents return their original disposition on retry.
+Expired, retired or unavailable reservations cannot write. Whole-list
+replacement and the single-binding API without an operation ID retire affected
+pending reservations after their own write. An ordinary read gives the
+committed value at that instant.
+
+The installation process owns these receipts for 120 seconds after reservation
+or settlement, with at most 4,096 retained operations per account. SQLite owns
+the saved Agent links. Restart releases the process-local reservations and
+retains those links. The form's read and retry rules are described in
+[Agent form instances](frontend-interaction-state.md#agent-表单实例).
+
 ## Public OAuth base
 
 The router uses a nonempty `OCTOPUS_PUBLIC_BASE_URL` before any request-derived

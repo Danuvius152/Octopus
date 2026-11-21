@@ -1,7 +1,9 @@
 import { createContext } from "react";
 import katex from "katex";
+import { bgTaskOutputLine } from "../lib/bgTaskOutput";
+import { backgroundResultBody } from "../lib/injectedTurns";
 import { isNativeChild, nativeAnswer, nativeCardState, nativeChatMessages, nativeItemKey, nativeWorkKey, nativeWorkPreviews } from "../lib/nativeOutput";
-import { readAttemptIdentity, readRuntimeMetadata, sameAttempt } from "../lib/toolIdentity";
+import { projectToolCall, readAttemptIdentity, readRuntimeMetadata, sameAttempt } from "../lib/toolIdentity";
 import { streamingTranscriptSource, type Message, type SubagentRun, type useSessionStore } from "../stores/sessionStore";
 import type { RuntimeMetadata } from "../api";
 import { clippedMathmlSelector, formulaBodySelector, formulaProbeOptions, projectMarkdownOutput } from "./chatMarkdown";
@@ -32,9 +34,10 @@ export interface PendingTranscriptOutput {
   live: Map<string, LiveOutputChange>;
   saved: Map<number, SavedOutputChange>;
   helpers: Map<string, HelperOutputChange>;
+  background: Map<string, LiveOutputChange>;
 }
 
-export const HelperOutputLayout = createContext<(() => void) | undefined>(undefined);
+export const TranscriptOutputLayout = createContext<(() => void) | undefined>(undefined);
 export const helperAnswerCardWidthClass = "box-border border-[0.7px] px-3";
 export const collapsedHelperAnswerClass = "subagent-summary mt-1.5 line-clamp-2 text-[12px] text-gray-800";
 
@@ -120,6 +123,48 @@ export function chatProjectionIndex(rows: Message[]): ChatProjectionIndex {
   return indexed;
 }
 
+function backgroundOutputHasBody(change: LiveOutputChange) {
+  const { start, end } = changedCharacters(change.text, change.previous);
+  return Boolean(change.text.slice(start, end).trim());
+}
+
+export function backgroundOutputOutside(body: HTMLElement, change: LiveOutputChange, port: ReturnType<typeof scrollportBounds>) {
+  return readableSpansOutside(body, [changedCharacters(change.text, change.previous)], port, body.getBoundingClientRect());
+}
+
+export function backgroundOutputRow(row: Message, messages: Message[]) {
+  if (row.type !== "tool_use" || row.tool_name !== "mcp__bg__run") return;
+  const receipt = projectToolCall(row, messages).receipt;
+  if (receipt?.kind === "bg") return receipt.task_id;
+}
+
+function recordBackgroundOutput(pending: PendingTranscriptOutput["background"], sid: string, state: SessionState, before: SessionState) {
+  const oldTasks = before.bgTasks[sid];
+  const tasks = state.bgTasks[sid];
+  if (oldTasks === tasks || !oldTasks?.length) return false;
+  const previous = new Map(oldTasks.map((task) => [task.id, task]));
+  let changed = false;
+  for (const task of tasks ?? []) {
+    const old = previous.get(task.id);
+    previous.delete(task.id);
+    if (old === task) continue;
+    if (old?.started_at !== task.started_at) {
+      pending.delete(task.id);
+      continue;
+    }
+    const text = bgTaskOutputLine(task.output_preview);
+    const last = bgTaskOutputLine(old.output_preview);
+    if (text === last) continue;
+    const change = { text, previous: pending.get(task.id)?.previous ?? last };
+    if (backgroundOutputHasBody(change)) {
+      pending.set(task.id, change);
+      changed = true;
+    } else pending.delete(task.id);
+  }
+  for (const id of previous.keys()) pending.delete(id);
+  return changed;
+}
+
 export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: string, state: SessionState, before: SessionState,
   transfers: ReturnType<typeof matchTranscriptTransfers>): boolean {
   const oldRows = before.messages[sid];
@@ -130,7 +175,8 @@ export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: st
   const items = state.streamingItems[sid];
   const oldCards = before.subagents[sid];
   const cards = state.subagents[sid];
-  if (oldRows === rows && oldRoot === root && oldItems === items && oldCards === cards) return false;
+  const backgroundChanged = recordBackgroundOutput(pending.background, sid, state, before);
+  if (oldRows === rows && oldRoot === root && oldItems === items && oldCards === cards) return backgroundChanged;
   const affectedHelpers = new Set(oldRows !== rows || oldCards !== cards ? pending.helpers.keys() : undefined);
   const newHelperRows = new Set<number>();
   const noteHelper = (metadata: RuntimeMetadata | null | undefined) => {
@@ -150,7 +196,8 @@ export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: st
     const oldest = before.oldestSeq[sid] ?? ((before.lastAppliedSeq[sid] ?? -1) + 1);
     for (const message of rows) {
       if (message.seq === undefined || message.seq < oldest || known.has(message.seq) || !message.content?.trim()) continue;
-      if (message.type === "tool_result" && !isNativeChild(message.runtime_metadata)) {
+      if ((message.type === "tool_result" && !isNativeChild(message.runtime_metadata)) ||
+        (message.role === "user" && message.type === "text" && backgroundResultBody(message) !== undefined)) {
         pending.saved.set(message.seq, { message, previous: "" });
         continue;
       }
@@ -182,7 +229,7 @@ export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: st
       else pending.live.delete(key);
     }
   }
-  if (!affectedHelpers.size) return false;
+  if (!affectedHelpers.size) return backgroundChanged;
   const { helpers } = chatProjectionIndex(chatProjection(rows, cards, state.dispatchStates[sid]?.active_request_id));
   let helperOutputChanged = false;
   for (const work of affectedHelpers) {
@@ -229,7 +276,7 @@ export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: st
       helperOutputChanged = true;
     } else pending.helpers.delete(work);
   }
-  return helperOutputChanged;
+  return helperOutputChanged || backgroundChanged;
 }
 
 export function scrollportBounds(viewport: HTMLElement) {
@@ -288,7 +335,9 @@ export function readableSpansOutside(body: HTMLElement, spans: TextSpan[], port?
   const outside = (box: DOMRect) => {
     const top = Math.max(box.top, clip?.top ?? -Infinity);
     const bottom = Math.min(box.bottom, clip?.bottom ?? Infinity);
-    return box.width > 0 && bottom - top > 1 && (!port || top < port.top - 1 || bottom > port.bottom + 1);
+    const left = Math.max(box.left, clip?.left ?? -Infinity);
+    const right = Math.min(box.right, clip?.right ?? Infinity);
+    return right > left && bottom - top > 1 && (!port || top < port.top - 1 || bottom > port.bottom + 1);
   };
   const range = document.createRange();
   for (const { start, end } of spans) {
@@ -340,6 +389,7 @@ function savedMarkdownChange(change: SavedOutputChange) {
 
 export function savedOutputHasBody(change: SavedOutputChange, viewport: HTMLElement) {
   if (change.message.type === "tool_result") return true;
+  if (change.message.role === "user") return !!backgroundResultBody(change.message)?.split("\n", 1)[0].trim();
   const { spans, images, mathOutput } = savedMarkdownChange(change);
   if (spans.length || images.length) return true;
   if (!mathOutput.length) return false;

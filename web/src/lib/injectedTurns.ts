@@ -11,8 +11,10 @@
  * One list, because two copies of it drift and the drift is invisible until a
  * new marker is added.
  */
+const BG_TASK_RESULT_PREFIX = "[bg-task-result]";
+
 export const AUTO_INJECTED_PREFIXES = [
-  "[bg-task-result]",
+  BG_TASK_RESULT_PREFIX,
   "[agent-reply:",
   "[agent-question:",
   "[agent-error:",
@@ -30,6 +32,15 @@ export function requestSource(message: { tool_input?: Record<string, unknown> })
   if (!context || typeof context !== "object") return undefined;
   const source = (context as Record<string, unknown>).source;
   return typeof source === "string" ? source : undefined;
+}
+
+export function backgroundResultBody(message: { content?: unknown; tool_input?: Record<string, unknown> }): string | undefined {
+  const { content } = message;
+  if (typeof content !== "string") return;
+  const source = requestSource(message);
+  const hasPrefix = content.startsWith(BG_TASK_RESULT_PREFIX);
+  if (source !== "bg" && !(source === undefined && hasPrefix)) return;
+  return hasPrefix ? content.slice(BG_TASK_RESULT_PREFIX.length).trimStart() : content;
 }
 
 /** Structured provenance wins; prefixes only recognize older history. */

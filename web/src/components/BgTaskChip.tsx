@@ -11,7 +11,7 @@
  * owns its saved stdout/stderr read and can reuse a confirmed terminal body.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   IconCheck,
   IconChevronDown,
@@ -25,8 +25,9 @@ import {
 import { bgTaskPreviewText, useSessionStore, type BgTask } from "../stores/sessionStore";
 import { cn } from "../lib/utils";
 import { confirmAuxiliaryTask, observeBgTaskCard, observeBgTaskOutput, observeSessionAuxiliary } from "../lib/hydrateSession";
-import { cachedBgTaskOutput } from "../lib/bgTaskOutput";
+import { bgTaskOutputLine, cachedBgTaskOutput } from "../lib/bgTaskOutput";
 import { useTaskControl } from "../hooks/useTaskControl";
+import { TranscriptOutputLayout } from "./chatOutputVisibility";
 import { TaskControlFeedback } from "./TaskControlFeedback";
 
 interface Props {
@@ -54,12 +55,6 @@ function StatusIcon({ status }: { status: BgTask["status"] }) {
     return <IconHandStop size={14} className="text-muted-foreground" />;
   }
   return <IconExclamationCircle size={14} className="text-destructive" />;
-}
-
-function lastLine(text: string): string {
-  const trimmed = text.replace(/\s+$/, "");
-  const lines = trimmed.split("\n");
-  return lines[lines.length - 1] || "";
 }
 
 function isRunning(task: Pick<BgTask, "status">): boolean {
@@ -113,15 +108,20 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
 
 function SummaryLine({ task, sessionId, taskId, failed }: Props & { task?: BgTask; failed: boolean }) {
   const preview = task?.output_preview;
+  const output = failed ? "" : bgTaskOutputLine(preview);
   const text = preview === undefined ? "Output preview not read" :
-    lastLine(preview) || (task?.has_output ? "Output available" : "No saved output");
+    output || (task?.has_output ? "Output available" : "No saved output");
+  const onOutputLayout = useContext(TranscriptOutputLayout);
+  useLayoutEffect(() => {
+    if (output) onOutputLayout?.();
+  }, [onOutputLayout, output, taskId]);
   const stop = task && stopDescription(task);
   const delivery = task?.delivery_disposition === "unknown" ? "Return admission unconfirmed" :
     task?.delivery_disposition === "stopped" ? "Automatic return stopped" : null;
   return (
     <div className="flex h-7 items-center gap-2 overflow-hidden border-t border-border/60 px-3 text-[11px] text-muted-foreground">
       {failed ? <span role="alert" className="shrink-0">Could not read summary</span> :
-        <span className="truncate font-mono" title={text}>{text}</span>}
+        <span className="truncate font-mono" title={text} data-bg-output={output ? taskId : undefined}>{text}</span>}
       {!failed && (task?.preview_truncated || task?.truncated || preview?.trimEnd().includes("\n")) &&
         <span className="shrink-0">Preview truncated</span>}
       {failed && <button type="button" className="shrink-0 underline" aria-label="Retry task summary"

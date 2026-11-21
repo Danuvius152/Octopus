@@ -118,8 +118,9 @@ the collected child text with matching request/attempt/thread/turn. Historical
 pagination and realtime output use the same association. Cards share a derived
 index of the current saved message window. It groups status rows by card ID
 and collected items by work identity. The chat projection looks up snapshots
-by that same work identity. Live text deltas compose the preview without
-rebuilding the saved index. If a window has child
+by that same work identity. Live text deltas update the associated card's
+preview using the saved index. Unrelated cards retain their rendered output.
+If a window has child
 text or tools but lacks the older status row, its card remains unconfirmed. A typed live
 snapshot can supply a missing display anchor without inventing a stored seq;
 loading the original row deduplicates that anchor.
@@ -154,9 +155,10 @@ Each page rechecks ownership and its original target. `after_seq` must belong
 to that precise child work. The UI keeps pages separately from main chat and
 deduplicates by saved seq, so a tool call and its result sharing one native
 item both survive. Refresh, target/account/service changes, close/reopen and
-disconnect/reconnect invalidate pending reads, including a reconnect to the
-same service. Detail reads do not advance chat high water, alter its display
-cache, add usage or change saved messages.
+disconnect/reconnect cancel pending reads, including a reconnect to the same
+service. The deadline covers the response body, and a failed next-page read
+can retry its original cursor. Detail reads preserve the chat high water,
+display cache, usage and saved messages.
 
 Available items, uncollected history and query errors are distinct. Saved
 partial output remains readable with the helper's actual status and stop

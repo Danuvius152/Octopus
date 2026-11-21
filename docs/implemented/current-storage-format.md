@@ -2,7 +2,7 @@
 
 > **Status:** implemented — 当前格式准入、持久资源、完整记录与离线交接不变量。
 
-The main database uses format **12**, and Wiki uses format **17**. Each database
+The main database uses format **13**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -294,8 +294,12 @@ execution authority. A reloaded card derives its body/status from collected
 messages; the live snapshot is only an additional bounded view. Main-chat
 filtering does not delete child rows or change the global high water.
 
-Current background-task rows retain nullable `bg_tasks.delivery_disposition` (`stopped`/`unknown`)
-and `delivery_error` after `knowledge_context`. Delegation round JSON requires
+Background-task rows retain nullable `delivery_disposition` (`stopped`/`unknown`)
+and the original `delivery_error`. SQLite stores bounded generated summary
+fields before the original variable-length command, stdout/stderr and other
+body fields. This order lets summary queries avoid reading body overflow
+pages. Publication verifies the physical column order as well as the full
+declaration. Delegation round JSON requires
 an independent nullable `terminal_delivery_error` and validates the finite
 terminal-disposition vocabulary, including `stopped` and `unknown`. These are
 source-side delivery observations; they do not change command/child business
@@ -446,14 +450,17 @@ keeps business closed. Reentry inspects actual committed facts under the same
 candidate and frozen inputs; it must not overwrite newer files/databases or
 replay model/tool effects. Runtime callbacks cannot be restored from JSON.
 
-For the finite main-format 11 to 12 handoff, the online preflight uses the
-source release's format declaration. The offline transaction installs the
-partial index and advances `user_version` together. A fresh read verifies the
-candidate layout and checks retained main rows, including SQLite's message ID
-allocation sequence, against the baseline captured after the source writer
-retired. The first candidate start still requires that comparison if the
-release pointer has already changed. A verified ready process bound to the
-same publication supplies the evidence that later normal writes can exist.
+For the finite main-format 12 to 13 handoff, preflight uses the pinned source
+release's verifier and checks the live process's database identity. After
+writer retirement, the loaded service mask and offline installation lock
+cover the baseline capture, transaction and handle closure. The transaction
+rebuilds `bg_tasks` with its summary fields and advances `user_version`
+together. A fresh read verifies the candidate layout and compares original
+values, row IDs, remaining tables and SQLite sequences with the frozen facts.
+Reentry with committed format 13 repeats that comparison read-only before
+first start, including when the release pointer already changed. A readiness
+receipt bound to the original request, candidate process and database identity
+supplies evidence that subsequent normal writes can exist.
 
 Only verified current storage permits candidate start and credential writes.
 Do not rotate or clean credentials by opening an uncertain store. A running

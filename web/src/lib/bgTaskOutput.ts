@@ -6,6 +6,10 @@ export type BgTaskOutput = Pick<BgTaskResponse,
   "truncated" | "delivery_disposition" | "delivery_error"
 >;
 
+export function bgTaskOutputLine(preview: string | undefined): string {
+  return preview?.trimEnd().split("\n").at(-1) ?? "";
+}
+
 const MAX_CACHED_BYTES = 8 * 1024 * 1024;
 const MAX_CACHED_TASKS = 16;
 let cache = new Map<string, { output: BgTaskOutput; bytes: number }>();

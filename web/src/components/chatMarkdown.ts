@@ -1,4 +1,4 @@
-import Markdown from "react-markdown";
+import Markdown, { defaultUrlTransform } from "react-markdown";
 import katex from "katex";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -201,7 +201,9 @@ export function projectMarkdownOutput(source: string, added?: TextSpan, purpose:
       const overlaps = !added || !!position && added.start < position.end && added.end > position.start;
       if (node.type === "element") {
         if (node.tagName === "img") {
-          if (overlaps) images.push(imageCount);
+          const { src, alt } = node.properties;
+          if (overlaps && (typeof src === "string" && defaultUrlTransform(src) ||
+            typeof alt === "string" && alt.trim())) images.push(imageCount);
           imageCount++;
         }
         const childCode = node.tagName === "pre" ? "block" : node.tagName === "code" ? code ?? "inline" : code;

@@ -21,6 +21,12 @@ readable context; the complete stored ID separates applications with the same
 display name. Renaming does not move resources, and existing rows retain their
 stored `app_dir`.
 
+The active-name SQLite index enforces case-insensitive uniqueness
+(`COLLATE NOCASE`) within each account. Archived rows release the name while
+retaining their resource claim. Creation, rename and restoration translate a
+rejection from that index to HTTP 409. If restoration loses a concurrent
+claim, the original app stays archived and can be renamed before retrying.
+
 Code, durable `.data` and rebuildable `.runtime` are separate siblings of that
 stored address, including when code uses an alias. The siblings are not derived
 from the code alias's final target. Application status, backend status and
@@ -203,6 +209,7 @@ as database state; a correct row alone does not prove notification ordering.
 | `POST /api/applications` | create + kick off the build |
 | `GET /api/applications/{id}` | one row |
 | `PATCH /api/applications/{id}` | rename / re-icon / change entrypoint |
+| `POST /api/applications/{id}/unarchive` | restore the archived app or report a conflicting active name |
 | `POST /api/applications/{id}/build` | another build turn (`{prompt}`) |
 | `DELETE /api/applications/{id}` | close admission, retire original work, process files, then remove the row; `keep_files=true` skips only file removal |
 | `GET /apps/{id}/{path}` | the app itself (cookie/bearer/query auth) |

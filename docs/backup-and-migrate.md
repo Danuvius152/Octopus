@@ -46,7 +46,7 @@ content and applications. It does not use a fixed instance-specific file list.
 | Wiki | Preserve registered vault content, sources/proofs, content history, business identities and the durable facts needed for query and maintenance, including a registered external vault within the supported home layout |
 | API configuration | Preserve account-stored endpoints/keys and saved credential associations |
 | Connector installations | Preserve the account's installation IDs, metadata, current encrypted grants and Agent enablement links, together with referenced custom definitions and OAuth client configuration. Reconnect updates those existing records; it adds no collection root. |
-| Chats and native continuity | Exclude old sessions/messages, input receipts and native input evidence, native transcripts/resume state, BG/delegation execution history and their return diagnostics, and extra external/fork work trees collected solely for old conversations; ordinary files already inside the account's included roots remain included |
+| Chats and native continuity | Exclude old sessions/messages, input receipts and native input evidence, native transcripts/resume state, BG/delegation execution history with diagnostics and BG summaries, and extra external/fork work trees collected solely for old conversations; ordinary files already inside the account's included roots remain included |
 | Schedules and execution | Exclude recurring/one-shot definitions, enablement, pending triggers and live process/PID/socket/lease state; no post-import schedule activation step |
 | Login state | Exclude model CLI subscription tokens, refresh tokens and authentication caches wherever stored; target credentials require reauthorization. Octopus account password/key material remains included; sign in again on the target |
 | Browser text drafts | Current-tab `sessionStorage` text is browser-local and excluded from account archives and server backups. Import does not collect or restore it; [draft recovery](implemented/input-reliability.md#browser-application-text-drafts) grants no submission or execution authority. |
@@ -58,12 +58,12 @@ not be discarded as a cache. Exclusion from an archive does not delete or
 reconfigure source chats, tasks, logins or files.
 
 Pending Connector OAuth logins, including their original Reconnect target, are
-process-local and are neither transferred nor resumed. Restoring completed
-installation records preserves the saved relationships and grant; it does not
-replay a callback or establish current provider access. See the
-[Connector lifecycle](implemented/connectors.md#oauth-and-lifecycle).
+process-local. Agent-binding reservations and receipts also live in the
+original process. Restoring committed installation records preserves saved
+relationships and grants. Provider access and new writes are established on
+the target through the [Connector lifecycle](implemented/connectors.md#oauth-and-lifecycle).
 
-Current archives contain complete main format 12 and Wiki format 17. GitHub
+Current archives contain complete main format 13 and Wiki format 17. GitHub
 installations preserve their canonical numeric identity, display label, original
 installation ID, encrypted grant and Agent links through export/import. The
 importer rejects an older main marker before creating the target; it does not

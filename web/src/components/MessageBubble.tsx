@@ -26,7 +26,7 @@ import { NativeSubagentCard, SubagentCard } from "./SubagentCard";
 import { useStreamingTextNode } from "../hooks/useStreamingTextNode";
 import { projectToolCall, readRuntimeMetadata } from "../lib/toolIdentity";
 import { questionClosure } from "../lib/questionPresentation";
-import { requestSource } from "../lib/injectedTurns";
+import { backgroundResultBody, requestSource } from "../lib/injectedTurns";
 import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { ToolInputDetails } from "./ToolInputDetails";
 import { nativeWorkKey } from "../lib/nativeOutput";
@@ -40,12 +40,6 @@ const CompletedMarkdown = memo(function CompletedMarkdown({ source }: { source: 
     {source}
   </Markdown>;
 });
-
-// Marker the backend prepends to the synthesized user message it
-// injects when a bg task completes. Used to render those messages
-// with a distinct "auto" badge so the user knows they didn't type it.
-// Source of truth: server/bg_tasks.py render_delivery_prompt.
-const BG_TASK_RESULT_PREFIX = "[bg-task-result]";
 
 import { normalizeMessage, presentOutcome } from "../lib/turnOutcome";
 
@@ -217,17 +211,8 @@ function MessageBody({
             <div className="mt-2 whitespace-pre-wrap break-words">{message.content}</div>
           </details>;
         }
-        const isBgResult = source === "bg" || (source === undefined &&
-          typeof message.content === "string" &&
-          message.content.startsWith(BG_TASK_RESULT_PREFIX));
-        if (isBgResult) {
-          return (
-            <BgTaskResultMessage
-              content={message.content as string}
-              sessionId={sessionId}
-            />
-          );
-        }
+        const bgResult = backgroundResultBody(message);
+        if (bgResult !== undefined) return <BgTaskResultMessage content={bgResult} />;
         if (source === "wiki" && typeof message.content === "string" &&
             message.content.startsWith("[wiki-maintenance-result]")) {
           return <div className="msg msg-system py-1 text-center text-xs text-muted-foreground">
@@ -528,22 +513,11 @@ function BgChipForToolUse({ sessionId, message }: { sessionId: string; message: 
   </div>;
 }
 
-function BgTaskResultMessage({
-  content,
-  sessionId: _sessionId,
-}: {
-  content: string;
-  sessionId: string;
-}) {
+function BgTaskResultMessage({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
-  // Strip the marker for display — it's only a routing hint, not part
-  // of the human-facing text.
-  const stripped = content.startsWith(BG_TASK_RESULT_PREFIX)
-    ? content.slice(BG_TASK_RESULT_PREFIX.length).trimStart()
-    : content;
   // Show only the first line collapsed; that line is the "finished
   // with status …" summary which is the most-important info.
-  const firstLine = stripped.split("\n", 1)[0];
+  const firstLine = content.split("\n", 1)[0];
   return (
     <div className="msg msg-bg-result flex justify-end">
       <div className="max-w-[85%] space-y-1">
@@ -564,7 +538,7 @@ function BgTaskResultMessage({
             </span>
             {expanded ? (
               <pre className="m-0 flex-1 font-mono text-xs whitespace-pre-wrap break-words">
-                {stripped}
+                {content}
               </pre>
             ) : (
               <span className="flex-1">{firstLine}</span>

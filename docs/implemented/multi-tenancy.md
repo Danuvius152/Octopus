@@ -83,9 +83,13 @@ operation. Cancellation alone does not prove rollback, particularly during
 COMMIT; durable state is checked by reopening the database. No recovery queue
 finishes half an account operation.
 
-Login throttling bounds guessing. Opaque tokens were chosen because
-revocation can be checked against the already-open SQLite authority without
-adding a JWT refresh/revocation subsystem.
+The login route keeps an in-process limit of eight combined in-flight
+attempts and failures from the preceding 300 seconds for each normalized
+username and request address. It claims a slot before validation and returns
+429 when the limit is reached. A failed validation records a failure at
+settlement. A successful login clears settled failures, and cancellation
+releases its slot. Other in-flight attempts keep their own slots. Opaque tokens
+can be checked for revocation against the open SQLite authority.
 
 UserManager runs password derivation and known/dummy verification through one
 bounded worker entry, including setup, registration, user creation and both
@@ -94,8 +98,9 @@ waiting for a slot is cancellable. An admitted computation retains its slot
 until the actual worker finishes, even if its waiter is cancelled. A separate
 worker limiter of equal capacity prevents an occupied default AnyIO pool from
 adding another protected queue. Cancellation is checked again before using a
-computed result in SQL. Costs, dummy verification and login throttling remain
-unchanged; no credential or authorization proof is cached by this helper.
+computed result in SQL. The worker accounts for password computation
+independently of the route's login budget and holds no cached credential or
+authorization proof.
 `tests/test_users.py` covers default-pool saturation, waiting/running cancellation,
 capacity release and password/enabled-state races with real derivation.
 
