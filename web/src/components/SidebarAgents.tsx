@@ -422,12 +422,20 @@ export function SidebarAgents() {
           <span className="agent-avatar tile tile-plain shrink-0">
             {a.avatar || "🐙"}
           </span>
-          <span className="agent-name truncate text-sm font-semibold text-gray-900">
+          <span className="agent-name flex-1 truncate text-sm font-semibold text-gray-900">
             {a.name}
           </span>
+          {runningCount > 0 && (
+            <span className="agent-running badge-running shrink-0">
+              <span className="dot" />
+              <span className="agent-running-count">
+                {runningCount} running
+              </span>
+            </span>
+          )}
           {a.pinned === false ? (
             <button
-              className="btn-agent-pin ml-auto inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-md text-gray-600 opacity-0 group-hover:opacity-100 hover:bg-gray-200 hover:text-gray-900 transition"
+              className="btn-agent-pin inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-md text-gray-600 opacity-0 group-hover:opacity-100 hover:bg-gray-200 hover:text-gray-900 transition"
               onClick={(e) => {
                 e.stopPropagation();
                 setPinned(a, true);
@@ -440,7 +448,7 @@ export function SidebarAgents() {
           ) : (
             !a.is_system && (
               <button
-                className="btn-agent-unpin ml-auto inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-md text-gray-600 opacity-0 group-hover:opacity-100 hover:bg-gray-200 hover:text-gray-900 transition"
+                className="btn-agent-unpin inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-md text-gray-600 opacity-0 group-hover:opacity-100 hover:bg-gray-200 hover:text-gray-900 transition"
                 onClick={(e) => {
                   e.stopPropagation();
                   setPinned(a, false);
@@ -452,42 +460,27 @@ export function SidebarAgents() {
               </button>
             )
           )}
-          {runningCount > 0 ? (
-            <span
-              className={`agent-running badge-running shrink-0${
-                a.is_system && a.pinned !== false ? " ml-auto" : ""
-              }`}
-            >
-              <span className="dot" />
-              <span className="agent-running-count">
-                {runningCount} running
-              </span>
-            </span>
-          ) : (
-            <button
-              className={`btn-session-add inline-flex${
-                a.is_system && a.pinned !== false ? " ml-auto" : ""
-              }  h-[18px] w-[18px] shrink-0 items-center justify-center rounded-md text-gray-600 opacity-0 group-hover:opacity-100 hover:bg-gray-200 hover:text-gray-900 transition`}
-              onClick={(e) => {
-                e.stopPropagation();
-                openCreateRow(a.id);
-              }}
-              title="New session"
-              aria-label={`New session for ${a.name}`}
-              disabled={creating}
-            >
-              <IconPlus size={14} />
-            </button>
-          )}
+          <button
+            className="btn-session-add inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-md text-gray-600 opacity-0 group-hover:opacity-100 hover:bg-gray-200 hover:text-gray-900 transition"
+            onClick={(e) => {
+              e.stopPropagation();
+              openCreateRow(a.id);
+            }}
+            title="New session"
+            aria-label={`New session for ${a.name}`}
+            disabled={creating}
+          >
+            <IconPlus size={14} />
+          </button>
         </div>
 
         {isExpanded && (
           <div className="session-rail ml-[15px] mt-0.5 mb-1 flex flex-col gap-0.5 border-l-[1.5px] border-gray-400/70 pl-3">
             {formAgentId === a.id && (
-              <fieldset disabled={creating} aria-busy={creating} aria-label="New session" className="session-create rounded-lg border border-primary-100 bg-primary-50/60 p-2">
+              <fieldset disabled={creating} aria-busy={creating} aria-label="New session" className="session-create min-w-0 rounded-lg border border-primary-100 bg-primary-50/60 p-2">
                 <div className="flex items-center gap-1.5">
                   <input
-                    className="min-w-0 flex-1 rounded-md border border-gray-400 bg-card px-2 py-1 text-[13px] text-gray-900 outline-none placeholder:text-gray-600 focus:border-primary"
+                    className="min-h-9 min-w-0 flex-1 rounded-md border border-gray-400 bg-card px-2 py-1 text-[13px] text-gray-900 outline-none placeholder:text-gray-600 focus:border-primary"
                     placeholder="Session name"
                     value={newName}
                     autoFocus
@@ -500,21 +493,21 @@ export function SidebarAgents() {
                   />
                   <button
                     type="button"
-                    className="btn-create inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-white transition-colors hover:bg-primary-700"
+                    className="btn-create inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-primary text-white transition-colors hover:bg-primary-700"
                     onClick={() => createSession(a.id)}
                     title="Create session"
                     aria-label="Create session"
                   >
-                    {creating ? <IconLoader2 size={13} className="animate-spin" aria-hidden /> : <IconCheck size={13} />}
+                    {creating ? <IconLoader2 size={16} className="animate-spin" aria-hidden /> : <IconCheck size={16} />}
                   </button>
                   <button
                     type="button"
-                    className="btn-create-cancel inline-flex size-6 shrink-0 items-center justify-center rounded-md text-gray-700 transition-colors hover:bg-gray-200"
+                    className="btn-create-cancel inline-flex size-9 shrink-0 items-center justify-center rounded-md text-gray-700 transition-colors hover:bg-gray-200"
                     onClick={closeCreateRow}
                     title="Cancel"
                     aria-label="Cancel new session"
                   >
-                    <IconX size={13} />
+                    <IconX size={16} />
                   </button>
                 </div>
 

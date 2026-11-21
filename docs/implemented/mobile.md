@@ -62,6 +62,8 @@ hidden menu.
 Under `hover: none`, sidebar row actions appear on the selected session
 or application and the expanded Agent (`.session-item.active`,
 `.application-item.active`, `.agent-item.expanded`). Other rows keep them hidden.
+An Agent's running count sits to the left of its actions. On a folded Agent
+row, taps in the space reserved for its hidden actions unfold the row.
 
 The current session action archives; Agent/App sidebar actions unpin. These
 library actions do not hard-delete, while credential and schedule deletion
@@ -79,6 +81,9 @@ an 18px icon with a 38px target is the combination that keeps both. Rows get
 `:active` backgrounds since `:hover` never fires, and everything tappable gets
 `touch-action: manipulation` so a tap isn't held for 300ms waiting to see
 whether it was a double-tap zoom.
+The adjacent Agent pin and new-session targets meet at the midpoint of their gap.
+In the inline session form, the name field shrinks within the drawer to leave
+room for separate 36px square Create and Cancel buttons.
 
 <a id="6-notch-home-indicator-status-bar"></a>
 ## Notch, home indicator, status bar

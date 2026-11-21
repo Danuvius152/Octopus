@@ -602,11 +602,13 @@ summary {
 
   .session-item:not(.active) .btn-session-archive:not([aria-busy="true"]),
   .application-item:not(.active) .btn-application-pin,
-  .application-item:not(.active) .btn-application-unpin,
-  .agent-item:not(.expanded) .btn-agent-pin,
-  .agent-item:not(.expanded) .btn-agent-unpin,
-  .agent-item:not(.expanded) .btn-session-add {
+  .application-item:not(.active) .btn-application-unpin {
     opacity: 0;
+  }
+
+  .agent-item:not(.expanded) :is(.btn-agent-pin, .btn-agent-unpin, .btn-session-add) {
+    opacity: 0;
+    pointer-events: none;
   }
 
   /* Hit areas. The icons stay 18-20px because the design is dense on
@@ -636,6 +638,15 @@ summary {
     content: "";
     position: absolute;
     inset: -10px;
+  }
+
+  /* Split the gap-2 space between adjacent agent actions at its midpoint. */
+  :is(.btn-agent-pin, .btn-agent-unpin)::after {
+    inset-inline-end: -0.25rem;
+  }
+
+  :is(.btn-agent-pin, .btn-agent-unpin) + .btn-session-add::after {
+    inset-inline-start: -0.25rem;
   }
 
   /* Taps get their own feedback since :hover never fires. */
