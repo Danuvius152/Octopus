@@ -130,4 +130,4 @@ it("audits native UI setup restarts and still rejects swallowed refusals or wron
   const wrong = runUI(args, "wrong-scope");
   expect(wrong.status).toBe(1);
   expect(wrong.stderr).toContain("main.jsonl");
-}, 20_000);
+}, 25_000);

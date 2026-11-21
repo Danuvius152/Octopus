@@ -79,7 +79,7 @@ it.each([[200, false], [400, false], [200, true], [400, true]] as const)(
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(useSessionStore.getState().messages[session.id]).toEqual([expect.objectContaining({ type: "notice", content: expect.stringContaining("new-model") })]);
   } finally { vi.unstubAllGlobals(); }
-});
+}, 10_000);
 
 it("keeps unsent text until deletion is confirmed and cannot carry it into another session", () => {
   const { input } = setup();

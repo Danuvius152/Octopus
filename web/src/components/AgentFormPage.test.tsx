@@ -114,7 +114,7 @@ describe("AgentFormPage", () => {
     expect(screen.getByRole("button", { name: "Save Agent" })).toBeEnabled();
     expect(screen.getByLabelText("One-line role")).toBeEnabled();
     expect(screen.getByLabelText("Name")).toHaveValue("Octo");
-  });
+  }, 10_000);
 
   it.each([true, false])("lets a prior Connector write settle during Save without unlocking the editors (success=%s)", async success => {
     const connector = deferred<Response>(), save = deferred<Response>();

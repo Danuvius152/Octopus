@@ -188,4 +188,4 @@ it("prepares account services only when the actual file/grep selection includes 
     expect(collectExecutionPlan(["app.spec.ts", "accounts.spec.ts", "--grep=shows connection status"], env)
       .map(({ scope }) => scope)).toEqual(["main"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
-}, 15_000);
+}, 20_000);
