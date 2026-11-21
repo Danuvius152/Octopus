@@ -27,6 +27,8 @@ from scripts.python_environment import inspect_environment
 
 HERMETIC_PYTEST_SELECTION = "not real and not knowledge_eval and not wiki_perf"
 PYTEST_SELECTION_ENVIRONMENT = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
+OFFLINE_E2E_COUNTS = ("passed", "failed", "flaky", "skipped", "errors")
+CODEX_LIVE_COUNTS = ("passed", "failed", "skipped")
 
 
 @dataclass(frozen=True)
@@ -170,6 +172,13 @@ def native_counts(path: Path, kind: str) -> dict[str, int]:
     return {key: count(data[field]) for key, field in (
         ("total", "numTotalTests"), ("passed", "numPassedTests"), ("failed", "numFailedTests"),
         ("skipped", "numPendingTests"), ("todo", "numTodoTests"))}
+
+
+def release_counts(values: dict[str, Any], fields: tuple[str, ...]) -> dict[str, int]:
+    counts = {field: values[field] for field in fields}
+    if any(type(value) is not int or value < 0 for value in counts.values()):
+        raise ValueError("Invalid release test count")
+    return counts
 
 
 def subreaper(value: int | None = None) -> int:
@@ -350,8 +359,13 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
     owner = GateChildren()
     try:
         inherited = [key for key in PYTEST_SELECTION_ENVIRONMENT if row["selection_environment"][key]]
-        if gate.id in ("pytest", "supervisor", "codex-live-pytest") and inherited:
-            error = f"Unset {', '.join(inherited)} to certify the requested pytest selection"
+        blocked = []
+        if gate.id in ("pytest", "supervisor", "codex-live-pytest"):
+            blocked = inherited
+        elif gate.id == "pytest-focused" and gate.pytest_context:
+            blocked = [key for key in inherited if key != "PYTEST_ADDOPTS"]
+        if blocked:
+            error = f"Unset {', '.join(blocked)} to certify the requested pytest selection"
             row.update(status="failed", evidence_error=error, report=None)
             return
         with owner:
@@ -403,18 +417,21 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
                     details = json.loads(report.read_text())
                     if gate.report == "offline-e2e":
                         partitions = row["partitions"] = details["partitions"]
-                        counts = [partition["counts"] for partition in partitions if partition["counts"] is not None]
+                        counts = [release_counts(partition["counts"], OFFLINE_E2E_COUNTS)
+                                  for partition in partitions if partition["counts"] is not None]
                         complete_counts = bool(partitions) and len(counts) == len(partitions)
                         if complete_counts:
-                            row["counts"] = {key: sum(item[key] for item in counts) for key in counts[0]}
+                            row["counts"] = {key: sum(item[key] for item in counts) for key in OFFLINE_E2E_COUNTS}
                         confirmed = complete_counts and all(
-                            part["status"] == "passed" and part["returncode"] == 0
+                            part["status"] == "passed" and part["returncode"] == 0 and part["counts"]["passed"] > 0
                             for part in partitions
                         )
                     else:
-                        counts = row["counts"] = details["suites"].get(suite)
+                        summary = details["suites"].get(suite)
                         row["execution"] = details["execution"].get(suite)
-                        confirmed = bool(counts and counts["exit_code"] == 0 and row["execution"]
+                        if summary is not None:
+                            row["counts"] = {**release_counts(summary, CODEX_LIVE_COUNTS), "exit_code": summary["exit_code"]}
+                        confirmed = bool(summary and summary["exit_code"] == 0 and summary["skipped"] == 0 and row["execution"]
                                          and row["execution"]["exit_code"] == 0)
                     totals = row["counts"]
                     if row["returncode"] == 0 and not (
@@ -431,7 +448,10 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
                     if context is not None:
                         context_data = json.loads(context.read_text())
                         row["execution"] = context_data
-                        if row["returncode"] == 0 and context_data["exit_code"] != 0:
+                        if row["returncode"] == 0 and (
+                            context_data["exit_code"] != 0 or context_data["failures"]
+                            or context_data["worker_crashes"] or not totals["total"]
+                        ):
                             row["evidence_error"] = "Pytest execution report did not confirm a passing execution"
             except (OSError, ValueError, KeyError, TypeError, AttributeError, ET.ParseError) as error:
                 row["evidence_error"] = f"Native report unavailable: {error}"
@@ -564,7 +584,7 @@ def release_gates(root: Path, *, supervisor: bool) -> list[Gate]:
     if supervisor:
         gates.append(Gate("supervisor", "isolated systemd supervisor", (
             python, "-m", "pytest", "-c", "pyproject.toml", "-n", "0",
-            "tests/test_service_supervisor.py", "tests/test_service_logging.py",
+            "tests/",
             "--run-real", "-m", "real and supervisor", "-q",
         ), root, "isolated systemd user units", "pytest", pytest_context=True))
     gates.append(Gate("offline-e2e", "offline browser E2E", ("bun", "run", "test:e2e:fast"),

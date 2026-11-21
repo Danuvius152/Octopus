@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { collectExecutionPlan, executionPlan, playwrightArgs } from "../e2e/execution-plan";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -21,7 +21,7 @@ function collectedSpecs(suites: Suite[]): Spec[] {
 }
 
 const files = ["app.spec.ts", "connectors.spec.ts"];
-it("keeps a failed release partition and still records the independent partitions", () => {
+it.each([false, true])("keeps a failed release partition and still records the independent partitions (cleanup error: %s)", (cleanupError) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "octopus-e2e-evidence-"));
   try {
     const bin = path.join(root, "node_modules/.bin");
@@ -38,18 +38,39 @@ if (args.includes("--list")) {
   ] }] }));
 } else {
   const failed = args.includes("--project=chromium");
+  const startupFailure = failed && !${cleanupError};
   const scope = process.env.OCTOPUS_E2E_SCOPE;
   const audit = path.join(process.env.OCTOPUS_E2E_AUDIT_DIR, scope + ".jsonl");
   fs.writeFileSync(audit, '{"kind":"guard_installed"}\\n{"kind":"offline_ready"}\\n');
   fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify({
-    config: { workers: failed ? 2 : 1 }, errors: [], stats: {
-      expected: failed ? 0 : 1, unexpected: Number(failed), flaky: 0, skipped: 0
+    config: { workers: 2, metadata: startupFailure ? {} : { actualWorkers: 1 } },
+    errors: startupFailure ? [{ message: "Service startup failed" }] : [], stats: {
+      expected: startupFailure ? 0 : 1, unexpected: 0, flaky: 0, skipped: 0
     }
   }));
+  if (failed && ${cleanupError}) process.exitCode = 7;
 }
 `, { mode: 0o700 });
     const destination = path.join(root, "evidence");
-    const child = spawnSync("bun", [path.resolve("e2e/run.ts"), "offline"], {
+    const preload = path.join(root, "cleanup.ts");
+    writeFileSync(preload, `
+import { mock } from "bun:test";
+import * as fs from "node:fs";
+import path from "node:path";
+const remove = fs.rmSync;
+let failed = false;
+mock.module("node:fs", () => ({
+  ...fs,
+  rmSync(directory, options) {
+    remove(directory, options);
+    if (!failed && path.basename(directory).startsWith("e2e-runtime-")) {
+      failed = true;
+      throw new Error("Injected cleanup failure");
+    }
+  },
+}));
+`);
+    const child = spawnSync("bun", [...(cleanupError ? ["--preload", preload] : []), path.resolve("e2e/run.ts"), "offline"], {
       cwd: root, env: { ...process.env, OCTOPUS_E2E_EVIDENCE_DIR: destination }, encoding: "utf8",
     });
     expect(child.status, child.stderr || child.stdout).toBe(1);
@@ -57,14 +78,44 @@ if (args.includes("--list")) {
     expect(result.passed).toBe(false);
     expect(result.partitions.map(({ project, scope, status, returncode, workers }: Record<string, unknown>) =>
       [project, scope, status, returncode, workers])).toEqual([
-      ["chromium", "main", "failed", 0, 2],
+      ["chromium", "main", "failed", cleanupError ? 7 : 0, cleanupError ? 1 : null],
       ["installation", "main", "passed", 0, 1],
       ["installation", "accounts", "passed", 0, 1],
     ]);
     for (const phase of result.partitions) {
-      expect(JSON.parse(readFileSync(phase.report, "utf8")).stats).toBeDefined();
+      const native = JSON.parse(readFileSync(phase.report, "utf8"));
+      expect(phase.counts).toEqual({
+        passed: native.stats.expected, failed: native.stats.unexpected, flaky: native.stats.flaky,
+        skipped: native.stats.skipped, errors: native.errors.length,
+      });
       expect(phase.argv).toContain("--trace=retain-on-failure");
+      expect(phase.argv).toContain("--forbid-only");
     }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 10_000);
+
+it("rejects focused Playwright tests during release collection", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "octopus-e2e-focused-"));
+  try {
+    symlinkSync(path.resolve("node_modules"), path.join(root, "node_modules"));
+    writeFileSync(path.join(root, "playwright.config.cjs"), 'module.exports = { projects: [{ name: "chromium" }] };');
+    writeFileSync(path.join(root, "app.spec.cjs"), `
+const { test } = require("@playwright/test");
+const { writeFileSync } = require("node:fs");
+const path = require("node:path");
+test.only("focused", () => {
+  writeFileSync(path.join(process.env.OCTOPUS_E2E_AUDIT_DIR, "main.jsonl"),
+    '{"kind":"guard_installed"}\\n{"kind":"offline_ready"}\\n');
+});
+test("case omitted by focus", () => { throw new Error("This case must not be silently omitted"); });
+`);
+    const destination = path.join(root, "evidence");
+    const child = spawnSync("bun", [path.resolve("e2e/run.ts"), "offline"], {
+      cwd: root, env: { ...process.env, OCTOPUS_E2E_EVIDENCE_DIR: destination }, encoding: "utf8",
+    });
+    expect(child.status, child.stderr || child.stdout).toBe(1);
+    expect(child.stderr).toContain("item focused with '.only'");
+    expect(child.stdout).not.toContain("services=backend+vite");
   } finally { rmSync(root, { recursive: true, force: true }); }
 }, 10_000);
 

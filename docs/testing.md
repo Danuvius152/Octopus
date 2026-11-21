@@ -176,11 +176,12 @@ or automatically reused.
 
 In evidence mode, pytest emits JUnit and Vitest emits its native JSON in the
 same execution as the terminal reports. Their counts come from those files.
-Release pytest also records the controller's workers started and failed node
-IDs, including the worker ID when xdist reports a crash. Missing or invalid test
-reports leave counts unknown
-and make otherwise successful execution fail evidence generation. Gate exit
-codes and failed reports remain available without being rewritten as passed.
+Release pytest records the controller's workers started, failed node IDs and
+the worker ID for test and collection failures reported by a worker. A worker
+crash fails the gate even if pytest exits zero, and records the worker ID
+whether or not a test was assigned. Empty execution also fails the release
+gate. Missing or invalid test reports leave counts unknown and fail evidence
+generation. Gate exit codes and failed reports remain available in the evidence.
 
 Input records include HEAD, tracked and non-ignored untracked source contents,
 the focused pytest inputs above, file modes and symlink targets, configuration
@@ -191,11 +192,12 @@ included. Changed before/after inputs make the run unusable as passing evidence.
 Keep inputs fixed throughout execution. Matching endpoint hashes cannot detect
 an intermediate edit that was later reverted, and package versions establish
 the inventory, with relevance and reuse determined by the policy above.
-The full pytest gate refuses to start pytest when `PYTEST_ADDOPTS`,
-`PYTEST_PLUGINS` or `PYTEST_DISABLE_PLUGIN_AUTOLOAD` is set to a nonempty value.
-Unset the variable named in the refusal to certify the full selection. Focused
-pytest runs with inherited `PYTEST_ADDOPTS` retain the actual execution and exit
-code, and the runner marks their requested scope uncertified.
+The full hermetic, supervisor and live Codex pytest gates refuse to start when
+`PYTEST_ADDOPTS`, `PYTEST_PLUGINS` or `PYTEST_DISABLE_PLUGIN_AUTOLOAD` is set
+to a nonempty value. The same applies to direct invocations of the live pytest
+runner. Focused release diagnostics refuse the two plugin overrides.
+Focused pytest runs with inherited `PYTEST_ADDOPTS` retain the actual execution
+and exit code, and the runner marks their requested scope uncertified.
 
 Reuse installed tools, browser binaries and caches. Provision a missing required
 version once; isolate mutable state rather than reinstalling dependencies.
@@ -312,8 +314,9 @@ evidence-reuse rules above. Release adds the installation-specific checks below.
 
 With the [selected existing Codex login](local-wsl.md#live-凭据与网络) configured,
 run `./scripts/check.sh --release --output <new-directory>`. Add `--supervisor`
-for managed-service changes. Supervisor uses the repository pytest configuration
-and requires at least one passed case. To fill a specific gap using existing evidence,
+for managed-service changes. Supervisor selects `real and supervisor` from
+`tests/` using the repository pytest configuration and requires at least one
+passed case. To fill a specific gap using existing evidence,
 select `--gate` IDs from the release set, such as `offline-e2e`,
 `codex-live-pytest`, or `codex-live-browser`. Each scoped report covers only its
 selected gates. The optional `knowledge_eval` and `wiki_perf` tiers remain
@@ -322,12 +325,14 @@ separate.
 The release report lists all selected stages from startup, with pending work
 marked `not-run`. A test failure leaves the run nonzero and allows the remaining
 independent stages to run. The offline browser runner records each selected
-partition's command, worker count, native JSON and offline audit, with
-Playwright traces retained on failure. Stage totals require reports from every
-partition. The two live Codex gates retain their
-own native reports, raw logs and network audits. During a quiet subprocess the
-runner prints elapsed time every 15 seconds. Use separate output directories for
-follow-up executions and link them to the first run in the acceptance record.
+partition's command, effective worker count when Playwright reports it, native
+JSON and offline audit, with Playwright traces retained on failure. Playwright
+rejects focused `.only` tests during collection and partition execution. Stage
+totals require valid counts from every partition. The two live Codex gates
+retain their own native reports, raw logs and network audits and print elapsed
+time every 15 seconds while their test output is redirected. Use separate output
+directories for follow-up executions and link them to the first run in the
+acceptance record.
 
 For documentation, check local targets and anchors (including inbound links
 when headings move), then run `.venv/bin/python scripts/gen-docs-index.py --check`

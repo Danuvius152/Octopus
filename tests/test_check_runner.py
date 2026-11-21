@@ -184,8 +184,8 @@ from pathlib import Path
 out = Path(os.environ["OCTOPUS_E2E_EVIDENCE_DIR"])
 out.mkdir()
 partitions = [
-    {"status": "failed", "returncode": 1, "counts": {"passed": 3, "failed": 1}},
-    {"status": "passed", "returncode": 0, "counts": {"passed": 2, "failed": 0}}
+    {"status": "failed", "returncode": 1, "counts": {"passed": 3, "failed": 1, "flaky": 0, "skipped": 0, "errors": 0}},
+    {"status": "passed", "returncode": 0, "counts": {"passed": 2, "failed": 0, "flaky": 0, "skipped": 0, "errors": 0}}
 ]
 '''
     if missing_partition:
@@ -196,7 +196,7 @@ from pathlib import Path
 out = Path(sys.argv[-1])
 out.mkdir()
 (out / "result.json").write_text(json.dumps({"passed": True,
-    "suites": {"browser": {"passed": 1, "failed": 0, "exit_code": 0}},
+    "suites": {"browser": {"passed": 1, "failed": 0, "skipped": 0, "exit_code": 0}},
     "execution": {"browser": {"exit_code": 0}}}))
 '''
     output = tmp_path / "release"
@@ -206,13 +206,44 @@ out.mkdir()
     ], output) == 1
     offline, live = json.loads((output / "results.json").read_text())["gates"]
     assert offline["returncode"] == 0 and offline["status"] == "failed" and offline["evidence_error"]
-    assert offline["counts"] == (None if missing_partition else {"passed": 5, "failed": 1})
+    assert offline["counts"] == (None if missing_partition else {
+        "passed": 5, "failed": 1, "flaky": 0, "skipped": 0, "errors": 0,
+    })
     assert offline["partitions"][1]["counts"]["passed"] == 2
     assert live["status"] == "passed" and live["counts"]["passed"] == 1
 
 
+@pytest.mark.parametrize(("first_counts", "second_counts", "expected_totals"), [
+    ({"passed": 2}, {"passed": 1, "failed": 1, "flaky": 0, "skipped": 0, "errors": 0}, None),
+    ({"passed": 2, "failed": 0, "flaky": 0, "skipped": 0, "errors": 0},
+     {"passed": 1, "failed": -1, "flaky": 0, "skipped": 0, "errors": 0}, None),
+    ({"passed": 2, "failed": 0, "flaky": 0, "skipped": 0, "errors": 0},
+     {"passed": 0, "failed": 0, "flaky": 0, "skipped": 1, "errors": 0},
+     {"passed": 2, "failed": 0, "flaky": 0, "skipped": 1, "errors": 0}),
+])
+def test_release_requires_valid_evidence_from_each_offline_partition(
+    tmp_path, fixed_inputs, first_counts, second_counts, expected_totals,
+):
+    child = f'''import json, os
+from pathlib import Path
+out = Path(os.environ["OCTOPUS_E2E_EVIDENCE_DIR"])
+out.mkdir()
+counts = {[first_counts, second_counts]!r}
+partitions = [{{"status": "passed", "returncode": 0, "counts": item}} for item in counts]
+(out / "result.json").write_text(json.dumps({{"passed": True, "partitions": partitions}}))
+'''
+    output = tmp_path / "evidence"
+    assert runner.run_checks(tmp_path, [gate(tmp_path, "offline-e2e", child, report="offline-e2e")], output) == 1
+    [offline] = json.loads((output / "results.json").read_text())["gates"]
+    assert offline["status"] == "failed" and offline["returncode"] == 0 and offline["evidence_error"]
+    assert [part["counts"] for part in offline["partitions"]] == [first_counts, second_counts]
+    assert offline["counts"] == expected_totals
+
+
 @pytest.mark.parametrize("skip_all", [False, True])
 def test_supervisor_uses_repo_config_and_requires_a_passing_case(tmp_path, fixed_inputs, monkeypatch, skip_all):
+    for selector in runner.PYTEST_SELECTION_ENVIRONMENT:
+        monkeypatch.delenv(selector, raising=False)
     root = tmp_path / "checkout"
     (root / "tests").mkdir(parents=True)
     (root / ".venv/bin").mkdir(parents=True)
@@ -226,6 +257,10 @@ def test_supervisor_uses_repo_config_and_requires_a_passing_case(tmp_path, fixed
     )
     (root / "tests/test_service_logging.py").touch()
     skip = "pytest.skip('fixture unavailable')"
+    (root / "tests/test_other_supervisor.py").write_text(
+        "import pytest\npytestmark = [pytest.mark.real, pytest.mark.supervisor]\n"
+        f"def test_additional_supervisor():\n    {skip if skip_all else 'pass'}\n"
+    )
     (root / "tests/test_service_supervisor.py").write_text(
         "import pytest\npytestmark = [pytest.mark.real, pytest.mark.supervisor]\n"
         f"def test_preserved():\n    {skip if skip_all else 'pass'}\n"
@@ -241,11 +276,11 @@ def test_supervisor_uses_repo_config_and_requires_a_passing_case(tmp_path, fixed
     counts = observed["counts"]
     if skip_all:
         assert observed["returncode"] == 0
-        assert counts["passed"] == 0 and counts["skipped"] == 2
+        assert counts["passed"] == 0 and counts["skipped"] == 3
         assert observed["evidence_error"] == "Supervisor report contains no passing tests"
     else:
         assert observed["returncode"] == 1
-        assert counts["passed"] == 1 and counts["failed"] == 1
+        assert counts["passed"] == 2 and counts["failed"] == 1
         assert observed["execution"]["failures"][0]["nodeid"].endswith("::test_filtered")
 
 
@@ -294,6 +329,64 @@ def test_pytest_evidence_identifies_the_crashed_worker(tmp_path, fixed_inputs):
     assert failure["nodeid"].endswith("test_worker_crash.py::test_crash")
     assert failure["worker"] in ("gw0", "gw1")
     assert f"worker {failure['worker']!r} crashed while running" in (output / "crash.log").read_text()
+
+
+def test_pytest_evidence_identifies_a_worker_lost_during_collection(tmp_path, fixed_inputs):
+    root = Path(runner.__file__).resolve().parents[1]
+    crashing = tmp_path / "test_collection_crash.py"
+    crashing.write_text("def test_neighbor(): pass\n")
+    (tmp_path / "conftest.py").write_text('''
+import os
+import time
+from pathlib import Path
+
+collected = Path(__file__).with_name("collected")
+
+
+def pytest_xdist_node_collection_finished(node, ids):
+    if node.gateway.id == "gw1" and ids:
+        collected.touch()
+
+
+def pytest_collection_modifyitems(config, items):
+    if getattr(config, "workerinput", {}).get("workerid") == "gw0":
+        deadline = time.monotonic() + 10
+        while not collected.exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Healthy worker did not finish collection")
+            time.sleep(0.01)
+        os._exit(17)
+''')
+    config = tmp_path / "pytest.ini"
+    config.write_text("[pytest]\n")
+    argv = (sys.executable, "-m", "pytest", "-c", str(config), "-q", "-n", "2", "--dist=loadfile",
+            "--max-worker-restart=0", str(crashing))
+    probe = runner.Gate("crash", "crash", argv, root, "one file", "pytest", pytest_context=True)
+    output = tmp_path / "evidence"
+    assert runner.run_checks(root, [probe], output) == 1
+    [observed] = json.loads((output / "results.json").read_text())["gates"]
+    assert observed["returncode"] == 0 and observed["status"] == "failed"
+    assert observed["counts"]["total"] == 0
+    [crash] = observed["execution"]["worker_crashes"]
+    assert crash["worker"] == "gw0" and crash["error"]
+
+
+def test_pytest_evidence_attributes_collection_errors_to_the_reporting_worker(tmp_path, fixed_inputs):
+    root = Path(runner.__file__).resolve().parents[1]
+    source = tmp_path / "test_collection_error.py"
+    source.write_text(
+        "import os\nif os.environ.get('PYTEST_XDIST_WORKER') == 'gw0': raise RuntimeError('collection error')\n"
+        "def test_neighbor(): pass\n"
+    )
+    config = tmp_path / "pytest.ini"
+    config.write_text("[pytest]\n")
+    argv = (sys.executable, "-m", "pytest", "-c", str(config), "-q", "-n", "2", "--dist=loadfile", str(source))
+    probe = runner.Gate("collect", "collect", argv, root, "one file", "pytest", pytest_context=True)
+    output = tmp_path / "evidence"
+    assert runner.run_checks(root, [probe], output) == 1
+    [observed] = json.loads((output / "results.json").read_text())["gates"]
+    [failure] = [item for item in observed["execution"]["failures"] if item["nodeid"].endswith(source.name)]
+    assert failure["phase"] == "collection" and failure["worker"] == "gw0"
 
 
 def test_existing_evidence_is_never_overwritten_or_executed(tmp_path, fixed_inputs):
@@ -429,6 +522,20 @@ def test_environment_filtered_focused_pytest_retains_the_actual_execution(tmp_pa
     assert row["returncode"] == 0 and row["counts"]["total"] == 1
     assert row["selection_environment"]["PYTEST_ADDOPTS"] == "-k selected"
     assert row["evidence_error"] and not report["success"]
+
+
+@pytest.mark.parametrize("selector", ["PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD"])
+def test_release_focused_pytest_refuses_plugin_overrides(tmp_path, fixed_inputs, monkeypatch, selector):
+    monkeypatch.setenv(selector, "unapproved")
+    marker = tmp_path / "started"
+    selection = runner.Gate("pytest-focused", "pytest", (
+        sys.executable, "-c", f"open({str(marker)!r}, 'w').close()",
+    ), tmp_path, "test scope", "pytest", pytest_context=True)
+    output = tmp_path / "evidence"
+    assert runner.run_checks(tmp_path, [selection], output) == 1
+    [row] = json.loads((output / "results.json").read_text())["gates"]
+    assert row["status"] == "failed" and row["returncode"] is None and not marker.exists()
+    assert selector in row["evidence_error"]
 
 
 def test_source_identity_includes_untracked_content_modes_links_and_deletions(tmp_path):

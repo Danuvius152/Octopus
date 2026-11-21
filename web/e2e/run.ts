@@ -17,8 +17,9 @@ const testRoot = path.join(os.homedir(), ".cache", "octopus-tests");
 mkdirSync(testRoot, { recursive: true, mode: 0o700 });
 const selectionRoot = mkdtempSync(path.join(testRoot, "e2e-selection-"));
 const plan = (() => {
+  const selectedArgs = evidenceRoot ? playwrightArgs(args, ["--forbid-only"]) : args;
   try {
-    return collectExecutionPlan(args, { ...process.env, OCTOPUS_E2E_MODE: mode, OCTOPUS_E2E_AUDIT_DIR: selectionRoot, TMPDIR: selectionRoot });
+    return collectExecutionPlan(selectedArgs, { ...process.env, OCTOPUS_E2E_MODE: mode, OCTOPUS_E2E_AUDIT_DIR: selectionRoot, TMPDIR: selectionRoot });
   } finally { rmSync(selectionRoot, { recursive: true, force: true }); }
 })();
 function run(project: string, scope: "main" | "accounts", selectedArgs: string[], evidence?: PartitionEvidence): number {
@@ -27,6 +28,7 @@ function run(project: string, scope: "main" | "accounts", selectedArgs: string[]
   // Each run owns fresh mutable state, even after an interrupted prior run.
   // Keep audit evidence outside runtime cleanup so late violations still count.
   const auditDir = evidence?.directory ?? mkdtempSync(path.join(testRoot, "e2e-audit-"));
+  if (evidence) mkdirSync(evidence.directory, { mode: 0o700 });
   const runtimeDir = mkdtempSync(path.join(testRoot, "e2e-runtime-"));
   const environment = { ...process.env };
   // Codex refuses helper installation when CODEX_HOME is inside TMPDIR.
@@ -54,7 +56,6 @@ function run(project: string, scope: "main" | "accounts", selectedArgs: string[]
   console.log(`E2E mode=${mode}; project=${project}; scope=${scope}; services=backend+vite; audit=${auditDir}`);
   const options = [`--project=${project}`];
   if (evidence) {
-    mkdirSync(evidence.directory, { mode: 0o700 });
     options.push("--reporter=line,json", "--trace=retain-on-failure", `--output=${path.join(evidence.directory, "artifacts")}`);
     environment.PLAYWRIGHT_JSON_OUTPUT_FILE = evidence.report;
   }
@@ -69,11 +70,11 @@ function run(project: string, scope: "main" | "accounts", selectedArgs: string[]
         // prepared phase exists in its config, so it cannot cross state scopes.
         OCTOPUS_E2E_UI_PROJECT: interactive ? project : undefined },
     });
+    if (evidence) Object.assign(evidence, { returncode: child.status, signal: child.signal });
   } finally {
     rmSync(runtimeDir, { recursive: true, force: true });
   }
   if (child.error) console.error(child.error);
-  if (evidence) Object.assign(evidence, { returncode: child.status, signal: child.signal });
   let status = child.status ?? 1;
   // spawnSync returns after Playwright's webServer teardown: late, swallowed
   // startup/cleanup violations count too. Missing/unreadable audits fail closed.
@@ -105,7 +106,7 @@ interface PartitionEvidence {
   returncode?: number | null;
   signal?: string | null;
   duration_seconds?: number;
-  workers?: number;
+  workers?: number | null;
   counts: Record<string, number> | null;
 }
 
@@ -127,11 +128,15 @@ function runWithEvidence(root: string): number {
     let status = 1;
     try {
       status = run(row.project, plan[index].scope, plan[index].args, row);
+    } catch (error) {
+      console.error(error);
+    }
+    try {
       const report = JSON.parse(readFileSync(row.report, "utf8"));
       const { expected, unexpected, flaky, skipped } = report.stats;
       if (![expected, unexpected, flaky, skipped].every((count) => Number.isInteger(count) && count >= 0))
         throw new Error("Invalid native Playwright test counts");
-      row.workers = report.config.metadata?.actualWorkers ?? report.config.workers;
+      row.workers = report.config.metadata?.actualWorkers ?? null;
       row.counts = { passed: expected, failed: unexpected, flaky, skipped, errors: report.errors.length };
       if (!expected || unexpected || flaky || report.errors.length) status = 1;
     } catch (error) {

@@ -15,6 +15,12 @@ import pytest
 from scripts import codex_live
 
 
+@pytest.fixture
+def clean_pytest_selection(monkeypatch):
+    for selector in codex_live.PYTEST_SELECTION_ENVIRONMENT:
+        monkeypatch.delenv(selector, raising=False)
+
+
 def test_execute_reports_progress_during_a_quiet_child_and_retains_its_exit(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(codex_live, "PROGRESS_INTERVAL_SECONDS", 0.04)
     log = tmp_path / "pytest.log"
@@ -281,6 +287,7 @@ def test_report_requires_actual_passes_without_skips_or_hidden_failures(tmp_path
 
 
 @pytest.mark.parametrize("failure", ["none", "client_closed", "only_client_closed", "source_changed", "all_skipped", "auth_attempt", "no_network", "command_failed"])
+@pytest.mark.usefixtures("clean_pytest_selection")
 def test_runner_applies_hard_success_conditions_and_preserves_evidence(tmp_path, monkeypatch, failure):
     source = tmp_path / "source"
     source.mkdir()
@@ -332,6 +339,26 @@ def test_existing_evidence_directory_is_not_reused(tmp_path):
         codex_live.run(SimpleNamespace(codex_home=str(tmp_path), output=str(tmp_path)))
 
 
+@pytest.mark.parametrize("selector", codex_live.PYTEST_SELECTION_ENVIRONMENT)
+@pytest.mark.usefixtures("clean_pytest_selection")
+def test_direct_live_pytest_refuses_selection_overrides(tmp_path, monkeypatch, selector):
+    (tmp_path / "auth.json").write_text("stand-in-login")
+    monkeypatch.setenv(selector, "unapproved")
+
+    def no_child(*args, **kwargs):
+        pytest.fail("Selection overrides must be rejected before pytest starts")
+
+    monkeypatch.setattr(codex_live, "execute", no_child)
+    output = tmp_path / "evidence"
+    args = SimpleNamespace(codex_home=str(tmp_path), output=str(output), model=None,
+                           service_tier=None, upstream_proxy=None, suite="pytest", pytest_target=None)
+    assert codex_live.run(args) == 1
+    result = json.loads((output / "result.json").read_text())
+    assert not result["passed"] and result["execution"] == {}
+    assert selector in result["errors"][0]
+
+
+@pytest.mark.usefixtures("clean_pytest_selection")
 def test_runner_cannot_pass_while_a_started_proxy_handshake_is_unsettled(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()

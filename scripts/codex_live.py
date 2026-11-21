@@ -10,6 +10,7 @@ import select
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import tomllib
@@ -22,6 +23,11 @@ from time import monotonic
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+if not __package__:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.check_runner import PYTEST_SELECTION_ENVIRONMENT  # noqa: E402
+
 SELECTION = "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval and not wiki_perf"
 PROGRESS_INTERVAL_SECONDS = 15
 
@@ -286,7 +292,7 @@ def run(args) -> int:
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     result = {"passed": False, "selected_home": str(source), "suites": {}, "execution": {}, "errors": []}
 
-    def run_suite(name, argv, environment, cwd, report):
+    def run_suite(name: str, argv: list[str], environment: dict[str, str], cwd: Path, report: Path) -> int:
         log = output / f"{name}.log"
         observation = {"argv": argv, "cwd": str(cwd), "log": str(log), "report": str(report)}
         result["execution"][name] = observation
@@ -300,6 +306,10 @@ def run(args) -> int:
 
     proxy = None
     try:
+        if args.suite in ("pytest", "all"):
+            selection_overrides = [key for key in PYTEST_SELECTION_ENVIRONMENT if os.environ.get(key)]
+            if selection_overrides:
+                raise ValueError(f"Unset {', '.join(selection_overrides)} to certify the requested pytest selection")
         with tempfile.TemporaryDirectory(prefix="codex-acceptance-", dir=cache) as temporary:
             runtime = Path(temporary)
             home = runtime / "selected"
