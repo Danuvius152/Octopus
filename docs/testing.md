@@ -110,6 +110,24 @@ the affected modules and consumers of any changed shared path. Expand to a full
 suite only when targeted checks cannot close a required coverage gap. Record that
 gap before launching the suite.
 
+Keep the first failed run and write every rerun to a new evidence directory.
+When a failure appears under parallel execution, record the first run's
+selection, actual worker count, distribution, failing node and worker. Use
+`./scripts/check.sh --release --pytest-target <node> --output <new-directory>`
+for an isolated check with execution evidence. When testing a concurrency or
+load hypothesis, match the original candidate, settings and worker count and
+include enough neighboring tests to reproduce contention. Use
+`--pytest-workers <count>` with `--release` and multiple `--pytest-target`
+files to retain the original worker count and file-based scheduling in a
+focused diagnostic run. Use
+`./scripts/check.sh --release --gate pytest --output <new-directory>` if the
+full selection is needed. Set `PYTEST_XDIST_AUTO_NUM_WORKERS` to the original
+count when automatic selection would differ. Eight workers with a single
+selected node still give that node no neighboring work. Apply the same
+distinction to browser projects and repeats. A passing isolated run records
+non-reproduction in isolation. The original failure and its cause remain
+separate from the repeat result.
+
 Use `./scripts/check.sh --output <new-directory>` for the full commit check set.
 Add `--e2e` to include Playwright. For scoped reruns, repeat `--gate <id>` to
 run only the named checks. `--gate pytest` runs the full hermetic backend suite.
@@ -157,8 +175,10 @@ and result-write failures fail the runner. No previous evidence is overwritten
 or automatically reused.
 
 In evidence mode, pytest emits JUnit and Vitest emits its native JSON in the
-same execution as the terminal reports. Their counts come from those files;
-other gates have no count. Missing or invalid test reports leave counts unknown
+same execution as the terminal reports. Their counts come from those files.
+Release pytest also records the controller's workers started and failed node
+IDs, including the worker ID when xdist reports a crash. Missing or invalid test
+reports leave counts unknown
 and make otherwise successful execution fail evidence generation. Gate exit
 codes and failed reports remain available without being rewritten as passed.
 
@@ -289,6 +309,25 @@ evidence-reuse rules above. Release adds the installation-specific checks below.
 |------|---------------------|
 | Before release on this Codex installation | All commit gates, **offline E2E**, **live Codex pytest** and **Codex browser E2E** from Test Coverage below; then follow [自动发布](local-wsl.md#自动发布). Include supervisor checks when managed-service behavior changed. |
 | Documentation only | Affected links, index and diff checks; follow [repository action policy](../AGENTS.md#repository-and-upstream-maintenance). |
+
+With the [selected existing Codex login](local-wsl.md#live-凭据与网络) configured,
+run `./scripts/check.sh --release --output <new-directory>`. Add `--supervisor`
+for managed-service changes. Supervisor uses the repository pytest configuration
+and requires at least one passed case. To fill a specific gap using existing evidence,
+select `--gate` IDs from the release set, such as `offline-e2e`,
+`codex-live-pytest`, or `codex-live-browser`. Each scoped report covers only its
+selected gates. The optional `knowledge_eval` and `wiki_perf` tiers remain
+separate.
+
+The release report lists all selected stages from startup, with pending work
+marked `not-run`. A test failure leaves the run nonzero and allows the remaining
+independent stages to run. The offline browser runner records each selected
+partition's command, worker count, native JSON and offline audit, with
+Playwright traces retained on failure. Stage totals require reports from every
+partition. The two live Codex gates retain their
+own native reports, raw logs and network audits. During a quiet subprocess the
+runner prints elapsed time every 15 seconds. Use separate output directories for
+follow-up executions and link them to the first run in the acceptance record.
 
 For documentation, check local targets and anchors (including inbound links
 when headings move), then run `.venv/bin/python scripts/gen-docs-index.py --check`

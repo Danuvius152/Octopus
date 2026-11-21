@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -39,6 +39,7 @@ class Gate:
     report: str | None = None
     quiet: bool = False
     source_files: tuple[str, ...] = ()
+    pytest_context: bool = False
 
 
 class Interrupted(Exception):
@@ -135,9 +136,11 @@ def environment_identity(root: Path) -> dict[str, Any]:
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
         packages = {"returncode": result.returncode, "installed_tree": result.stdout}
     return {"python": python, "tools": tools, "frontend_dependencies": packages,
+            "cpu_affinity_count": len(os.sched_getaffinity(0)),
             "variables": {key: os.environ.get(key) for key in (
                 "CI", "LANG", "LC_ALL", "TZ", "PYTHONHASHSEED", "PLAYWRIGHT_HOST_PLATFORM_OVERRIDE",
-                *PYTEST_SELECTION_ENVIRONMENT, "PYTEST_XDIST_AUTO_NUM_WORKERS", "NODE_OPTIONS")}}
+                *PYTEST_SELECTION_ENVIRONMENT, "PYTEST_XDIST_AUTO_NUM_WORKERS", "NODE_OPTIONS",
+                "VITEST_MAX_WORKERS")}}
 
 
 def capture_inputs(root: Path, extra_files: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -314,10 +317,26 @@ def write_all(stream, data: bytes) -> None:
 def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
     argv = list(gate.argv)
     report = None
+    context = None
+    environment = None
     if output is not None and gate.report is not None:
         report = output / (gate.id + (".xml" if gate.report == "pytest" else ".json"))
-        argv += ([f"--junitxml={report}"] if gate.report == "pytest" else
-                 ["--reporter=default", "--reporter=json", f"--outputFile={report}"])
+        if gate.report == "pytest":
+            argv.append(f"--junitxml={report}")
+            if gate.pytest_context:
+                context = output / f"{gate.id}-execution.json"
+                row["execution_context"] = str(context)
+                argv += ["-p", "scripts.pytest_evidence", "--execution-evidence", str(context)]
+        elif gate.report == "vitest":
+            argv += ["--reporter=default", "--reporter=json", f"--outputFile={report}"]
+        elif gate.report == "offline-e2e":
+            evidence = output / gate.id
+            report = evidence / "result.json"
+            environment = {**os.environ, "OCTOPUS_E2E_EVIDENCE_DIR": str(evidence)}
+        else:
+            evidence = output / gate.id
+            report = evidence / "result.json"
+            argv += ["--output", str(evidence)]
     row.update(argv=argv, cwd=str(gate.cwd), scope=gate.scope, started_at=now(), returncode=None,
                status="incomplete", counts=None, evidence_error=None, execution_error=None,
                log=None, report=str(report) if report else None)
@@ -331,7 +350,7 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
     owner = GateChildren()
     try:
         inherited = [key for key in PYTEST_SELECTION_ENVIRONMENT if row["selection_environment"][key]]
-        if gate.id == "pytest" and inherited:
+        if gate.id in ("pytest", "supervisor", "codex-live-pytest") and inherited:
             error = f"Unset {', '.join(inherited)} to certify the requested pytest selection"
             row.update(status="failed", evidence_error=error, report=None)
             return
@@ -349,7 +368,8 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
                 row["log"] = str(log)
                 with log.open("wb", buffering=0) as stream:
                     try:
-                        process = owner.spawn(argv, cwd=gate.cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                        process = owner.spawn(argv, cwd=gate.cwd, env=environment,
+                                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                     except OSError as error:
                         row.update(status="failed", execution_error=str(error))
                         write_all(stream, (str(error) + "\n").encode())
@@ -378,12 +398,48 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
         row["status"] = "passed" if row["returncode"] == 0 else "failed"
         if report is not None:
             try:
-                row["counts"] = native_counts(report, gate.report)
-            except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as error:
+                if gate.report in ("offline-e2e", "codex-live"):
+                    suite = gate.id.removeprefix("codex-live-")
+                    details = json.loads(report.read_text())
+                    if gate.report == "offline-e2e":
+                        partitions = row["partitions"] = details["partitions"]
+                        counts = [partition["counts"] for partition in partitions if partition["counts"] is not None]
+                        complete_counts = bool(partitions) and len(counts) == len(partitions)
+                        if complete_counts:
+                            row["counts"] = {key: sum(item[key] for item in counts) for key in counts[0]}
+                        confirmed = complete_counts and all(
+                            part["status"] == "passed" and part["returncode"] == 0
+                            for part in partitions
+                        )
+                    else:
+                        counts = row["counts"] = details["suites"].get(suite)
+                        row["execution"] = details["execution"].get(suite)
+                        confirmed = bool(counts and counts["exit_code"] == 0 and row["execution"]
+                                         and row["execution"]["exit_code"] == 0)
+                    totals = row["counts"]
+                    if row["returncode"] == 0 and not (
+                        details["passed"] is True and confirmed and totals and totals["passed"] > 0
+                        and not any(totals.get(key) for key in ("failed", "errors", "flaky"))
+                    ):
+                        row["evidence_error"] = "Release report did not confirm a passing execution"
+                else:
+                    totals = row["counts"] = native_counts(report, gate.report)
+                    if row["returncode"] == 0 and (totals["failed"] or totals.get("errors")):
+                        row["evidence_error"] = "Native report contains failed tests after a zero exit"
+                    elif row["returncode"] == 0 and gate.id == "supervisor" and not totals["passed"]:
+                        row["evidence_error"] = "Supervisor report contains no passing tests"
+                    if context is not None:
+                        context_data = json.loads(context.read_text())
+                        row["execution"] = context_data
+                        if row["returncode"] == 0 and context_data["exit_code"] != 0:
+                            row["evidence_error"] = "Pytest execution report did not confirm a passing execution"
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, ET.ParseError) as error:
                 row["evidence_error"] = f"Native report unavailable: {error}"
         if gate.id == "pytest-focused" and additional:
             error = "Unset PYTEST_ADDOPTS to certify the requested pytest selection"
             row["evidence_error"] = "; ".join(filter(None, (row["evidence_error"], error)))
+        if row["evidence_error"]:
+            row["status"] = "failed"
     except Interrupted:
         row["status"] = "interrupted"
         raise
@@ -396,18 +452,21 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
 def run_checks(root: Path, gates: list[Gate], output: Path | None = None) -> int:
     if len({gate.id for gate in gates}) != len(gates) or any(not re.fullmatch(r"[a-z0-9-]+", gate.id) for gate in gates):
         raise ValueError("Gate identifiers must be unique safe filenames")
-    if any(gate.report not in (None, "pytest", "vitest") for gate in gates):
+    if any(gate.report not in (None, "pytest", "vitest", "offline-e2e", "codex-live") for gate in gates):
         raise ValueError("Unknown native report format")
+    if output is None and any(gate.report in ("offline-e2e", "codex-live") for gate in gates):
+        raise ValueError("Release checks require an evidence directory")
     source_files = tuple(file for gate in gates for file in gate.source_files)
     if output is not None:
         output = output.resolve()
         if output.is_relative_to(root.resolve()) and (root / ".git").exists():
             if subprocess.run(["git", "check-ignore", "-q", str(output)], cwd=root).returncode:
                 raise ValueError("Evidence must be outside the checkout or in a Git-ignored directory")
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(mode=0o700, parents=True, exist_ok=False)
     report = {"format_version": 1, "state": "incomplete", "success": False, "started_at": now(),
               "finished_at": None, "inputs_before": None, "inputs_after": None, "inputs_changed": None,
-              "gates": [], "evidence_errors": [], "exit_code": None}
+              "gates": [{"id": gate.id, "name": gate.name, "scope": gate.scope, "status": "not-run"} for gate in gates],
+              "evidence_errors": [], "exit_code": None}
 
     def save() -> None:
         if output is not None:
@@ -423,10 +482,9 @@ def run_checks(root: Path, gates: list[Gate], output: Path | None = None) -> int
         if output is not None:
             report["inputs_before"] = capture_inputs(root, source_files)
             save()
-        for gate in gates:
+        for gate, row in zip(gates, report["gates"], strict=True):
             print(f"\n── {gate.name}", flush=True)
-            row = {"id": gate.id, "name": gate.name, "status": "incomplete"}
-            report["gates"].append(row)
+            row["status"] = "incomplete"
             save()
             try:
                 run_gate(gate, output, row)
@@ -496,6 +554,28 @@ def commit_gates(root: Path, e2e: bool) -> list[Gate]:
     return gates
 
 
+def release_gates(root: Path, *, supervisor: bool) -> list[Gate]:
+    python = str(root / ".venv/bin/python")
+    gates = [
+        replace(gate, argv=(python, "-m", "pytest", *gate.argv[1:]), pytest_context=True)
+        if gate.id == "pytest" else gate
+        for gate in commit_gates(root, e2e=False)
+    ]
+    if supervisor:
+        gates.append(Gate("supervisor", "isolated systemd supervisor", (
+            python, "-m", "pytest", "-c", "pyproject.toml", "-n", "0",
+            "tests/test_service_supervisor.py", "tests/test_service_logging.py",
+            "--run-real", "-m", "real and supervisor", "-q",
+        ), root, "isolated systemd user units", "pytest", pytest_context=True))
+    gates.append(Gate("offline-e2e", "offline browser E2E", ("bun", "run", "test:e2e:fast"),
+                      root / "web", "all offline browser partitions", "offline-e2e"))
+    for suite in ("pytest", "browser"):
+        gates.append(Gate(f"codex-live-{suite}", f"live Codex {suite}",
+                          (python, "scripts/codex_live.py", "--suite", suite),
+                          root, f"full live Codex {suite}", "codex-live"))
+    return gates
+
+
 def pytest_target(root: Path, target: str) -> str:
     filename, separator, node = target.partition("::")
     path = (root / filename).resolve()
@@ -514,20 +594,37 @@ def pytest_input(root: Path, filename: str) -> str:
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     available = commit_gates(root, e2e=True)
+    release_available = release_gates(root, supervisor=True)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--e2e", action="store_true", help="add Playwright to the full commit checks")
-    parser.add_argument("--gate", action="append", choices=[gate.id for gate in available],
+    parser.add_argument("--release", action="store_true", help="run commit gates, offline E2E and both live Codex suites")
+    parser.add_argument("--supervisor", action="store_true", help="include isolated supervisor checks with --release")
+    parser.add_argument("--gate", action="append", choices=sorted({gate.id for gate in available + release_available}),
                         help="run only named gates (repeat to select additional gates)")
     parser.add_argument("--pytest-target", action="append", metavar="FILE_OR_NODE_ID",
                         type=lambda target: pytest_target(root, target),
-                        help="run focused hermetic pytest (repeat for additional files or node IDs)")
+                        help="run focused hermetic pytest (serial by default, repeat to select more tests)")
+    parser.add_argument("--pytest-workers", type=int, metavar="COUNT",
+                        help="set the xdist worker count for a targeted release diagnostic run")
     parser.add_argument("--pytest-input", action="append", metavar="FILE", default=[],
                         type=lambda filename: pytest_input(root, filename),
                         help="fingerprint an additional focused pytest input file (repeat for helpers and data)")
     parser.add_argument("--output", type=Path, help="new evidence directory outside the checkout or Git-ignored")
     args = parser.parse_args()
+    if args.supervisor and not args.release:
+        parser.error("--supervisor requires --release")
+    if args.release and (args.e2e or not args.output):
+        parser.error("--release requires --output and supplies its own browser selection")
+    if args.release:
+        available = release_available if args.supervisor or "supervisor" in (args.gate or ()) else [
+            gate for gate in release_available if gate.id != "supervisor"
+        ]
+    if set(args.gate or ()).difference(gate.id for gate in available):
+        parser.error("Choose gates from the selected commit or release check set")
     if args.pytest_input and not args.pytest_target:
         parser.error("--pytest-input requires --pytest-target")
+    if args.pytest_workers is not None and (not args.release or not args.pytest_target or args.pytest_workers < 0):
+        parser.error("--pytest-workers requires --release, --pytest-target and a nonnegative count")
     if args.gate or args.pytest_target:
         if args.e2e:
             parser.error("--e2e adds Playwright to the full suite. Use --gate e2e for a selected run")
@@ -539,12 +636,18 @@ def main() -> int:
             test_files = {Path(target.partition("::")[0]) for target in targets}
             conftests = {parent / "conftest.py" for target in test_files for parent in target.parents}
             source_files = set(args.pytest_input).union(map(str, test_files | conftests))
+            command = (str(root / ".venv/bin/python"), "-m", "pytest") if args.release else (str(root / ".venv/bin/pytest"),)
+            workers = ("-n", str(args.pytest_workers or 0)) if args.release else ()
+            distribution = ("--dist=loadfile", "--max-worker-restart=0") if args.pytest_workers else ()
+            config = ("-c", "pyproject.toml") if args.release else ()
             gates.append(Gate(
                 "pytest-focused", "backend unit (focused hermetic selection)",
-                (str(root / ".venv/bin/pytest"), *targets, "-m", HERMETIC_PYTEST_SELECTION, "-q"),
+                (*command, *config, *targets, "-m", HERMETIC_PYTEST_SELECTION, *workers, *distribution, "-q"),
                 root, f"{', '.join(targets)} ({HERMETIC_PYTEST_SELECTION})", "pytest",
-                source_files=tuple(sorted(source_files)),
+                source_files=tuple(sorted(source_files)), pytest_context=args.release,
             ))
+    elif args.release:
+        gates = available
     else:
         gates = commit_gates(root, e2e=args.e2e)
         if not args.e2e:

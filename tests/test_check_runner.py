@@ -44,6 +44,28 @@ def test_cli_runs_only_the_named_gates(monkeypatch):
     assert [gate.id for gate in execute.call_args.args[1]] == ["ruff", "docs-index"]
 
 
+def test_cli_release_runs_independent_offline_and_live_gates(monkeypatch, tmp_path):
+    execute = Mock(return_value=1)
+    monkeypatch.setattr(runner, "run_checks", execute)
+    monkeypatch.setattr(sys, "argv", ["check.sh", "--release", "--supervisor", "--output", str(tmp_path)])
+    assert runner.main() == 1
+    _, gates, output = execute.call_args.args
+    assert [gate.id for gate in gates[-4:]] == ["supervisor", "offline-e2e", "codex-live-pytest", "codex-live-browser"]
+    assert output == tmp_path
+    assert next(gate for gate in gates if gate.id == "pytest").pytest_context
+
+
+def test_cli_release_targeted_load_probe_records_parallel_arguments(monkeypatch, tmp_path):
+    execute = Mock(return_value=0)
+    monkeypatch.setattr(runner, "run_checks", execute)
+    monkeypatch.setattr(sys, "argv", ["check.sh", "--release", "--output", str(tmp_path),
+        "--pytest-target", "tests/test_bg_tasks.py", "--pytest-target", "tests/test_check_hooks.py", "--pytest-workers", "8"])
+    assert runner.main() == 0
+    [focused] = execute.call_args.args[1]
+    assert focused.id == "pytest-focused" and focused.pytest_context
+    assert focused.argv[-5:] == ("-n", "8", "--dist=loadfile", "--max-worker-restart=0", "-q")
+
+
 @pytest.mark.parametrize("include_ruff", [False, True])
 def test_cli_records_focused_pytest_as_a_separate_selection(monkeypatch, tmp_path, include_ruff):
     execute = Mock(return_value=0)
@@ -123,6 +145,10 @@ def test_edit(value):
     ("--pytest-input", "tests/test_check_runner.py"),
     ("--pytest-target", "tests/test_check_runner.py", "--pytest-input", "tests/"),
     ("--e2e", "--gate", "ruff"),
+    ("--release",),
+    ("--release", "--output", "unused", "--gate", "e2e"),
+    ("--gate", "offline-e2e", "--output", "unused"),
+    ("--pytest-workers", "8", "--pytest-target", "tests/test_bg_tasks.py"),
 ])
 def test_cli_rejects_invalid_selections_before_running_checks(monkeypatch, arguments):
     execute = Mock()
@@ -149,6 +175,125 @@ def test_failure_is_preserved_and_later_gate_runs_with_its_own_cwd(tmp_path, fix
     assert report["gates"][0]["counts"] is None
     assert "before failure" in (output / "bad.log").read_text()
     assert str(other) in (output / "good.log").read_text()
+
+
+@pytest.mark.parametrize("missing_partition", [False, True])
+def test_release_preserves_child_failure_even_when_wrapper_exits_zero(tmp_path, fixed_inputs, missing_partition):
+    failed_offline = '''import json, os
+from pathlib import Path
+out = Path(os.environ["OCTOPUS_E2E_EVIDENCE_DIR"])
+out.mkdir()
+partitions = [
+    {"status": "failed", "returncode": 1, "counts": {"passed": 3, "failed": 1}},
+    {"status": "passed", "returncode": 0, "counts": {"passed": 2, "failed": 0}}
+]
+'''
+    if missing_partition:
+        failed_offline += 'partitions.append({"status": "failed", "returncode": 1, "counts": None})\n'
+    failed_offline += '(out / "result.json").write_text(json.dumps({"passed": False, "partitions": partitions}))\n'
+    passing_live = '''import json, sys
+from pathlib import Path
+out = Path(sys.argv[-1])
+out.mkdir()
+(out / "result.json").write_text(json.dumps({"passed": True,
+    "suites": {"browser": {"passed": 1, "failed": 0, "exit_code": 0}},
+    "execution": {"browser": {"exit_code": 0}}}))
+'''
+    output = tmp_path / "release"
+    assert runner.run_checks(tmp_path, [
+        gate(tmp_path, "offline-e2e", failed_offline, report="offline-e2e"),
+        gate(tmp_path, "codex-live-browser", passing_live, report="codex-live"),
+    ], output) == 1
+    offline, live = json.loads((output / "results.json").read_text())["gates"]
+    assert offline["returncode"] == 0 and offline["status"] == "failed" and offline["evidence_error"]
+    assert offline["counts"] == (None if missing_partition else {"passed": 5, "failed": 1})
+    assert offline["partitions"][1]["counts"]["passed"] == 2
+    assert live["status"] == "passed" and live["counts"]["passed"] == 1
+
+
+@pytest.mark.parametrize("skip_all", [False, True])
+def test_supervisor_uses_repo_config_and_requires_a_passing_case(tmp_path, fixed_inputs, monkeypatch, skip_all):
+    root = tmp_path / "checkout"
+    (root / "tests").mkdir(parents=True)
+    (root / ".venv/bin").mkdir(parents=True)
+    python = root / ".venv/bin/python"
+    python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o755)
+    (root / "pyproject.toml").write_text('[tool.pytest.ini_options]\nmarkers = ["real", "supervisor"]\n')
+    (root / "pytest.ini").write_text("[pytest]\naddopts = -k preserved\n")
+    (root / "tests/conftest.py").write_text(
+        "def pytest_addoption(parser):\n    parser.addoption('--run-real', action='store_true')\n"
+    )
+    (root / "tests/test_service_logging.py").touch()
+    skip = "pytest.skip('fixture unavailable')"
+    (root / "tests/test_service_supervisor.py").write_text(
+        "import pytest\npytestmark = [pytest.mark.real, pytest.mark.supervisor]\n"
+        f"def test_preserved():\n    {skip if skip_all else 'pass'}\n"
+        f"def test_filtered():\n    {skip if skip_all else 'pytest.fail()'}\n"
+    )
+    plugin_root = Path(runner.__file__).resolve().parents[1]
+    monkeypatch.setenv("PYTHONPATH", str(plugin_root), prepend=os.pathsep)
+    supervisor = next(gate for gate in runner.release_gates(root, supervisor=True) if gate.id == "supervisor")
+    output = tmp_path / "evidence"
+    assert runner.run_checks(root, [supervisor], output) == 1
+    [observed] = json.loads((output / "results.json").read_text())["gates"]
+    assert observed["status"] == "failed"
+    counts = observed["counts"]
+    if skip_all:
+        assert observed["returncode"] == 0
+        assert counts["passed"] == 0 and counts["skipped"] == 2
+        assert observed["evidence_error"] == "Supervisor report contains no passing tests"
+    else:
+        assert observed["returncode"] == 1
+        assert counts["passed"] == 1 and counts["failed"] == 1
+        assert observed["execution"]["failures"][0]["nodeid"].endswith("::test_filtered")
+
+
+def test_pytest_evidence_distinguishes_xdist_failure_from_serial_pass(tmp_path, fixed_inputs):
+    root = Path(runner.__file__).resolve().parents[1]
+    failing = tmp_path / "test_sensitive.py"
+    failing.write_text("def test_sensitive(pytestconfig):\n    assert not hasattr(pytestconfig, 'workerinput')\n")
+    other = tmp_path / "test_neighbor.py"
+    other.write_text("def test_neighbor(): pass\n")
+    config = tmp_path / "pytest.ini"
+    config.write_text("[pytest]\n")
+    base = (sys.executable, "-m", "pytest", "-c", str(config), "-q")
+    output = tmp_path / "execution"
+    assert runner.run_checks(root, [
+        runner.Gate("parallel", "parallel", (*base, "-n", "2", "--dist=loadfile", str(failing), str(other)),
+                    root, "two files", "pytest", pytest_context=True),
+        runner.Gate("serial", "serial", (*base, "-n", "0", str(failing)),
+                    root, "one file", "pytest", pytest_context=True),
+    ], output) == 1
+    parallel, serial = json.loads((output / "results.json").read_text())["gates"]
+    observed = parallel["execution"]
+    assert observed["workers_started"] == 2 and observed["distribution"] == "loadfile"
+    [failure] = observed["failures"]
+    assert failure["nodeid"].endswith("test_sensitive.py::test_sensitive")
+    assert failure["worker"] in ("gw0", "gw1")
+    assert serial["execution"]["workers_started"] == 0 and serial["execution"]["failures"] == []
+    assert serial["status"] == "passed" and parallel["status"] == "failed"
+
+
+def test_pytest_evidence_identifies_the_crashed_worker(tmp_path, fixed_inputs):
+    root = Path(runner.__file__).resolve().parents[1]
+    crashing = tmp_path / "test_worker_crash.py"
+    crashing.write_text("import os\ndef test_crash(): os._exit(17)\n")
+    neighbor = tmp_path / "test_neighbor.py"
+    neighbor.write_text("def test_neighbor(): pass\n")
+    config = tmp_path / "pytest.ini"
+    config.write_text("[pytest]\n")
+    argv = (sys.executable, "-m", "pytest", "-c", str(config), "-q", "-n", "2", "--dist=loadfile",
+            "--max-worker-restart=0", str(crashing), str(neighbor))
+    probe = runner.Gate("crash", "crash", argv, root, "two files", "pytest", pytest_context=True)
+    output = tmp_path / "evidence"
+    assert runner.run_checks(root, [probe], output) == 1
+    [observed] = json.loads((output / "results.json").read_text())["gates"]
+    assert observed["returncode"] == 1 and observed["execution"]["workers_started"] == 2
+    [failure] = observed["execution"]["failures"]
+    assert failure["nodeid"].endswith("test_worker_crash.py::test_crash")
+    assert failure["worker"] in ("gw0", "gw1")
+    assert f"worker {failure['worker']!r} crashed while running" in (output / "crash.log").read_text()
 
 
 def test_existing_evidence_is_never_overwritten_or_executed(tmp_path, fixed_inputs):

@@ -18,10 +18,12 @@ from contextlib import contextmanager
 from datetime import date, datetime, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from time import monotonic
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 SELECTION = "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval and not wiki_perf"
+PROGRESS_INTERVAL_SECONDS = 15
 
 
 def identity(path: Path) -> tuple:
@@ -257,9 +259,19 @@ def accepted(summary: dict) -> bool:
 
 def execute(argv: list[str], *, env: dict, log: Path, cwd: Path) -> int:
     print(f"Running {log.stem}; output: {log}", flush=True)
-    with log.open("w") as stream:
-        return subprocess.run(argv, cwd=cwd, env=env, stdout=stream, stderr=subprocess.STDOUT,
-                              check=False).returncode
+    started = monotonic()
+    with log.open("w") as stream, subprocess.Popen(
+        argv, cwd=cwd, env=env, stdout=stream, stderr=subprocess.STDOUT,
+    ) as process:
+        try:
+            while True:
+                try:
+                    return process.wait(timeout=PROGRESS_INTERVAL_SECONDS)
+                except subprocess.TimeoutExpired:
+                    print(f"Still running {log.stem} ({monotonic() - started:.0f}s elapsed)", flush=True)
+        finally:
+            if process.poll() is None:
+                process.kill()
 
 
 def run(args) -> int:
@@ -272,7 +284,20 @@ def run(args) -> int:
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     cache = Path.home() / ".cache" / "octopus-tests"
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
-    result = {"passed": False, "selected_home": str(source), "suites": {}, "errors": []}
+    result = {"passed": False, "selected_home": str(source), "suites": {}, "execution": {}, "errors": []}
+
+    def run_suite(name, argv, environment, cwd, report):
+        log = output / f"{name}.log"
+        observation = {"argv": argv, "cwd": str(cwd), "log": str(log), "report": str(report)}
+        result["execution"][name] = observation
+        started = monotonic()
+        try:
+            code = execute(argv, env=environment, log=log, cwd=cwd)
+            observation["exit_code"] = code
+            return code
+        finally:
+            observation["duration_seconds"] = monotonic() - started
+
     proxy = None
     try:
         with tempfile.TemporaryDirectory(prefix="codex-acceptance-", dir=cache) as temporary:
@@ -301,11 +326,11 @@ def run(args) -> int:
                 environment["NO_PROXY"] = environment["no_proxy"] = "127.0.0.1,localhost,::1"
                 if args.suite in ("pytest", "all"):
                     report = output / "pytest.xml"
-                    code = execute([str(ROOT / ".venv/bin/python"), "-m", "pytest",
+                    code = run_suite("pytest", [str(ROOT / ".venv/bin/python"), "-m", "pytest", "-c", "pyproject.toml", "-n", "0",
                                     *(args.pytest_target or ["tests/"]), "--run-real",
                                     "--ignore=tests/test_codex_login_real.py", "-m", SELECTION,
                                     "-v", f"--junitxml={report}"],
-                                   env=environment, log=output / "pytest.log", cwd=ROOT)
+                                     environment, ROOT, report)
                     summary = pytest_summary(report)
                     result["suites"]["pytest"] = {**summary, "exit_code": code}
                     if code or not accepted(summary):
@@ -313,8 +338,8 @@ def run(args) -> int:
                 if args.suite in ("browser", "all"):
                     report = output / "browser.json"
                     environment["PLAYWRIGHT_JSON_OUTPUT_FILE"] = str(report)
-                    code = execute(["bun", "run", "test:e2e:llm", "codex-app-server.spec.ts", "--reporter=line,json"],
-                                   env=environment, log=output / "browser.log", cwd=ROOT / "web")
+                    code = run_suite("browser", ["bun", "run", "test:e2e:llm", "codex-app-server.spec.ts", "--reporter=line,json"],
+                                     environment, ROOT / "web", report)
                     summary = browser_summary(report)
                     result["suites"]["browser"] = {**summary, "exit_code": code}
                     if code or not accepted(summary):

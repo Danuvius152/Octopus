@@ -105,9 +105,13 @@ def _redirected_writer(tmp_path: Path, *, ignore_term: bool = True) -> tuple[str
     child = (
         "import os,signal,time\nfrom pathlib import Path\n"
         + ("signal.signal(signal.SIGTERM,signal.SIG_IGN)\n" if ignore_term else "")
-        + f"Path({str(ready)!r}).write_text(str(os.getpgrp()))\n"
         + f"with open({str(output)!r},'ab',buffering=0) as f:\n"
-        + " while True:\n  f.write(b'x'); time.sleep(.005)\n"
+        + " f.write(b'x')\n"
+        + f" ready = Path({str(ready)!r})\n"
+        + " pending = ready.with_suffix('.pending')\n"
+        + " pending.write_text(str(os.getpgrp()))\n"
+        + " pending.replace(ready)\n"
+        + " while True:\n  time.sleep(.005); f.write(b'x')\n"
     )
     command = (
         shlex.join([sys.executable, "-c", child])
@@ -141,6 +145,7 @@ async def test_normal_completion_retires_redirected_descendant_before_delivery(
         pgid = int(ready.read_text())
         assert not group_has_live_members_after_kill(pgid), "Completion returned with a live writer"
         size = output.stat().st_size
+        assert size > 0
         await asyncio.sleep(0.04)
         assert output.stat().st_size == size
         await manager.cancel_task(record.id)

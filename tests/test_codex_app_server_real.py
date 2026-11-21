@@ -3,6 +3,7 @@
 import asyncio
 import json
 import uuid
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -485,11 +486,35 @@ async def test_live_old_and_native_history_fork_continue_independently(tmp_path,
     parent = await manager.create_session(agent["id"], "Live fork source", str(work), backend="codex")
 
     async def ask(session, prompt):
-        receipt = await manager.start_message(session.id, prompt)
-        completion = await asyncio.wait_for(receipt.wait(), 120)
-        assert completion.outcome.status == "success", completion
-        await manager.await_session_execution(session.id, timeout=10)
-        return await database.read_session_result(session.id, receipt.request_id)
+        started = asyncio.get_running_loop().time()
+        events = deque(maxlen=16)
+
+        async def observe(event):
+            if event.get("session_id") == session.id:
+                events.append((round(asyncio.get_running_loop().time() - started, 3),
+                               event.get("type"), event.get("request_id")))
+
+        manager.on_broadcast("live-fork-request", observe)
+        try:
+            receipt = await manager.start_message(session.id, prompt)
+            try:
+                completion = await asyncio.wait_for(receipt.wait(), 120)
+            except TimeoutError as error:
+                dispatch = manager.dispatch_snapshot(session.id)
+                execution = receipt.execution
+                raise AssertionError(
+                    f"Fork request {receipt.request_id} ({receipt.disposition}) waited for completion. "
+                    f"active={dispatch['active_request_id']}, queued="
+                    f"{[item['request_id'] for item in dispatch['items']]}, "
+                    f"driver={execution.driver_state if execution else None}, "
+                    f"attempts={[(attempt.attempt_id, attempt.state) for attempt in execution.attempts] if execution else []}, "
+                    f"events=(seconds, type, request_id) {list(events)}"
+                ) from error
+            assert completion.outcome.status == "success", completion
+            await manager.await_session_execution(session.id, timeout=10)
+            return await database.read_session_result(session.id, receipt.request_id)
+        finally:
+            manager.remove_broadcast("live-fork-request")
 
     try:
         phrase = f"amber-{uuid.uuid4().hex}"

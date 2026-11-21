@@ -27,10 +27,17 @@ def commit_fixture(root, env):
 def run_pre_commit(root, env, *args):
     executable = shutil.which("lefthook")
     assert executable, "Install the required hook tool using scripts/setup-hooks.sh"
-    return subprocess.run(
-        [executable, "run", "pre-commit", "--no-auto-install", "--no-stage-fixed", "--no-tty", *args],
-        cwd=root, env=env, text=True, capture_output=True, timeout=15,
-    )
+    try:
+        return subprocess.run(
+            [executable, "run", "pre-commit", "--no-auto-install", "--no-stage-fixed", "--no-tty", *args],
+            cwd=root, env=env, text=True, capture_output=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired as error:
+        error.add_note(f"Hook command {args!r}; pytest worker {os.environ.get('PYTEST_XDIST_WORKER', 'serial')}")
+        for label, data in (("stdout", error.stdout), ("stderr", error.stderr)):
+            if data:
+                error.add_note(f"Last 4096 bytes of {label}:\n{data[-4096:].decode(errors='replace')}")
+        raise
 
 
 @pytest.fixture

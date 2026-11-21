@@ -4,6 +4,7 @@
 # Usage:
 #   ./scripts/check.sh          # includes the full hermetic backend suite
 #   ./scripts/check.sh --e2e    # also run Playwright (needs signed-in CLIs)
+#   ./scripts/check.sh --release --output <new-directory>  # Codex release matrix
 #   ./scripts/check.sh --gate ruff --gate docs-index
 #   ./scripts/check.sh --pytest-target tests/test_check_runner.py
 #   ./scripts/check.sh --output <new-directory>  # logs and machine-readable evidence

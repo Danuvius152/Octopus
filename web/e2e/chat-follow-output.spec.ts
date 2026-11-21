@@ -2214,7 +2214,7 @@ test("cancelling the Touch owner discards its direction before a late main-list 
 });
 
 for (const navigation of ["wheel", "PageUp", "scrollbar", "touch"] as const) {
-test(`upward ${navigation} invalidates measured output work before its animation frame`, async ({ page }) => {
+test(`upward ${navigation} invalidates measured output work before its animation frame`, async ({ page }, testInfo) => {
   const { scroller, gap, send, settle, output } = await openChat(page);
   const touch = navigation === "touch" ? await page.context().newCDPSession(page) : null;
   if (touch) {
@@ -2235,7 +2235,7 @@ test(`upward ${navigation} invalidates measured output work before its animation
     const cancel = window.cancelAnimationFrame;
     let serial = 0;
     const pending = new Map<number, FrameRequestCallback>();
-    let movement: { top: number; after: number } | null = null;
+    let movement: { top: number; after: number; pendingWrites: number; focused: boolean } | null = null;
     let removeNavigationListener = () => {};
     const flush = () => {
       for (const id of [...pending.keys()]) {
@@ -2254,10 +2254,12 @@ test(`upward ${navigation} invalidates measured output work before its animation
           if (element.scrollTop >= before) return;
           removeNavigationListener();
           const top = element.scrollTop;
+          const pendingWrites = pending.size;
+          const focused = document.activeElement === element;
           // Run pending writes at the first actual navigation event, before
           // keyboard animation can mask an unwanted return to the bottom.
           flush();
-          movement = { top, after: element.scrollTop };
+          movement = { top, after: element.scrollTop, pendingWrites, focused };
         };
         element.addEventListener("scroll", onScroll);
         removeNavigationListener = () => element.removeEventListener("scroll", onScroll);
@@ -2272,6 +2274,7 @@ test(`upward ${navigation} invalidates measured output work before its animation
       },
     };
   });
+  let movement;
   try {
     send({ type: "assistant_delta", content: output("Queued output") });
     await expect(scroller.getByTestId("streaming-text")).toContainText("Queued output line 12");
@@ -2303,7 +2306,7 @@ test(`upward ${navigation} invalidates measured output work before its animation
     }
     if (navigation !== "wheel") {
       await expect.poll(() => frames.evaluate((gate) => gate.movement())).not.toBeNull();
-      const movement = await frames.evaluate((gate) => gate.movement());
+      movement = await frames.evaluate((gate) => gate.movement());
       expect.soft(movement!.after - movement!.top).toBeLessThanOrEqual(2);
     }
     await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeLessThan(before - 200);
@@ -2317,7 +2320,22 @@ test(`upward ${navigation} invalidates measured output work before its animation
   }
   if (navigation === "PageUp" || navigation === "touch") await settle();
   const jump = page.getByRole("button", { name: "Jump to latest" });
-  await expect(jump).toBeVisible();
+  try {
+    await expect(jump).toBeVisible();
+  } catch (error) {
+    if (navigation === "PageUp") {
+      const after = await scroller.evaluate((element) => ({
+        top: element.scrollTop,
+        height: element.scrollHeight,
+        viewport: element.clientHeight,
+        focused: document.activeElement === element,
+      })).catch(() => null);
+      await testInfo.attach("page-up-navigation", {
+        body: JSON.stringify({ before, movement, after }, null, 2), contentType: "application/json",
+      });
+    }
+    throw error;
+  }
   const parked = await scroller.evaluate((element) => element.scrollTop);
   await settle();
   expect(Math.abs(await scroller.evaluate((element) => element.scrollTop) - parked)).toBeLessThanOrEqual(2);

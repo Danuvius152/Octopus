@@ -2,8 +2,10 @@
 
 import json
 import math
+import os
 import socket
 import struct
+import sys
 import threading
 import tomllib
 from types import SimpleNamespace
@@ -11,6 +13,19 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import codex_live
+
+
+def test_execute_reports_progress_during_a_quiet_child_and_retains_its_exit(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(codex_live, "PROGRESS_INTERVAL_SECONDS", 0.04)
+    log = tmp_path / "pytest.log"
+    code = codex_live.execute(
+        [sys.executable, "-c", "import time; time.sleep(0.2); print('child output'); raise SystemExit(7)"],
+        env=os.environ.copy(), log=log, cwd=tmp_path,
+    )
+    assert code == 7
+    output = capsys.readouterr().out
+    assert "Still running pytest" in output and "child output" not in output
+    assert log.read_text() == "child output\n"
 
 
 def _receive_headers(connection):
