@@ -414,6 +414,10 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       break;
     }
 
+    case "session_created":
+      sessionList.announced(sessionId, data.session);
+      break;
+
     case "session_unarchived": {
       const revived = data.session;
       if (revived?.id === sessionId) sessionList.restored(revived);

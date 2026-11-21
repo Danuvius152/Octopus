@@ -503,6 +503,11 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
 async def test_start_delegation_happy_path(models, dm, mgr, db, monkeypatch):
     # Disable real harness spawn — we only want to verify the wiring.
     started: list[tuple[str, str]] = []
+    session_creations: list[dict] = []
+
+    async def capture_creation(frame):
+        if frame["type"] == "session_created":
+            session_creations.append(frame)
 
     async def fake_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         started.append((sid, prompt))
@@ -513,6 +518,7 @@ async def test_start_delegation_happy_path(models, dm, mgr, db, monkeypatch):
     parent_agent = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, parent_agent["id"], name="parent")
+    mgr.on_broadcast("delegation-creation", capture_creation, parent.user_id)
 
     rec = await dm.start_delegation(
         parent_session_id=parent.id,
@@ -532,6 +538,12 @@ async def test_start_delegation_happy_path(models, dm, mgr, db, monkeypatch):
     assert child.parent_session_id == parent.id
     assert child.delegation_request == "review the dashboard"
     assert child.working_dir == parent.working_dir  # inherited
+    (created,) = session_creations
+    assert created["session_id"] == created["session"]["id"] == child.id
+    assert created["session"]["agent_id"] == child.agent_id
+    assert created["session"]["parent_session_id"] == parent.id
+    assert created["session"]["origin"] == "delegation" and not created["session"]["archived"]
+    assert "delegation_request" not in created["session"]
 
     # The child's first turn was kicked off — the composed prompt
     # mentions the parent agent and the request, and lists files.

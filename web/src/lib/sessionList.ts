@@ -38,6 +38,7 @@ export class SessionList {
   private socket: object | null = null;
   private connection = 0;
   private change = 0;
+  private lastInclusiveRead = 0;
   private active: Read | null = null;
   private dirty = false;
   private scheduled = false;
@@ -192,6 +193,7 @@ export class SessionList {
         // Only a complete list can distinguish archive from deletion. Every
         // missing known identity can still own cached inputs or late receipts.
         if (read.archived) {
+          this.lastInclusiveRead = this.change;
           this.unconfirmedMissing.clear();
           for (const id of absent) this.remove(id);
         } else {
@@ -215,7 +217,10 @@ export class SessionList {
     if (this.active !== read) return;
     if (!this.current(read)) { this.retire({ state: "obsolete" }); return; }
     const message = error instanceof Error ? error.message : "Could not load sessions";
-    this.retire({ state: "failed", message }); this.dirty = false; this.state({ error: message });
+    this.retire({ state: "failed", message }); this.state({ error: message });
+    // start() consumed this read's demand. An invalidation that arrived
+    // afterward still owns a follow-up, even if the older read failed.
+    if (this.dirty) this.kick();
   }
   private commit(sessions: SessionInfo[], archivedSessions: SessionInfo[], links = useSessionStore.getState().sessionSuccessors,
     activity?: SessionArchiveResult,
@@ -327,6 +332,28 @@ export class SessionList {
     const known = useSessionStore.getState().dispatchStates[info.id];
     if (dispatch && known?.generation === dispatch.generation && known.revision > dispatch.revision) return false;
     return this.row(info, observation, dispatch?.generation);
+  }
+  metadata(info: SessionInfo, observation: SessionObservation): boolean {
+    if (!this.current(observation) || this.observations.get(observation)?.id !== info.id) return false;
+    const { sessions, archivedSessions } = useSessionStore.getState();
+    if (info.archived && !sessions.some((row) => row.id === info.id) && !archivedSessions.some((row) => row.id === info.id)) {
+      // Target events retire this observation. A later inclusive read can also
+      // settle absence. Unrelated live changes cannot settle archival history.
+      return observation.change >= this.lastInclusiveRead && this.row(info);
+    }
+    return this.detail(info, observation, null);
+  }
+  announced(id: string, info?: SessionInfo): void {
+    if (this.closed) return;
+    const { sessions, archivedSessions } = useSessionStore.getState();
+    // A read may already have observed this identity with newer fields or membership.
+    if (sessions.some((row) => row.id === id) || archivedSessions.some((row) => row.id === id)) return;
+    if (info) this.commit([...sessions, info], archivedSessions);
+    else {
+      // The summary exceeded the wire budget. An in-flight list may predate it.
+      this.change++;
+      this.invalidate();
+    }
   }
   restored(info: SessionInfo): void {
     if (!info.id || info.archived) return;

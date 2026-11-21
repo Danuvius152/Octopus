@@ -58,6 +58,55 @@ it("preserves sessions created during a read and coalesces conflicting observati
   expect(useSessionStore.getState().sessionRead.stale).toBe(false);
 });
 
+it("coalesces creation announcements without summaries into a current list read", async () => {
+  const stale = list.refresh();
+  list.announced("one");
+  list.announced("two");
+  calls[0].resolve(Response.json([row()]));
+  expect(await stale).toEqual({ state: "pending" });
+  await flush();
+  expect(calls).toHaveLength(2);
+  calls[1].resolve(Response.json([row(), row("one"), row("two")]));
+  await flush();
+  expect(useSessionStore.getState().sessions.map((session) => session.id)).toEqual(["old", "one", "two"]);
+  list.announced("one");
+  await flush();
+  expect(calls).toHaveLength(2);
+});
+
+it.each(["success", "failure"])("keeps newer creation demand when the in-flight read fails, then handles %s", async (outcome) => {
+  const old = list.refresh();
+  list.announced("one");
+  list.announced("two");
+  calls[0].resolve(new Response(null, { status: 503 }));
+  expect(await old).toMatchObject({ state: "failed" });
+  await flush();
+  expect(calls).toHaveLength(2);
+
+  const response = outcome === "success" ? Response.json([row(), row("one"), row("two")]) :
+    new Response(null, { status: 503 });
+  calls[1].resolve(response);
+  await flush();
+  expect(useSessionStore.getState().sessions.map((session) => session.id)).toEqual(
+    outcome === "success" ? ["old", "one", "two"] : ["old"]);
+  expect(useSessionStore.getState().sessionRead.error).toEqual(outcome === "success" ? null : expect.stringContaining("503"));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(calls).toHaveLength(2);
+});
+
+it.each(["delete", "inclusive read"])("cannot fill a missing archived row after a newer %s", async (boundary) => {
+  const historical = list.observe("historical");
+  if (boundary === "delete") list.remove("historical");
+  else {
+    const inclusive = list.refresh(true);
+    calls[0].resolve(Response.json([row()]));
+    expect(await inclusive).toEqual({ state: "applied" });
+  }
+  expect(list.metadata({ ...row("historical", "idle"), archived: true }, historical.observation)).toBe(false);
+  expect(useSessionStore.getState().archivedSessions).toEqual([]);
+  historical.finish();
+});
+
 it("keeps another consumer's GET alive while confirming an unknown archive from a later snapshot", async () => {
   const reading = list.refresh(true);
   const signal = vi.mocked(fetch).mock.calls[0][1]!.signal!;

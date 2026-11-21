@@ -13,6 +13,21 @@ const delegationEvent = { type: "delegation_delivery", session_id: "parent", del
   target_agent_id: "agent", target_agent_name: "Helper", request: "Work", state: "running",
   created_at: "now", finished_at: null, error: null,
 } };
+const creation = { type: "session_created", session_id: "new-child", session: {
+  ...producers.session_unarchived.session, id: "new-child", origin: "delegation", parent_session_id: "parent",
+} };
+
+it("adds an announced session once and preserves newer status and archive facts", () => {
+  handleWsMessage(creation);
+  expect(useSessionStore.getState().sessions).toEqual([creation.session]);
+  handleWsMessage({ type: "status", session_id: creation.session_id, status: "running" });
+  handleWsMessage(creation);
+  expect(useSessionStore.getState().sessions).toEqual([{ ...creation.session, status: "running" }]);
+  handleWsMessage({ type: "session_archived", old_session_id: creation.session_id, new_session_id: null });
+  handleWsMessage(creation);
+  expect(useSessionStore.getState().sessions).toEqual([]);
+  expect(useSessionStore.getState().archivedSessions).toEqual([{ ...creation.session, status: "running", archived: true }]);
+});
 
 it.each(["running", "completed", "failed", "cancelled", "interrupted"])("decodes the %s delegation state", (state) => {
   const event = { ...delegationEvent, delegation: { ...delegationEvent.delegation, state } };
@@ -74,6 +89,8 @@ it.each([
   { ...producers.application_updated, application: { ...producers.application_updated.application, status: "invented" } },
   { ...producers.subagent, runtime_metadata: { request_id: 4, attempt_id: "a" } },
   { ...producers.session_unarchived, session_id: "another-session" },
+  { ...creation, session_id: "another-session" },
+  { ...creation, session: { ...creation.session, archived: true } },
   { ...producers.agent_updated, agent_id: "another-agent" },
   { ...producers.agent_updated, type: "agent_archived", agent_id: "another-agent", agent: { ...producers.agent_updated.agent, archived: true } },
   { ...producers.agent_updated, type: "agent_archived" },

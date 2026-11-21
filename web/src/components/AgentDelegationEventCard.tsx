@@ -17,7 +17,7 @@ import { observeSession } from "../lib/hydrateSession";
  * answer a delegated agent's question; the parent agent's model is.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   IconArrowBackUp,
   IconChevronDown,
@@ -126,34 +126,34 @@ export function AgentDelegationEventCard({
   const sessions = useSessionStore((s) => s.sessions);
   const archivedSessions = useSessionStore((s) => s.archivedSessions);
   const token = useSessionStore((s) => s.token);
-  // Resolve from BOTH stores: after DelegationManager auto-archives
-  // the child on terminal delivery, the row lives in archivedSessions
-  // (not sessions). The "Open session" button must render in either
-  // case so the user can navigate into a read-only view of the
-  // delegated child.
-  const childSession =
-    sessions.find((sess) => sess.id === event.delegationId) ??
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
+  const connected = useSessionStore((s) => s.connected);
+  const dispatchGeneration = useSessionStore((s) => s.dispatchGeneration);
+  const connectedScope = useRef<{ account: number; child: string } | null>(null);
+  // Retained delegation history can link to a live or archived child.
+  const childSession = sessions.find((sess) => sess.id === event.delegationId) ??
     archivedSessions.find((sess) => sess.id === event.delegationId);
 
-  // Delegation child sessions are created server-side without going
-  // through the frontend's POST /api/sessions path, so the store
-  // doesn't learn about them automatically. If our delegation_id
-  // isn't in either sessions list, fetch the child by id once and
-  // route it to the right store slot (sessions vs archivedSessions
-  // based on the row's `archived` flag — the
-  // DelegationManager auto-archives children once their terminal
-  // turn has been injected).
+  // The creation event covers live children. A historical child may be
+  // absent from the initial live list, so resolve its link by id.
   useEffect(() => {
-    if (!event.delegationId) return;
+    const child = event.delegationId;
+    if (!token || !child) return;
+    // An initial lookup can run over HTTP alone. Once the socket drops,
+    // retire the pending read and wait for reconnect within that scope.
+    if (connected) connectedScope.current = { account: accountGeneration, child };
+    else if (connectedScope.current?.account === accountGeneration && connectedScope.current.child === child) return;
     if (childSession) return;
-    const read = observeSession(event.delegationId, "metadata");
+    const read = observeSession(child, "metadata");
     void read.done.catch(() => {});
     return read.cancel;
   }, [
     event.delegationId,
     childSession,
-    archivedSessions,
     token,
+    accountGeneration,
+    connected,
+    dispatchGeneration,
   ]);
 
   const openChild = () => {

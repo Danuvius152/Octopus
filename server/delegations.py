@@ -79,6 +79,7 @@ from .question_resolution import UNKNOWN_SOURCE, AnswerSource, QuestionAnswerInv
 from .research.manager import research_manager
 from .service_health import ServiceUnavailable
 from .sessions.base import TICKET_BATCH_ORIGINS
+from .sessions.presentation import session_info
 from .sessions.publication import WorkPublication, WorkPublications
 from .sessions.runtime_types import (
     AdmissionIntegrityError,
@@ -1007,6 +1008,11 @@ class DelegationManager:
             await abandon_setup("Child request suppressed: admission is closed", return_terminal=True)
         else:
             self._watch_completion(child.id, rec.work_id, receipt)
+            if self.session_mgr.get_session(child.id) is child and not self.session_mgr.session_deleting(child.id):
+                await self.session_mgr._broadcast({
+                    "type": "session_created", "session_id": child.id,
+                    "session": session_info(child).model_dump(mode="json", exclude={"delegation_request"}),
+                }, user_id=child.user_id)
 
         return rec
 

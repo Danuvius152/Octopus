@@ -182,6 +182,7 @@ const definitions = [
   event("agent_updated", { agent, agent_id: optional(id) }),
   event("agent_archived", { agent_id: id, agent: optional(agent) }),
   event("agent_deleted", { agent_id: id }),
+  event("session_created", { ...inSession, session: optional(session) }),
   event("session_unarchived", { ...inSession, session, dispatch_state: optional(dispatch) }),
   event("session_archived", { old_session_id: id, new_session_id: nullable(id), name: optional(text), ...settings,
     dispatch_state: optional(dispatch), archive_result: optional(archiveResult) }),
@@ -212,6 +213,8 @@ function identitiesAgree(data: WsEvent): boolean {
       return (data.new_session_id === null || data.name !== undefined) &&
         (!data.archive_result || data.archive_result.old_session_id === data.old_session_id &&
           data.archive_result.new_session_id === data.new_session_id);
+    case "session_created":
+      return !data.session || data.session.id === data.session_id && !data.session.archived;
     case "session_unarchived":
       return data.session.id === data.session_id && !data.session.archived;
     case "delegation_delivery":

@@ -91,7 +91,7 @@ function issueDetail(sessionId: string, purpose: SessionReadPurpose, start: Snap
     publish: (data, dispatch) => {
       if (result !== undefined) return result;
       if (metadata) {
-        result = sessions.detail(data as unknown as SessionInfo, observation, null) ?
+        result = sessions.metadata(data as unknown as SessionInfo, observation) ?
           { data, needsExecutionConfirmation: false } : null;
       } else {
         const applied = applySessionSnapshot(sessionId, data, start, !read!.claim(), streamingBasis);

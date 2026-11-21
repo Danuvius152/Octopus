@@ -270,7 +270,11 @@ def unavailable_event(event: dict[str, Any], detail_ref: str | None = None) -> d
 def event_view(event: dict[str, Any]) -> dict[str, Any]:
     """Called only by the browser subscription, never by the shared bus."""
     result = _event_view(event)
-    return result if encoded_size(result) <= EVENT_BYTES else unavailable_event(event, result.get("detail_ref"))
+    if encoded_size(result) <= EVENT_BYTES:
+        return result
+    if event.get("type") == "session_created":
+        return {"type": "session_created", "session_id": event["session_id"]}
+    return unavailable_event(event, result.get("detail_ref"))
 
 
 def _event_view(event: dict[str, Any]) -> dict[str, Any]:

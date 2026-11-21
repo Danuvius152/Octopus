@@ -12,19 +12,24 @@
  * principal-chain rule — and the "Open child's session" link wiring.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import {
   AgentDelegationEventCard,
   parseDelegationEvent,
 } from "./AgentDelegationEventCard";
 import { useSessionStore } from "../stores/sessionStore";
+import { handleWsMessage } from "../hooks/useWebSocket";
+import producers from "../lib/wsProducerFixtures.json";
+import { deferred } from "../test-support/deferred";
 
 beforeEach(() => {
   useSessionStore.setState({
     token: "tok",
+    connected: false,
     sessions: [],
+    archivedSessions: [],
     agents: [],
     activeAgentId: null,
     activeSessionId: null,
@@ -33,6 +38,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 describe("parseDelegationEvent", () => {
@@ -72,6 +78,59 @@ describe("parseDelegationEvent", () => {
 });
 
 describe("AgentDelegationEventCard", () => {
+  it.each(["missing", "archived"] as const)("keeps the %s historical child's read independent of a new delegation", async (kind) => {
+    const history = deferred<Response>();
+    const session = { ...producers.session_unarchived.session, id: "new-child", origin: "delegation" };
+    const fetch = vi.fn((url: string) => new URL(url).pathname === "/api/sessions/historical-child/info" ?
+      history.promise : Promise.resolve(Response.json([])));
+    vi.stubGlobal("fetch", fetch);
+    const event = parseDelegationEvent("[agent-reply:Vera delegation=historical-child]\nDone.")!;
+    render(<AgentDelegationEventCard event={event} />);
+    fireEvent.click(screen.getAllByRole("button")[0]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    if (kind === "missing") await act(async () => history.resolve(new Response(null, { status: 404 })));
+
+    act(() => {
+      handleWsMessage({ type: "session_created", session_id: session.id, session });
+      handleWsMessage({ type: "status", session_id: session.id, status: "running" });
+    });
+    expect(useSessionStore.getState().sessions).toMatchObject([{ id: session.id, status: "running" }]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    if (kind === "archived") {
+      await act(async () => history.resolve(Response.json({ ...session, id: "historical-child", archived: true })));
+      expect(screen.getByRole("button", { name: /open vera's session/i })).toBeVisible();
+      expect(fetch).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it.each(["missing", "pending"])("retires the %s historical lookup on disconnect and retries on reconnect", async (kind) => {
+    const child = { ...producers.session_unarchived.session, id: "historical-child", origin: "delegation", archived: true };
+    const history = deferred<Response>();
+    const fetch = vi.fn<(url: string, init: RequestInit) => Promise<Response>>()
+      .mockImplementation(async () => Response.json(child))
+      .mockReturnValueOnce(history.promise);
+    vi.stubGlobal("fetch", fetch);
+    useSessionStore.getState().setConnected(true);
+    const event = parseDelegationEvent("[agent-reply:Vera delegation=historical-child]\nDone.")!;
+    render(<AgentDelegationEventCard event={event} />);
+    fireEvent.click(screen.getAllByRole("button")[0]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    if (kind === "missing") await act(async () => history.resolve(new Response(null, { status: 404 })));
+
+    await act(async () => useSessionStore.getState().setConnected(false));
+    if (kind === "pending") {
+      expect(fetch.mock.calls[0][1].signal?.aborted).toBe(true);
+      await act(async () => history.resolve(Response.json(child)));
+    }
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: /open vera's session/i })).toBeNull();
+
+    await act(async () => useSessionStore.getState().setConnected(true));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: /open vera's session/i })).toBeVisible();
+  });
+
   it("renders the reply variant with the agent name + body preview", () => {
     const ev = parseDelegationEvent(
       "[agent-reply:Vera delegation=ab12cd34ef56]\nLooks good to me."
