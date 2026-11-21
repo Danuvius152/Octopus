@@ -26,6 +26,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ValidationError
@@ -45,7 +46,7 @@ from ..mcp_identity import McpScope, require_live_scope, work_is_open
 from ..sessions.base import Session
 from ..sessions.configuration import SessionConfigurationError
 from ..sessions.owner_runtime import capture_configuration
-from ..sessions.publication import WorkPublications
+from ..sessions.publication import WorkPublication, WorkPublications
 from ..sessions.runtime_types import (
     AdmissionIntegrityError,
     SessionOwnerUnavailable,
@@ -101,8 +102,11 @@ class _ResearchJob:
     job_id: str
     session_id: str | None
     work_id: str | None
+    publication: WorkPublication
+    audience: str | None = None
     writers: dict[_WriterKind, _ResearchWriter] = field(default_factory=dict)
     retiring_delivery: asyncio.Future[None] | None = None
+    cancellation_confirmed: bool = False
 
 
 def _now() -> str:
@@ -140,6 +144,7 @@ class ResearchManager:
         self._job_sem: asyncio.Semaphore | None = None
         self._closing = False
         self._delivery_jobs: dict[str, _ResearchJob] = {}
+        self._delivery_progress: dict[asyncio.Future[None], _ResearchJob] = {}
         self._publications = WorkPublications()
 
     def bind(self, session_mgr: SessionManager, db: Database) -> None:
@@ -154,13 +159,19 @@ class ResearchManager:
         writer = job.writers.get(kind) if job else None
         return writer.task if writer else None
 
+    def _new_job(self, job_id: str, session_id: str | None, work_id: str | None) -> _ResearchJob:
+        manager = self.session_mgr
+        session = manager.get_session(session_id) if manager is not None and session_id is not None else None
+        return _ResearchJob(job_id, session_id, work_id, self._publications.create_scope(job_id),
+                            audience=session.user_id if session is not None else None)
+
     def _register_task(self, job_id: str, task: asyncio.Task, *, kind: _WriterKind = "pipeline",
                        session_id: str | None = None, work_id: str | None = None,
                        on_retired: Callable[[], None] | None = None, resuming: bool = False) -> None:
         """Retain original work through cleanup, with controls kept unsignalled."""
         job = self._jobs.get(job_id)
         if job is None:
-            job = self._jobs[job_id] = _ResearchJob(job_id, session_id, work_id)
+            job = self._jobs[job_id] = self._new_job(job_id, session_id, work_id)
         writer = job.writers[kind] = _ResearchWriter(task, on_retired, resuming=resuming)
 
         def finished(done: asyncio.Task) -> None:
@@ -194,7 +205,7 @@ class ResearchManager:
         return result
 
     async def wait_for_idle(self) -> None:
-        """Drain current controls, pipelines and their delivery observers.
+        """Drain writers, report progress callbacks and actual sends.
 
         This does not close admission. Cancelling a waiter never cancels the
         original research or receipt observation.
@@ -330,18 +341,17 @@ class ResearchManager:
         configured: Session,
     ) -> None:
         assert self.db is not None
+        job = self._jobs[job_id]
         try:
             await self.db.create_research_job(
                 job_id, session_id, question, _now(), knowledge_context=encode(owned),
             )
-            if closed := self._closure_error(self._jobs[job_id]):
-                await self._finalize_failed(job_id, "cancelled", closed.message)
+            if closed := self._closure_error(job):
+                await self._settle_pipeline_stop(job, "cancelled", closed.message)
                 ready.set_exception(closed)
                 return
-            await self._broadcast({
+            await self._broadcast(job, {
                 "type": "research_started",
-                "session_id": session_id,
-                "research_id": job_id,
                 "question": question,
             })
             row = await self.db.get_research_job(job_id)
@@ -351,14 +361,23 @@ class ResearchManager:
         except asyncio.CancelledError:
             status = "interrupted" if self._closing else "cancelled"
             reason = "research interrupted by server shutdown" if self._closing else "cancelled by user"
-            await self._finalize_failed(job_id, status, reason)
+            await self._settle_pipeline_stop(job, status, reason)
             raise
+
+    async def _settle_pipeline_stop(self, job: _ResearchJob, status: str, reason: str) -> None:
+        # An admitted control owns its pending or retryable write. Once
+        # confirmed, that cancellation survives removal of the control writer.
+        control = job.writers.get("control")
+        if job.cancellation_confirmed or (control is not None and (not control.task.done() or control.recording is not None)):
+            return
+        await self._finalize_failed(job.job_id, status, reason)
 
     # ------------------------------------------------------------------- run
 
     async def _run_job(self, job_id: str, session_id: str, question: str, session: Session, owned: OwnedTaskContext) -> None:
         assert self.session_mgr is not None and self.db is not None
         assert self._job_sem is not None
+        job = self._jobs[job_id]
         report = None
         completion_progress: dict[str, Any] | None = None
         try:
@@ -366,7 +385,7 @@ class ResearchManager:
                 harness = get_harness(session.backend)
                 user_id = owned.execution.origin.user_id
                 credential_id, backend = session.credential_id, session.backend
-                database, manager, job = self.db, self.session_mgr, self._jobs[job_id]
+                database, manager = self.db, self.session_mgr
 
                 async def authorize_spawn() -> None:
                     await manager.require_active_agent(session.agent_id)
@@ -388,8 +407,6 @@ class ResearchManager:
                     await self.db.update_research_job(job_id, phase=p.phase)
                     event = {
                         "type": "research_progress",
-                        "session_id": session_id,
-                        "research_id": job_id,
                         "phase": p.phase,
                         "detail": p.detail,
                         "counts": p.counts,
@@ -397,7 +414,7 @@ class ResearchManager:
                     if p.phase == "done":
                         completion_progress = event
                     else:
-                        await self._broadcast(event)
+                        await self._broadcast(job, event)
 
                 # Run leaves in an EMPTY per-job scratch cwd, NOT the session's
                 # working_dir — a web/reasoning leaf has no reason to read the
@@ -426,7 +443,7 @@ class ResearchManager:
             # its original record/delivery; it cannot select interruption.
             async def finish_report() -> None:
                 if completion_progress is not None:
-                    await self._broadcast(completion_progress)
+                    await self._broadcast(job, completion_progress)
                 await self._complete_report(job_id, session_id, question, report, session.user_id)
 
             await complete_cleanup(finish_report())
@@ -499,11 +516,10 @@ class ResearchManager:
     ) -> None:
         assert self.db is not None
         job_id = row["id"]
+        job = self._jobs[job_id]
         projection = await self.public_job(row)
-        await self._broadcast({
+        await self._broadcast(job, {
             "type": "research_completed",
-            "session_id": session_id,
-            "research_id": job_id,
             "sources": report.sources,
             "verified": sum(getattr(f, "verification", "unverified") == "verified" for f in report.findings),
             "unverified": sum(getattr(f, "verification", "unverified") != "verified" for f in report.findings),
@@ -524,8 +540,8 @@ class ResearchManager:
                 if current.get("error"):
                     message = f"{current['error']}\n{message}"
                 await self.db.update_research_job(job_id, error=message)
-                await self._broadcast({"type": "research_delivery", "session_id": session_id,
-                                       "research_id": job_id, "injection_status": current["injection_status"], "error": message})
+                await self._broadcast(job, {"type": "research_delivery",
+                                            "injection_status": current["injection_status"], "error": message})
             raise
 
     async def _inject_report(
@@ -598,7 +614,7 @@ class ResearchManager:
         assert self.session_mgr is not None
         job = self._jobs.get(job_id)
         if job is None:
-            job = self._jobs[job_id] = _ResearchJob(job_id, session_id, work_id)
+            job = self._jobs[job_id] = self._new_job(job_id, session_id, work_id)
         job.retiring_delivery = asyncio.get_running_loop().create_future()
         self._delivery_jobs[receipt.request_id] = job
         current = self.session_mgr.get_session(session_id)
@@ -607,8 +623,7 @@ class ResearchManager:
             self._delivery_jobs.pop(receipt.request_id, None)
             job.retiring_delivery = None
         try:
-            await self._advance_delivery(job_id, session_id, receipt.request_id, "processing" if processing else "queued",
-                                         work_id=work_id)
+            await self._advance_delivery(job, receipt.request_id, "processing" if processing else "queued")
         except BaseException:
             forget_delivery()
             if not job.writers:
@@ -617,21 +632,35 @@ class ResearchManager:
         task = asyncio.create_task(self._observe_delivery(job, receipt), name=f"research-delivery-{job_id}")
         self._register_task(job_id, task, kind="delivery", on_retired=forget_delivery)
 
-    async def _advance_delivery(self, job_id, session_id, request_id, stage, *, error=None, work_id=None):
-        receipt = await self.db.advance_research_delivery(job_id, request_id, stage, error=error)
+    async def _advance_delivery(
+        self, job: _ResearchJob, request_id: str, stage: str, *, error: str | None = None,
+    ) -> None:
+        assert self.db is not None
+        receipt = await self.db.advance_research_delivery(job.job_id, request_id, stage, error=error)
         if receipt:
-            await self._broadcast({"type": "research_delivery", "session_id": session_id, "research_id": job_id,
-                                   "injection_status": "delivered", "delivery_receipt": receipt},
-                                  retiring=not work_is_open(work_id))
+            await self._broadcast(job, {"type": "research_delivery", "injection_status": "delivered",
+                                        "delivery_receipt": receipt})
 
-    async def _on_delivery_progress(self, event):
-        owner = self._delivery_jobs.get(event.get("request_id"))
-        if event.get("type") == "dequeued" and owner and owner.session_id == event.get("session_id"):
-            await self._advance_delivery(owner.job_id, owner.session_id, event["request_id"], "processing",
-                                         work_id=owner.work_id)
+    async def _on_delivery_progress(self, event: dict[str, Any]) -> None:
+        if self._closing or event.get("type") != "dequeued":
+            return
+        request_id = event.get("request_id")
+        if not isinstance(request_id, str):
+            return
+        job = self._delivery_jobs.get(request_id)
+        if job is None or job.session_id != event.get("session_id"):
+            return
+        # The receipt observer can retire while this subscriber's write returns.
+        finished: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._delivery_progress[finished] = job
+        try:
+            await self._advance_delivery(job, request_id, "processing")
+        finally:
+            del self._delivery_progress[finished]
+            finished.set_result(None)
 
     async def _observe_delivery(self, delivery: _ResearchJob, receipt: SubmissionReceipt) -> None:
-        job_id, session_id = delivery.job_id, delivery.session_id
+        job_id = delivery.job_id
         assert delivery.retiring_delivery is not None
         try:
             if self._closing:
@@ -641,8 +670,7 @@ class ResearchManager:
             await self._record_owned(job_id, lambda: self._record_delivery_completion(delivery, receipt), kind="delivery")
         except asyncio.CancelledError:
             await self._record_owned(job_id, lambda: self._advance_delivery(
-                job_id, session_id, receipt.request_id, "unknown", error="Delivery observation stopped; the request was not replayed.",
-                work_id=delivery.work_id,
+                delivery, receipt.request_id, "unknown", error="Delivery observation stopped; the request was not replayed.",
             ), kind="delivery")
             raise
 
@@ -656,8 +684,7 @@ class ResearchManager:
             if row is not None and row["request_id"] == receipt.request_id:
                 completion = receipt_for_input(row).completion
         stage, error = _delivery_result(completion) if completion is not None else ("unknown", "Original completion is unconfirmed")
-        await self._advance_delivery(delivery.job_id, delivery.session_id, receipt.request_id, stage,
-                                     error=error, work_id=delivery.work_id)
+        await self._advance_delivery(delivery, receipt.request_id, stage, error=error)
 
     async def _settle_delivery(self, job_id: str, session_id: str, *, error: str, unknown: bool = False) -> None:
         """Persist a refused or uncertain return independently of the report."""
@@ -665,6 +692,7 @@ class ResearchManager:
 
     async def _record_undelivered(self, job_id: str, session_id: str, error: str, unknown: bool) -> None:
         assert self.db is not None and self.session_mgr is not None
+        job = self._jobs[job_id]
         status = "unknown" if unknown else "failed"
         await self.db.update_research_job(job_id, injection_status=status, error=error, injected_at=None)
         if not unknown:
@@ -677,14 +705,15 @@ class ResearchManager:
                 )
             except SessionOwnerUnavailable:
                 logger.warning("Research %s delivery unavailable; report retained at %s: %s", job_id, location, error)
-        await self._broadcast({
-            "type": "research_delivery", "session_id": session_id, "research_id": job_id,
+        await self._broadcast(job, {
+            "type": "research_delivery",
             "injection_status": status, "error": error,
         })
 
     async def _finalize_failed(self, job_id: str, status: str, error: str, *, retry: bool = True) -> None:
         assert self.db is not None
         db = self.db
+        job = self._jobs[job_id]
         timestamp = _now()
 
         async def write() -> tuple[bool, dict[str, Any] | None]:
@@ -693,20 +722,26 @@ class ResearchManager:
         async def publish_if_committed(result: tuple[bool, dict[str, Any] | None]) -> None:
             _, row = result
             if row is not None and (row["status"], row["completed_at"]) == (status, timestamp):
-                await self._publish_failed(row)
+                await self._publish_failed(job, row)
 
         if retry:
             await self._record_owned(job_id, write, on_recorded=publish_if_committed)
         else:
             await publish_if_committed(await write())
 
-    async def _publish_failed(self, row: dict[str, Any], *, retiring: bool = False) -> None:
-        await self._broadcast({
-            "type": "research_failed", "session_id": row["session_id"],
-            "research_id": row["id"], "status": row["status"], "error": row["error"],
-        }, retiring=retiring)
+    async def _publish_failed(self, job: _ResearchJob, row: dict[str, Any]) -> None:
+        await self._broadcast(job, {"type": "research_failed", "status": row["status"], "error": row["error"]})
 
     # ---------------------------------------------------------------- cancel
+
+    def release_session_publications(self, session_id: str) -> None:
+        """Hand off original job notifications at permanent deletion claim."""
+        self._release_publications(lambda job: job.session_id == session_id)
+
+    def _release_publications(self, matches: Callable[[_ResearchJob], bool]) -> None:
+        for job in chain(self._jobs.values(), self._delivery_progress.values()):
+            if matches(job):
+                job.publication.release()
 
     async def retire_session(self, session_id: str) -> None:
         """The Owner has stopped. Join its writers, then any receipts they handed off."""
@@ -734,11 +769,11 @@ class ResearchManager:
             raise BaseExceptionGroup("Original research resource retirement failed", errors)
 
     async def _retire_writers(self, matches: Callable[[_ResearchJob], bool], *, deliveries: bool = False) -> list[BaseException]:
+        self._release_publications(matches)
         tasks: dict[asyncio.Task, _WriterKind] = {}
         for job in self._jobs.values():
             if not matches(job):
                 continue
-            self._publications.release(job.job_id)
             for kind, writer in job.writers.items():
                 if (kind == "delivery") != deliveries:
                     continue
@@ -764,7 +799,10 @@ class ResearchManager:
         error = task.exception()
         return None if kind == "control" and isinstance(error, ResearchError) else error
 
-    async def cancel(self, job_id: str, *, row: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def cancel(
+        self, job_id: str, *, row: dict[str, Any] | None = None, audience: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel the original job, with its verified audience when supplied by the route."""
         if self.db is None:
             raise ResearchError("ResearchManager not bound", status_code=500)
         if (control := self._task(job_id, "control")) is not None:
@@ -772,9 +810,10 @@ class ResearchManager:
         if self._closing:
             raise ResearchError("ResearchManager is shutting down", status_code=503)
         original = self._task(job_id)
-        job = self._jobs.get(job_id) or _ResearchJob(job_id, None, None)
+        job = self._jobs.get(job_id) or self._new_job(job_id, None, None)
         if row is not None and job.session_id is None:
             self._bind_stored_job(job, row)
+            job.audience = audience
         if closed := self._closure_error(job):
             raise closed
         timestamp = _now()
@@ -790,7 +829,7 @@ class ResearchManager:
                 self._bind_stored_job(job, stored)
                 if closed := self._closure_error(job):
                     raise closed
-            return await self._record_owned(job_id, lambda: self._cancel_job(job_id, original, timestamp), kind="control")
+            return await self._record_owned(job_id, lambda: self._cancel_job(job, original, timestamp), kind="control")
 
         self._jobs[job_id] = job
         control = asyncio.create_task(cancel_original(), name=f"research-cancel-{job_id}")
@@ -810,25 +849,30 @@ class ResearchManager:
             return ResearchError("Original research work is closed", status_code=409)
         return None
 
-    async def _cancel_job(self, job_id: str, original: asyncio.Task | None, timestamp: str) -> dict[str, Any]:
+    async def _cancel_job(self, job: _ResearchJob, original: asyncio.Task | None, timestamp: str) -> dict[str, Any]:
         assert self.db is not None
         _, row = await self.db.confirm_research_outcome(
-            job_id, "cancelled", completed_at=timestamp, error="cancelled by user",
+            job.job_id, "cancelled", completed_at=timestamp, error="cancelled by user",
         )
         if row is None:
-            raise ResearchError(f"research job {job_id} not found", status_code=404)
-        if row["status"] == "cancelled" and original and not original.done() and not original.cancelling():
-            self._publications.release(job_id)
+            raise ResearchError(f"research job {job.job_id} not found", status_code=404)
+        if row["status"] != "cancelled":
+            return row
+        job.cancellation_confirmed = True
+        if original is not None and not original.done() and not original.cancelling():
+            job.publication.release()
             original.cancel()
-        if (row["status"], row["completed_at"]) == ("cancelled", timestamp):
-            await self._publish_failed(row, retiring=True)
+        if row["completed_at"] == timestamp:
+            job.publication.release()
+            await self._publish_failed(job, row)
         return row
 
     # --------------------------------------------------------------- helpers
 
     def drain_blockers(self) -> tuple[str, ...]:
         blockers = [f"cancellation control {job.job_id}" for job in self._jobs.values() if "control" in job.writers]
-        if self._publications.pending or any(job.writers.keys() - {"control"} for job in self._jobs.values()):
+        if (self._delivery_progress or self._publications.pending
+                or any(job.writers.keys() - {"control"} for job in self._jobs.values())):
             blockers.append("pipeline, return delivery, publication or cleanup")
         return tuple(blockers)
 
@@ -851,14 +895,16 @@ class ResearchManager:
     async def _drain(self, *, deadline: float | None = None) -> None:
         while True:
             writers = {writer.task: (job.job_id, kind) for job in self._jobs.values() for kind, writer in job.writers.items()}
-            observed = writers.keys() | self._publications.pending
+            progress = dict(self._delivery_progress)
+            observed = writers.keys() | self._publications.pending | progress.keys()
             if not observed:
                 return
             timeout = max(0, deadline - asyncio.get_running_loop().time()) if deadline is not None else None
             _, pending = await asyncio.wait(observed, timeout=timeout)
             if pending:
-                jobs = ", ".join(job_id for task, (job_id, _) in writers.items() if task in pending)
-                raise TimeoutError(f"research shutdown retirement unconfirmed: {jobs or 'publication'}")
+                jobs = [job_id for task, (job_id, _) in writers.items() if task in pending]
+                jobs.extend(job.job_id for callback, job in progress.items() if callback in pending)
+                raise TimeoutError(f"research shutdown retirement unconfirmed: {', '.join(jobs) or 'publication'}")
             for task, (_, kind) in writers.items():
                 if (error := self._writer_error(task, kind)) is not None:
                     raise error
@@ -931,17 +977,15 @@ class ResearchManager:
         public.update(evidence=evidence.model_dump(), evidence_state="available")
         return public
 
-    async def _broadcast(self, msg: dict[str, Any], *, retiring: bool = False) -> None:
+    async def _broadcast(self, job: _ResearchJob, msg: dict[str, Any]) -> None:
         manager = self.session_mgr
         if manager is None:
             return
-        job_id = msg["research_id"]
-        job = self._jobs.get(job_id)
-        retiring = retiring or manager.session_deleting(msg["session_id"]) or (
-            job is not None and not work_is_open(job.work_id)
-        )
-
-        await self._publications.publish(job_id, lambda: manager._broadcast(msg), retiring=retiring, required=False)
+        if not work_is_open(job.work_id):
+            job.publication.release()
+        event = {**msg, "session_id": job.session_id, "research_id": job.job_id}
+        await self._publications.publish(job.publication, lambda: manager._broadcast(event, user_id=job.audience),
+                                         required=False)
 
 
 # Module-level singleton (mirrors session_manager / bg_tasks / delegations).

@@ -589,6 +589,7 @@ async def quiesce_installation(request: Request, user: deps.CurrentUser):
     from .wiki.registry import registry
     from .wiki.store import WikiError
 
+    delegation_manager.resume_question_parent_observations()
     try:
         # No await through observation, producer sealing and receipt publication.
         # Registry/Store guards also serialize actual cross-thread admission.

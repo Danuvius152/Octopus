@@ -67,7 +67,11 @@ HTTP 责任直到原 ASGI app 完成，发出 headers 不是完成点；被动 M
 规则处理。WS 只计正在处理输入的区间，空闲连接不阻塞。scheduler 自己观察已排出
 回调及注册操作；DB 自己观察 writer 和已有独占操作，shutdown 收尾仍可使用原库。
 
-管理员 `POST /api/installation/quiesce` 在同一事件循环同步段完成最终事实检查、
+管理员 `POST /api/installation/quiesce` 先让委派恢复合资格的原问题回执观察。
+委派登记只读恢复，沿原 delivery 核对已有回执。在途恢复仍是阻塞项，本次请求
+返回 409，之后可重试。该步骤在最终事实检查之前，交接仍依据当次同步检查。
+
+quiesce 在同一事件循环同步段完成最终事实检查、
 必要 producer 封口和成功收据发布，跨线程准入由上述 guard 保证。封口前 busy
 返回 409，producer 保持开放，等待自然完成；不为发布取消真实工作。第 N 个 gate
 失败时没有成功 marker，已经关闭的 owner 保持真实状态并负责可重复收尾，服务

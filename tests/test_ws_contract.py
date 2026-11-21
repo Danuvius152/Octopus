@@ -92,9 +92,10 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         await apps._broadcast_application("application_updated", await db.get_application("application"))
         research = ResearchManager()
         research.session_mgr, research.db = manager, db
-        await research._publish_failed({"session_id": session.id, "id": "research", "status": "interrupted", "error": "Original worker retired"})
+        job = research._new_job("research", session.id, None)
+        await research._publish_failed(job, {"status": "interrupted", "error": "Original worker retired"})
         await db.create_research_job(job_id="research", session_id=session.id, question="Question", created_at="now")
-        await research._advance_delivery("research", session.id, "original-return", "queued")
+        await research._advance_delivery(job, "original-return", "queued")
 
         # This is the actual restore constructor, including its SessionInfo.
         await manager.archive_session(session.id, replace=False)

@@ -298,14 +298,27 @@ explicit `reply_unavailable` error to the still-open caller, so a nested parent
 can finish without invented reply text or child replay. Normal deletion does
 not turn command/database drain into an invariant failure. The database's
 session-deletion entry notifies the round owner synchronously after confirmed
-commit. Permanent parent deletion joins the exact round's original work and
-parent return handoff. A surviving child owns its question notice after the
-parent receipt or refusal is known. Its pending notice failures still block
-service drain until recorded or its own target retires. New valid questions
-retain a stopped-return notice and remain answerable.
-A refused deletion or an unrelated session deletion closes neither writer.
-This retires only finished diagnostic commands; in-flight
-callbacks and processes retain their original retirement owners.
+commit. The original question tracks its parent receipt, selected disposition,
+and child writes under a stable delivery identity. Reentry observes the original
+receipt and retains an unknown disposition until the receipt provides new evidence.
+
+Each parent observation registers a handoff before its first await. Permanent
+parent deletion joins the round's original work, then seals new parent receipt
+observations after materializing descendant attachments. The seal holds through
+SQLite deletion and waits for observations already registered. Failure before
+entering the write releases the seal acquired by that attempt. Once the write
+starts, confirmed deletion closes the relationship, and healthy storage can
+reopen observations by confirming that the original row survived. An unconfirmed
+write retains the seal pending authoritative evidence.
+
+The surviving child owns notice storage and receipt binding after parent handoff.
+A valid human-answerable question first raised during the seal or after confirmed
+deletion retains one stopped-return notice and remains answerable. An already
+selected unknown disposition or accepted receipt can still finish its original
+child write. The question broadcast waits for child settlement, so an unattended
+question remains pending while its receipt binding is in progress. Delegation
+drain tracks the full command and its unsettled writes until they are recorded
+or the original writing target retires.
 
 The broadcast listener only forwards `question_request` for the captured
 work and retires that question's relay observation on answer/close once its
@@ -427,9 +440,12 @@ initial refusal and archival, the round owns its original terminal receipt.
 A cancellation retains its selected reason and timestamp. A lost acknowledgement
 for either that cancellation or a terminal receipt can be confirmed against
 the exact persisted snapshot for the same relationship.
-Parent deletion releases notification waits for the captured branch, including
-notifications destined for surviving conversations. The original publisher
-records delivery errors and remains part of service drain.
+Each round owns its notification handoff through its setup, result and
+cancellation. Snapshots of one round use the same handoff, and a follow-up
+owns its own. Parent deletion or closure of the original parent work releases
+notification waits, including notifications destined for surviving conversations.
+Ordinary root cancellation still observes required notifications to an open
+original parent work. The publisher remains part of service drain.
 An ordinary relationship/CAS refusal is reported after all captured resources
 are cleaned; physical storage uncertainty retains the fail-stop boundary.
 Stable work identity and terminal disposition protect one parent injection.

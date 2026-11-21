@@ -147,11 +147,12 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   losing completion attempt are not proof of completion.
   A cancellation control captures the original pipeline and takes ownership
   before its first database wait. It survives cancellation of its HTTP waiter;
-  repeated calls join the same control while it remains active. A cancelled row,
-  including an already committed cancellation, signals that captured pipeline
-  at most once rather than looking up a later replacement. The pipeline still
-  owns actual leaf/fetch retirement. Cancellation after completion returns the
-  completed job and preserves its report and delivery. The card consumes this
+  repeated calls observe that same control while it remains registered. A
+  confirmed cancelled row releases notification waits before signalling the
+  captured pipeline if it still needs stopping. When this control selected the
+  cancellation, its first notice is handed off even without a live pipeline.
+  The pipeline owns actual leaf/fetch retirement. Cancellation after completion
+  returns the completed job and preserves its report and delivery. The card consumes this
   response directly through its existing state merge. A boot sweep marks running jobs
   `interrupted`; startup does not resume mid-pipeline.
 
@@ -258,11 +259,17 @@ refused return finishes its row update, material notice keyed by
 After execution retires, an observer can read the original committed receipt
 while the Session publisher is still delivering its notification.
 
-Research publishes progress and result notifications in job order. The final
-progress notification is published after the pipeline selects its report for
-settlement. Retirement can hand pending notification I/O to the publication
-owner while joining durable outcomes and receipts. Service drain still joins
-those publications. Subscribers can await deletion of the originating session.
+Research publishes progress and result notifications in job order, using the
+original job's publication state. The final pipeline progress notification follows
+report selection. A delivery-progress callback registers its completion signal
+and holds the original job before writing receipt progress. It can still issue
+the notification after the receipt observer has cleared the job indexes.
+Permanent deletion hands off publication at claim, including jobs held only
+by these callbacks. Work retirement in a surviving session also hands off
+publication. A late callback uses the captured work's closure and the original
+job's handoff state. Research drain observes the callbacks through registration
+of any late notification, then waits for the actual sends. Subscribers can
+await deletion of the originating session.
 
 Before any leaf starts, an `OSError` from preparing the per-job directory or its
 scratch cwd becomes the existing `ResearchError`. The original guarded terminal

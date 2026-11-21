@@ -18,6 +18,7 @@ from server.deps import get_session_manager
 from server.harness import get_harness
 from server.mcp_identity import mint, verify
 from server.sessions import SessionManager
+from server.sessions.runtime_types import SessionMailboxFull
 from tests.accounts import create_account
 from tests.harness_profiles import process_profile, session_turn_argv
 from tests.test_delegation_restart_security import wait_live_scope
@@ -99,6 +100,229 @@ async def assert_no_queued_messages(manager, session_id):
     else:
         assert next(row for row in await manager.db.load_sessions(include_archived=True)
                     if row["id"] == session_id)["archived"]
+
+
+@pytest.mark.parametrize("child_outcome", ["surviving", "deleted", "follow-up", "parent-read-failed"])
+async def test_parent_delete_releases_retired_work_while_child_notice_is_pending(
+    work_runtime, monkeypatch, tmp_path, child_outcome,
+):
+    from server.routers.sessions import router
+
+    manager, delegations, parent, starts = work_runtime
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    manager.work_test_app.include_router(router)
+    rec = await delegations.start_delegation(
+        parent_session_id=parent.id, agent_name="Worker", request="controlled original work",
+    )
+    child_id = rec.delegation_id
+    await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    submit, lookup, retain = manager.start_message, manager.source_receipt, manager.retain_result_notice
+    writing, release = asyncio.Event(), asyncio.Event()
+    reading, release_read, waiting_for_parent = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    confirm = delegations.confirm_recording
+    submissions = []
+    notices = []
+    reads = []
+    original_notice_error = RuntimeError("Original child notice write failed")
+    parent_error = RuntimeError("Original question receipt read failed")
+    fail_read = False
+
+    async def observe_parent_wait(*, return_session_id=None):
+        if return_session_id == parent.id:
+            waiting_for_parent.set()
+        return await confirm(return_session_id=return_session_id)
+
+    async def lose_confirmation(session_id, prompt, **kwargs):
+        receipt = await submit(session_id, prompt, **kwargs)
+        if kwargs.get("delivery_id", "").startswith("agent-question:"):
+            submissions.append(receipt.request_id)
+            raise ConnectionError("Original question confirmation lost")
+        return receipt
+
+    async def withhold_confirmation(source, delivery_id, **kwargs):
+        if delivery_id.startswith("agent-question:"):
+            reads.append(delivery_id)
+            if fail_read:
+                reading.set()
+                await release_read.wait()
+                raise parent_error
+            if release_read.is_set():
+                return await lookup(source, delivery_id, **kwargs)
+            return None
+        return await lookup(source, delivery_id, **kwargs)
+
+    async def hold_child_notice(session_id, delivery_id, content):
+        if session_id == child_id and delivery_id.startswith("agent-question:"):
+            notices.append(delivery_id)
+            if len(notices) == 1:
+                writing.set()
+                raise original_notice_error
+            writing.set()
+            await release.wait()
+            if child_outcome == "follow-up":
+                raise SessionMailboxFull("Original child notice had no capacity")
+        return await retain(session_id, delivery_id, content)
+
+    monkeypatch.setattr(manager, "start_message", lose_confirmation)
+    monkeypatch.setattr(manager, "source_receipt", withhold_confirmation)
+    monkeypatch.setattr(manager, "retain_result_notice", hold_child_notice)
+    monkeypatch.setattr(delegations, "confirm_recording", observe_parent_wait)
+    question = [{"question": "Where should the original work go?"}]
+    question_id = await manager.create_pending_question(child_id, question)
+    event = {
+        "type": "question_request", "session_id": child_id, "work_id": rec.work_id,
+        "question_id": question_id, "questions": question,
+    }
+    client = manager.work_test_client
+    broadcasting = draining = deleting = None
+    try:
+        await asyncio.wait_for(writing.wait(), 3)
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await delegations.confirm_recording()
+        assert await manager.answer_question(child_id, question_id, [{"text": "Original destination"}])
+        (tmp_path / "release").touch()
+        await wait_state(delegations, child_id, "completed")
+        await manager.await_session_execution(child_id, timeout=3)
+
+        initial_reads = len(reads)
+        await manager._broadcast({**event, "work_id": "unrelated-work"})
+        assert len(reads) == initial_reads
+        writing.clear()
+        fail_read = child_outcome == "parent-read-failed"
+        broadcasting = asyncio.create_task(manager._broadcast(event))
+        if fail_read:
+            await asyncio.wait_for(reading.wait(), 3)
+            deleting = asyncio.create_task(client.delete(f"/api/sessions/{parent.id}"))
+            await asyncio.wait_for(waiting_for_parent.wait(), 3)
+            release_read.set()
+            with pytest.raises(RuntimeError, match="Original question receipt read failed") as failure:
+                await asyncio.wait_for(deleting, 3)
+            assert failure.value is parent_error
+            fail_read = False
+        await asyncio.wait_for(writing.wait(), 3)
+        assert len(reads) > initial_reads
+        reads_before_duplicate = len(reads)
+        await manager._broadcast(event)
+        assert len(reads) == reads_before_duplicate
+
+        if child_outcome == "follow-up":
+            renewed = await delegations.follow_up_delegation(
+                parent_session_id=parent.id, delegation_id=child_id, request="held next work",
+            )
+            assert renewed.work_id != rec.work_id
+            await manager._broadcast(event)
+            assert len(reads) == reads_before_duplicate
+        else:
+            response = await asyncio.wait_for(client.delete(f"/api/sessions/{parent.id}"), 3)
+            assert response.status_code == 204
+            assert await manager.db.get_session_binding(parent.id) is None
+        if child_outcome == "deleted":
+            response = await asyncio.wait_for(client.delete(f"/api/sessions/{child_id}"), 3)
+            assert response.status_code == 204
+            assert await manager.db.get_session_binding(child_id) is None
+        draining = asyncio.create_task(delegations.confirm_recording())
+        _, unfinished = await asyncio.wait({draining}, timeout=0.05)
+        assert unfinished, "An admitted child notice command remains owned during full drain"
+        release.set()
+        if child_outcome == "follow-up":
+            with pytest.raises(SessionMailboxFull, match="Original child notice had no capacity") as broadcast_failure:
+                await asyncio.wait_for(broadcasting, 3)
+            with pytest.raises(RuntimeError, match="Delegation command cleanup failed") as drain_failure:
+                await asyncio.wait_for(draining, 3)
+            assert drain_failure.value.__cause__ is broadcast_failure.value
+            await delegations.confirm_recording()
+        elif child_outcome == "parent-read-failed":
+            with pytest.raises(RuntimeError, match="Original question receipt read failed") as broadcast_failure:
+                await asyncio.wait_for(broadcasting, 3)
+            with pytest.raises(RuntimeError, match="Delegation command cleanup failed") as drain_failure:
+                await asyncio.wait_for(draining, 3)
+            assert drain_failure.value.__cause__ is broadcast_failure.value is parent_error
+            await delegations.confirm_recording()
+        else:
+            await asyncio.wait_for(broadcasting, 3)
+            await asyncio.wait_for(draining, 3)
+        assert len(submissions) == 1 and notices == [f"agent-question:{rec.work_id}:{question_id}"] * 2
+        if child_outcome in {"surviving", "parent-read-failed"}:
+            rows = await manager.db.load_messages(child_id)
+            retained, = (row for row in rows if row["type"] == "delivery_notice")
+            assert question_id in retained["content"] and "Return admission unconfirmed" in retained["content"]
+    finally:
+        release.set()
+        release_read.set()
+        (tmp_path / "release").touch()
+        await asyncio.gather(*(task for task in (broadcasting, draining, deleting) if task is not None), return_exceptions=True)
+        if broadcasting is None:
+            for task in tuple(delegations._commands):
+                if task.done() and not task.cancelled() and task.exception() is original_notice_error:
+                    delegations._forget_command(task)
+
+
+async def test_parent_delete_waits_for_original_resources_while_child_owner_is_busy(work_runtime, monkeypatch):
+    from server.routers.sessions import router
+    from server.sessions.owner_questions import CaptureQuestion
+
+    manager, delegations, parent, starts = work_runtime
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    manager.work_test_app.include_router(router)
+    rec = await delegations.start_delegation(
+        parent_session_id=parent.id, agent_name="Worker", request="held original work",
+    )
+    await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    child = manager.get_session(rec.delegation_id)
+    owner = manager._question_owner(child, internal=True)
+    async with asyncio.timeout(3):
+        while child._run.backend is None or child._run.backend._process is None:
+            await asyncio.sleep(0.01)
+    backend = child._run.backend
+    process = backend._process
+    assert process is not None and process.returncode is None
+    handling, release, retiring = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    stopping, release_stop = asyncio.Event(), asyncio.Event()
+    handle, close_work = owner.questions.handle, manager.close_work
+    stop = backend.stop
+
+    async def hold_child_control(command):
+        if isinstance(command, CaptureQuestion):
+            handling.set()
+            await release.wait()
+        return await handle(command)
+
+    async def observe_retirement(work_id):
+        if work_id == rec.work_id:
+            retiring.set()
+        return await close_work(work_id)
+
+    async def hold_process_exit(*args, **kwargs):
+        stopping.set()
+        await release_stop.wait()
+        return await stop(*args, **kwargs)
+
+    monkeypatch.setattr(owner.questions, "handle", hold_child_control)
+    monkeypatch.setattr(manager, "close_work", observe_retirement)
+    monkeypatch.setattr(backend, "stop", hold_process_exit)
+    control = asyncio.create_task(owner.call_question(CaptureQuestion("absent")))
+    deleting = None
+    try:
+        await asyncio.wait_for(handling.wait(), 3)
+        deleting = asyncio.create_task(manager.work_test_client.delete(f"/api/sessions/{parent.id}"))
+        await asyncio.wait_for(retiring.wait(), 3)
+        _, unfinished = await asyncio.wait({deleting}, timeout=0.05)
+        assert unfinished and process.returncode is None
+        assert await manager.db.get_session_binding(parent.id) is not None
+        release.set()
+        assert await asyncio.wait_for(control, 3) is None
+        await asyncio.wait_for(stopping.wait(), 3)
+        _, unfinished = await asyncio.wait({deleting}, timeout=0.05)
+        assert unfinished and process.returncode is None
+        assert await manager.db.get_session_binding(parent.id) is not None
+        release_stop.set()
+        response = await asyncio.wait_for(asyncio.shield(deleting), 3)
+        assert response.status_code == 204 and process.returncode is not None
+        assert await manager.db.get_session_binding(parent.id) is None
+    finally:
+        release.set()
+        release_stop.set()
+        await asyncio.gather(control, *([deleting] if deleting is not None else []), return_exceptions=True)
 
 
 @pytest.mark.parametrize("follow_up", [False, True], ids=["initial-refusal-archive", "follow-up-restore"])
@@ -972,6 +1196,53 @@ async def test_follow_up_has_new_work_and_stale_cancel_cannot_stop_it(work_runti
     assert second.state == "cancelled"
 
 
+async def test_follow_up_cancellation_waits_for_its_own_required_notification(work_runtime):
+    manager, delegations, parent, starts = work_runtime
+    first_entered, first_release = asyncio.Event(), asyncio.Event()
+    second_entered, second_release = asyncio.Event(), asyncio.Event()
+    failure = DelegationError("Required follow-up notification failed")
+    cancelling = None
+
+    async def subscriber(event):
+        if event["type"] != "delegation_delivery" or event["session_id"] != parent.id:
+            return
+        if event["delegation"]["state"] == "completed":
+            first_entered.set()
+            await first_release.wait()
+        else:
+            assert event["delegation"]["state"] == "cancelled"
+            second_entered.set()
+            await second_release.wait()
+            raise failure
+
+    manager.on_broadcast("observe independent round notifications", subscriber, user_id=parent.user_id, required=True)
+    try:
+        first = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="first round")
+        await asyncio.wait_for(starts.get(), 3)
+        await asyncio.wait_for(first_entered.wait(), 3)
+        second = await asyncio.wait_for(delegations.follow_up_delegation(
+            parent_session_id=parent.id, delegation_id=first.delegation_id, request="held follow-up",
+        ), 3)
+        await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+        assert second.work_id != first.work_id
+        cancelling = asyncio.create_task(delegations.cancel_delegation(second.delegation_id, work_id=second.work_id))
+        await asyncio.wait_for(second_entered.wait(), 3)
+        assert not cancelling.done()
+        second_release.set()
+        with pytest.raises(DelegationError) as raised:
+            await asyncio.wait_for(cancelling, 3)
+        assert raised.value is failure
+        assert first.state == "completed" and second.state == "cancelled"
+        assert delegations.drain_blockers()
+    finally:
+        first_release.set()
+        second_release.set()
+        manager.remove_broadcast("observe independent round notifications")
+        if cancelling is not None:
+            await asyncio.gather(cancelling, return_exceptions=True)
+        await delegations.confirm_recording()
+
+
 async def test_cancel_queued_round_preserves_independent_human_request(work_runtime):
     manager, delegations, parent, starts = work_runtime
     first = await delegations.start_delegation(
@@ -1187,6 +1458,43 @@ async def test_nested_cancellation_closes_descendants_without_waking_closed_bran
     assert grandchild.state == "cancelled"
     await assert_no_queued_messages(manager, child.delegation_id)
     assert len(manager.dispatch_snapshot(parent.id)["items"]) == 1
+
+
+async def test_cancelling_parent_work_releases_the_nested_rounds_notification(work_runtime):
+    manager, delegations, parent, starts = work_runtime
+    await AgentManager(manager.db).create_agent(name="Nested Worker", backend="codex", user_id=parent.user_id)
+    child = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held child")
+    scope = await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    nested = await delegations.start_delegation(
+        parent_session_id=child.delegation_id, agent_name="Nested Worker", request="held nested", scope=scope,
+    )
+    await wait_live_scope(await asyncio.wait_for(starts.get(), 3))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_notification(event):
+        if event["type"] == "delegation_delivery" and event["delegation"]["work_id"] == nested.work_id:
+            entered.set()
+            await release.wait()
+
+    manager.on_broadcast("hold nested cancellation", hold_notification, user_id=parent.user_id, required=True)
+    cancelling = asyncio.create_task(delegations.cancel_delegation(nested.delegation_id, work_id=nested.work_id))
+    retiring = draining = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert not cancelling.done(), "The original parent work is open and the send is required"
+        retiring = asyncio.create_task(delegations.cancel_delegation(child.delegation_id, work_id=child.work_id))
+        done, _ = await asyncio.wait({retiring, cancelling}, timeout=3)
+        assert done == {retiring, cancelling}, "Closing the original parent work hands off the outstanding send"
+        assert retiring.result() is child and cancelling.result() is nested
+        assert not manager.work_has_resources(child.work_id) and not manager.work_has_resources(nested.work_id)
+        draining = asyncio.create_task(delegations.confirm_recording())
+        assert not (await asyncio.wait({draining}, timeout=.05))[0]
+        release.set()
+        await asyncio.wait_for(draining, 3)
+    finally:
+        release.set()
+        manager.remove_broadcast("hold nested cancellation")
+        await asyncio.gather(*(task for task in (cancelling, retiring, draining) if task is not None), return_exceptions=True)
 
 
 async def test_held_claude_reuses_actual_lease_until_work_changes(work_runtime, monkeypatch):

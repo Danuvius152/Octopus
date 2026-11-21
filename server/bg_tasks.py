@@ -54,7 +54,7 @@ from .process_groups import (
     group_has_live_members_after_kill as _group_has_live_members_after_kill,
 )
 from .service_health import ServiceUnavailable
-from .sessions.publication import WorkPublications
+from .sessions.publication import WorkPublication, WorkPublications
 from .sessions.runtime_types import AdmissionIntegrityError
 from .sessions.submission import (
     ReturnAdmission,
@@ -191,7 +191,7 @@ class _RunningTask:
 
     def __init__(
         self, record: BgTaskRecord, proc: asyncio.subprocess.Process, limits: BgTaskLimits,
-        started_monotonic: float,
+        started_monotonic: float, publication: WorkPublication,
     ) -> None:
         self.record = record
         self.proc = proc
@@ -201,21 +201,17 @@ class _RunningTask:
         self.limits = limits
         self.started_monotonic = started_monotonic
         self.started_notice = asyncio.Event()
-        self.registration_done = asyncio.Event()
-        self.registered = False
+        self.publication = publication
         self.stop_reason: str | None = None
         self.termination: asyncio.Task[None] | None = None
         self.retired = False
         self.recorded = False
         self.notified = False
-        self.publication_retiring = False
         self.delivery_saved = (record.delivery_disposition, record.delivery_error)
         self.stdout_buf = bytearray()
         self.stderr_buf = bytearray()
         self.stdout_truncated = False
         self.stderr_truncated = False
-        # Set when cancel_task is called; affects terminal status mapping.
-        self.cancel_requested: bool = False
         # The asyncio.Task running the orchestration coroutine; held so
         # shutdown() can cancel it.
         self.task: asyncio.Task[None] | None = None
@@ -456,7 +452,8 @@ class BgTaskManager:
                     diagnostic = exception_diagnostic(error)
                     logger.error("Background task %s startup failed\n%s", task_id, diagnostic)
             if abandoned is not None:
-                running = _RunningTask(record, abandoned, limits, started_monotonic)
+                running = _RunningTask(record, abandoned, limits, started_monotonic,
+                                       self._publications.create_scope(task_id))
                 reservation.running = running
                 await self._terminate_proc(running, reason=reservation.stop_reason or "startup_failed")
                 if running.termination is not None:
@@ -527,9 +524,7 @@ class BgTaskManager:
             raise BgTaskError("Background task admission closed before process launch")
 
         creation = replace(record)
-        rt = _RunningTask(record, proc, limits, started_monotonic)
-        rt.registered = True
-        rt.registration_done.set()
+        rt = _RunningTask(record, proc, limits, started_monotonic, self._publications.create_scope(task_id))
         reservation.running = rt
         self._running[task_id] = rt
         rt.task = asyncio.create_task(self._run_task(rt), name=f"bg-task-{task_id}")
@@ -602,8 +597,7 @@ class BgTaskManager:
         running.extend(item.running for item in starting if item.running is not None)
         captured = set(running)
         for task in captured:
-            task.publication_retiring = True
-            self._publications.release(task.record.id)
+            task.publication.release()
         for item in starting:
             self._resume_startup_recording(item)
         # Stop every captured process before joining. A failed compensation or
@@ -849,10 +843,10 @@ class BgTaskManager:
             # tells us exactly which branch we hit and why.
             logger.info(
                 "bg task %s terminal state: status=%s exit_code=%s "
-                "cancel_requested=%s timed_out=%s killed_by_signal=%s stop_reason=%s "
+                "timed_out=%s killed_by_signal=%s stop_reason=%s "
                 "stdout_bytes=%d stderr_bytes=%d",
                 rt.record.id, status, exit_code,
-                rt.cancel_requested, timed_out, killed_by_signal, rt.stop_reason,
+                timed_out, killed_by_signal, rt.stop_reason,
                 len(stdout_bytes), len(stderr_bytes),
             )
 
@@ -861,18 +855,16 @@ class BgTaskManager:
             completed_at = _now_iso()
             truncated = rt.stdout_truncated or rt.stderr_truncated
 
-            await rt.registration_done.wait()
-            if rt.registered:
-                # Freeze the command's outcome before retiring descendants.
-                # Later cancellation joins cleanup without relabelling success.
-                rt.record.status = status
-                rt.record.exit_code = exit_code
-                rt.record.stdout = stdout_str
-                rt.record.stderr = stderr_str
-                rt.record.truncated = truncated
-                rt.record.completed_at = completed_at
-                rt.record.stop_reason = rt.stop_reason
-                await self._settle_task(rt)
+            # Freeze the command's outcome before retiring descendants.
+            # Later cancellation joins cleanup without relabelling success.
+            rt.record.status = status
+            rt.record.exit_code = exit_code
+            rt.record.stdout = stdout_str
+            rt.record.stderr = stderr_str
+            rt.record.truncated = truncated
+            rt.record.completed_at = completed_at
+            rt.record.stop_reason = rt.stop_reason
+            await self._settle_task(rt)
 
     def _resume_settlement(self, rt: _RunningTask) -> None:
         """Retry failed retirement/recording/delivery, using the original result."""
@@ -933,7 +925,7 @@ class BgTaskManager:
         if callback is None:
             return
 
-        await self._publications.publish(rt.record.id, lambda: callback(event), retiring=rt.publication_retiring, required=False)
+        await self._publications.publish(rt.publication, lambda: callback(event), required=False)
 
     async def _publish_terminal(self, rt: _RunningTask) -> None:
         assert self._db is not None
@@ -1075,7 +1067,6 @@ class BgTaskManager:
             os.killpg(pgid, signal.SIGTERM)
             if rt.record.status == "running" and rt.stop_reason is None:
                 rt.stop_reason = reason
-                rt.cancel_requested = reason == "user_cancel"
         except ProcessLookupError:
             rt.retired = True
             if rt.record.status == "running" and reason in {"idle_timeout", "total_timeout"}:

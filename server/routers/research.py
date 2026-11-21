@@ -114,7 +114,7 @@ async def cancel_research(
     if existing is None or existing["session_id"] != session_id:
         raise HTTPException(404, "research job not found")
     try:
-        return await research_manager.public_job(await research_manager.cancel(research_id, row=existing))
+        return await research_manager.public_job(await research_manager.cancel(research_id, row=existing, audience=user_id))
     except ResearchError as e:
         raise HTTPException(e.status_code, e.message)
 

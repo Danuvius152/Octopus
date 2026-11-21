@@ -153,11 +153,14 @@ class LifecycleMixin(SessionManagerBase):
     def _close_independent_session_work(self, session_id: str, *, permanent: bool = False) -> None:
         from ..bg_tasks import bg_task_manager
         from ..delegations import delegation_manager
+        from ..research import research_manager
 
         if bg_task_manager._db is self.db:
             bg_task_manager.close_session(session_id)
         if delegation_manager.db is self.db:
             delegation_manager.close_session(session_id, permanent=permanent)
+        if permanent and research_manager.db is self.db:
+            research_manager.release_session_publications(session_id)
 
     async def _retire_application_history(self, session: Session) -> None:
         if session.app_id is None and self.db is not None:
@@ -1186,7 +1189,10 @@ class LifecycleMixin(SessionManagerBase):
         # Materialize descendant ID references before removing the parent row:
         # the ancestor chain cannot resolve a deleted parent afterward.
         await self._blit_attachments_to_descendant_forks(session_id)
-        if self.db:
+        if self.db is not None and delegation_manager.db is self.db:
+            async with delegation_manager.seal_question_parent_observations(session_id):
+                await self.db.delete_session(session_id)
+        elif self.db is not None:
             await self.db.delete_session(session_id)
         if session is not None and self.sessions.get(session_id) is session:
             self.sessions.pop(session_id)

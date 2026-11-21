@@ -13,6 +13,245 @@ from tests.test_delegation_work import wait_state
 from tests.test_delegation_work import work_runtime as work_runtime
 
 
+@pytest.mark.parametrize("child_outcome", [
+    "notice-stored", "notice-failed", "child-deleted", "child-deleted-before-drain", "follow-up",
+    "answered", "closed-with-notice-failure",
+])
+async def test_parent_recording_reports_observation_failure_before_child_notice_finishes(
+    work_runtime, monkeypatch, tmp_path, child_outcome,
+):
+    from server.routers.sessions import router
+
+    manager, delegations, parent, starts = work_runtime
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    manager.work_test_app.include_router(router)
+    rec = await delegations.start_delegation(
+        parent_session_id=parent.id, agent_name="Worker", request="controlled original question",
+    )
+    await asyncio.wait_for(starts.get(), 3)
+    lookup, retain, submit = manager.source_receipt, manager.retain_result_notice, manager.start_message
+    reading, release_read = asyncio.Event(), asyncio.Event()
+    writing, release_write = asyncio.Event(), asyncio.Event()
+    observed_broadcast = asyncio.get_running_loop().create_future()
+    parent_error = RuntimeError("Original parent receipt read failed")
+    read_cause = ValueError("Original parent receipt source failed")
+    child_error = RuntimeError("Original child notice write failed")
+    submissions, recovery_reads = [], []
+    admit_before_failure = child_outcome in {"follow-up", "closed-with-notice-failure"}
+
+    async def fail_observation(source, delivery_id, **kwargs):
+        if delivery_id.startswith("agent-question:") and (not admit_before_failure or submissions):
+            reading.set()
+            await release_read.wait()
+            raise parent_error from read_cause
+        return await lookup(source, delivery_id, **kwargs)
+
+    async def lose_confirmation(session_id, prompt, **kwargs):
+        if kwargs.get("delivery_id", "").startswith("agent-question:"):
+            assert admit_before_failure and not submissions
+            receipt = await submit(session_id, prompt, **kwargs)
+            submissions.append(receipt)
+            raise ConnectionError("Original confirmation lost after submission")
+        return await submit(session_id, prompt, **kwargs)
+
+    async def recover_observation(source, delivery_id, **kwargs):
+        original = await lookup(source, delivery_id, **kwargs)
+        if delivery_id.startswith("agent-question:"):
+            recovery_reads.append((source, delivery_id, kwargs["session_id"], original[1].request_id if original else None))
+        return original
+
+    async def hold_notice(session_id, delivery_id, content):
+        if delivery_id.startswith("agent-question:"):
+            writing.set()
+            await release_write.wait()
+            if child_outcome not in {"notice-stored", "answered"}:
+                raise child_error
+        return await retain(session_id, delivery_id, content)
+
+    async def observe_original_broadcast(event):
+        if event.get("type") != "question_request" or observed_broadcast.done():
+            await delegations._on_broadcast(event)
+            return
+        try:
+            await delegations._on_broadcast(event)
+        except (Exception, asyncio.CancelledError) as error:
+            observed_broadcast.set_result(error)
+            raise
+        observed_broadcast.set_result(None)
+
+    manager.on_broadcast(delegations.BROADCAST_KEY, observe_original_broadcast, required=True)
+    monkeypatch.setattr(manager, "source_receipt", fail_observation)
+    monkeypatch.setattr(manager, "retain_result_notice", hold_notice)
+    monkeypatch.setattr(manager, "start_message", lose_confirmation)
+    question = [{"question": "Original question"}]
+    question_id = await manager.create_pending_question(rec.delegation_id, question)
+    targeted = draining = None
+    try:
+        try:
+            await asyncio.wait_for(reading.wait(), 3)
+            targeted = asyncio.create_task(delegations.confirm_recording(return_session_id=parent.id))
+            _, pending = await asyncio.wait({targeted}, timeout=0.05)
+            assert pending, "Parent recording must wait for the in-flight receipt read"
+            release_read.set()
+            await asyncio.wait_for(writing.wait(), 3)
+            draining = asyncio.create_task(delegations.confirm_recording())
+            with pytest.raises(RuntimeError, match="Original parent receipt read failed") as failure:
+                await asyncio.wait_for(asyncio.shield(targeted), 1)
+            assert failure.value is parent_error
+            _, pending = await asyncio.wait({draining, observed_broadcast}, timeout=0.05)
+            assert pending == {draining, observed_broadcast}
+            release_write.set()
+            assert await asyncio.wait_for(asyncio.shield(observed_broadcast), 3) is parent_error
+            assert parent_error.__cause__ is read_cause
+            with pytest.raises(RuntimeError, match="cleanup failed") as drain_failure:
+                await asyncio.wait_for(draining, 3)
+            assert drain_failure.value.__cause__ is parent_error
+        finally:
+            release_read.set()
+            release_write.set()
+            await asyncio.gather(*(task for task in (targeted, draining) if task is not None), return_exceptions=True)
+            try:
+                await asyncio.wait_for(asyncio.shield(observed_broadcast), 3)
+            finally:
+                monkeypatch.setattr(manager, "retain_result_notice", retain)
+        client = manager.work_test_client
+        if child_outcome not in {"notice-stored", "notice-failed"}:
+            if child_outcome.startswith("child-deleted"):
+                response = await client.delete(f"/api/sessions/{rec.delegation_id}")
+                assert response.status_code == 204
+            elif child_outcome == "follow-up":
+                assert await manager.answer_question(rec.delegation_id, question_id, [{"text": "Original answer"}])
+                (tmp_path / "release").touch()
+                await wait_state(delegations, rec.delegation_id, "completed")
+                renewed = await delegations.follow_up_delegation(
+                    parent_session_id=parent.id, delegation_id=rec.delegation_id, request="held replacement round",
+                )
+                assert renewed.work_id != rec.work_id
+            elif child_outcome == "answered":
+                assert await manager.answer_question(rec.delegation_id, question_id, [{"text": "Original answer"}])
+            else:
+                assert await manager.close_pending_question(rec.delegation_id, question_id)
+            with pytest.raises(RuntimeError, match="Original parent receipt read failed"):
+                await client.delete(f"/api/sessions/{parent.id}")
+            assert await manager.db.get_session_binding(parent.id) is not None
+            monkeypatch.setattr(manager, "source_receipt", recover_observation)
+            if child_outcome == "child-deleted-before-drain":
+                await delegations.confirm_recording()
+            response = await client.delete(f"/api/sessions/{parent.id}")
+            assert response.status_code == 204
+            assert await manager.db.get_session_binding(parent.id) is None
+            original_request_id = submissions[0].request_id if submissions else None
+            assert recovery_reads == [
+                ("delegation", f"agent-question:{rec.work_id}:{question_id}", parent.id, original_request_id),
+            ]
+            if child_outcome in {"answered", "closed-with-notice-failure"}:
+                assert await manager.db.get_session_binding(rec.delegation_id) is not None
+            if child_outcome == "closed-with-notice-failure":
+                with pytest.raises(RuntimeError, match="cleanup failed"):
+                    await delegations.confirm_recording()
+                await manager._broadcast({
+                    "type": "question_request", "session_id": rec.delegation_id, "work_id": rec.work_id,
+                    "question_id": question_id, "questions": question,
+                })
+                rows = await manager.db.load_messages(rec.delegation_id)
+                retained, = (row for row in rows if row["type"] == "delivery_notice")
+                assert "Return admission unconfirmed" in retained["content"] and question_id in retained["content"]
+            await delegations.confirm_recording()
+        else:
+            monkeypatch.setattr(manager, "source_receipt", lookup)
+            await manager._broadcast({
+                "type": "question_request", "session_id": rec.delegation_id, "work_id": rec.work_id,
+                "question_id": question_id, "questions": question,
+            })
+            await delegations.confirm_recording(return_session_id=parent.id)
+            await delegations.confirm_recording()
+            rows = await manager.db.load_messages(rec.delegation_id)
+            retained, = (row for row in rows if row["type"] == "delivery_notice")
+            assert question_id in retained["content"]
+    finally:
+        monkeypatch.setattr(manager, "source_receipt", lookup)
+        monkeypatch.setattr(manager, "start_message", submit)
+        for task in tuple(delegations._commands):
+            if task.done() and not task.cancelled() and task.exception() is parent_error:
+                delegations._forget_command(task)
+
+
+async def test_broadcast_joining_failed_parent_recovery_still_records_child_notice(work_runtime, monkeypatch):
+    from server.routers.sessions import router
+
+    manager, delegations, parent, starts = work_runtime
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    manager.work_test_app.include_router(router)
+    rec = await delegations.start_delegation(
+        parent_session_id=parent.id, agent_name="Worker", request="held original question",
+    )
+    await asyncio.wait_for(starts.get(), 3)
+    lookup, retain = manager.source_receipt, manager.retain_result_notice
+    missed_notice, reading, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    parent_error = RuntimeError("Shared parent receipt read failed")
+    reads = []
+
+    async def fail_original(source, delivery_id, **kwargs):
+        if delivery_id.startswith("agent-question:"):
+            raise RuntimeError("Original parent receipt read failed")
+        return await lookup(source, delivery_id, **kwargs)
+
+    async def fail_original_notice(session_id, delivery_id, content):
+        if delivery_id.startswith("agent-question:"):
+            missed_notice.set()
+            raise RuntimeError("Original child notice unavailable")
+        return await retain(session_id, delivery_id, content)
+
+    async def fail_recovery(source, delivery_id, **kwargs):
+        if delivery_id.startswith("agent-question:"):
+            reads.append((source, delivery_id, kwargs["session_id"]))
+            reading.set()
+            await release.wait()
+            raise parent_error
+        return await lookup(source, delivery_id, **kwargs)
+
+    monkeypatch.setattr(manager, "source_receipt", fail_original)
+    monkeypatch.setattr(manager, "retain_result_notice", fail_original_notice)
+    questions = [{"question": "Original question"}]
+    qid = await manager.create_pending_question(rec.delegation_id, questions)
+    event = {"type": "question_request", "session_id": rec.delegation_id, "question_id": qid,
+             "work_id": rec.work_id, "questions": questions}
+    delete_parent = f"/api/sessions/{parent.id}"
+    client = manager.work_test_client
+    deleting = replay = None
+    try:
+        await asyncio.wait_for(missed_notice.wait(), 3)
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await delegations.confirm_recording()
+        assert await manager.close_pending_question(rec.delegation_id, qid)
+        monkeypatch.setattr(manager, "retain_result_notice", retain)
+        monkeypatch.setattr(manager, "source_receipt", fail_recovery)
+        deleting = asyncio.create_task(client.delete(delete_parent))
+        await asyncio.wait_for(reading.wait(), 3)
+        replay = asyncio.create_task(manager._broadcast(event))
+        _, pending = await asyncio.wait({replay, deleting}, timeout=0.05)
+        assert pending == {replay, deleting}
+        release.set()
+        for waiter in (deleting, replay):
+            with pytest.raises(RuntimeError, match="Shared parent receipt read failed") as failure:
+                await asyncio.wait_for(waiter, 3)
+            assert failure.value is parent_error
+        assert reads == [("delegation", f"agent-question:{rec.work_id}:{qid}", parent.id)]
+        rows = await manager.db.load_messages(rec.delegation_id)
+        retained, = (row for row in rows if row["type"] == "delivery_notice")
+        assert qid in retained["content"] and "Return admission unconfirmed" in retained["content"]
+        monkeypatch.setattr(manager, "source_receipt", lookup)
+        assert (await client.delete(delete_parent)).status_code == 204
+        await delegations.confirm_recording()
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (deleting, replay) if task is not None), return_exceptions=True)
+        monkeypatch.setattr(manager, "source_receipt", lookup)
+        monkeypatch.setattr(manager, "retain_result_notice", retain)
+        if manager.get_session(parent.id) is not None:
+            await manager._broadcast(event)
+
+
 @pytest.mark.parametrize('source', ['terminal', 'question'])
 async def test_return_reconciliation_preserves_full_masked_exception_chain(work_runtime, monkeypatch, caplog, source):
     manager, delegations, parent, starts = work_runtime
@@ -336,31 +575,249 @@ async def test_deletion_closes_only_recording_at_the_missing_target(
             delegations._commands.clear()
 
 
-async def test_running_child_after_parent_deletion_records_question_return_failure(work_runtime, monkeypatch):
+@pytest.mark.parametrize("phase", ["before-commit", "after-delete"])
+async def test_surviving_child_after_parent_closure_keeps_its_first_question_answerable(work_runtime, monkeypatch, phase):
+    from server.routers.sessions import router
+
     manager, delegations, parent, starts = work_runtime
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    manager.work_test_app.include_router(router)
     rec = await delegations.start_delegation(
         parent_session_id=parent.id, agent_name='Worker', request='held while asking',
     )
     await asyncio.wait_for(starts.get(), 3)
-    assert await manager.delete_session(parent.id)
-    submit = manager.start_message
-    parent_attempts = []
+    submit, lookup, delete = manager.start_message, manager.source_receipt, manager.db.delete_session
+    parent_attempts, parent_reads = [], []
+    writing, can_write = asyncio.Event(), asyncio.Event()
+
+    async def hold_deletion(session_id):
+        writing.set()
+        await can_write.wait()
+        await delete(session_id)
 
     async def observe_submission(session_id, prompt, **kwargs):
-        if session_id == parent.id:
+        if session_id == parent.id and kwargs.get('delivery_id', '').startswith('agent-question:'):
             parent_attempts.append(kwargs)
         return await submit(session_id, prompt, **kwargs)
 
+    async def observe_receipt(source, delivery_id, **kwargs):
+        if kwargs.get('session_id') == parent.id and delivery_id.startswith('agent-question:'):
+            parent_reads.append(delivery_id)
+        return await lookup(source, delivery_id, **kwargs)
+
     monkeypatch.setattr(manager, 'start_message', observe_submission)
-    question_id = await manager.create_pending_question(rec.delegation_id, [{'question': 'Question after parent deletion'}])
-    await delegations.confirm_recording()
-    notices = [row for row in await manager.db.load_messages(rec.delegation_id) if row['type'] == 'delivery_notice']
-    assert len(notices) == 1 and question_id in notices[0]['content']
-    assert 'Automatic return stopped' in notices[0]['content']
-    assert parent_attempts == [] and rec.state == 'running'
-    assert manager.has_pending_question(rec.delegation_id, question_id)
-    assert await manager.answer_question(rec.delegation_id, question_id, [{'text': 'Manual answer after deletion'}])
-    assert not manager.has_pending_question(rec.delegation_id, question_id)
+    monkeypatch.setattr(manager, 'source_receipt', observe_receipt)
+    monkeypatch.setattr(manager.db, 'delete_session', hold_deletion)
+    relayed = asyncio.get_running_loop().create_future()
+
+    async def observe_relay(event):
+        if event.get('type') == 'question_request' and event['session_id'] == rec.delegation_id and not relayed.done():
+            relayed.set_result(event)
+
+    manager.on_broadcast('post-delete-question', observe_relay)
+    deleting = asyncio.create_task(manager.work_test_client.delete(f'/api/sessions/{parent.id}'))
+    try:
+        if phase == 'before-commit':
+            await asyncio.wait_for(writing.wait(), 3)
+            assert await manager.db.get_session_binding(parent.id) is not None
+        else:
+            can_write.set()
+            assert (await asyncio.wait_for(deleting, 3)).status_code == 204
+        assert rec.state == 'cancelled'
+        question_id = await manager.create_pending_question(rec.delegation_id, [{'question': 'Question after parent closure'}])
+        event = await asyncio.wait_for(relayed, 3)
+        assert event['question_id'] == question_id and event['work_id'] == rec.work_id
+        notices = [row for row in await manager.db.load_messages(rec.delegation_id) if row['type'] == 'delivery_notice']
+        assert len(notices) == 1 and question_id in notices[0]['content']
+        assert 'Automatic return stopped' in notices[0]['content']
+        can_write.set()
+        assert (await asyncio.wait_for(deleting, 3)).status_code == 204
+        await manager._broadcast(event)
+        assert [row for row in await manager.db.load_messages(rec.delegation_id) if row['type'] == 'delivery_notice'] == notices
+        assert parent_reads == parent_attempts == []
+        assert manager.has_pending_question(rec.delegation_id, question_id)
+        assert await manager.answer_question(rec.delegation_id, question_id, [{'text': 'Manual answer after deletion'}])
+        assert await manager.wait_for_question_answer(rec.delegation_id, question_id) == (
+            'Q: Question after parent closure\nA: Manual answer after deletion'
+        )
+        assert not manager.has_pending_question(rec.delegation_id, question_id)
+    finally:
+        can_write.set()
+        await asyncio.gather(deleting, return_exceptions=True)
+
+
+@pytest.mark.parametrize("reentry", ["materializing", "writing", "rollback", "handoff-failure", "hook-failure"])
+async def test_parent_delete_closes_receipt_observation_after_materializing_attachments(
+    work_runtime, monkeypatch, tmp_path, reentry,
+):
+    from server.routers.sessions import router
+
+    manager, delegations, parent, starts = work_runtime
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    manager.work_test_app.include_router(router)
+    rec = await delegations.start_delegation(
+        parent_session_id=parent.id, agent_name="Worker", request="controlled question before deletion",
+    )
+    await asyncio.wait_for(starts.get(), 3)
+    db = manager.db
+    submit, lookup, retain = manager.start_message, manager.source_receipt, manager.retain_result_notice
+    materialize, delete, binding = manager._blit_attachments_to_descendant_forks, db.delete_session, db.get_session_binding
+    notice_refused, materializing, reading, writing = (asyncio.Event() for _ in range(4))
+    can_materialize, can_read, can_write = (asyncio.Event() for _ in range(3))
+    submissions, reads = [], []
+    observe_receipt = False
+    read_during_materialization = reentry in {"materializing", "handoff-failure"}
+    receipt_error = RuntimeError("Original parent receipt read failed during materialization")
+
+    async def lose_confirmation(session_id, prompt, **kwargs):
+        receipt = await submit(session_id, prompt, **kwargs)
+        if kwargs.get("delivery_id", "").startswith("agent-question:"):
+            submissions.append(receipt.request_id)
+            raise ConnectionError("Original parent admission confirmation lost")
+        return receipt
+
+    async def observe_original(source, delivery_id, **kwargs):
+        if delivery_id.startswith("agent-question:") and submissions:
+            if not observe_receipt:
+                return None
+            reading.set()
+            if read_during_materialization:
+                await can_read.wait()
+            original = await lookup(source, delivery_id, **kwargs)
+            reads.append(original[1].request_id if original else None)
+            if reentry == "handoff-failure" and len(reads) == 1:
+                raise receipt_error
+            return original
+        return await lookup(source, delivery_id, **kwargs)
+
+    async def refuse_first_notice(session_id, delivery_id, content):
+        if delivery_id.startswith("agent-question:") and not notice_refused.is_set():
+            notice_refused.set()
+            raise RuntimeError("The original child notice could not be stored")
+        return await retain(session_id, delivery_id, content)
+
+    async def hold_materialization(session_id):
+        materializing.set()
+        await can_materialize.wait()
+        await materialize(session_id)
+
+    async def hold_deletion(session_id):
+        writing.set()
+        await can_write.wait()
+        await delete(session_id)
+
+    async def time_out_row_recheck(session_id):
+        if session_id == parent.id and len(reads) == 1 and not writing.is_set():
+            raise TimeoutError("Original parent row recheck timed out")
+        return await binding(session_id)
+
+    hook_calls = []
+
+    def fail_first_delete_hook(session_id):
+        hook_calls.append(session_id)
+        if len(hook_calls) == 1:
+            raise OSError("Post-commit hook failed")
+
+    if reentry == "handoff-failure":
+        monkeypatch.setattr(db, "get_session_binding", time_out_row_recheck)
+    if reentry == "hook-failure":
+        monkeypatch.setattr(db, "_session_delete_hooks", [fail_first_delete_hook, *db._session_delete_hooks])
+    monkeypatch.setattr(manager, "start_message", lose_confirmation)
+    monkeypatch.setattr(manager, "source_receipt", observe_original)
+    monkeypatch.setattr(manager, "retain_result_notice", refuse_first_notice)
+    monkeypatch.setattr(manager, "_blit_attachments_to_descendant_forks", hold_materialization)
+    monkeypatch.setattr(db, "delete_session", hold_deletion)
+    questions = [{"question": "Where should the original work go?"}]
+    question_id = await manager.create_pending_question(rec.delegation_id, questions)
+    event = {"type": "question_request", "session_id": rec.delegation_id, "work_id": rec.work_id,
+             "question_id": question_id, "questions": questions}
+    url = f"/api/sessions/{parent.id}"
+    deleting = broadcast = None
+    try:
+        await asyncio.wait_for(notice_refused.wait(), 3)
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await delegations.confirm_recording()
+        assert await manager.answer_question(rec.delegation_id, question_id, [{"text": "Original destination"}])
+        (tmp_path / "release").touch()
+        await wait_state(delegations, rec.delegation_id, "completed")
+        await manager.await_session_execution(rec.delegation_id, timeout=3)
+
+        if reentry == "rollback":
+            async with db.transaction(write=True) as tx:
+                await tx.execute("CREATE TEMP TRIGGER refuse_deletion BEFORE DELETE ON sessions "
+                                 "BEGIN SELECT RAISE(ABORT, 'Original parent deletion refused'); END")
+        deleting = asyncio.create_task(manager.work_test_client.delete(url))
+        await asyncio.wait_for(materializing.wait(), 3)
+        observe_receipt = True
+        if read_during_materialization:
+            broadcast = asyncio.create_task(manager._broadcast(event))
+            await asyncio.wait_for(reading.wait(), 3)
+            can_materialize.set()
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(writing.wait(), 0.1)
+            can_read.set()
+            if reentry == "handoff-failure":
+                with pytest.raises(RuntimeError, match="receipt read failed"):
+                    await asyncio.wait_for(broadcast, 3)
+                with pytest.raises(RuntimeError, match="receipt read failed") as failed:
+                    await asyncio.wait_for(deleting, 3)
+                assert failed.value is receipt_error
+                assert not writing.is_set()
+                assert await binding(parent.id) is not None
+                await delegations.confirm_recording()
+                assert reads == submissions * 2
+                assert await db.get_session_binding(parent.id) is not None
+                deleting = asyncio.create_task(manager.work_test_client.delete(url))
+            else:
+                await asyncio.wait_for(broadcast, 3)
+        else:
+            can_materialize.set()
+        await asyncio.wait_for(writing.wait(), 3)
+        assert await db.get_session_binding(parent.id) is not None
+        if reentry == "writing":
+            await manager._broadcast(event)
+            assert not reading.is_set()
+            rows = await db.load_messages(rec.delegation_id)
+            assert any(row["type"] == "delivery_notice" and "Return admission unconfirmed" in row["content"]
+                       for row in rows)
+        can_write.set()
+        if reentry == "rollback":
+            with pytest.raises(sqlite3.IntegrityError, match="Original parent deletion refused"):
+                await asyncio.wait_for(deleting, 3)
+            assert await db.get_session_binding(parent.id) is not None
+            await manager._broadcast(event)
+            async with db.transaction(write=True) as tx:
+                await tx.execute("DROP TRIGGER refuse_deletion")
+            deleting = asyncio.create_task(manager.work_test_client.delete(url))
+        if reentry == "hook-failure":
+            with pytest.raises(OSError, match="Post-commit hook failed"):
+                await asyncio.wait_for(deleting, 3)
+            assert await db.get_session_binding(parent.id) is None
+            await manager._broadcast(event)
+            assert not reading.is_set()
+            deleting = asyncio.create_task(manager.work_test_client.delete(url))
+        assert (await asyncio.wait_for(deleting, 3)).status_code == 204
+        assert await db.get_session_binding(parent.id) is None
+        retained, = [row for row in await db.load_messages(rec.delegation_id) if row["type"] == "delivery_notice"]
+        assert "Return admission unconfirmed" in retained["content"] and question_id in retained["content"]
+        assert len(submissions) == 1
+        expected_reads = {"writing": [], "hook-failure": [], "handoff-failure": submissions * 2}
+        assert reads == expected_reads.get(reentry, submissions)
+        if reentry == "hook-failure":
+            assert hook_calls == [parent.id, parent.id]
+        await delegations.confirm_recording()
+    finally:
+        can_materialize.set()
+        can_read.set()
+        can_write.set()
+        await asyncio.gather(*(task for task in (deleting, broadcast) if task is not None), return_exceptions=True)
+        # A failed assertion can leave the original refused child notice
+        # outstanding. Retry the broadcast before closing the database.
+        if notice_refused.is_set():
+            await manager._broadcast(event)
+        if reentry == "handoff-failure" and len(reads) == 1 and await binding(parent.id) is not None:
+            monkeypatch.setattr(db, "get_session_binding", binding)
+            await asyncio.wait_for(manager.work_test_client.delete(url), 3)
 
 
 @pytest.mark.parametrize('fault', ['write-error', 'cancel'])
