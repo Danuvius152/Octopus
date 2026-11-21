@@ -82,8 +82,11 @@ an 18px icon with a 38px target is the combination that keeps both. Rows get
 `touch-action: manipulation` so a tap isn't held for 300ms waiting to see
 whether it was a double-tap zoom.
 The adjacent Agent pin and new-session targets meet at the midpoint of their gap.
-In the inline session form, the name field shrinks within the drawer to leave
-room for separate 36px square Create and Cancel buttons.
+The inline session form uses 24px square Create and Cancel buttons so the name
+field has room on narrow screens. Their hit areas extend into the surrounding
+space and meet at the midpoint of the gap between them. On touch screens, the
+Create target leaves a buffer next to the name field so taps at the field's
+trailing edge can still focus it.
 
 <a id="6-notch-home-indicator-status-bar"></a>
 ## Notch, home indicator, status bar

@@ -480,7 +480,7 @@ export function SidebarAgents() {
               <fieldset disabled={creating} aria-busy={creating} aria-label="New session" className="session-create min-w-0 rounded-lg border border-primary-100 bg-primary-50/60 p-2">
                 <div className="flex items-center gap-1.5">
                   <input
-                    className="min-h-9 min-w-0 flex-1 rounded-md border border-gray-400 bg-card px-2 py-1 text-[13px] text-gray-900 outline-none placeholder:text-gray-600 focus:border-primary"
+                    className="min-w-0 flex-1 rounded-md border border-gray-400 bg-card px-2 py-1 text-[13px] text-gray-900 outline-none placeholder:text-gray-600 focus:border-primary"
                     placeholder="Session name"
                     value={newName}
                     autoFocus
@@ -493,21 +493,21 @@ export function SidebarAgents() {
                   />
                   <button
                     type="button"
-                    className="btn-create inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-primary text-white transition-colors hover:bg-primary-700"
+                    className="btn-create inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-white transition-colors hover:bg-primary-700"
                     onClick={() => createSession(a.id)}
                     title="Create session"
                     aria-label="Create session"
                   >
-                    {creating ? <IconLoader2 size={16} className="animate-spin" aria-hidden /> : <IconCheck size={16} />}
+                    {creating ? <IconLoader2 size={13} className="animate-spin" aria-hidden /> : <IconCheck size={13} />}
                   </button>
                   <button
                     type="button"
-                    className="btn-create-cancel inline-flex size-9 shrink-0 items-center justify-center rounded-md text-gray-700 transition-colors hover:bg-gray-200"
+                    className="btn-create-cancel inline-flex size-6 shrink-0 items-center justify-center rounded-md text-gray-700 transition-colors hover:bg-gray-200"
                     onClick={closeCreateRow}
                     title="Cancel"
                     aria-label="Cancel new session"
                   >
-                    <IconX size={16} />
+                    <IconX size={13} />
                   </button>
                 </div>
 

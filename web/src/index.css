@@ -565,7 +565,33 @@ summary {
   touch-action: manipulation;
 }
 
+.session-create :is(.btn-create, .btn-create-cancel) {
+  position: relative;
+}
+
+/* Extend the compact buttons into the 6px gap up to its midpoint. */
+.session-create :is(.btn-create, .btn-create-cancel)::after {
+  content: "";
+  position: absolute;
+  inset-block: -0.375rem;
+  inset-inline: 0 -0.1875rem;
+}
+
+.session-create .btn-create-cancel::after {
+  inset-inline: -0.1875rem -0.5625rem;
+}
+
 @media (hover: none) {
+  /* Keep touch adjustment away from the name field's trailing edge. */
+  .session-create .btn-create {
+    pointer-events: none;
+  }
+
+  .session-create .btn-create::after {
+    inset-inline-start: 0.25rem;
+    pointer-events: auto;
+  }
+
   /* A hover-only affordance is unreachable on a touchscreen, so these have to
      appear some other way. "Always" was the first answer and the wrong one: it
      put a delete button on every session and every application at once, under

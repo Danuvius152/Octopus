@@ -72,14 +72,38 @@ for (const touch of [false, true]) {
 
       const create = page.getByRole("button", { name: "Create session", exact: true });
       const cancel = page.getByRole("button", { name: "Cancel new session", exact: true });
+      const pressAt = (x: number, y: number) => touch ? page.touchscreen.tap(x, y) : page.mouse.click(x, y);
       await expect(create).toBeInViewport({ ratio: 1 });
       await expect(cancel).toBeInViewport({ ratio: 1 });
+      await expect(create).toHaveCSS("width", "24px");
+      await expect(cancel).toHaveCSS("width", "24px");
+      await expect(create.locator("svg")).toHaveAttribute("width", "13");
+      await expect(cancel.locator("svg")).toHaveAttribute("width", "13");
       await sessionName.fill("Discarded conversation");
+      if (touch) {
+        const input = (await sessionName.boundingBox())!;
+        for (const inset of [4, 1]) {
+          await sessionName.blur();
+          await page.touchscreen.tap(input.x + input.width - inset, input.y + input.height / 2);
+          await expect(sessionName).toBeFocused();
+          expect(submissions).toBe(0);
+        }
+      }
       const cancelBounds = (await cancel.boundingBox())!;
       const cancelX = cancelBounds.x + cancelBounds.width / 2 + 16;
       const cancelY = cancelBounds.y + cancelBounds.height / 2;
-      if (touch) await page.touchscreen.tap(cancelX, cancelY);
-      else await page.mouse.click(cancelX, cancelY);
+      await pressAt(cancelX, cancelY);
+      await expect(sessionName).toBeHidden();
+      expect(submissions).toBe(0);
+      if (touch) await add.tap();
+      else await add.click();
+      await expect(sessionName).toHaveValue("");
+
+      const createBounds = (await create.boundingBox())!;
+      const reopenedCancel = (await cancel.boundingBox())!;
+      const gapMidpoint = (createBounds.x + createBounds.width + reopenedCancel.x) / 2;
+      await sessionName.fill("Another discarded conversation");
+      await pressAt(gapMidpoint + 1, reopenedCancel.y - 4);
       await expect(sessionName).toBeHidden();
       expect(submissions).toBe(0);
       if (touch) await add.tap();
@@ -88,8 +112,8 @@ for (const touch of [false, true]) {
 
       const name = "New session alongside running work";
       await sessionName.fill(name);
-      if (touch) await create.tap();
-      else await create.click();
+      const createY = createBounds.y + createBounds.height / 2;
+      await pressAt(gapMidpoint - 2.5, createY);
       await expect(page.locator(".chat-header .crumb-current")).toHaveText(name);
       expect(submissions).toBe(1);
       if (touch) await openDrawer.tap();
