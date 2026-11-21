@@ -26,7 +26,7 @@ import { NativeSubagentCard, SubagentCard } from "./SubagentCard";
 import { useStreamingTextNode } from "../hooks/useStreamingTextNode";
 import { projectToolCall, readRuntimeMetadata } from "../lib/toolIdentity";
 import { questionClosure } from "../lib/questionPresentation";
-import { backgroundResultBody, requestSource } from "../lib/injectedTurns";
+import { backgroundResultMessage, requestSource } from "../lib/injectedTurns";
 import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { ToolInputDetails } from "./ToolInputDetails";
 import { nativeWorkKey } from "../lib/nativeOutput";
@@ -211,8 +211,8 @@ function MessageBody({
             <div className="mt-2 whitespace-pre-wrap break-words">{message.content}</div>
           </details>;
         }
-        const bgResult = backgroundResultBody(message);
-        if (bgResult !== undefined) return <BgTaskResultMessage content={bgResult} />;
+        const bgResult = backgroundResultMessage(message);
+        if (bgResult) return <BgTaskResultMessage {...bgResult} />;
         if (source === "wiki" && typeof message.content === "string" &&
             message.content.startsWith("[wiki-maintenance-result]")) {
           return <div className="msg msg-system py-1 text-center text-xs text-muted-foreground">
@@ -513,11 +513,8 @@ function BgChipForToolUse({ sessionId, message }: { sessionId: string; message: 
   </div>;
 }
 
-function BgTaskResultMessage({ content }: { content: string }) {
+function BgTaskResultMessage({ body, summary }: { body: string; summary: string }) {
   const [expanded, setExpanded] = useState(false);
-  // Show only the first line collapsed; that line is the "finished
-  // with status …" summary which is the most-important info.
-  const firstLine = content.split("\n", 1)[0];
   return (
     <div className="msg msg-bg-result flex justify-end">
       <div className="max-w-[85%] space-y-1">
@@ -538,10 +535,10 @@ function BgTaskResultMessage({ content }: { content: string }) {
             </span>
             {expanded ? (
               <pre className="m-0 flex-1 font-mono text-xs whitespace-pre-wrap break-words">
-                {content}
+                {body}
               </pre>
             ) : (
-              <span className="flex-1">{firstLine}</span>
+              <span className="flex-1">{summary}</span>
             )}
           </div>
         </button>

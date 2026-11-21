@@ -80,8 +80,9 @@ shell 和输出结束后先固定原命令结果，再主动对启动时捕获�
 列表和详情同时核对账户、session、task 归属，归档聊天仍可只读其历史任务。
 浏览器自动列表和按 ID 确认使用 `bg-task-summaries`，列表最多 200 条。SQLite
 投影有界读取命令、描述、停止原因和交付诊断，输出摘要取去尾空白的 stdout
-末 120 字符，stdout 无可用内容时取 stderr。两路都有内容或原输出被截时显示
-截短。完整 `bg-tasks` 接口继续提供原详情。折叠卡、显式展开和终态复用见
+末 120 字符，stdout 无可用内容时取 stderr。摘要省略任一流的正文时标为
+`preview_truncated`，包括单路超过 120 字符或两路都有内容。原始流采集的
+截断由 `truncated` 表示。完整 `bg-tasks` 接口继续提供原详情。折叠卡、显式展开和终态复用见
 [前端 BG 观察](frontend-session-observation.md#bg-列表与详情的逐任务合并)。
 
 取消返回的 `cancelled: bool` 表示本次是否发起／加入停止动作，不是同步清理完成

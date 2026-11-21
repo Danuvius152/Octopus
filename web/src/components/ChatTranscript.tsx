@@ -8,6 +8,7 @@ import { observeOlderMessages } from "../lib/transcript";
 import { observeSession } from "../lib/hydrateSession";
 import { matchesPendingQuestion } from "../lib/questionPresentation";
 import { nativeRootPreviews } from "../lib/nativeOutput";
+import { projectBgTaskId } from "../lib/toolIdentity";
 import type { QuestionCommandTarget, SubmissionReply } from "../lib/submission";
 import { Button } from "./ui/button";
 import { MessageBubble } from "./MessageBubble";
@@ -15,7 +16,7 @@ import { MessageDetails, SavedMessageRecord } from "./MessageDetails";
 import { MessageTime } from "./MessageTime";
 import { QuestionPrompt, type AnswerPayload } from "./QuestionPrompt";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
-import { TranscriptOutputLayout, backgroundOutputOutside, backgroundOutputRow, chatProjection, chatProjectionIndex,
+import { TranscriptOutputLayout, backgroundOutputOutside, chatProjection, chatProjectionIndex,
   collapsedHelperHasChangedText, matchTranscriptTransfers,
   readableChangeOutside, readableSpansOutside, recordTranscriptOutput,
   savedOutputHasBody, savedOutputOutside, scrollportBounds,
@@ -651,7 +652,7 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
     }
     if (pending.background.size) {
       for (let index = 0; index < rows.length; index++) {
-        const task = backgroundOutputRow(rows[index], committed.current.messages);
+        const task = projectBgTaskId(rows[index], committed.current.messages);
         if (task && pending.background.has(task) && !state.bgTaskReadFailures[sid]?.includes(task) && outsideMountedRange(index)) {
           offerReturn();
           return;

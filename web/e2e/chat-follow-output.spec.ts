@@ -763,8 +763,10 @@ test("a saved background result offers a return when its summary leaves the sele
   await expect(jump).toBeVisible();
 });
 
-for (const outsideViewport of [false, true]) {
-test(`a completed task's ${outsideViewport ? "offscreen output preview offers a return" : "visible output preview keeps the selection"} without fetching full output`, async ({ page }) => {
+for (const scenario of ["visible", "offscreen", "offscreen without the start event"] as const) {
+test(`a completed task's ${scenario} output preview respects reading without fetching full output`, async ({ page }) => {
+  const outsideViewport = scenario !== "visible";
+  const observesStart = scenario !== "offscreen without the start event";
   const { scroller, gap, send, settle } = await openChat(page, 4);
   const sessionId = "follow-output";
   const taskId = "background-preview";
@@ -775,16 +777,18 @@ test(`a completed task's ${outsideViewport ? "offscreen output preview offers a 
     role: "assistant", type: "text", seq: 5, content: "Keep reading this reply.\n\n".repeat(55),
   } }));
   send({ type: "assistant_text", seq: 5, content: "Long reply preview", body_state: "preview", detail_ref: reference });
-  send({ type: "bg_started", task_id: taskId, command: "echo preview", started_at: startedAt });
+  if (observesStart) send({ type: "bg_started", task_id: taskId, command: "echo preview", started_at: startedAt });
   send({ type: "tool_use", seq: 6, tool: "mcp__bg__run", input: { command: "echo preview" },
     runtime_metadata: { request_id: "request", attempt_id: "attempt", tool_call_id: taskId,
       receipt: { kind: "bg", task_id: taskId } } });
-  const expandTask = scroller.getByRole("button", { name: "Expand bg task" });
-  await expect(expandTask).toBeInViewport();
+  const toolRow = scroller.getByText("mcp__bg__run", { exact: true });
+  await expect(toolRow).toBeInViewport();
+  if (observesStart) await expect(scroller.getByRole("button", { name: "Expand bg task" })).toBeInViewport();
+  else await expect(scroller.getByRole("button", { name: "Retry task summary" })).toBeInViewport();
   if (outsideViewport) {
     await scroller.getByRole("button", { name: "View full message" }).click();
     await expect.poll(gap).toBeGreaterThan(500);
-    await expect(expandTask).toHaveCount(0);
+    await expect(toolRow).toHaveCount(0);
   } else {
     const paragraph = scroller.getByText("Saved row 4", { exact: true });
     await expect(paragraph).toBeInViewport({ ratio: 1 });

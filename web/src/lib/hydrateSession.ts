@@ -277,15 +277,23 @@ const auxiliaryTaskReads = {
 
 // Confirmation owns the request demand and its original observation.
 const taskConfirmations = new Map<string, {
-  current: () => boolean; dirty: boolean; independent: boolean; resumeIfIdle: () => void; finish: () => void;
+  current: () => boolean; dirty: boolean; independent: boolean; completion: boolean;
+  resumeIfIdle: () => void; finish: () => void;
 }>();
 const confirmationKey = (kind: SessionAuxiliaryKind, sessionId: string, taskId: string) => JSON.stringify([kind, sessionId, taskId]);
+
+export function isConfirmingBackgroundCompletion(sessionId: string, taskId: string): boolean {
+  const demand = taskConfirmations.get(confirmationKey("background", sessionId, taskId));
+  return demand?.completion === true && demand.current();
+}
+
 export function confirmAuxiliaryTask(kind: SessionAuxiliaryKind, sessionId: string, taskId: string, source: "event" | "completion" | "list" | "retry" | "card"): void {
   const key = confirmationKey(kind, sessionId, taskId);
   const pending = taskConfirmations.get(key);
   if (pending?.current()) {
     if (source !== "card") pending.independent = true;
     if (source === "event" || source === "completion") pending.dirty = true;
+    if (source === "completion") pending.completion = true;
     pending.resumeIfIdle();
     return;
   }
@@ -303,6 +311,7 @@ export function confirmAuxiliaryTask(kind: SessionAuxiliaryKind, sessionId: stri
       (sessions.current(lifetime.observation) || sessions.initialGenerationCurrent(lifetime.observation)),
     dirty: false,
     independent: source !== "card",
+    completion: source === "completion",
     resumeIfIdle: () => { if (!read) void run(); },
     finish,
   };

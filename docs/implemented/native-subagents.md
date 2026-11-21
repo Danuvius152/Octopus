@@ -152,13 +152,9 @@ or duplicate sequences fail the query. A window with only child body or tools
 can supply its own real saved reference. A snapshot alone cannot manufacture one.
 
 Each page rechecks ownership and its original target. `after_seq` must belong
-to that precise child work. The UI keeps pages separately from main chat and
-deduplicates by saved seq, so a tool call and its result sharing one native
-item both survive. Refresh, target/account/service changes, close/reopen and
-disconnect/reconnect cancel pending reads, including a reconnect to the same
-service. The deadline covers the response body, and a failed next-page read
-can retry its original cursor. Detail reads preserve the chat high water,
-display cache, usage and saved messages.
+to that precise child work. Detail reads preserve the chat high water,
+display cache, usage and saved messages. The browser's paging and read
+lifetime are defined in [the transcript contract](frontend-transcript-view.md).
 
 Available items, uncollected history and query errors are distinct. Saved
 partial output remains readable with the helper's actual status and stop

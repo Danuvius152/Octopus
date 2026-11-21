@@ -74,12 +74,17 @@ export function projectToolCall(message: Message, messages: Message[] | undefine
   };
 }
 
+export function projectBgTaskId(message: Message, messages: Message[] | undefined) {
+  if (message.type !== "tool_use" || message.tool_name !== "mcp__bg__run") return;
+  const receipt = projectToolCall(message, messages).receipt;
+  if (receipt?.kind === "bg") return receipt.task_id;
+}
+
 export function representedBgTaskIds(messages: Message[] | undefined): Set<string> {
   const ids = new Set<string>();
   for (const message of messages ?? []) {
-    if (message.type !== "tool_use" || message.tool_name !== "mcp__bg__run") continue;
-    const receipt = projectToolCall(message, messages).receipt;
-    if (receipt?.kind === "bg" && typeof receipt.task_id === "string") ids.add(receipt.task_id);
+    const taskId = projectBgTaskId(message, messages);
+    if (taskId) ids.add(taskId);
   }
   return ids;
 }

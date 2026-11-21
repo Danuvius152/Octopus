@@ -42,8 +42,10 @@ replacement and the single-binding API without an operation ID retire affected
 pending reservations after their own write. An ordinary read gives the
 committed value at that instant.
 
-The installation process owns these receipts for 120 seconds after reservation
-or settlement, with at most 4,096 retained operations per account. SQLite owns
+The installation process retains each reservation for 120 seconds. The first
+recording of an applied or retired disposition starts a new 120-second period.
+Reading an existing disposition leaves that deadline in place. The limit is
+4,096 retained operations per account. SQLite owns
 the saved Agent links. Restart releases the process-local reservations and
 retains those links. The form's read and retry rules are described in
 [Agent form instances](frontend-interaction-state.md#agent-表单实例).

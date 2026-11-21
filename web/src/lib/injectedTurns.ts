@@ -34,13 +34,14 @@ export function requestSource(message: { tool_input?: Record<string, unknown> })
   return typeof source === "string" ? source : undefined;
 }
 
-export function backgroundResultBody(message: { content?: unknown; tool_input?: Record<string, unknown> }): string | undefined {
+export function backgroundResultMessage(message: { content?: unknown; tool_input?: Record<string, unknown> }) {
   const { content } = message;
   if (typeof content !== "string") return;
   const source = requestSource(message);
   const hasPrefix = content.startsWith(BG_TASK_RESULT_PREFIX);
   if (source !== "bg" && !(source === undefined && hasPrefix)) return;
-  return hasPrefix ? content.slice(BG_TASK_RESULT_PREFIX.length).trimStart() : content;
+  const body = hasPrefix ? content.slice(BG_TASK_RESULT_PREFIX.length).trimStart() : content;
+  return { body, summary: body.split("\n", 1)[0] };
 }
 
 /** Structured provenance wins; prefixes only recognize older history. */
