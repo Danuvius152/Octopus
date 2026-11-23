@@ -279,11 +279,8 @@ async def test_application_delete_and_archive_cannot_lose_a_preparing_rewind(
 
 
 async def test_independent_application_copy_and_its_rewind_survive_original_deletion(
-    am, db, mgr, sent, models, monkeypatch, tmp_path,
+    am, db, mgr, sent, models,
 ):
-    from server.sessions.forking import ForkingMixin
-
-    monkeypatch.setattr(ForkingMixin, "_fork_copy_base", staticmethod(lambda: str(tmp_path / "copies")))
     row = await _create_app(am, db)
     await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
     (Path(row["app_dir"]) / "independent.txt").write_text("Keep this full copy")

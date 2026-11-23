@@ -396,16 +396,23 @@ no copied submission, process identity or recovery permission. Result reads use
 that observation to retain input uncertainty; malformed refs never read a parent
 session to reconstruct text.
 
-An initializing full-copy saga commits its row before copying. Its existing
-`fork_metadata.owned_copy_dir` JSON field is written only after successful
-exclusive directory creation and names that exact destination. The initializing
-state, full-copy identity, receipt match and allowed scope jointly permit
-directory cleanup; native artifact cleanup and the original writer's exit remain
-separate prerequisites. An existing directory without a matching creation
-receipt is retained with the recovery row for inspection. Ready sessions are
-outside the sweep; normal first-turn metadata clearing need not keep this
-initialization receipt. There is no new table, storage root, format transition or
-startup backfill. Backup and transfer follow the existing session scope below.
+An initializing full-copy fork commits its row before directory allocation.
+`fork_metadata.copy_layout` identifies the account or global layout, and
+`copy_creation` identifies the attempted creation. After exclusive allocation,
+`owned_copy_dir` records `path`, `parent`, `staging`, `target` and `creation`.
+The identities and filesystem creation marker bind the receipt to the actual
+objects within the saved layout. Cleanup requires the initializing full-copy
+row, matching directory ownership, native artifact cleanup and writer
+retirement. Legacy paths alone give no cleanup authority.
+
+`copy_delivery_pending` marks a prepared `ready` row that may still need
+admission confirmation. The online acknowledgement removes just that field.
+On startup, the pending row's own admitted input or a matching directory
+binding establishes admission. An unresolved binding leaves the row and
+artifacts available for inspection. First-input processing can consume the
+creation receipt. See the [full-copy lifecycle](session-fork.md#4-crash-safety--limits)
+for the admission and recovery sequence. These JSON facts use the existing
+session columns and require no format transition or startup backfill.
 
 The existing `fork_metadata.native_fork` records a
 native creation's unknown/created phase, selected home/strategy, RPC connection

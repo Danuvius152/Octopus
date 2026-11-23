@@ -30,6 +30,7 @@ from ..models import (
     SessionStatus,
 )
 from ..session_operations import OperationKind
+from .fork_directory import ForkDirectoryError, require_saved_copy
 from .observation import RequestObservation
 from .restoration import RestoreOperation
 from .submission import (
@@ -554,6 +555,9 @@ class SessionManagerBase:
     async def require_active_agent(self, agent_id: str | None) -> None:
         raise NotImplementedError
 
+    async def _owner_extra_roots(self, user_id: str | None) -> list[str]:
+        raise NotImplementedError
+
     async def _create_session(self, agent_id: str | None, *, origin: str = "user", persist: bool = True) -> Session:
         raise NotImplementedError
 
@@ -806,9 +810,12 @@ class SessionManagerBase:
 
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
+        self._recovered_copy_deliveries: list[tuple[Session, dict[str, Any]]] = []
         self._session_owners: dict[int, SessionOwner] = {}
         # Serialize archive/restoration without retaining historical sessions.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        # Serialize planning through allocation of the shared fork parent.
+        self._fork_allocation_locks: weakref.WeakValueDictionary[str | None, asyncio.Lock] = weakref.WeakValueDictionary()
         # The phase survives live-instance replacement while an operation or fire observes it.
         self._session_relationships: weakref.WeakValueDictionary[str, SessionRelationship] = weakref.WeakValueDictionary()
         # Archived sessions need their original audience even if a post-commit hook fails.
@@ -859,17 +866,33 @@ class SessionManagerBase:
     def set_schedule_runner(self, runner: Any) -> None:
         self._schedule_runner = runner
 
-    async def initialize(self, db: Database, *, previous_writers_retired: bool = False) -> None:
+    async def initialize(self, db: Database, *, previous_writers_retired: bool = False,
+                         defer_copy_delivery: bool = False) -> None:
         if self._input_state == "initializing":
             raise RuntimeError("SessionManager initialization is already in progress")
         self._input_state = "initializing"
         self._admission_closed = False
         try:
             await self._initialize_storage(db, previous_writers_retired=previous_writers_retired)
+            if not defer_copy_delivery:
+                self.admit_recovered_copies()
         except BaseException:
             self._input_state = "failed"
             raise
         self._input_state = "ready"
+
+    def admit_recovered_copies(self) -> None:
+        """Admit recovered copies synchronously without recording early delivery."""
+        for session, metadata in self._recovered_copy_deliveries:
+            try:
+                require_saved_copy(session.working_dir, session.user_id, session.id, metadata)
+            except ForkDirectoryError as error:
+                # A committed ready row may already have been observed. An
+                # uncertain binding can withhold admission, never authorize cleanup.
+                logger.warning("fork %s: retained copy awaiting delivery: %s", session.id, error)
+                continue
+            self.sessions[session.id] = session
+        self._recovered_copy_deliveries.clear()
 
     def input_database(self) -> Database:
         """Only completed initialization/recovery authorizes input operations."""
@@ -924,6 +947,7 @@ class SessionManagerBase:
         db.add_close_hook(self.close_session_owners)
         db.add_close_hook(self.drain_turns)
         db.add_close_hook(self.drain_credential_refreshes)
+        self._recovered_copy_deliveries.clear()
         rows = await db.load_sessions()
         for row in rows:
             session = _session_from_row(row)
@@ -944,6 +968,16 @@ class SessionManagerBase:
             except ApplicationDeleting:
                 session._admission_closed = True
             session.restore_message_state(*await db.message_sequence_state(session.id))
+            if session.fork_status == "ready" and session.fork_metadata:
+                try:
+                    metadata = json.loads(session.fork_metadata)
+                except json.JSONDecodeError:
+                    metadata = None
+                if isinstance(metadata, dict) and metadata.get("copy_delivery_pending") is True:
+                    if not await db.full_copy_has_admitted_input(session.id):
+                        self.sessions.pop(session.id, None)
+                        self._recovered_copy_deliveries.append((session, metadata))
+                        continue
             self.sessions[session.id] = session
         logger.info("Loaded %d sessions from database", len(rows))
         # Sweep forks left mid-saga by a crash (session-rewind.md §5.6.7).

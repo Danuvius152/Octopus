@@ -272,8 +272,9 @@ agent can be told it in one line.
 
 The proxy carries the existing app-cookie auth (`_authorized`), buffers the
 request body, streams ordinary backend responses as raw bytes, and forwards the
-method, path, query and a conservative header set. `no-store` stays on app content; the
-backend's own cache headers pass through for its responses.
+method, path, query and a conservative header set. Static app content uses
+`no-store`, with a short cache for the discovered icon. Proxied cache headers
+pass through except on 404, where the site sets `Cache-Control: no-store`.
 
 The reserved `token` query parameter authenticates to Octopus and is removed
 in every occurrence before forwarding. All other pairs retain their original
@@ -284,7 +285,15 @@ For a protected Wiki mutation, `app_bridge`/`AppMutation` own admission, origina
 backend revalidation, dispatch, response consumption, effect recording and cleanup.
 The proxy consumes the managed result. Decoded managed responses drop encoded
 representation headers; ordinary responses retain their compressed bytes and
-matching headers. A valid 202 transfers the same client and mutation to the
+matching headers. Both paths forward the remaining upstream fields in their
+original order with their value bytes intact. Repeated fields such as
+`Set-Cookie` and `Vary` retain each separate occurrence. The route bypasses
+the site's GZip middleware. Site CORS still handles preflight and sets its
+policy headers on applicable responses. When that policy needs an origin
+vary and the response varies on neither `Origin` nor `*`, it appends a
+separate `Vary: Origin` field.
+
+A valid 202 transfers the same client and mutation to the
 existing job follower, retaining the lock and original job ID after the HTTP
 consumer leaves. Malformed receipts, mismatched job identity, unknown terminal
 status or uncertain dispatch use the original abort/retirement path and preserve
@@ -295,8 +304,9 @@ repeated cancellation.
 `tests/test_app_proxy_wiki_target.py` covers real stop/restart and spontaneous
 exit during waits, including another HTTP service reusing the old port with zero
 body dispatch after refusal. It also covers transferred 202 work, consumer
-cancellation and invalid receipts. `tests/test_application_proxy_encoding.py`
-retains the raw/decoded encoding contract and repeated-cancellation cleanup.
+cancellation, invalid receipts, ordered repeated fields and the cookie jar.
+`tests/test_application_proxy_encoding.py` covers raw/decoded bodies and
+repeated-cancellation cleanup.
 `tests/test_app_request_lifetime.py` additionally covers ordinary slow bodies,
 capacity, idle/drain, unstarted responses, ASGI failures and control operations.
 `tests/test_wiki_app_request_lifetime.py` observes real 202 work, file effects,

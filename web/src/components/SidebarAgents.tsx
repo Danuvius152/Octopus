@@ -281,7 +281,7 @@ export function SidebarAgents() {
       const confirmation = new ArchiveDeadline();
       let accepted: boolean;
       try {
-        accepted = await sessionList.created(session, observation, undefined, confirmation);
+        accepted = await sessionList.created(session, observation, { deadline: confirmation });
         accepted &&= confirmation.active && sessionList.current(observation) &&
           useSessionStore.getState().sessions.some((row) => row.id === session.id);
       } finally { confirmation.finish(); }

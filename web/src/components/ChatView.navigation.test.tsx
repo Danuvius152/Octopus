@@ -595,6 +595,36 @@ it.each(["successor_creation", "successor_configuration", "schedule_rebinding"])
   expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
 
+it.each(["receipt", "broadcast"] as const)("shows how to continue a legacy copy after a directory refusal from the %s", async (source) => {
+  const api = server();
+  const directory = "/srv/octopus/fork/work-legacyfork01";
+  const copy = { ...a, working_dir: directory, origin: "fork", fork_is_full_copy: true } satisfies SessionInfo;
+  useSessionStore.setState({ sessions: [copy, b] });
+  mount();
+  command("/archive");
+  const result = {
+    old_session_id: copy.id, archived: true, new_session_id: null, failure_stage: "successor_creation",
+    message: `${directory} requires a directory grant. Ask an administrator to approve it, then restore the session and retry.`,
+  };
+  api.setRows([b, { ...copy, archived: true }]);
+  if (source === "receipt") {
+    await api.complete(Response.json(result, { status: 500 }));
+  } else {
+    act(() => handleWsMessage({
+      type: "session_archived", old_session_id: copy.id, new_session_id: null, name: copy.name, archive_result: result,
+    }));
+    await api.loseResponse();
+  }
+
+  const alert = screen.getByRole("alert");
+  expect(alert).toHaveTextContent(source === "receipt" ? "Archive committed" : "Session archived");
+  expect(alert).toHaveTextContent(`Successor creation failed: ${result.message}`);
+  expect(screen.queryByRole("button", { name: "Open successor" })).toBeNull();
+  expect(screen.queryByRole("textbox")).toBeNull();
+  expect(useSessionStore.getState().activeSessionId).toBe(copy.id);
+  expect(api.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/archive"))).toHaveLength(1);
+});
+
 it("retains the original archive through disconnect and uses a new read scope without reviving navigation", async () => {
   const api = server();
   const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };

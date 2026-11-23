@@ -24,7 +24,10 @@ async function markdown(target: "chat" | "file", content: string) {
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
     String(input).includes("/files/meta")
-      ? Response.json({ path: "math.md", kind: "markdown", mime_type: "text/markdown", size: content.length })
+      ? Response.json({
+        path: "math.md", canonical_path_id: "math-path", canonical_directory: { path: ".", path_id: "root-path" },
+        kind: "markdown", mime_type: "text/markdown", size: content.length,
+      })
       : new Response(content, { headers: { "content-type": "text/markdown" } })));
   render(<FileViewerDialog />);
   act(() => useSessionStore.getState().openViewer("math-session", "math.md"));

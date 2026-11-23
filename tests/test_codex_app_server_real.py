@@ -18,7 +18,6 @@ from server.monitor import MetricsStore, query
 from server.question_resolution import AnswerSource
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
-from server.sessions.forking import ForkingMixin
 from tests.accounts import create_account
 from tests.cli_gate import codex_cli_works
 from tests.codex_legacy_history import seed_exec_history
@@ -470,7 +469,7 @@ async def test_live_native_start_and_precise_resume(tmp_path, monkeypatch, first
 
 
 @pytest.mark.parametrize("first_transport", ["exec", "app-server"])
-async def test_live_old_and_native_history_fork_continue_independently(tmp_path, monkeypatch, first_transport):
+async def test_live_old_and_native_history_fork_continue_independently(tmp_path, first_transport):
     if first_transport == "exec" and not await asyncio.to_thread(codex_cli_works):
         pytest.skip("The independent exec history seeder requires a usable PATH Codex")
     database = Database(str(tmp_path / "fork-product.db"))
@@ -482,7 +481,6 @@ async def test_live_old_and_native_history_fork_continue_independently(tmp_path,
     await manager.initialize(database)
     work = tmp_path / "work"
     work.mkdir()
-    monkeypatch.setattr(ForkingMixin, "_fork_copy_base", staticmethod(lambda: str(tmp_path / "copies")))
     parent = await manager.create_session(agent["id"], "Live fork source", str(work), backend="codex")
 
     async def ask(session, prompt):

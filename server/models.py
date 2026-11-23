@@ -1070,13 +1070,6 @@ class UpdateNotifierRequest(BaseModel):
     enabled: bool | None = None
 
 
-class NotifierRefreshUnconfirmed(BaseModel):
-    code: Literal["notifier_refresh_unconfirmed"] = "notifier_refresh_unconfirmed"
-    notifier_id: str
-    committed: Literal[True] = True
-    detail: str = "Notifier was saved, but runtime refresh is unconfirmed."
-
-
 # Applications (docs/implemented/applications.md §2/§5) — agent-built static web
 # apps that Octopus serves under /apps/{id}/ and renders in the main pane.
 

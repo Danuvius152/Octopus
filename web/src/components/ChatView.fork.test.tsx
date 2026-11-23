@@ -19,7 +19,7 @@ vi.mock("./ForkDialog", () => ({ ForkDialog: ({ onForked }: { onForked: (value: 
   <button onClick={async () => {
     const tracked = sessionList.observe(child.forked_from_session_id, useSessionStore.getState(), "archive");
     try {
-      if (await sessionList.created(child as SessionInfo, tracked.observation, child.forked_from_session_id)) onForked(child, tracked.observation);
+      if (await sessionList.created(child as SessionInfo, tracked.observation, { archivedId: child.forked_from_session_id })) onForked(child, tracked.observation);
     } finally {
       tracked.finish();
     }

@@ -1,5 +1,6 @@
 """Notifier receipts retain the real authoritative-storage exit boundary."""
 
+import json
 import sqlite3
 import subprocess
 import sys
@@ -23,16 +24,16 @@ from httpx import ASGITransport, AsyncClient
 from server import deps
 from server.database import Database
 from server.main import app
-from server.notifiers import NotifierManager
+from server.notifiers import NotifierEvent, NotifierManager, WebhookNotifier
 from server.routers import notifiers
 from server.users import UserManager
 phase = sys.argv[2]
 
 def authorize(action, first, second, database, source):
     denied = (phase == "commit" and action == sqlite3.SQLITE_TRANSACTION and first == "COMMIT"
-              or phase == "refresh" and action == sqlite3.SQLITE_READ and first == "notifiers")
+              or phase == "read" and action == sqlite3.SQLITE_READ and first == "notifiers")
     if denied:
-        Path(sys.argv[5]).write_text(first)
+        Path(sys.argv[4]).write_text(first)
         return sqlite3.SQLITE_DENY
     return sqlite3.SQLITE_OK
 
@@ -43,53 +44,55 @@ async def main():
     deps.set_user_manager(users)
     owner = await users.create_user(username="notifier-owner", password="password1")
     token = await users.issue_token(owner["id"])
-    await db.save_notifier("target", "webhook", "Original", {}, "now", user_id=owner["id"])
+    await db.save_notifier("target", "webhook", "Original", {"url": "https://local.test/hook"},
+                           "now", user_id=owner["id"])
     manager = NotifierManager()
     manager.set_db(db)
-    await manager.load()
     notifiers.set_db(db)
-    notifiers.notifier_manager = manager
-    update, load = db.update_notifier, manager.load
+    update = db.update_notifier
 
     async def update_with_fault(*args, **kwargs):
-        if phase == "commit":
-            await db.conn.set_authorizer(authorize)
+        await db.conn.set_authorizer(authorize)
         return await update(*args, **kwargs)
 
-    async def load_with_fault():
-        # The route reaches this boundary only after the original update's
-        # real transaction has returned through its confirmed COMMIT.
-        Path(sys.argv[4]).write_text("update committed")
-        await db.conn.set_authorizer(authorize)
-        await load()
+    async def record_delivery(self, event):
+        Path(sys.argv[5]).write_text(self.id)
 
-    db.update_notifier = update_with_fault
-    if phase == "refresh":
-        manager.load = load_with_fault
+    if phase == "commit":
+        db.update_notifier = update_with_fault
+    WebhookNotifier.send = record_delivery
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.patch("/api/notifiers/target",
             headers={"Authorization": f"Bearer {token}"}, json={"label": "Saved"})
-        Path(sys.argv[3]).write_text(json.dumps({"status": response.status_code, "body": response.text}))
+        Path(sys.argv[3]).write_text(json.dumps({"status": response.status_code, "body": response.json()}))
+    if phase == "read":
+        await db.conn.set_authorizer(authorize)
+        await manager.fire(NotifierEvent(type="session_idle", title="Idle", message="Done"), owner["id"])
     await db.close()
 
 asyncio.run(main())
 '''
 
 
-@pytest.mark.parametrize("phase", ["commit", "refresh"])
-def test_storage_fault_exits_without_fabricating_a_notifier_receipt(tmp_path, phase):
+@pytest.mark.parametrize("phase", ["commit", "read"])
+def test_storage_fault_exits_at_the_notifier_transaction_boundary(tmp_path, phase):
     config, config_file = installation_settings(tmp_path / "installation")
     response = tmp_path / "response.json"
-    committed = tmp_path / "committed"
     fault = tmp_path / "fault"
+    delivery = tmp_path / "delivered"
     result = subprocess.run(
-        [sys.executable, "-c", PROGRAM, str(config_file), phase, str(response), str(committed), str(fault)],
+        [sys.executable, "-c", PROGRAM, str(config_file), phase, str(response), str(fault), str(delivery)],
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10,
     )
     assert result.returncode == 70, result.stderr
     assert fault.read_text() == ("COMMIT" if phase == "commit" else "notifiers")
-    assert not response.exists()
-    assert committed.exists() is (phase == "refresh")
+    assert not delivery.exists()
+    if phase == "commit":
+        assert not response.exists()
+    else:
+        receipt = json.loads(response.read_text())
+        assert receipt["status"] == 200
+        assert receipt["body"]["id"] == "target" and receipt["body"]["label"] == "Saved"
     with sqlite3.connect(f"file:{config.db_path}?mode=ro", uri=True) as database:
         row = database.execute("SELECT label FROM notifiers WHERE id = 'target'").fetchone()
-    assert row == ("Saved" if phase == "refresh" else "Original",)
+    assert row == ("Saved" if phase == "read" else "Original",)

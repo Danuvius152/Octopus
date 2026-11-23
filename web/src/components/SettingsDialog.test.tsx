@@ -18,7 +18,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const target = (id: string) => ({ id, type: "webhook", label: `Target ${id}`, config: { url: `https://example.com/${id}` }, enabled: true });
+const target = (id: string) => ({ id, type: "webhook", label: `Target ${id}`, config: { url: `https://example.com/${id}` }, enabled: true, created_at: "2026-11-23T00:00:00Z" });
 
 function showNotifications() {
   const tab = screen.getByRole("tab", { name: "Notifications" });
@@ -343,10 +343,10 @@ it.each(["GET", "POST"])("unmounting retires the old %s without starting confirm
   expect(reads).toBe(2);
 });
 
-it("a failed deletion releases pending state and permits a deliberate retry", async () => {
+it.each([500, 200])("a deletion with HTTP %s releases pending state and permits a deliberate retry", async (status) => {
   let deletions = 0;
   const fetcher = vi.fn(async (_input: string, init?: RequestInit) => {
-    if (init?.method === "DELETE") return new Response(null, { status: ++deletions === 1 ? 500 : 204 });
+    if (init?.method === "DELETE") return new Response(null, { status: ++deletions === 1 ? status : 204 });
     return Response.json([target("a")]);
   });
   vi.stubGlobal("fetch", fetcher);
@@ -380,6 +380,23 @@ it("a failed creation preserves the form and permits a deliberate retry", async 
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.getByRole("button", { name: "Add webhook" })).toBeEnabled();
   expect(creations).toBe(2);
+});
+
+it.each([200, 201])("an unconfirmed creation with HTTP %s refreshes the list and keeps the draft", async (status) => {
+  let reads = 0;
+  const fetcher = vi.fn(async (_input: string, init?: RequestInit) => {
+    if (init?.method === "POST") return Response.json(status === 201 ? {} : target("c"), { status });
+    return Response.json(++reads === 1 ? [] : [target("c")]);
+  });
+  vi.stubGlobal("fetch", fetcher);
+  await openNotifications();
+  await screen.findByText("No notifier targets configured.");
+  createTarget("c");
+  expect(await screen.findByText("Target c")).toBeVisible();
+  expect(screen.getByRole("alert")).toBeVisible();
+  expect(screen.getByLabelText("Label")).toHaveValue("Target c");
+  expect(reads).toBe(2);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
 
 it.each(["http", "json"])("an initial GET %s error is visible and does not refetch automatically", async (failure) => {

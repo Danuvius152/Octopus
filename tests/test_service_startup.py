@@ -1,6 +1,7 @@
 """The public ASGI lifespan owns storage before recovering or producing work."""
 
 import asyncio
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ from server.config import settings
 from server.database import Database
 from server.knowledge import encode, for_account
 from server.service_installation import InstallationError, InstallationOwner
+from server.sessions import SessionManager
 from server.wiki.registry import registry
 from tests import test_api as api
 from tests.accounts import create_account
@@ -64,6 +66,78 @@ async def test_incomplete_fork_scan_failure_prevents_service_startup(service, mo
 
     async with AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test") as client:
         assert (await client.get("/ready")).status_code == 503
+
+
+@pytest.mark.parametrize("startup_wait", ["metrics", "tunnel"])
+async def test_service_rechecks_undelivered_forks_after_startup_waits(service, tmp_path, monkeypatch, startup_wait):
+    db = Database(settings.db_path)
+    await db.initialize()
+    source = SessionManager()
+    try:
+        user, _ = await create_account(db)
+        agent = await db.get_system_agent(user["id"])
+        await source.initialize(db)
+        parent = await source.create_session(agent["id"], "Source")
+        finish = db.finish_full_copy_fork
+
+        async def lose_ack(*args):
+            await finish(*args)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(db, "finish_full_copy_fork", lose_ack)
+        for label in ("Intact copy", "Redirected copy"):
+            with pytest.raises(asyncio.CancelledError):
+                await source.duplicate_session(parent.id, label=label, user_id=user["id"])
+        rows = {row["name"]: row for row in await db.load_sessions()}
+    finally:
+        await db.close()
+
+    redirected = rows["Redirected copy"]
+    intact = rows["Intact copy"]
+    copy = Path(redirected["working_dir"])
+    store_factory = main.MetricsStore
+    observed = []
+
+    def replace_copy():
+        observed.append((
+            main.app.state.service_health.state,
+            service.get_session(redirected["id"], user["id"]),
+            service.get_session(intact["id"], user["id"]),
+        ))
+        copy.rename(tmp_path / "original-copy")
+        copy.mkdir()
+        (copy / "keep.txt").write_text("Unrelated data")
+
+    def replace_before_metrics_initialization(*args):
+        replace_copy()
+        return store_factory(*args)
+
+    class TestTunnel:
+        def __init__(self, *, port):
+            self.port = port
+
+        async def start(self):
+            await asyncio.sleep(0)
+            replace_copy()
+            return None
+
+        async def stop(self):
+            pass
+
+    if startup_wait == "metrics":
+        monkeypatch.setattr(main, "MetricsStore", replace_before_metrics_initialization)
+    else:
+        monkeypatch.setattr(settings, "enable_tunnel", True)
+        monkeypatch.setattr(main, "CloudflareTunnel", TestTunnel)
+    async with main.app.router.lifespan_context(main.app):
+        assert main.app.state.service_health.state == "ready"
+        assert service.get_session(intact["id"], user["id"]) is not None
+        assert service.get_session(redirected["id"], user["id"]) is None
+        assert observed == [("starting", None, None)]
+        assert (copy / "keep.txt").read_text() == "Unrelated data"
+        saved = {row["id"]: row for row in await service.db.load_sessions()}
+        assert json.loads(saved[redirected["id"]]["fork_metadata"])["copy_delivery_pending"] is True
+        assert not await service.db.load_incomplete_forks()
 
 
 async def test_due_schedules_wait_for_the_service_recovery_gate(service, tmp_path, monkeypatch):

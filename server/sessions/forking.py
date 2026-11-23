@@ -1,20 +1,13 @@
-"""Forking and duplicating a session, and recovering a fork that was interrupted.
-
-One slice of `SessionManager`, which was a single 4,017-line class with 84
-methods (docs/post-mortems/2026-09-25-polish-pass.md). Split by responsibility; the
-methods are unchanged and still reached through one `session_manager` object,
-so no call site moved.
-"""
+"""Session forks, full working-directory copies, and startup recovery."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import shutil
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,8 +19,9 @@ from ..attachments import AttachmentError
 from ..attachments import get_path as get_attachment_path
 from ..credential_bindings import CredentialBindingError
 from ..harness import BackendForkNotSupported, HarnessRun, get_harness
-from ..harness.fork import ForkCheckpoint, ForkHooks, read_fork_checkpoint
+from ..harness.fork import ForkCheckpoint, ForkCwd, ForkHooks, read_fork_checkpoint
 from ..models import MessageContent
+from ..workspace import WorkspaceError, confine
 from .base import (
     ActiveRun,
     ForkError,
@@ -35,6 +29,16 @@ from .base import (
     SessionManagerBase,
     logger,
 )
+from .fork_directory import (
+    CopyDestinationExists,
+    CopyDirectory,
+    CopyLocation,
+    ForkDirectoryError,
+    fd_path,
+    fork_copy_root,
+    remove_copy,
+)
+from .fork_git_layout import GitLayoutError, require_independent_git_layout
 from .owner_runtime import OwnForkProcess, ReserveFork, RetireProcess
 
 if TYPE_CHECKING:
@@ -43,7 +47,10 @@ if TYPE_CHECKING:
 
 class ForkingMixin(SessionManagerBase):
 
-    def _fork_hooks(self, owner: SessionOwner, fork: Session, metadata: dict[str, Any]) -> ForkHooks:
+    def _fork_hooks(
+        self, owner: SessionOwner, fork: Session, metadata: dict[str, Any],
+        directory: CopyDirectory | None = None,
+    ) -> ForkHooks:
         async def checkpoint(artifact: ForkCheckpoint) -> None:
             assert self.db is not None
             metadata["native_fork"] = dict(artifact)
@@ -65,7 +72,8 @@ class ForkingMixin(SessionManagerBase):
                 if retirement is not None:
                     await asyncio.shield(retirement)
 
-        return ForkHooks(checkpoint, manage, fork.id, fork.user_id)
+        cwd = ForkCwd(str(fd_path(directory.target)), directory.require_current) if directory is not None else None
+        return ForkHooks(checkpoint, manage, fork.id, fork.user_id, cwd)
 
     async def _require_unambiguous_transcript(self, parent: Session) -> None:
         ambiguous = ((await self.db.message_sequence_state(parent.id))[2] != 0
@@ -107,7 +115,7 @@ class ForkingMixin(SessionManagerBase):
                     # store; Claude ignores it. Prefer the FORK-TIME effective
                     # credential pinned in fork_metadata (so an agent whose
                     # credential changed after the fork doesn't send cleanup to
-                    # the wrong CODEX_HOME — Vera review); else fall back to the
+                    # the wrong CODEX_HOME); else fall back to the
                     # row's credential_id, else its agent's. require_auth=False
                     # so a since-revoked login still yields its home dir.
                     eff_cred_id = None
@@ -143,7 +151,7 @@ class ForkingMixin(SessionManagerBase):
                         row["working_dir"], row["resume_id"], fork_id,
                         credential=cred, artifact=artifact, hooks=hooks,
                     )
-                    self._remove_fork_copy_directory(row["working_dir"], metadata)
+                    remove_copy(row["working_dir"], row["user_id"], fork_id, metadata)
                     await self.db.delete_session(fork_id)
                 except Exception:
                     logger.exception(
@@ -436,62 +444,28 @@ class ForkingMixin(SessionManagerBase):
                 await self._release_session_reservation(owner, ReserveFork(False))
 
     @staticmethod
-    def _fork_copy_base() -> str:
-        """Base dir holding every /fork working-dir copy (session-fork.md)."""
-        return os.path.expanduser(os.path.join("~", ".octopus", "fork"))
-
-    @staticmethod
-    def _fork_copy_dest(src_working_dir: str, fork_id: str) -> str:
-        """Destination for a /fork working-dir copy: ~/.octopus/fork/<name>-<id>
-        (session-fork.md). Keeps the project basename for readability +
-        the fork id for uniqueness. Planning has no filesystem effects."""
-        base = ForkingMixin._fork_copy_base()
+    def _fork_copy_dest(src_working_dir: str, fork_id: str, user_id: str | None) -> str:
+        """Plan a readable, unique copy location without touching the filesystem."""
         name = os.path.basename(os.path.normpath(src_working_dir)) or "session"
-        return os.path.join(base, f"{name}-{fork_id}")
+        return str(fork_copy_root(user_id) / f"{name}-{fork_id}")
+
+    def _fork_allocation_lock(self, user_id: str | None) -> asyncio.Lock:
+        lock = self._fork_allocation_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._fork_allocation_locks[user_id] = lock
+        return lock
 
     @staticmethod
-    def _is_fork_copy_dir(working_dir: str | None) -> bool:
-        """Check the copy path's scope, without granting deletion authority.
-
-        A rewind can borrow a parent's working directory inside this scope.
-        """
-        if not working_dir:
-            return False
-        # Normalize both sides (expanduser + abspath) so a `~/.octopus/fork/...`
-        # style row still classifies — otherwise it would leak rather than be
-        # swept (Vera review hardening).
-        def norm(p: str) -> str:
-            return os.path.normpath(os.path.abspath(os.path.expanduser(p)))
-
-        base = norm(ForkingMixin._fork_copy_base())
-        wd = norm(working_dir)
-        return wd != base and (wd + os.sep).startswith(base + os.sep)
-
-    def _remove_fork_copy_directory(self, working_dir: str, metadata: dict[str, Any]) -> None:
-        """Only an initializing full-copy saga can retire its own directory."""
-        if metadata.get("full_copy") is not True:
-            if self._is_fork_copy_dir(working_dir):
-                logger.info("Retaining borrowed or unproven fork directory %s", working_dir)
-            return
-        if not self._is_fork_copy_dir(working_dir):
-            raise ValueError("Incomplete fork copy is outside its directory scope")
-        if metadata.get("owned_copy_dir") != working_dir:
-            if not os.path.lexists(working_dir):
-                return
-            raise ValueError("Incomplete fork has no confirmed directory creation; retain recovery material")
+    async def _check_fork_git_layout(source: Path, destination: Path) -> None:
         try:
-            shutil.rmtree(working_dir)
-        except FileNotFoundError:
-            if os.path.lexists(working_dir):
-                raise
-
-    @staticmethod
-    def _copy_tree(src: str, dest: str) -> None:
-        # Literal full copy (the user's explicit choice — incl. .git /
-        # node_modules / .venv). Symlinks copied AS symlinks so we don't follow
-        # them into huge targets / loops.
-        # The saga exclusively created and recorded dest before this writer.
-        shutil.copytree(src, dest, symlinks=True, dirs_exist_ok=True)
+            await complete_cleanup(asyncio.to_thread(require_independent_git_layout, source, destination))
+        except GitLayoutError as error:
+            raise ForkError(
+                f"The Git layout cannot be copied independently: {error}. "
+                "Use a self-contained working directory.",
+                reason="unsupported_git_layout", status_code=409,
+            ) from error
 
     async def duplicate_session(
         self, parent_id: str, *, label: str | None = None,
@@ -541,8 +515,13 @@ class ForkingMixin(SessionManagerBase):
 
         fork_id = uuid.uuid4().hex[:12]
         resume_id_hint = str(uuid.uuid4())
+        directory = ExitStack()
+        allocation = AsyncExitStack()
         try:
-            dest = os.path.abspath(os.path.expanduser(self._fork_copy_dest(source.working_dir, fork_id)))
+            await allocation.enter_async_context(self._fork_allocation_lock(parent.user_id))
+            dest = os.path.abspath(os.path.expanduser(self._fork_copy_dest(
+                source.working_dir, fork_id, parent.user_id,
+            )))
             # Resolve existing ancestors too: a symlink in the target's parent
             # can put an apparently separate copy back inside the source tree.
             source_path = Path(source.working_dir).resolve()
@@ -552,6 +531,13 @@ class ForkingMixin(SessionManagerBase):
                     "The copy destination must be outside the source working directory",
                     reason="invalid_copy_destination", status_code=400,
                 )
+            try:
+                location = directory.enter_context(CopyLocation.planned(Path(dest), parent.user_id))
+                confine(str(dest_path), user_id=parent.user_id,
+                        extra_roots=await self._owner_extra_roots(parent.user_id))
+            except (OSError, ForkDirectoryError, WorkspaceError) as error:
+                raise ForkError(str(error), reason="invalid_copy_destination", status_code=400) from error
+            await self._check_fork_git_layout(source_path, dest_path)
             # Snapshot the transcript after reserving the parent against turns:
             # loading it earlier risks a fast turn slipping in between the read
             # and the guard, which would copy a post-turn working dir against a
@@ -579,9 +565,11 @@ class ForkingMixin(SessionManagerBase):
             # failure: `full_copy`/`duplicated_from` drive the UI, and
             # `cleanup_credential_id` pins the FORK-TIME effective credential so
             # the startup sweep finds the right CODEX_HOME even if the agent's
-            # credential later changes (Vera review). Omitted when there's none.
+            # credential later changes. Omitted when there's none.
+            creation = uuid.uuid4().hex
             fork_meta_dict: dict[str, Any] = {
                 "full_copy": True, "duplicated_from": parent.name,
+                "copy_layout": location.layout, "copy_creation": creation, "copy_delivery_pending": True,
             }
             # Pin only when the backend has a per-credential on-disk store to
             # clean up (parent_cred resolved → home_dir-style, i.e. Codex);
@@ -594,7 +582,7 @@ class ForkingMixin(SessionManagerBase):
             #    HISTORY_REPLAY backends inject on turn 1 — so it MUST stay set,
             #    or the duplicate would continue with no copied context). The UI
             #    distinguishes a full copy from a rewind via fork_metadata's
-            #    `full_copy` flag, not by nulling fork_after_seq (Vera review).
+            #    `full_copy` flag.
             assert self.db is not None  # Original saga drains before DB close.
             await self.db.create_fork_session(
                 fork_id=fork_id, name=fork_name, working_dir=dest,
@@ -621,61 +609,99 @@ class ForkingMixin(SessionManagerBase):
             )
             fork.restore_message_state(len(messages), last_seq + 1, 0)
 
-            # A preexisting destination belongs to somebody else. Exclusive
-            # mkdir establishes creation; its committed receipt grants cleanup.
-            # A crash between them retains the row and directory for inspection.
+            # The copy starts in a private slot while the logical cwd is vacant.
+            # The committed receipt proves which private and installed objects
+            # this saga may use or retire.
             try:
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                os.mkdir(dest)
+                owned = directory.enter_context(location.create(creation))
+            except ForkDirectoryError as error:
+                raise ForkError(str(error), reason="invalid_copy_destination", status_code=409) from error
             except OSError as error:
-                await self.db.delete_session(fork_id)
+                if isinstance(error, CopyDestinationExists):
+                    # Exclusive installation found an existing entry.
+                    await self.db.delete_session(fork_id)
+                else:
+                    try:
+                        remove_copy(dest, parent.user_id, fork_id, fork_meta_dict)
+                    except (OSError, ForkDirectoryError):
+                        logger.exception("fork %s: allocation outcome retained for recovery", fork_id)
+                    else:
+                        await self.db.delete_session(fork_id)
                 raise ForkError(
                     f"Failed to allocate the working directory: {error}",
                     reason="copy_failed", status_code=500,
                 ) from error
-            fork_meta_dict["owned_copy_dir"] = dest
+            await allocation.aclose()
+            fork_meta_dict["owned_copy_dir"] = owned.receipt()
             fork.fork_metadata = json.dumps(fork_meta_dict)
             # Storage failure is not a copy failure: do not compensate a write
             # whose COMMIT is unconfirmed through a second mutation path.
             await self.db.update_session_field(fork_id, fork_metadata=fork.fork_metadata)
 
-            # 2. Copy the directory, then prepare the native transcript
+            # 2. Build the copy privately and install its cwd, then prepare the native transcript
             #    with the WHOLE conversation as genuine context — no history
             #    replay dumped into the first prompt (session-fork.md). On a
             #    backend/parent with no transcript yet, the harness returns
             #    needs_replay=True and we fall back to the replay path.
+            native_started = False
+            finishing = False
             try:
                 try:
                     # Cancellation ends this command only after its original
                     # thread exits. Neither compensation nor reservation release
                     # can race a writer still populating the destination.
-                    await complete_cleanup(asyncio.to_thread(self._copy_tree, parent.working_dir, dest))
+                    owned.require_staged()
+                    await complete_cleanup(asyncio.to_thread(owned.copy_from, source_path))
+                    owned.install()
+                except ForkDirectoryError:
+                    raise
                 except Exception as error:
                     raise ForkError(
                         f"Failed to copy the working directory: {error}",
                         reason="copy_failed", status_code=500,
                     ) from error
+                owned.require_current()
+                await self._check_fork_git_layout(Path(dest), Path(dest))
+                owned.require_current()
+                native_started = True
                 artifact = await harness.prepare_fork_copy(
                     parent_working_dir=parent.working_dir,
                     parent_resume_id=parent.claude_session_id,
                     parent_credential=parent_cred,
                     dest_working_dir=dest,
                     new_resume_id=resume_id_hint,
-                    hooks=self._fork_hooks(owner, fork, fork_meta_dict),
+                    hooks=self._fork_hooks(owner, fork, fork_meta_dict, owned),
                 )
-            except BaseException:
+                finishing = True
+                await self.db.finish_full_copy_fork(
+                    fork_id, artifact.resume_id, artifact.needs_replay, owned.require_current,
+                )
+                try:
+                    # The bound cwd must still name this copy after SQLite
+                    # acknowledges the write, at admission to the live map.
+                    owned.require_current()
+                except ForkDirectoryError:
+                    await self.db.update_session_field(fork_id, fork_status="initializing")
+                    raise
+            except BaseException as failure:
+                if finishing and not isinstance(failure, ForkDirectoryError):
+                    # A failed or cancelled storage wait does not prove rollback.
+                    raise
                 # Retire artifacts, then the owned directory, then its recovery
                 # row. Failed cleanup retains responsibility for the next boot.
                 try:
                     self.db.health.require_healthy()
-                    await harness.cleanup_incomplete_fork_artifacts(
-                        dest, fork.claude_session_id, fork_id, credential=parent_cred,
-                        artifact=(read_fork_checkpoint(fork_meta_dict["native_fork"])
-                                  if "native_fork" in fork_meta_dict else None),
-                        hooks=self._fork_hooks(owner, fork, fork_meta_dict),
-                    )
-                    self._remove_fork_copy_directory(dest, fork_meta_dict)
+                    if native_started:
+                        await harness.cleanup_incomplete_fork_artifacts(
+                            dest, fork.claude_session_id, fork_id, credential=parent_cred,
+                            artifact=(read_fork_checkpoint(fork_meta_dict["native_fork"])
+                                      if "native_fork" in fork_meta_dict else None),
+                            hooks=self._fork_hooks(owner, fork, fork_meta_dict),
+                        )
+                    remove_copy(dest, parent.user_id, fork_id, fork_meta_dict)
                     await self.db.delete_session(fork_id)
+                except ForkDirectoryError:
+                    logger.exception("fork %s: directory ownership could not be verified", fork_id)
                 except Exception:
                     logger.exception(
                         "fork %s: cleanup failed; leaving row + copied "
@@ -683,6 +709,8 @@ class ForkingMixin(SessionManagerBase):
                         fork_id,
                     )
                     raise
+                if isinstance(failure, ForkDirectoryError):
+                    raise ForkError(str(failure), reason="invalid_copy_destination", status_code=409) from failure
                 raise
 
             # 4. Apply resume state + finalize. fork_after_seq stays = last_seq
@@ -691,15 +719,6 @@ class ForkingMixin(SessionManagerBase):
             fork.claude_session_id = artifact.resume_id
             fork.fork_needs_replay = artifact.needs_replay
             fork.fork_status = "ready"
-            # fork_metadata already holds full_copy/duplicated_from/cleanup id
-            # from the INSERT — only the resume state + status change here.
-            await self.db.update_session_field(
-                fork_id,
-                claude_session_id=artifact.resume_id,
-                fork_needs_replay=artifact.needs_replay,
-                fork_status="ready",
-            )
-
             self.sessions[fork_id] = fork
             self._session_owner(fork)
 
@@ -711,8 +730,16 @@ class ForkingMixin(SessionManagerBase):
                 "fork_session_id": fork.id,
                 "name": fork.name,
             }, user_id=parent.user_id)
+            # If the process exits before recording delivery, startup must
+            # check the saved binding or use this fork's own admitted input.
+            before = fork.fork_metadata
+            acknowledged = await self.db.acknowledge_full_copy_delivery(fork.id)
+            if acknowledged is not None and fork.fork_metadata == before:
+                fork.fork_metadata = acknowledged
             return fork
         finally:
+            directory.close()
+            await allocation.aclose()
             if self.sessions.get(parent.id) is parent:
                 await self._release_session_reservation(owner, ReserveFork(False))
 

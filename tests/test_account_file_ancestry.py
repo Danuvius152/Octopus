@@ -44,9 +44,8 @@ async def test_deleting_an_intermediate_fork_uses_the_descendants_own_copy(ances
         assert (account / "attachments" / session_id / f"{metadata['id']}__ancestry.txt").read_bytes() == original
 
 
-async def test_a_new_fork_reads_the_nearest_owned_copy_before_a_deleted_ancestor(ancestry, monkeypatch):
-    _parent, middle, client, manager, account, metadata, original = ancestry
-    monkeypatch.setattr(manager, "_fork_copy_base", lambda: str(account / "forks"))
+async def test_a_new_fork_reads_the_nearest_owned_copy_before_a_deleted_ancestor(ancestry):
+    _parent, middle, client, _manager, account, metadata, original = ancestry
     duplicate = await client.post(f"/api/sessions/{middle.id}/duplicate", json={})
     assert duplicate.status_code == 201, duplicate.text
     child = duplicate.json()["id"]

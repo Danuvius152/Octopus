@@ -55,26 +55,32 @@ class NotifiersMixin(DatabaseBase):
             )
 
     async def load_notifiers(
-        self, user_id: str | None = None
+        self, user_id: str | None = None, *, enabled_only: bool = False,
     ) -> list[dict[str, Any]]:
-        """Every notifier, or one account's. The owner is on the row because
-        the manager needs it: an event must only reach its own account's
-        targets (multi-tenancy.md §7)."""
+        """Read the account's targets, or the installation's for a single operator."""
+        conditions = []
+        params = []
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+        if enabled_only:
+            # Match bool() in the row projection for SQLite's numeric, text, and BLOB values.
+            conditions.append("enabled NOT IN (0, '', X'')")
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
         async with self.transaction(write=False) as tx:
-            sql = f"SELECT {_NOTIFIER_COLS} FROM notifiers"
-            params: list[Any] = []
-            if user_id is not None:
-                sql += " WHERE user_id = ?"
-                params.append(user_id)
-            cursor = await tx.execute(sql + " ORDER BY created_at", params)
-            rows = await cursor.fetchall()
-            return [_notifier_row(row) for row in rows]
-
-    async def delete_notifier(self, notifier_id: str) -> bool:
-        async with self.transaction(write=True) as tx:
-            cursor = await tx.execute(
-                "DELETE FROM notifiers WHERE id = ?", (notifier_id,)
+            rows = await tx.fetch_all(
+                f"SELECT {_NOTIFIER_COLS} FROM notifiers{where} ORDER BY created_at", params,
             )
+        return [_notifier_row(row) for row in rows]
+
+    async def delete_notifier(self, notifier_id: str, *, user_id: str | None = None) -> bool:
+        where = "id = ?"
+        scope = [notifier_id]
+        if user_id is not None:
+            where += " AND user_id = ?"
+            scope.append(user_id)
+        async with self.transaction(write=True) as tx:
+            cursor = await tx.execute(f"DELETE FROM notifiers WHERE {where}", scope)
             return cursor.rowcount > 0
 
     async def update_notifier(

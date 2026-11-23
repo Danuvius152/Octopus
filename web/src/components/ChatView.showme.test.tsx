@@ -70,7 +70,12 @@ it.each(["selection", "page", "page round trip", "close viewer", "explicit old f
     if (outcome === "success") reads[0].resolve(Response.json({ path: "/obsolete/report.md" }));
     else reads[0].reject(new TypeError("Retired network failure"));
   });
-  expect(useSessionStore.getState().viewer).toEqual(transition === "explicit old file" ? { sessionId: b.id, path: "/explicit/older.md" } : null);
+  const viewer = useSessionStore.getState().viewer;
+  if (transition === "explicit old file") {
+    expect(viewer).toMatchObject({ sessionId: b.id, path: "/explicit/older.md" });
+  } else {
+    expect(viewer).toBeNull();
+  }
   expect(Object.values(useSessionStore.getState().messages).flat().some(message => message.is_error)).toBe(false);
 });
 
@@ -81,7 +86,7 @@ it.each(["success", "failure"])("keeps a newer viewing intent through an old %s 
   await act(async () => reads[0].resolve(outcome === "success" ? Response.json({ path: "/old.md" }) : Response.json({ detail: "Old failure" }, { status: 409 })));
   expect(useSessionStore.getState().viewer).toBeNull();
   await act(async () => reads[1].resolve(Response.json({ path: "/new.md" })));
-  expect(useSessionStore.getState().viewer).toEqual({ sessionId: a.id, path: "/new.md" });
+  expect(useSessionStore.getState().viewer).toMatchObject({ sessionId: a.id, path: "/new.md" });
   expect(useSessionStore.getState().messages[a.id].some(message => message.is_error)).toBe(false);
 });
 
@@ -91,7 +96,7 @@ it("keeps the newer viewer when its response finishes before the old viewing", a
   command("/showme second report");
   await act(async () => reads[1].resolve(Response.json({ path: "/new.md" })));
   await act(async () => reads[0].resolve(Response.json({ path: "/old.md" })));
-  expect(useSessionStore.getState().viewer).toEqual({ sessionId: a.id, path: "/new.md" });
+  expect(useSessionStore.getState().viewer).toMatchObject({ sessionId: a.id, path: "/new.md" });
 });
 
 it.each([200, 400])("ignores a body delivered after account retirement (HTTP %s)", async status => {

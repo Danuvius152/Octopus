@@ -322,7 +322,7 @@ export function ForkDialog({
         return;
       }
       const fork: SessionInfo = await res.json();
-      const applied = await sessionList.created(fork, observation, sessionId);
+      const applied = await sessionList.created(fork, observation, { archivedId: sessionId });
       if (!ownsDialog()) return;
       close();
       if (applied && sessionList.current(observation)) onForked(fork, observation);

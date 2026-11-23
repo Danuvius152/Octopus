@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette._utils import get_route_path
-from starlette.datastructures import MutableHeaders
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.routing import compile_path
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -123,7 +123,8 @@ async def lifespan(app: FastAPI):
         # acquire() verified this installation's exclusive managed cgroup.
         # Its prior writers are gone; recovery still preserves their unknown
         # outcomes. Standalone startup has no corresponding retirement proof.
-        await session_manager.initialize(db, previous_writers_retired=installation.profile is not None)
+        await session_manager.initialize(db, previous_writers_retired=installation.profile is not None,
+                                         defer_copy_delivery=True)
         # Restore round receipts before any background producer can start work.
         started.add("delegations")
         delegation_manager.bind(session_mgr=session_manager, db=db)
@@ -150,7 +151,6 @@ async def lifespan(app: FastAPI):
         notifiers.set_db(db)
         notifier_manager.set_db(db)
         session_manager.set_notifier_manager(notifier_manager)
-        await notifier_manager.load()
 
         # Bg task worker — lives in this FastAPI process so spawned
         # subprocesses survive any per-turn `claude --print` lifetime. The
@@ -209,8 +209,14 @@ async def lifespan(app: FastAPI):
         await sweep_wiki_history()
         started.add("wiki_worker")
         await wiki_worker.start(session_manager, paused=True)
+        if settings.enable_tunnel:
+            tunnel = CloudflareTunnel(port=settings.port)
+            url = await tunnel.start()
+            if url:
+                logger.info("Cloudflare Tunnel active: %s", url)
 
-        # Recovery is complete. No producer above can dispatch new work.
+        # Finish startup waits before checking cwd bindings and opening admission.
+        session_manager.admit_recovered_copies()
         service_health.open_admission()
         schedule_runner.start()
         wiki_registry.start_reconciler()
@@ -224,11 +230,6 @@ async def lifespan(app: FastAPI):
                 held_process_count=lambda: len(getattr(session_manager, "_held", {}) or {}),
             ), name="metrics-sampler",
         )
-        if settings.enable_tunnel:
-            tunnel = CloudflareTunnel(port=settings.port)
-            url = await tunnel.start()
-            if url:
-                logger.info("Cloudflare Tunnel active: %s", url)
         logger.info("MCP namespaces served in-process: %s", ", ".join(_mcp_mounts))
         yield
     except BaseException as exc:
@@ -382,21 +383,25 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
 
 
 _APP_AGENT_CHAT_ROUTE = compile_path(applications_router.APP_AGENT_CHAT_PATH)[0]
+# Follow Starlette's Route.matches() on the same root-relative path.
+_APP_BACKEND_PROXY_ROUTE = compile_path(applications_router.APP_BACKEND_PROXY_PATH)[0]
 
 
 class _HTTPCompression(GZipMiddleware):
-    """MCP and app agent streams send headers before their first event.
+    """Preserve stream timing and application proxy representations.
 
-    GZip buffers response.start even for excluded SSE content. Send headers
-    directly so a disconnect before the first body frame can preserve them.
-    Match the same root-relative path as Starlette's mounted namespaces.
+    GZip buffers MCP and app agent SSE headers until the first body frame.
+    App backend responses carry upstream fields such as repeated Vary through
+    unchanged and retain the representation selected by the proxy.
     """
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
             path = get_route_path(scope)
-            if path.startswith(MOUNT_PREFIX + "/") or (
-                scope["method"] == "POST" and _APP_AGENT_CHAT_ROUTE.fullmatch(path)
+            if (
+                path.startswith(MOUNT_PREFIX + "/")
+                or (scope["method"] == "POST" and _APP_AGENT_CHAT_ROUTE.fullmatch(path))
+                or _APP_BACKEND_PROXY_ROUTE.match(path)
             ):
                 await self.app(scope, receive, send)
                 return
@@ -499,8 +504,46 @@ class _HTTPResponses:
 app.add_middleware(_HTTPResponses)
 
 
+class _HTTPCORS(CORSMiddleware):
+    """Apply the site CORS policy without rewriting an upstream Vary field."""
+
+    async def simple_response(
+        self, scope: Scope, receive: Receive, send: Send, request_headers: Headers,
+    ) -> None:
+        if not _APP_BACKEND_PROXY_ROUTE.match(get_route_path(scope)):
+            await super().simple_response(scope, receive, send, request_headers)
+            return
+
+        async def response_send(message: Message) -> None:
+            if message["type"] != "http.response.start" or not scope.get("state", {}).get(
+                applications_router.APP_BACKEND_RESPONSE_STATE,
+            ):
+                await self.send(message, send, request_headers)
+                return
+
+            async def apply_policy(policy: Message) -> None:
+                headers = MutableHeaders(scope=message)
+                for name, value in policy["headers"]:
+                    if name == b"vary":
+                        # Starlette's simple CORS policy varies only on Origin.
+                        if not any(
+                            token.strip().lower() in {"origin", "*"}
+                            for field in headers.getlist("vary")
+                            for token in field.split(",")
+                        ):
+                            headers.append("vary", value.decode("latin-1"))
+                    else:
+                        headers[name.decode("latin-1")] = value.decode("latin-1")
+                await send(message)
+
+            # Let Starlette decide which policy headers to emit for this request.
+            await self.send({**message, "headers": []}, apply_policy, request_headers)
+
+        await self.app(scope, receive, response_send)
+
+
 app.add_middleware(
-    CORSMiddleware,
+    _HTTPCORS,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],

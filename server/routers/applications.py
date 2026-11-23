@@ -73,6 +73,8 @@ static_router = APIRouter(tags=["applications"])
 # /apps so it never rides along with API or SPA requests.
 APP_TOKEN_COOKIE = "octopus_app_token"
 APP_AGENT_CHAT_PATH = "/apps/{app_id}/agent/chat"
+APP_BACKEND_PROXY_PATH = "/apps/{app_id}/api/{path:path}"
+APP_BACKEND_RESPONSE_STATE = "app_backend_response"
 
 # Injected at startup (mirrors the agents/connectors routers).
 _manager: ApplicationManager | None = None
@@ -370,9 +372,19 @@ _SKIP_REQUEST_HEADERS = {
     "cookie", "authorization",
 }
 _SKIP_RESPONSE_HEADERS = {
-    "connection", "keep-alive", "transfer-encoding", "upgrade", "trailer",
-    "content-length",
+    b"connection", b"keep-alive", b"transfer-encoding", b"upgrade", b"trailer",
+    b"content-length",
 }
+
+
+def _prepare_proxy_response(request: Request, upstream: httpx.Response, response: Response) -> None:
+    headers = []
+    for name, value in upstream.headers.raw:
+        name = name.lower()
+        if name not in _SKIP_RESPONSE_HEADERS:
+            headers.append((name, value))
+    response.raw_headers[:0] = headers
+    request.scope.setdefault("state", {})[APP_BACKEND_RESPONSE_STATE] = True
 
 
 def _backend_raw_path(request: Request, path: str) -> bytes:
@@ -394,7 +406,7 @@ def _backend_raw_path(request: Request, path: str) -> bytes:
 
 
 @static_router.api_route(
-    "/apps/{app_id}/api/{path:path}",
+    APP_BACKEND_PROXY_PATH,
     methods=_PROXY_METHODS,
     # Not part of the typed client API: the only caller is an application's own
     # page, calling `api/…` relative to itself. Keeping it out of the schema
@@ -438,20 +450,17 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
         use.require_running()
         managed = await forward(row, use, upstream)
         if managed is not None:
-            return Response(managed.content, status_code=managed.status_code, headers={
-                key: value for key, value in managed.headers.items() if key.lower() not in _SKIP_RESPONSE_HEADERS
-            })
+            response = Response(managed.content, status_code=managed.status_code)
+            _prepare_proxy_response(request, managed, response)
+            return response
 
         client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
         use.add_cleanup(client.aclose)
         use.require_running()
         resp = await client.send(upstream, stream=True)
         own_response(use, resp)
-        response_headers = {key: value for key, value in resp.headers.items() if key.lower() not in _SKIP_RESPONSE_HEADERS}
-        response = BackendStreamingResponse(
-            resp.aiter_raw(), use=use, status_code=resp.status_code, headers=response_headers,
-            media_type=resp.headers.get("content-type"),
-        )
+        response = BackendStreamingResponse(resp.aiter_raw(), use=use, status_code=resp.status_code)
+        _prepare_proxy_response(request, resp, response)
         use.detach()
         return response
     except BaseException as exc:

@@ -5,14 +5,17 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 
 import { AgentFormPage } from "./AgentFormPage";
-import { handleWsMessage } from "../hooks/useWebSocket";
+import { handleWsMessage, useWebSocket } from "../hooks/useWebSocket";
 import { connectorInstallations } from "../lib/connectorInstallations";
 import { backendCatalogFixture } from "../test-support/backendCatalog";
 import { deferred } from "../test-support/deferred";
+import { Socket } from "../test-support/socket";
 import { refreshAgents } from "../lib/refreshAgents";
+import { showSession } from "../lib/selectSession";
+import { SidebarAgents } from "./SidebarAgents";
 import {
   useSessionStore, type Agent, type BackendKind, type SessionInfo,
 } from "../stores/sessionStore";
@@ -73,6 +76,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -1137,15 +1141,16 @@ describe("AgentFormPage", () => {
     useSessionStore.setState({
       sessions: [
         session({ id: "old", agent_id: "ag2", created_at: "2026-01-01T00:00:00Z" }),
-        session({ id: "new", agent_id: "ag2", created_at: "2026-02-01T00:00:00Z" }),
+        session({ id: "builder", agent_id: "ag2", origin: "application", created_at: "2026-02-01T00:00:00Z" }),
         // An application's conversation is not the user's chat.
         session({ id: "app", agent_id: "ag2", origin: "app", created_at: "2026-03-01T00:00:00Z" }),
+        session({ id: "delegated", agent_id: "ag2", origin: "delegation", created_at: "2026-04-01T00:00:00Z" }),
       ],
     });
     fireEvent.click(
       screen.getAllByRole("button", { name: "Chat" })[1]
     );
-    await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe("new"));
+    await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe("builder"));
     expect(useSessionStore.getState().mainView).toBe("chat");
   });
 
@@ -1182,7 +1187,7 @@ describe("AgentFormPage", () => {
       if (transition === "opening") { store.openAgentForm("ag1"); store.setPageTab("all"); }
     });
     const view = useSessionStore.getState().mainView;
-    await act(async () => receipt.resolve(json(session({ id: "late-chat", agent_id: "ag2" }))));
+    await act(async () => receipt.resolve(json(session({ id: "late-chat", agent_id: "ag2" }), 201)));
     await waitFor(() => expect(useSessionStore.getState().sessions.some((s) => s.id === "late-chat")).toBe(true));
     if (transition === "current") {
       expect(useSessionStore.getState().mainView).toBe("chat");
@@ -1193,24 +1198,437 @@ describe("AgentFormPage", () => {
     }
   });
 
-  it("keeps the new All-page error when an old chat failure arrives after a tab round trip", async () => {
-    const old = deferred<Response>();
+  it("shares one Chat submission across a double click and a tab round trip, then allows retry after rejection", async () => {
+    const receipt = deferred<Response>();
     let writes = 0;
     fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) =>
       String(url).endsWith("/sessions") && init?.method === "POST"
-        ? ++writes === 1 ? old.promise : json({}, 503) : emptyRead(url));
+        ? ++writes === 1 ? receipt.promise : json(session({ id: "retried" }), 201) : emptyRead(url));
     mount("ag1", [agent()], "all");
-    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    const chat = screen.getByRole("button", { name: "Chat" });
+    act(() => { fireEvent.click(chat); fireEvent.click(chat); });
     act(() => {
       useSessionStore.getState().setPageTab("form");
       useSessionStore.getState().setPageTab("all");
     });
-    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
-    await screen.findByText("HTTP 503");
-    await act(async () => old.resolve(json({}, 500)));
-    expect(screen.getByText("HTTP 503")).toBeVisible();
-    expect(screen.queryByText("HTTP 500")).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Chat" })); });
+    expect(writes).toBe(1);
+    await act(async () => receipt.resolve(json({ detail: "Agent unavailable" }, 404)));
+    expect(await screen.findByText(/HTTP 404|Agent unavailable/)).toBeVisible();
     expect(useSessionStore.getState().mainView).toBe("agent-form");
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe("retried"));
+    expect(writes).toBe(2);
+  });
+
+  it.each(["A first", "B first", "A→B→A"] as const)("navigates only from the most recent Chat click: %s", async (order) => {
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent(), agent({ id: "ag2", name: "Vera", is_system: false, pinned: false })], "all");
+    await clickChat("Octo");
+    await clickChat("Vera");
+    if (order === "A→B→A") await clickChat("Octo");
+    expect(writes.map(({ agentId }) => agentId)).toEqual(["ag1", "ag2"]);
+    const rows = [session({ id: "chat-a" }), session({ id: "chat-b", agent_id: "ag2" })];
+    const first = order === "B first" ? 1 : 0;
+    await act(async () => writes[first].reply.resolve(json(rows[first], 201)));
+    expect(useSessionStore.getState().activeSessionId).toBe(order === "A first" ? null : rows[first].id);
+    await act(async () => writes[1 - first].reply.resolve(json(rows[1 - first], 201)));
+    expect(reads).toHaveLength(1);
+    await act(async () => reads[0].reply.resolve(json(rows)));
+    expect(useSessionStore.getState().activeSessionId).toBe(order === "A→B→A" ? "chat-a" : "chat-b");
+    expect(useSessionStore.getState().sessions.map(({ id }) => id)).toEqual(["chat-a", "chat-b"]);
+  });
+
+  it.each([true, false])("lets only the latest Agent show a Chat error (older failure first: %s)", async (olderFirst) => {
+    const { writes } = controlChatHttp();
+    mount(null, [agent(), agent({ id: "ag2", name: "Vera", is_system: false, pinned: false })], "all");
+    await clickChat("Octo");
+    await clickChat("Vera");
+    if (olderFirst) {
+      await act(async () => writes[0].reply.resolve(json({}, 400)));
+      expect(screen.queryByText("HTTP 400")).toBeNull();
+    }
+    await act(async () => writes[1].reply.resolve(json({}, 422)));
+    if (!olderFirst) await act(async () => writes[0].reply.resolve(json({}, 400)));
+    expect(screen.getByText("HTTP 422")).toBeVisible();
+    expect(screen.queryByText("HTTP 400")).toBeNull();
+    expect(useSessionStore.getState().mainView).toBe("agent-form");
+  });
+
+  it("retires an old Chat submission even after signing back into the same account", async () => {
+    const { writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    await clickChat();
+    act(() => {
+      const store = useSessionStore.getState();
+      store.setToken("another-account");
+      store.setToken("tok");
+      useSessionStore.setState({ agents: [agent()] });
+      openAllAgents();
+    });
+    await clickChat();
+    expect(writes.map(({ agentId }) => agentId)).toEqual(["ag1", "ag1"]);
+    await act(async () => writes[0].reply.resolve(json(session({ id: "previous-sign-in" }), 201)));
+    expect(useSessionStore.getState().sessions).toEqual([]);
+    expect(useSessionStore.getState().mainView).toBe("agent-form");
+    await act(async () => writes[1].reply.resolve(json(session({ id: "new-sign-in" }), 201)));
+    expect(useSessionStore.getState().sessions.map(({ id }) => id)).toEqual(["new-sign-in"]);
+    expect(useSessionStore.getState().activeSessionId).toBe("new-sign-in");
+  });
+
+  it("keeps an explicit sidebar creation independent from an unresolved All-page Chat", async () => {
+    const { writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    render(<SidebarAgents />);
+    await clickChat();
+    fireEvent.click(screen.getByLabelText("New session for Octo"));
+    fireEvent.change(screen.getByPlaceholderText("Session name"), { target: { value: "Explicit chat" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create session" }));
+    expect(writes.map(({ agentId, body }) => [agentId, body.name])).toEqual([["ag1", undefined], ["ag1", "Explicit chat"]]);
+    await act(async () => writes[1].reply.resolve(json(session({ id: "explicit" }), 201)));
+    await act(async () => writes[0].reply.resolve(json({}, 400)));
+    expect(useSessionStore.getState().activeSessionId).toBe("explicit");
+  });
+
+  it("refreshes once when transport fails and preserves its POST after another tab's chat comes and goes", async () => {
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    await clickChat();
+    await act(async () => writes[0].reply.reject(new Error("Connection lost")));
+    expect(reads.map(({ archived }) => archived)).toEqual([false]);
+    await clickChat();
+    await clickChat();
+    expect(reads).toHaveLength(1);
+    await act(async () => reads[0].reply.resolve(json({}, 503)));
+    expect(screen.getByText(/Chat creation could not be confirmed/)).toBeVisible();
+    await clickChat();
+    await act(async () => reads[1].reply.resolve(json([])));
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    await clickChat();
+    const fromAnotherTab = session({ id: "another-tab" });
+    await act(async () => reads[2].reply.resolve(json([fromAnotherTab])));
+    expect(useSessionStore.getState().activeSessionId).toBe(fromAnotherTab.id);
+    await act(async () => {
+      handleWsMessage({ type: "session_archived", old_session_id: fromAnotherTab.id, new_session_id: null });
+      openAllAgents();
+    });
+    await clickChat();
+    expect(reads).toHaveLength(4);
+    await act(async () => reads[3].reply.resolve(json([])));
+    expect(writes).toHaveLength(1);
+  });
+
+  it("opens a chat accepted from another tab while the unknown submission's list read is still pending", async () => {
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    await clickChat();
+    await act(async () => writes[0].reply.reject(new Error("Connection lost")));
+    expect(reads).toHaveLength(1);
+    const other = session({ id: "another-tab-restored" });
+    await act(async () => handleWsMessage({ type: "session_unarchived", session_id: other.id, session: other }));
+    expect(useSessionStore.getState().activeSessionId).toBe(other.id);
+    await act(async () => reads[0].reply.resolve(json({}, 503)));
+    await act(async () => {
+      handleWsMessage({ type: "session_archived", old_session_id: other.id, new_session_id: null });
+      openAllAgents();
+    });
+    await clickChat();
+    expect(writes).toHaveLength(1);
+    await act(async () => reads[1].reply.resolve(json([])));
+  });
+
+  it.each(["timed out decoding the body", "invalid 201", "server error"] as const)("keeps the POST when its response %s", async (outcome) => {
+    vi.useFakeTimers();
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    await clickChat();
+    await act(async () => {
+      if (outcome === "timed out decoding the body") {
+        writes[0].reply.resolve(new Response(new ReadableStream(), { status: 201 }));
+        await vi.advanceTimersByTimeAsync(30_000);
+      } else {
+        writes[0].reply.resolve(outcome === "invalid 201" ? json({ id: "not-a-session" }, 201) : json({}, 503));
+      }
+    });
+    expect(reads.map(({ archived }) => archived)).toEqual([false]);
+    await clickChat();
+    expect(reads).toHaveLength(1);
+    await act(async () => reads[0].reply.resolve(json([])));
+    expect(screen.getByText(/Chat creation could not be confirmed/)).toBeVisible();
+    expect(writes).toHaveLength(1);
+  });
+
+  it.each(["list first", "restore event first"] as const)("preserves the 201 ID through reconnect and inferred removal: %s", async (order) => {
+    vi.useFakeTimers();
+    Socket.reset();
+    vi.stubGlobal("WebSocket", Socket);
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    renderHook(() => useWebSocket());
+    const first = Socket.instances[0];
+    await openSocket(first);
+    await act(async () => reads[0].reply.resolve(json([])));
+    await clickChat();
+    const second = await reconnectSocket(first);
+    await act(async () => reads[1].reply.resolve(json([])));
+    const original = session({ id: "original-created-chat" });
+    act(() => {
+      // A known selection can be absent from both lists. It exercises the
+      // inferred removal while the restore broadcast is still outstanding.
+      showSession(original.id, original.agent_id);
+      openAllAgents();
+    });
+    await act(async () => writes[0].reply.resolve(json(original, 201)));
+    expect(reads.map(({ archived }) => archived)).toEqual([false, false, true]);
+    await act(async () => reads[2].reply.resolve(json([])));
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    expect(useSessionStore.getState().sessions).toEqual([]);
+
+    await clickChat();
+    await clickChat();
+    expect(writes).toHaveLength(1);
+    expect(reads.map(({ archived }) => archived)).toEqual([false, false, true, true]);
+    const restore = { type: "session_unarchived", session_id: original.id, session: original };
+    if (order === "list first") await act(async () => reads[3].reply.resolve(json([original])));
+    else await act(async () => sendSocket(second, restore));
+    expect(useSessionStore.getState().activeSessionId).toBe(original.id);
+    expect(writes).toHaveLength(1);
+    if (order === "list first") await act(async () => sendSocket(second, restore));
+    else {
+      await act(async () => reads[3].reply.resolve(json([original])));
+      await act(async () => reads[4].reply.resolve(json([original])));
+    }
+  });
+
+  it("waits for current list evidence when a late 201 matches a row retained from the old socket", async () => {
+    vi.useFakeTimers();
+    Socket.reset();
+    vi.stubGlobal("WebSocket", Socket);
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    renderHook(() => useWebSocket());
+    const original = session({ id: "from-old-socket" });
+    const first = Socket.instances[0];
+    await openSocket(first);
+    await act(async () => reads[0].reply.resolve(json([])));
+    await clickChat();
+    await act(async () => sendSocket(first, { type: "session_created", session_id: original.id, session: original }));
+    expect(useSessionStore.getState().sessions).toEqual([original]);
+    await reconnectSocket(first);
+    await clickChat();
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    await act(async () => writes[0].reply.resolve(json(original, 201)));
+    await clickChat();
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    expect(useSessionStore.getState().mainView).toBe("agent-form");
+    expect(writes).toHaveLength(1);
+    await act(async () => reads[1].reply.resolve(json([])));
+    expect(reads[2].archived).toBe(true);
+    await act(async () => reads[2].reply.resolve(json([{ ...original, archived: true }])));
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    await clickChat();
+    expect(writes).toHaveLength(2);
+    await act(async () => writes[1].reply.resolve(json(session({ id: "after-archive" }), 201)));
+    expect(useSessionStore.getState().activeSessionId).toBe("after-archive");
+  });
+
+  it("keeps the 201 ID occupied when an interim reconnect list shows it before inclusive confirmation", async () => {
+    vi.useFakeTimers();
+    Socket.reset();
+    vi.stubGlobal("WebSocket", Socket);
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    renderHook(() => useWebSocket());
+    const first = Socket.instances[0];
+    await openSocket(first);
+    await act(async () => reads[0].reply.resolve(json([])));
+    await clickChat();
+    const second = await reconnectSocket(first);
+    const original = session({ id: "interim-list-chat" });
+    await act(async () => writes[0].reply.resolve(json(original, 201)));
+    expect(reads.map(({ archived }) => archived)).toEqual([false, false]);
+    await act(async () => reads[1].reply.resolve(json([original])));
+    expect(reads.map(({ archived }) => archived)).toEqual([false, false, true]);
+    const interimNavigation = useSessionStore.getState().activeSessionId;
+    act(openAllAgents);
+    await clickChat();
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    // The inclusive response misses the session because it was restored
+    // between the live and archived reads. Its event has not arrived yet.
+    await act(async () => reads[2].reply.resolve(json([])));
+    expect(useSessionStore.getState().sessions).toEqual([]);
+    await clickChat();
+    expect(writes).toHaveLength(1);
+    expect(interimNavigation).toBeNull();
+    expect(reads.map(({ archived }) => archived)).toEqual([false, false, true, true]);
+    await act(async () => reads[3].reply.resolve(json([original])));
+    expect(useSessionStore.getState().activeSessionId).toBe(original.id);
+    await act(async () => sendSocket(second, { type: "session_unarchived", session_id: original.id, session: original }));
+  });
+
+  it("opens a row accepted by the new socket after the unknown POST's reconnect read fails", async () => {
+    vi.useFakeTimers();
+    Socket.reset();
+    vi.stubGlobal("WebSocket", Socket);
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    renderHook(() => useWebSocket());
+    const first = Socket.instances[0];
+    await openSocket(first);
+    await act(async () => reads[0].reply.resolve(json([])));
+    await clickChat();
+    await act(async () => writes[0].reply.reject(new Error("Connection lost")));
+    await act(async () => reads[1].reply.resolve(json({}, 503)));
+    const second = await reconnectSocket(first);
+    const other = session({ id: "restored-on-new-socket" });
+    await act(async () => sendSocket(second, { type: "session_unarchived", session_id: other.id, session: other }));
+    await act(async () => reads[2].reply.resolve(json({}, 503)));
+    await clickChat();
+    expect(useSessionStore.getState().activeSessionId).toBe(other.id);
+    expect(reads).toHaveLength(3);
+    await act(async () => {
+      sendSocket(second, { type: "session_archived", old_session_id: other.id, new_session_id: null });
+      openAllAgents();
+    });
+    await clickChat();
+    expect(writes).toHaveLength(1);
+    await act(async () => reads[3].reply.resolve(json([])));
+  });
+
+  it.each(["restore", "settled list"] as const)("uses current evidence ahead of a late 201: %s", async (evidence) => {
+    vi.useFakeTimers();
+    Socket.reset();
+    vi.stubGlobal("WebSocket", Socket);
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    renderHook(() => useWebSocket());
+    const first = Socket.instances[0];
+    await openSocket(first);
+    await act(async () => reads[0].reply.resolve(json([])));
+    await clickChat();
+    const second = await reconnectSocket(first);
+    const original = session({ id: "restored-before-late-201" });
+    if (evidence === "restore") {
+      await act(async () => sendSocket(second, { type: "session_unarchived", session_id: original.id, session: original }));
+    } else {
+      await act(async () => reads[1].reply.resolve(json([original])));
+    }
+    await act(async () => writes[0].reply.resolve(json(original, 201)));
+    expect(useSessionStore.getState().activeSessionId).toBe(original.id);
+    if (evidence === "restore") await act(async () => reads[1].reply.resolve(json({}, 503)));
+    expect(reads.map(({ archived }) => archived)).toEqual([false, false]);
+    expect(writes).toHaveLength(1);
+  });
+
+  it("opens a current ordinary list row after an unrelated archive follow-up fails", async () => {
+    vi.useFakeTimers();
+    Socket.reset();
+    vi.stubGlobal("WebSocket", Socket);
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    renderHook(() => useWebSocket());
+    const first = Socket.instances[0];
+    await openSocket(first);
+    await act(async () => reads[0].reply.resolve(json([session({ id: "unrelated-before-refresh", agent_id: "ag2" })])));
+    await clickChat();
+    await act(async () => writes[0].reply.reject(new Error("Connection lost")));
+    const other = session({ id: "other-chat-in-ordinary-list" });
+    await act(async () => reads[1].reply.resolve(json([other])));
+    expect(reads.map(({ archived }) => archived)).toEqual([false, false, true]);
+    expect(useSessionStore.getState().activeSessionId).toBe(other.id);
+    act(openAllAgents);
+    await act(async () => reads[2].reply.resolve(json({}, 503)));
+    await clickChat();
+    expect(useSessionStore.getState().activeSessionId).toBe(other.id);
+    expect(reads).toHaveLength(3);
+    await act(async () => {
+      sendSocket(first, { type: "session_archived", old_session_id: other.id, new_session_id: null });
+      openAllAgents();
+    });
+    await clickChat();
+    expect(writes).toHaveLength(1);
+    await act(async () => reads[3].reply.resolve(json([])));
+  });
+
+  it.each(["confirmed receipt", "unknown submission"] as const)("continues the latest Chat confirmation across a canceled read: %s", async (outcome) => {
+    vi.useFakeTimers();
+    Socket.reset();
+    vi.stubGlobal("WebSocket", Socket);
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    renderHook(() => useWebSocket());
+    const original = session({ id: "after-reconnect" });
+    const other = session({ id: "other-agent-chat", agent_id: "other-agent" });
+    const first = Socket.instances[0];
+    await openSocket(first);
+    await act(async () => reads[0].reply.resolve(json([])));
+    await clickChat();
+    await act(async () => {
+      sendSocket(first, { type: "session_created", session_id: other.id, session: other });
+      if (outcome === "confirmed receipt") writes[0].reply.resolve(json(original, 201));
+      else writes[0].reply.reject(new Error("Connection lost"));
+    });
+    expect(reads).toHaveLength(2);
+    await reconnectSocket(first);
+    expect(screen.queryByText(/Chat creation could not be confirmed/)).toBeNull();
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    expect(reads).toHaveLength(3);
+    await act(async () => reads[1].reply.resolve(json([other])));
+    await act(async () => reads[2].reply.resolve(json([original, other])));
+    expect(useSessionStore.getState().activeSessionId).toBe(original.id);
+    expect(writes).toHaveLength(1);
+  });
+
+  it.each(["archived row", "archive event", "delete event", "delete before 201"] as const)("permits fresh creation after an explicit %s", async (evidence) => {
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    await clickChat();
+    const original = session({ id: "original" });
+    const other = session({ id: "unrelated", agent_id: "other-agent" });
+    const deleted = { type: "session_deleted", session_id: original.id };
+    await act(async () => {
+      handleWsMessage({ type: "session_created", session_id: other.id, session: other });
+      if (evidence === "delete before 201") handleWsMessage(deleted);
+      writes[0].reply.resolve(json(original, 201));
+    });
+    if (evidence !== "delete before 201") {
+      expect(reads.map(({ archived }) => archived)).toEqual([true]);
+      await act(async () => reads[0].reply.resolve(json([other])));
+      await clickChat();
+      expect(writes).toHaveLength(1);
+      await act(async () => {
+        if (evidence === "archive event") handleWsMessage({ type: "session_archived", old_session_id: original.id, new_session_id: null });
+        if (evidence === "delete event") handleWsMessage(deleted);
+        reads[1].reply.resolve(json(evidence === "archived row" ? [other, { ...original, archived: true }] : [other]));
+      });
+      if (reads[2]) await act(async () => reads[2].reply.resolve(json([other])));
+    }
+    expect(useSessionStore.getState().sessions.some(({ id }) => id === original.id)).toBe(false);
+    expect(useSessionStore.getState().mainView).toBe("agent-form");
+    await clickChat();
+    expect(writes).toHaveLength(2);
+    await act(async () => writes[1].reply.resolve(json(session({ id: "replacement" }), 201)));
+    expect(useSessionStore.getState().activeSessionId).toBe("replacement");
+  });
+
+  it("preserves a received archive row for a late 201 even after a later snapshot removes the row", async () => {
+    const { reads, writes } = controlChatHttp();
+    mount(null, [agent()], "all");
+    const original = session({ id: "archived-before-receipt" });
+    await clickChat();
+    await act(async () => handleWsMessage({ type: "session_archived", old_session_id: "other-1", new_session_id: null }));
+    await act(async () => reads[0].reply.resolve(json([{ ...original, archived: true }])));
+    expect(useSessionStore.getState().archivedSessions.map(({ id }) => id)).toContain(original.id);
+    await act(async () => handleWsMessage({ type: "session_archived", old_session_id: "other-2", new_session_id: null }));
+    await act(async () => reads[1].reply.resolve(json([])));
+    expect(useSessionStore.getState().archivedSessions).toEqual([]);
+    await act(async () => writes[0].reply.resolve(json(original, 201)));
+    expect(useSessionStore.getState().sessions).toEqual([]);
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    await clickChat();
+    expect(writes).toHaveLength(2);
+    await act(async () => writes[1].reply.resolve(json(session({ id: "replacement-after-late-201" }), 201)));
+    expect(useSessionStore.getState().activeSessionId).toBe("replacement-after-late-201");
   });
 
   it("archives from a row and keeps the page open", async () => {
@@ -1335,6 +1753,64 @@ function emptyRead(url: unknown): Response {
   return json(/\/api\/agents\/[^/]+\/connectors$/.test(String(url)) ? { installation_ids: [] } : []);
 }
 
+function controlChatHttp() {
+  const writes: { agentId: string; body: Record<string, unknown>; reply: ReturnType<typeof deferred<Response>> }[] = [];
+  const reads: { archived: boolean; reply: ReturnType<typeof deferred<Response>> }[] = [];
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    const address = new URL(String(url), window.location.origin);
+    const agentId = /^\/api\/agents\/([^/]+)\/sessions$/.exec(address.pathname)?.[1];
+    if (agentId && init?.method === "POST") {
+      const reply = deferred<Response>();
+      writes.push({ agentId, body: JSON.parse(String(init.body)), reply });
+      return reply.promise;
+    }
+    if (address.pathname === "/api/sessions") {
+      const reply = deferred<Response>();
+      reads.push({ archived: address.searchParams.has("include_archived"), reply });
+      return reply.promise;
+    }
+    if (address.pathname === "/api/agents" && !address.searchParams.has("include_archived")) {
+      return json(useSessionStore.getState().agents);
+    }
+    return emptyRead(url);
+  });
+  return { reads, writes };
+}
+
+async function clickChat(name?: string) {
+  const row = name && screen.getByText(name).closest<HTMLElement>(".library-row");
+  const button = (row ? within(row) : screen).getByRole("button", { name: "Chat" });
+  await act(async () => { fireEvent.click(button); });
+}
+
+function openAllAgents() {
+  const state = useSessionStore.getState();
+  state.openAgentForm();
+  state.setPageTab("all");
+}
+
+async function openSocket(socket: Socket) {
+  await act(async () => {
+    socket.readyState = Socket.OPEN;
+    socket.onopen?.();
+  });
+}
+
+async function reconnectSocket(first: Socket): Promise<Socket> {
+  act(() => {
+    first.readyState = Socket.CLOSED;
+    first.onclose?.({ code: 1013 });
+    vi.advanceTimersByTime(3000);
+  });
+  const second = Socket.instances[1];
+  await openSocket(second);
+  return second;
+}
+
+function sendSocket(socket: Socket, event: object) {
+  socket.onmessage?.({ data: JSON.stringify(event) });
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -1349,8 +1825,17 @@ function session(o: Partial<SessionInfo> = {}): SessionInfo {
     working_dir: "/tmp",
     status: "idle",
     created_at: "2026-01-01T00:00:00Z",
+    archived: false,
+    backend: "codex",
+    message_count: 0,
+    transcript_integrity: "ok",
+    can_steer: false,
+    can_observe_context: false,
+    can_compact: false,
+    can_fork: false,
+    fork_is_full_copy: false,
     origin: "user",
     agent_id: "ag1",
     ...o,
-  } as SessionInfo;
+  };
 }

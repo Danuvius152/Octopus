@@ -407,7 +407,7 @@ it("offers a native image's original path through live WS and saved history", as
     fireEvent.click(rendered.getByRole("button", { name: "Copy path" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(savedPath));
     fireEvent.click(rendered.getByRole("button", { name: "Open in viewer" }));
-    expect(useSessionStore.getState().viewer).toEqual({ sessionId: "image-session", path: savedPath });
+    expect(useSessionStore.getState().viewer).toMatchObject({ sessionId: "image-session", path: savedPath });
     rendered.unmount();
     const restored = render(<MessageBubble sessionId="image-session" message={JSON.parse(JSON.stringify(message))} />);
     expect(restored.getByRole("button", { name: "Copy path" })).toBeVisible();

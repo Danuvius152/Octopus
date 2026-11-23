@@ -13,7 +13,6 @@ import pytest
 
 from server.database import Database
 from server.notifiers import NotifierEvent, NotifierManager
-from server.notifiers.base import NotifierBase
 from server.notifiers.webhook import WebhookNotifier
 
 # ---------------------------------------------------------------------------
@@ -78,23 +77,15 @@ async def test_delete_notifier(db):
 
 
 @pytest.mark.asyncio
-async def test_manager_loads_only_enabled(db):
-    await db.save_notifier("on", "webhook", "On", {"url": "a"}, _now())
-    await db.save_notifier("off", "webhook", "Off", {"url": "b"}, _now(), enabled=False)
+async def test_single_operator_events_reach_all_enabled_targets(db, monkeypatch):
+    await db.save_notifier("a", "webhook", "A", {"url": "https://a"}, _now(), user_id="u-1")
+    await db.save_notifier("b", "webhook", "B", {"url": "https://b"}, _now(), user_id="u-2")
+    await db.save_notifier("old", "webhook", "Old", {"url": "https://old"}, _now())
+    await db.save_notifier("off", "webhook", "Off", {"url": "https://off"}, _now(), enabled=False)
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE notifiers SET enabled = 2 WHERE id = 'old'")
     mgr = NotifierManager()
     mgr.set_db(db)
-    await mgr.load()
-    ids = [n.id for n in mgr.list()]
-    assert ids == ["on"]
-
-
-@pytest.mark.asyncio
-async def test_manager_fires_to_all_registered(db, monkeypatch):
-    await db.save_notifier("a", "webhook", "A", {"url": "https://a"}, _now())
-    await db.save_notifier("b", "webhook", "B", {"url": "https://b"}, _now())
-    mgr = NotifierManager()
-    mgr.set_db(db)
-    await mgr.load()
 
     sent: list[tuple[str, NotifierEvent]] = []
 
@@ -109,7 +100,7 @@ async def test_manager_fires_to_all_registered(db, monkeypatch):
     await mgr.fire(event)
 
     sent_ids = sorted(s[0] for s in sent)
-    assert sent_ids == ["a", "b"]
+    assert sent_ids == ["a", "b", "old"]
     assert all(s[1].type == "session_idle" for s in sent)
 
 
@@ -120,7 +111,6 @@ async def test_manager_swallows_per_notifier_exceptions(db, monkeypatch, caplog)
     await db.save_notifier("bad", "webhook", "B", {"url": "https://b"}, _now())
     mgr = NotifierManager()
     mgr.set_db(db)
-    await mgr.load()
 
     sent: list[str] = []
 
@@ -203,7 +193,6 @@ async def test_webhook_delivery_logs_are_safe_per_target(db, monkeypatch, caplog
             await db.save_notifier(target, "webhook", target, {"url": url}, _now())
         manager = NotifierManager()
         manager.set_db(db)
-        await manager.load()
 
         caplog.set_level(level)
         async with asyncio.TaskGroup() as tasks:
@@ -290,37 +279,3 @@ async def test_session_manager_fires_idle_notification(monkeypatch):
     assert fired_event.session_id == "s-1"
     assert fired_event.session_name == "My session"
     assert fake_mgr.fire.call_args.args[1] == "u-1"
-
-
-@pytest.mark.asyncio
-async def test_an_event_reaches_only_its_own_accounts_targets():
-    """One account's session going idle must not poke another's webhook.
-
-    `fire` sent every event to every registered target, which on a single-user
-    install is right and on a site is a notification channel between strangers
-    (multi-tenancy.md §7).
-    """
-    from server.notifiers.manager import NotifierManager
-
-    sent: list[str] = []
-
-    class _Target(NotifierBase):
-        type = "webhook"
-
-        def __init__(self, id: str) -> None:
-            super().__init__(id=id, label=id, config={})
-
-        async def send(self, event: NotifierEvent) -> None:
-            sent.append(self.id)
-
-    mgr = NotifierManager()
-    mgr._notifiers = {"a": _Target("a"), "b": _Target("b"), "old": _Target("old")}
-    mgr._owner = {"a": "u-1", "b": "u-2", "old": None}
-
-    await mgr.fire(NotifierEvent(type="session_idle", title="t", message="m"), "u-1")
-    assert sent == ["a"], sent
-
-    # Pre-accounts: no owner anywhere, and the one operator gets everything.
-    sent.clear()
-    await mgr.fire(NotifierEvent(type="session_idle", title="t", message="m"))
-    assert sorted(sent) == ["a", "b", "old"]

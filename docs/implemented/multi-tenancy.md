@@ -202,22 +202,22 @@ using the admitted account scope. A nonempty update captures its own returned ro
 account-scoped UPDATE and returns it only after COMMIT succeeds. A concurrent
 later PATCH or DELETE does not replace that receipt with another row or a
 post-commit existence assertion. Missing and foreign targets both return 404.
-Empty or all-null updates perform only the scoped existence read and do not
-reload the runtime manager. Internal calls with `user_id=None` retain their
+Empty or all-null updates perform only the scoped existence read.
+Internal calls with `user_id=None` retain their
 existing unscoped meaning.
 
-After a nonempty commit, the route separately reloads the notifier manager;
-neither reload I/O nor HTTP response handling extends the write transaction.
-A normal reload exception returns HTTP 503 with
-`code="notifier_refresh_unconfirmed"`, the original `notifier_id`,
-`committed=true` and a detail explaining that saving succeeded but runtime
-refresh is unconfirmed. It logs the original exception and does not undo or
-repeat the write. COMMIT or reload storage-authority failures retain the shared
-database fail-stop boundary rather than becoming this ordinary 503. A commit
-receipt, runtime refresh and external notification delivery remain separate facts.
-Real HTTP/SQLite regressions in `tests/test_notifier_routes.py` cover receipt
-ordering and account scope; `tests/test_notifier_storage_failure.py` injects
-SQLite failures at COMMIT and at the subsequent reload read in isolated processes.
+POST, PATCH and DELETE acknowledge their own committed operations. For each
+event, the notifier manager reads the current enabled targets for that
+account using the shared SQLite transaction boundary. A committed change
+before the selection controls that event. A selection already made may
+finish delivery while a later write commits. Parallel sends occur after the
+read transaction. An ordinary read failure skips that event and logs the
+failure. Loss of storage authority at the read or COMMIT retains the database
+fail-stop behavior.
+
+`tests/test_notifier_routes.py` covers real HTTP/SQLite receipts, concurrent
+selection and account scope. `tests/test_notifier_storage_failure.py` checks
+COMMIT and selection failures in isolated processes.
 
 Known limits remain explicit.
 `schedules_changed` is a global empty invalidation notification; account-scoped
@@ -240,8 +240,9 @@ resolver. Additional account policies belong to
 attachments, large prompts and research roots. A new session without an explicit
 directory uses the account workspace. Relative paths resolve there; absolute
 paths are validated against the account root and granted extra roots after
-symlink resolution. Applications legitimately work in their account-owned sibling
-directory, not necessarily below `workspace/` itself.
+symlink resolution. Account application directories and new full-copy fork
+directories are siblings of `workspace/`. Archived successors use the same
+ordinary directory authorization. See [full-copy fork behavior](session-fork.md#2-behavior).
 
 ### Continuous directory authorization
 

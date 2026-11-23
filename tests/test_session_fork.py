@@ -130,7 +130,6 @@ async def test_fork_settings_snapshot_matches_database_during_parent_update(mana
             )
 
     monkeypatch.setattr(manager.db, "create_fork_session", mutate_after_insert)
-    monkeypatch.setattr(manager, "_fork_copy_base", lambda: str(tmp_path / "forks"))
     fork = await manager.duplicate_session(parent.id) if full_copy else await manager.fork_session(parent.id, 2)
     assert (fork.model, fork.reasoning_effort, fork.service_tier) == ("original-model", "low", "fast")
     if not full_copy:

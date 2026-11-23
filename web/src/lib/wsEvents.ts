@@ -60,7 +60,7 @@ const application: Guard<Application> = fields({
   error: maybeText, deletion: optional(nullable(fields({ phase: oneOf("retiring", "files"), keep_files: boolean, error: maybeText }))),
   archived: boolean, created_at: text, updated_at: text, last_built_at: maybeText, pinned: boolean, pin_order: maybeNumber,
 });
-const session: Guard<SessionInfo> = fields({
+export const isSessionInfo: Guard<SessionInfo> = fields({
   id, name: text, working_dir: text, status: oneOf("idle", "running"), created_at: text,
   message_count: integer, transcript_integrity: oneOf("ok", "duplicate_seq"), claude_session_id: maybeText,
   credential_id: maybeText, agent_id: maybeText, origin: text, backend, ...settings,
@@ -182,8 +182,8 @@ const definitions = [
   event("agent_updated", { agent, agent_id: optional(id) }),
   event("agent_archived", { agent_id: id, agent: optional(agent) }),
   event("agent_deleted", { agent_id: id }),
-  event("session_created", { ...inSession, session: optional(session) }),
-  event("session_unarchived", { ...inSession, session, dispatch_state: optional(dispatch) }),
+  event("session_created", { ...inSession, session: optional(isSessionInfo) }),
+  event("session_unarchived", { ...inSession, session: isSessionInfo, dispatch_state: optional(dispatch) }),
   event("session_archived", { old_session_id: id, new_session_id: optional(nullable(id)), name: optional(text), ...settings,
     dispatch_state: optional(dispatch), archive_result: optional(archiveResult) }),
   event("session_forked", { fork_session_id: id }),

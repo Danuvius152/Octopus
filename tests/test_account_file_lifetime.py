@@ -9,7 +9,7 @@ import pytest
 
 from server.large_prompts import LARGE_PROMPT_THRESHOLD_BYTES, spill_if_large
 from server.routers import attachments as attachment_routes
-from server.sessions.forking import ForkingMixin
+from server.sessions.fork_directory import CopyDirectory
 from tests.test_account_file_layout import managed_files as managed_files
 from tests.test_service_layout import account_installation as account_installation
 
@@ -72,25 +72,24 @@ async def test_delete_refuses_an_original_fork_reservation_until_copy_finishes(m
     await manager.db.append_message(parent.id, 0, "user", "text", "The complete original history")
     before = await manager.db.load_messages(parent.id)
     (account / "workspace" / "original.txt").write_bytes(b"Complete workspace")
-    monkeypatch.setattr(ForkingMixin, "_fork_copy_base", staticmethod(lambda: str(account / "forks")))
     entered, release = asyncio.Event(), threading.Event()
     loop = asyncio.get_running_loop()
-    copy_tree = manager._copy_tree
+    copy_tree = CopyDirectory.copy_from
 
-    def copying(source, destination):
+    def copying(directory, source):
         loop.call_soon_threadsafe(entered.set)
         assert release.wait(5), "The original fork copy was not released"
-        copy_tree(source, destination)
+        copy_tree(directory, source)
 
-    monkeypatch.setattr(manager, "_copy_tree", copying)
+    monkeypatch.setattr(CopyDirectory, "copy_from", copying)
     creation = asyncio.create_task(client.post(f"/api/sessions/{parent.id}/duplicate", json={}))
     try:
         await asyncio.wait_for(entered.wait(), 3)
         pending, = await manager.db.load_incomplete_forks()
         assert pending["forked_from_session_id"] == parent.id
         assert pending["fork_status"] == "initializing"
-        assert json.loads(pending["fork_metadata"])["owned_copy_dir"] == pending["working_dir"]
-        assert Path(pending["working_dir"]).is_relative_to(account / "forks")
+        assert json.loads(pending["fork_metadata"])["owned_copy_dir"]["path"] == pending["working_dir"]
+        assert Path(pending["working_dir"]).parent == account / "fork"
         refused = await client.delete(f"/api/sessions/{parent.id}")
         assert refused.status_code == 409, "Parent deletion must refuse the original fork reservation"
         assert manager.get_session(parent.id, parent.user_id) is parent

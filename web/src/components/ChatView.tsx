@@ -944,7 +944,7 @@ export function ChatView({
         confirmation = new ArchiveDeadline();
         checking = true;
         feedback("");
-        const accepted = await sessionList.created(fresh, observation, activeSessionId, confirmation);
+        const accepted = await sessionList.created(fresh, observation, { archivedId: activeSessionId, deadline: confirmation });
         confirmation.finish();
         if (!accepted || !sessionList.current(observation)) {
           feedback("Archive committed. Confirm the original archive to check its successor.", true);

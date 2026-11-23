@@ -16,18 +16,21 @@ no second weaker token to leak.
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import asdict, replace
 from functools import partial
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, JSONResponse
 
 from ..deps import SessionMgr, ViewerUser
 from ..file_viewer import (
+    DocumentDirectoryChanged,
     FileNotFound,
     FileTooLarge,
     PathRejected,
     ResolvedFile,
+    ResourceDirectory,
     UnsupportedType,
     resolve_safe_path,
 )
@@ -61,9 +64,32 @@ async def _working_dir_for(
     return working_dir
 
 
-def _resolve_or_raise(working_dir: str, path: str) -> ResolvedFile:
+def _source_directory(
+    source_directory: str | None = None, source_directory_id: str | None = None,
+) -> ResourceDirectory | None:
+    if source_directory is None and source_directory_id is None:
+        return None
+    if not source_directory or not source_directory_id:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "A source directory and its path ID are required.",
+        )
+    return ResourceDirectory(source_directory, source_directory_id)
+
+
+SourceDirectory = Annotated[ResourceDirectory | None, Depends(_source_directory)]
+
+
+def _resolve_or_raise(
+    working_dir: str,
+    path: str,
+    source_directory: ResourceDirectory | None,
+    *,
+    canonical: bool = False,
+) -> ResolvedFile:
     try:
-        return resolve_safe_path(working_dir, path)
+        return resolve_safe_path(working_dir, path, canonical=canonical, source_directory=source_directory)
+    except DocumentDirectoryChanged as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
     except PathRejected as e:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
     except FileNotFound as e:
@@ -147,6 +173,7 @@ async def resolve_showme(
 async def file_meta(
     session_manager: SessionMgr,
     session_id: str,
+    source_directory: SourceDirectory,
     path: str = Query(...),
     user_id: ViewerUser = None,
 ) -> JSONResponse:
@@ -158,10 +185,12 @@ async def file_meta(
     that will never render). Same security path as /files.
     """
     working_dir = await _working_dir_for(session_manager, session_id, user_id)
-    resolved = _resolve_or_raise(working_dir, path)
+    resolved = _resolve_or_raise(working_dir, path, source_directory)
     return JSONResponse(
         {
             "path": resolved.relative_path,
+            "canonical_path_id": resolved.canonical_path_id,
+            "canonical_directory": asdict(resolved.canonical_directory),
             "kind": resolved.kind,
             "mime_type": resolved.mime_type,
             "size": resolved.size,
@@ -173,18 +202,30 @@ async def file_meta(
 async def get_file(
     session_manager: SessionMgr,
     session_id: str,
+    source_directory: SourceDirectory,
     path: str = Query(...),
     preview: bool = False,
+    canonical_path_id: str | None = None,
     user_id: ViewerUser = None,
 ) -> FileResponse:
     working_dir = await _working_dir_for(session_manager, session_id, user_id)
-    resolved = _resolve_or_raise(working_dir, path)
+    resolved = _resolve_or_raise(
+        working_dir, path, source_directory, canonical=canonical_path_id is not None,
+    )
+    if canonical_path_id is not None and (
+        resolved.relative_path != path or resolved.canonical_path_id != canonical_path_id
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The file path changed. Reopen the file to read it.",
+        )
     # FileResponse handles streaming + ETag + Range. We override
     # media_type so e.g. .md is delivered as text/markdown rather
     # than the default application/octet-stream.
     return FileResponse(
         resolved.abs_path,
         media_type=resolved.mime_type,
+        headers={"Cache-Control": "no-store"} if source_directory is not None else None,
         filename=resolved.abs_path.name,
         content_disposition_type="inline" if preview and resolved.kind == "pdf" else "attachment",
     )

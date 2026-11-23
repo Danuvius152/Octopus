@@ -17,19 +17,33 @@ throwaway copy of the project without disturbing the original.
 
 Planning resolves the source, destination and existing symlink ancestors before
 session insertion, directory creation or copying. An equal destination or one
-inside the source is refused with `invalid_copy_destination`; relative paths
-and aliases use their actual filesystem relationship. Legal independent targets
-keep the complete-copy and failure-compensation behavior below. Planning never
-creates the copy base, skips content or silently selects another target.
+inside the source is refused with `invalid_copy_destination`. Relative paths
+and aliases use their actual filesystem relationship. Planning holds the
+nearest existing parent directory open and creates no directories.
 An application session's independent full copy does not inherit responsibility
 for the original application's resources or deletion.
 
+Git administration must stay inside the copy. This includes the worktree,
+private and common Git directories, object alternates, nested repositories and
+submodules. A self-contained layout is copied as it stands, including ordinary
+file symlinks. Linked worktrees, references that would escape the copy, and
+layouts whose independence cannot be established return `unsupported_git_layout`.
+The error points to using a self-contained working directory. The same rule
+checks the installed copy before native history preparation because the source
+can change while the copy is in progress.
+
 - New session under the same agent/backend/credential, **renamed** (`/fork
   <name>`, default `"<parent name> (fork)"`).
-- Working dir = a **literal full copy** of the parent's working dir at
-  `~/.octopus/fork/<basename>-<forkid>/` (incl. .git/node_modules/.venv — the
-  copy includes the full directory). Parent directories may exist; the
-  destination itself is created exclusively and must not already exist.
+- Working dir = a **literal full copy** of the parent's working dir under
+  `<account-root>/fork/<basename>-<forkid>/`, beside the default `workspace/`.
+  It includes directories such as `.git`, `node_modules` and `.venv`. An
+  installation without accounts uses `~/.octopus/fork/`. The final working
+  directory is installed exclusively.
+- A former global fork stays at its saved path. An ordinary archive successor
+  inherits the cwd only if the current account grants allow it. For a legacy
+  copy outside the current roots, an administrator can verify ownership and
+  grant the account that specific directory through `extra_roots`. The archive
+  result and successor creation result are reported separately.
 - **History carried over (native-copy)**: the fork **resumes the parent's real
   conversation**, not a replay. `harness.prepare_fork_copy` copies the backend's
   native history into an independent resume identity at the fork's location, so the fork's
@@ -83,21 +97,35 @@ for the original application's resources or deletion.
      history and its cleanup (Codex needs its selected CODEX_HOME).
   3. `create_fork_session(fork_after_seq = last_seq, working_dir = dest, …)`
      copies ALL messages and commits the `initializing` row, including
-     `full_copy` and the cleanup credential, before copying any directory bytes.
-  4. Exclusively create dest with `mkdir`, then commit its creation receipt in
-     `fork_metadata.owned_copy_dir`. A preexisting dest is refused without
-     cleanup. Only after the receipt commits does `copytree` populate dest in
-     `asyncio.to_thread`. The original managed operation owns that writer:
-     caller cancellation leaves the operation running; cancellation of the
-     command joins the actual copy before compensation or reservation release.
+     `full_copy`, its creation identity and the cleanup credential, before
+     allocating a directory.
+  4. Reserve the shared parent through allocation. Recheck the planned binding
+     and publish any missing parents from an open directory chain on the same
+     mount. For accounts, bind the configured users root and destination in the
+     same traversal, then stage the chain in the users root when the service
+     user owns it and has exclusive write access. The bound
+     destination ancestor can serve as staging under the same ownership and
+     permission requirements. If neither qualifies, allocation stops before any
+     directory is created. Prepublication cleanup uses the staging handles.
+     After installation, sync the source and destination parents and confirm
+     that the public path reaches the prepared directory before allocating a
+     copy. Failed confirmation leaves any installed empty parent chain in
+     place and retains the initializing row for recovery.
+     Allocate the copy in a private directory and commit its exact
+     `fork_metadata.owned_copy_dir` receipt. Once the receipt commits, the
+     original command copies through the bound directory handle. It installs
+     the populated copy without replacing any existing entry and checks the
+     installed directory and Git layout. Caller cancellation leaves the
+     command running. Command cancellation joins the writer before compensation
+     or reservation release.
   5. Call
      `prepare_fork_copy(parent_working_dir, parent_resume_id, parent_credential,
      dest, new_resume_id)` → prepare independent native history; set claude_session_id
      (= new id on success, None on replay-fallback) + fork_needs_replay.
      Compensation on failure: cleanup artifacts first (passing the credential so
      Codex can find its rollout store), then remove the proven independent copy,
-     and only then delete its recovery row. Directory absence is idempotent;
-     a real cleanup error is logged and retains the row for startup retry.
+     and only then delete its recovery row. A cleanup error retains the row
+     for startup retry.
      Both compensation and startup require the initializing full-copy identity,
      matching creation receipt and allowed path scope. A path under the copy
      base alone is no deletion permission: a rewind can borrow a ready parent's
@@ -114,11 +142,12 @@ for the original application's resources or deletion.
      A missing qualification never falls back to hint-based deletion.
      The profile's precise prepare/copy/cleanup protocols replace dynamic keyword
      assembly without moving this saga or changing its retirement sequence.
-  6. keep `fork_after_seq` (= replay cutoff for the fallback path + the DB
-     message-copy bound); set `fork_metadata.full_copy = True` + status='ready'.
-     A native management host must have confirmed retirement first.
-  7. do NOT archive the parent; broadcast a `session_forked` event so other
-     tabs add the new session.
+  6. Keep `fork_after_seq` as the replay and message-copy bound. Commit
+     `ready` after native preparation, confirmed host retirement and the
+     directory check. The durable row still marks delivery pending.
+  7. Recheck the binding after the commit before installing the live session.
+     Broadcast `session_forked` to the account, then acknowledge delivery on
+     the original row.
 - Route: `POST /api/sessions/{id}/duplicate {label?}` → returns the new
   SessionInfo (carrying `fork_is_full_copy = True`).
 - Frontend: `/fork [name]` slash command → POST → add the returned session to
@@ -128,14 +157,18 @@ for the original application's resources or deletion.
 <a id="4-crash-safety--limits"></a>
 ## Crash safety / limits
 
-A crash mid-copy retains the existing initializing row and its exact directory
-creation receipt. Startup uses the same artifact → owned copy → recovery row
-ordering as immediate compensation. If the process dies between exclusive mkdir
-and committing that receipt, an existing directory and recovery row are retained
-for inspection. Old unproven ownership never grants directory removal; ready
-sessions are outside this recovery sweep. There is no general orphan-directory
-sweeper. Destination-allocation errors also release the parent's reservation.
-Literal full copy remains the user's explicit choice and retains its size cost.
+A crash mid-copy retains the initializing row and any committed receipt.
+Startup uses the same artifact → owned copy → recovery row ordering as
+immediate compensation. An observed directory of uncertain ownership is left
+for inspection. An interrupted first allocation can leave an empty private
+parent chain. The session sweep has no general directory ownership discovery.
+
+A `ready` row still awaiting delivery is admitted on startup if it has its
+own durable accepted input or if its saved directory binding is confirmed just
+before service admission opens. When neither can be established, startup
+retains the ready row, native artifact and files and leaves that session
+unavailable. The saved conversation does not prove admission on its own.
+See [stored fork evidence](current-storage-format.md#json-facts-and-unknown-values).
 
 <a id="5-tests"></a>
 ## Tests
@@ -153,6 +186,11 @@ Literal full copy remains the user's explicit choice and retains its size cost.
   a full-copy parent's later edits; existing/unproven directories and ready
   copies are never reclaimed as failed copies. Artifact and directory cleanup
   failures retain retry responsibility.
+- `test_session_duplicate.py` exercises independent Git writes, initial
+  parent publication, concurrent copies and both layouts. Use
+  `test_service_startup.py` for pre-admission recovery,
+  `test_wiki_account_portability.py` for registered files in a fork directory,
+  and `web/e2e/fork-copy.spec.ts` for the browser entry.
 - harness `prepare_fork_copy` / `_fork_copy` / `_fork_cleanup` per backend:
   Claude transcript copy/id/cwd rewrite, Codex native actual-ID fork and their
   fallback/cleanup. Rollout-copy coverage applies to saved legacy recovery only;

@@ -22,10 +22,16 @@ straight through it.
 
 from __future__ import annotations
 
+import errno
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import settings
+
+FORK_CREATION_ATTRIBUTE = "user.octopus.fork-creation"
+FORK_RETIREMENT_TARGET_ATTRIBUTE = "user.octopus.fork-retirement-target"
 
 
 class WorkspaceError(Exception):
@@ -68,6 +74,61 @@ def _expand(raw: str) -> Path:
 
 def user_root(user_id: str) -> Path:
     return _expand(settings.users_root) / user_id
+
+
+def account_fork_root(account_root: Path) -> Path:
+    return account_root / "fork"
+
+
+def managed_fork_entries(root: Path) -> set[str]:
+    """Identify fork-created entries without classifying preexisting data by name."""
+    if root.is_symlink() or not root.is_dir():
+        return set()
+    entries: set[str] = set()
+    for entry in root.iterdir():
+        suffix = entry.name.rpartition("-")[2]
+        private = len(suffix) == 32 and entry.name.startswith((".fork-create-", ".fork-remove-"))
+        if not (
+            len(suffix) == 12 and all(char in "0123456789abcdef" for char in suffix)
+            or private
+        ):
+            continue
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            token = os.getxattr(entry, FORK_CREATION_ATTRIBUTE, follow_symlinks=False)
+        except OSError as error:
+            if error.errno not in {errno.ENODATA, errno.ENOTSUP}:
+                raise
+        else:
+            if len(token) == 32 and all(byte in b"0123456789abcdef" for byte in token):
+                if private and token != suffix.encode("ascii"):
+                    continue
+                if entry.name.startswith(".fork-remove-"):
+                    _require_exportable_retirement(entry, token)
+                entries.add(entry.name)
+    return entries
+
+
+def _require_exportable_retirement(slot: Path, token: bytes) -> None:
+    """An occupied slot may contain a foreign entry awaiting restoration."""
+    names = {entry.name for entry in slot.iterdir()}
+    if not names:
+        return
+    if names == {"copy"}:
+        copy = slot / "copy"
+        info = copy.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            try:
+                identity = os.getxattr(slot, FORK_RETIREMENT_TARGET_ATTRIBUTE, follow_symlinks=False)
+                creation = os.getxattr(copy, FORK_CREATION_ATTRIBUTE, follow_symlinks=False)
+            except OSError as error:
+                if error.errno not in {errno.ENODATA, errno.ENOTSUP}:
+                    raise
+            else:
+                if identity == f"{info.st_dev}:{info.st_ino}".encode("ascii") and creation == token:
+                    return
+    raise ValueError(f"Account export found an unverified fork retirement at {slot}")
 
 
 def paths_for(user_id: str | None) -> UserPaths:

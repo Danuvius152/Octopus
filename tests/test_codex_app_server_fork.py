@@ -10,9 +10,8 @@ import pytest
 
 from server.harness import get_harness
 from server.harness.codex import _cleanup_legacy_fork
-from server.sessions import SessionManager
+from server.sessions import ForkError, SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
-from server.sessions.forking import ForkingMixin
 from tests import native_app_server as native_tests
 from tests.native_app_server import (
     ROOT,
@@ -41,7 +40,6 @@ def select_legacy_cleanup(monkeypatch):
 async def fork_source(native_runtime, tmp_path, monkeypatch):
     manager, _, parent, mode, _, _ = native_runtime
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    monkeypatch.setattr(ForkingMixin, "_fork_copy_base", staticmethod(lambda: str(tmp_path / "copies")))
     work = tmp_path / "work"
     work.mkdir()
     parent = await manager.create_session(parent.agent_id, "Fork source", str(work), backend="codex")
@@ -134,7 +132,8 @@ async def test_full_fork_saves_actual_native_id_without_starting_a_turn(fork_sou
     fork = next(frame for frame in wire_frames(tmp_path) if frame.get("method") == "thread/fork")
     assert fork["params"]["deferGoalContinuation"] is True
     assert fork["params"]["config"]["features.goals"] is False
-    assert fork["params"]["cwd"] == branch.working_dir
+    assert fork["params"]["cwd"].startswith("/proc/")
+    assert (tmp_path / "actual-native-fork.cwd").read_text() == branch.working_dir
     assert (await database.read_session_result(branch.id, receipt.request_id)).fragments == ("Native answer",)
     continued = await manager.start_message(branch.id, "Explicit continuation")
     assert (await asyncio.wait_for(continued.wait(), 4)).outcome.status == "success"
@@ -162,6 +161,48 @@ async def test_full_fork_copies_history_with_bad_agent_tools_but_refuses_new_inp
     refused = await submit_client_message(manager, branch.id, "Do not execute", [], "bad-agent-input", wiki_mode=None)
     assert not refused["accepted"] and parent.agent_id in refused["message"] and "mcp_servers" in refused["message"]
     assert (tmp_path / "native-business.jsonl").read_bytes() == before
+
+
+async def test_native_fork_rechecks_binding_before_writing_the_history_request(fork_source, tmp_path, monkeypatch):
+    runtime, _ = fork_source
+    manager, database, parent, _, starts, _ = runtime
+    update = database.update_session_field
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    (unrelated / "keep.txt").write_text("Unrelated data")
+
+    async def replace_after_checkpoint(session_id, **fields):
+        await update(session_id, **fields)
+        metadata = json.loads(fields.get("fork_metadata") or "{}")
+        if metadata.get("native_fork", {}).get("phase") == "unknown":
+            copy = Path(metadata["owned_copy_dir"]["path"])
+            copy.rename(tmp_path / "displaced")
+            copy.symlink_to(unrelated, target_is_directory=True)
+
+    monkeypatch.setattr(database, "update_session_field", replace_after_checkpoint)
+    with pytest.raises(ForkError, match="cwd changed"):
+        await manager.duplicate_session(parent.id, user_id=parent.user_id)
+    pending, = await database.load_incomplete_forks()
+    frames = wire_frames(tmp_path)
+    config_cwd = [frame["params"]["cwd"] for frame in frames if frame.get("method") == "config/read"][-1]
+    assert config_cwd.startswith("/proc/") and starts[-1].working_dir == str(tmp_path)
+    assert not any(frame.get("method") == "thread/fork" for frame in frames)
+    assert not (tmp_path / "actual-native-fork.jsonl").exists()
+    assert manager.get_session(pending["id"], parent.user_id) is None
+    assert list(unrelated.iterdir()) == [unrelated / "keep.txt"]
+    assert (unrelated / "keep.txt").read_text() == "Unrelated data"
+    copy = Path(pending["working_dir"])
+    assert json.loads(pending["fork_metadata"])["native_fork"]["phase"] == "not_sent"
+    copy.unlink()
+    (tmp_path / "displaced").rename(copy)
+    recovered = SessionManager()
+    try:
+        await recovered.initialize(database)
+        assert not await database.load_incomplete_forks()
+        assert not copy.exists()
+        assert not any(frame.get("method") == "thread/delete" for frame in wire_frames(tmp_path))
+    finally:
+        await recovered.close_session_owners()
 
 
 @pytest.mark.parametrize("failure", ["fork_lost_ack", "fork_error_after_creation", "fork_wrong_identity"])
@@ -237,17 +278,15 @@ async def test_untrusted_fork_after_ack_keeps_its_effects_and_disables_cold_clea
 async def test_restart_cleans_only_acknowledged_artifact_using_saved_strategy(fork_source, tmp_path, monkeypatch):
     runtime, _ = fork_source
     manager, database, parent, mode, _, _ = runtime
-    update = database.update_session_field
+    finish = database.finish_full_copy_fork
 
-    async def fail_install(session_id, **fields):
-        if fields.get("fork_status") == "ready":
-            raise OSError("Lost final product installation")
-        await update(session_id, **fields)
+    async def fail_install(*args):
+        raise OSError("Lost final product installation")
 
-    monkeypatch.setattr(database, "update_session_field", fail_install)
+    monkeypatch.setattr(database, "finish_full_copy_fork", fail_install)
     with pytest.raises(OSError):
         await manager.duplicate_session(parent.id, user_id=parent.user_id)
-    monkeypatch.setattr(database, "update_session_field", update)
+    monkeypatch.setattr(database, "finish_full_copy_fork", finish)
     row, = await database.load_incomplete_forks()
     assert row["resume_id"] == "actual-native-fork"
     mode[0] = "fork_cleanup_failed"
@@ -274,17 +313,12 @@ async def test_restart_cleans_only_acknowledged_artifact_using_saved_strategy(fo
 async def test_cold_cleanup_requires_the_exact_missing_history_error(fork_source, tmp_path, monkeypatch, missing_is_proven):
     runtime, _ = fork_source
     manager, database, parent, mode, _, _ = runtime
-    update = database.update_session_field
+    async def fail_install(*args):
+        raise OSError("Lost final product installation")
 
-    async def fail_install(session_id, **fields):
-        if fields.get("fork_status") == "ready":
-            raise OSError("Lost final product installation")
-        await update(session_id, **fields)
-
-    monkeypatch.setattr(database, "update_session_field", fail_install)
+    monkeypatch.setattr(database, "finish_full_copy_fork", fail_install)
     with pytest.raises(OSError):
         await manager.duplicate_session(parent.id, user_id=parent.user_id)
-    monkeypatch.setattr(database, "update_session_field", update)
     row, = await database.load_incomplete_forks()
     artifact = json.loads(row["fork_metadata"])["native_fork"]
     Path(artifact["path"]).unlink()
@@ -299,6 +333,44 @@ async def test_cold_cleanup_requires_the_exact_missing_history_error(fork_source
         assert (tmp_path / "native-history.jsonl").exists()
     finally:
         await cold.close_session_owners()
+
+
+async def test_cold_cleanup_retries_after_copy_directory_was_removed(fork_source, tmp_path, monkeypatch):
+    runtime, _ = fork_source
+    manager, database, parent, _, _, _ = runtime
+    delete = database.delete_session
+
+    async def fail_install(*args):
+        raise OSError("Lost final product installation")
+
+    async def lose_row_deletion(session_id):
+        raise OSError("Interrupted after directory cleanup")
+
+    monkeypatch.setattr(database, "finish_full_copy_fork", fail_install)
+    with pytest.raises(OSError, match="Lost final product installation"):
+        await manager.duplicate_session(parent.id, user_id=parent.user_id)
+    row, = await database.load_incomplete_forks()
+    destination = Path(row["working_dir"])
+    await manager.close_session_owners()
+    monkeypatch.setattr(database, "delete_session", lose_row_deletion)
+    first = SessionManager()
+    try:
+        await first.initialize(database)
+        assert not destination.exists()
+        assert not (tmp_path / "actual-native-fork.jsonl").exists()
+        assert len(await database.load_incomplete_forks()) == 1
+    finally:
+        await first.close_session_owners()
+
+    monkeypatch.setattr(database, "delete_session", delete)
+    second = SessionManager()
+    try:
+        await second.initialize(database)
+        assert not await database.load_incomplete_forks()
+        assert not destination.exists()
+        assert (tmp_path / "native-history.jsonl").exists()
+    finally:
+        await second.close_session_owners()
 
 
 @pytest.mark.parametrize("artifact", [None, {}, [], {"transport": "exec"}])

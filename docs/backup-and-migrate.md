@@ -56,6 +56,13 @@ account's exported rows. A configuration error identifies the Agent and field.
 | Browser restoration identities | Unresolved archived-session operation IDs and service generations in current-tab `sessionStorage` are excluded from account archives and server backups. They contain no token or text and are not collected or restored on import. Server restoration records last only for their service generation; [original-operation confirmation](implemented/frontend-session-observation.md#归档恢复的原操作确认) requires sealing or actual writer-retirement proof, not copying a browser record to a new installation. |
 | Host network entry | Host-level tunnel binaries, systemd units and proxy settings outside account roots are not account resources. Reinstall them separately; importing an account does not open a public tunnel |
 
+Account export identifies managed entries under the account's `fork/` by
+their creation marker. Conversation-only copies are excluded. Registered
+business material, such as a Wiki vault, retains its subtree and the parent
+directories needed for restoration. The owning importer rebinds that
+material. If a retirement slot may contain unrelated files, the export
+reports the unresolved slot and stops.
+
 Knowledge history and source/effect evidence are not executable work and must
 not be discarded as a cache. Exclusion from an archive does not delete or
 reconfigure source chats, tasks, logins or files.
@@ -276,7 +283,7 @@ make startup succeed. Cross-file publication is not one global transaction.
 | Runtime database | Effective `Settings.db_path` / `OCTOPUS_DB_PATH` from the active service; the default relative `octopus.db` resolves against that process's working directory. Include all current accounts, messages, inputs, completion evidence, schedules and durable relations |
 | Master key and configuration | Effective `OCTOPUS_MASTER_KEY` or `master_key_file`, plus actual configuration sources. The key unwraps account DEKs; passwords do not replace it |
 | Account trees | Actual `users_root/<id>/` workspace, memory, attachments, research and application code/`.data`; retain referenced older/global files and unknown ownership until classified |
-| Referenced working copies | External projects, fork copies, untracked files and archived-session directories that must remain usable. A session row or transcript cannot regenerate their later edits |
+| Referenced working copies | External projects, fork copies, untracked files and archived-session directories that must remain usable. Preserve copy creation markers (filesystem extended attributes) with the saved files and matching database receipts. A session row or transcript cannot regenerate later file edits |
 | Provider state | The selected credential's effective Codex home or used Claude configuration, with transcripts/indexes and necessary login state; host defaults may be unrelated |
 | Wiki | Every actual vault, registration/configuration, state directory, `index.sqlite3`, history/blobs and pending-effect evidence; roots may lie outside the Octopus directory |
 | Service ownership | Active service profile and resource bindings as evidence for restoration; target bindings must be verified or explicitly reconstructed |
@@ -317,6 +324,12 @@ service ownership. Identical path strings do not prove identical filesystem
 identity. Renaming Claude project slugs or editing `sessions.working_dir` alone
 is not a complete restore; current Wiki registration rejects changing an existing
 root. Do not bypass checks by deleting markers or rebuilding the Wiki database.
+
+A file-by-file restore can preserve bytes and extended attributes while
+changing directory identities. Fork recovery treats a changed binding as
+unconfirmed and preserves the available files and evidence. Review the
+[full-copy recovery rules](implemented/session-fork.md#4-crash-safety--limits)
+when verifying a restored installation.
 
 1. Select compatible code and an empty target. Verify the inventory, required
    roots and master key before creating state. Prepare configuration and explicit

@@ -12,12 +12,140 @@ import pytest
 from server.config import settings
 from server.database import Database
 from server.portability import export_account, import_account
+from server.sessions import SessionManager, fork_directory, forking
 from server.wiki.history import WikiHistory
 from server.wiki.portability import inspect_wiki
 from server.wiki.registry import WikiRegistry
 from server.wiki.store import MAX_DOCUMENT_BYTES, DocumentTooLarge
 from tests.accounts import create_account
 from tests.installation_settings import installation_settings
+
+
+async def test_recovery_restores_redirected_retirement_and_export_refuses_to_drop_it(tmp_path, monkeypatch):
+    home = tmp_path / "source"
+    config, _ = installation_settings(home)
+    for name, value in config.model_dump().items():
+        monkeypatch.setattr(settings, name, value)
+    database = Database(config.db_path)
+    await database.initialize()
+    manager = SessionManager()
+    recovered = SessionManager()
+    try:
+        account, _ = await create_account(database)
+        agent = await database.get_system_agent(account["id"])
+        await manager.initialize(database)
+        parent = await manager.create_session(agent["id"], "Source workspace")
+        move = fork_directory._move
+        displaced = tmp_path / "owned-copy"
+
+        def replace_during_retirement(source_parent, source, dest_parent, dest):
+            if dest == "copy" and source.startswith("workspace-"):
+                public = fork_directory.fd_path(source_parent) / source
+                public.rename(displaced)
+                public.mkdir()
+                (public / "foreign.txt").write_text("Unrelated staged files")
+                move(source_parent, source, dest_parent, dest)
+                public.mkdir()
+                (public / "another.txt").write_text("Another directory")
+                return
+            move(source_parent, source, dest_parent, dest)
+
+        async def reject_history(*args, **kwargs):
+            raise RuntimeError("Native preparation refused")
+
+        harness = forking.get_harness(parent.backend)
+        monkeypatch.setattr(harness, "prepare_fork_copy", reject_history)
+        monkeypatch.setattr(fork_directory, "_move", replace_during_retirement)
+        with pytest.raises(RuntimeError, match="Native preparation refused"):
+            await manager.duplicate_session(parent.id, user_id=account["id"])
+        row, = await database.load_incomplete_forks()
+        public = Path(row["working_dir"])
+        retirement, = public.parent.glob(".fork-remove-*")
+        assert (retirement / "copy" / "foreign.txt").read_text() == "Unrelated staged files"
+        assert (public / "another.txt").read_text() == "Another directory"
+        archive = tmp_path / "account.zip"
+        with pytest.raises(ValueError, match="unverified fork retirement"):
+            export_account(config, account["id"], archive, home=home)
+        assert not archive.exists()
+
+        await recovered.initialize(database)
+        assert (retirement / "copy" / "foreign.txt").read_text() == "Unrelated staged files"
+        assert (public / "another.txt").read_text() == "Another directory"
+        public.rename(tmp_path / "additional-directory")
+        await recovered._recover_incomplete_forks()
+        assert not retirement.exists()
+        assert (public / "foreign.txt").read_text() == "Unrelated staged files"
+        assert (tmp_path / "additional-directory" / "another.txt").read_text() == "Another directory"
+        assert [item["id"] for item in await database.load_incomplete_forks()] == [row["id"]]
+        export_account(config, account["id"], archive, home=home)
+        with zipfile.ZipFile(archive) as package:
+            recovered_file = (public / "foreign.txt").relative_to(home).as_posix()
+            assert package.read(f"files/{recovered_file}") == b"Unrelated staged files"
+    finally:
+        await recovered.close_session_owners()
+        await manager.close_session_owners()
+        await database.close()
+
+
+@pytest.mark.parametrize("vault_scope", ["nested", "account"])
+async def test_account_round_trip_keeps_registered_material_in_a_fork(tmp_path, monkeypatch, vault_scope):
+    home = tmp_path / "source"
+    config, _ = installation_settings(home)
+    for name, value in config.model_dump().items():
+        monkeypatch.setattr(settings, name, value)
+    database = Database(config.db_path)
+    await database.initialize()
+    manager = SessionManager()
+    try:
+        account, _ = await create_account(database)
+        agent = await database.get_system_agent(account["id"])
+        await manager.initialize(database)
+        parent = await manager.create_session(agent["id"], "Source workspace")
+        fork = await manager.duplicate_session(parent.id, user_id=account["id"])
+        old_fork = await manager.duplicate_session(parent.id, user_id=account["id"])
+        await manager.delete_session(old_fork.id)
+    finally:
+        await manager.close_session_owners()
+        await database.close()
+
+    copy = Path(fork.working_dir)
+    (copy / "session-only.txt").write_text("Excluded session material")
+    old_copy = Path(old_fork.working_dir)
+    (old_copy / "notes.txt").write_text("Another old session")
+    ordinary = copy.parent / "manual-project" / "notes.txt"
+    ordinary.parent.mkdir()
+    ordinary.write_text("Preexisting ordinary files")
+    knowledge = copy / "knowledge" / "vault"
+    knowledge.mkdir(parents=True)
+    vault = copy.parent.parent if vault_scope == "account" else knowledge
+    document = (knowledge / "notes.md").relative_to(vault).as_posix()
+    registry = WikiRegistry()
+    try:
+        registration = registry.configure(account["id"], vault, agent["id"])
+        WikiHistory(registry.store(account["id"])).write(
+            document, b"# Portable knowledge\n", None, "human", "create",
+        )
+    finally:
+        registry.close()
+
+    archive = tmp_path / "account.zip"
+    target = tmp_path / "target"
+    export_account(config, account["id"], archive, home=home)
+    restored = import_account(archive, home=target)
+    new_copy = target / copy.relative_to(home)
+    assert (new_copy / "session-only.txt").exists() is (vault_scope == "account")
+    assert (target / old_copy.relative_to(home)).exists() is (vault_scope == "account")
+    assert (target / ordinary.relative_to(home)).read_text() == "Preexisting ordinary files"
+    for name, value in restored.model_dump().items():
+        monkeypatch.setattr(settings, name, value)
+    registry = WikiRegistry()
+    try:
+        store = registry.store(account["id"])
+        assert registry.config(account["id"])["vault_id"] == registration["vault_id"]
+        assert store.path(document) == target / knowledge.relative_to(home) / "notes.md"
+        assert store.read(document)["content"] == "# Portable knowledge\n"
+    finally:
+        registry.close()
 
 
 @pytest.mark.parametrize("suffix", [".pdf", ".PDF"])

@@ -219,7 +219,7 @@ it.each(["created", "successor"])("gives a later %s lookup only the original con
   let pending: Promise<boolean | SessionInfo | null>;
   if (lookup === "created") {
     list.patch("old", { name: "Changed since the POST" });
-    pending = list.created(row("new"), observation.observation, "old", budget);
+    pending = list.created(row("new"), observation.observation, { archivedId: "old", deadline: budget });
   } else {
     list.archive("old", undefined, "new");
     pending = list.confirmSuccessor("old", observation.observation, budget);

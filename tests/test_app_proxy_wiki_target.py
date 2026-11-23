@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.middleware.cors import CORSMiddleware
 
 from server import deps
 from server.app_backends import backend_supervisor
@@ -42,6 +43,9 @@ state = Path((data / "test-state").read_text())
 (data / "started").write_text("started")
 
 class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.respond(404 if urlsplit(self.path).path == "/api/missing" else 200, {"ordinary": True})
+
     def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("content-length", "0")))
         query = parse_qs(urlsplit(self.path).query)
@@ -78,10 +82,31 @@ class Handler(BaseHTTPRequestHandler):
         self.respond(200, {"revision": hashlib.sha256(path.read_bytes()).hexdigest(), "observed": observed})
 
     def respond(self, status, payload):
+        wire = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("content-type", "application/json")
+        if urlsplit(self.path).path == "/api/missing":
+            self.send_header("Cache-Control", "public")
+            self.send_header("Cache-Control", "max-age=600")
+            self.send_header("Access-Control-Allow-Origin", "https://upstream-one.example")
+            self.send_header("Access-Control-Allow-Origin", "https://upstream-two.example")
+            self.send_header("Vary", "*")
+        cookie_action = parse_qs(urlsplit(self.path).query).get("cookie-action")
+        if cookie_action:
+            expiry = ("Wed, 01 Jan 2020 00:00:00 GMT" if cookie_action == ["clear"]
+                      else "Thu, 01 Jan 2099 00:00:00 GMT")
+            self.send_header("Set-Cookie", f"theme=dark; Expires={expiry}; Path=/")
+            self.send_header("X-App-Tag", "café, first")
+            self.send_header("Vary", "Accept-Language")
+            self.send_header("Set-Cookie", f"density=compact; Expires={expiry}; Path=/")
+            self.send_header("X-App-Tag", "second")
+            self.send_header("Vary", "Origin" if cookie_action == ["set"] else "Accept")
+            self.send_header("Connection", "close")
+            self.send_header("Keep-Alive", "timeout=5")
+            self.send_header("Trailer", "X-Checksum")
+            self.send_header("Content-Length", str(len(wire)))
         self.end_headers()
-        self.wfile.write(json.dumps(payload).encode())
+        self.wfile.write(wire)
 
     def log_message(self, *args):
         pass
@@ -139,6 +164,94 @@ async def sapphire_proxy(tmp_path, monkeypatch):
         registry.close()
         manager.shutdown()
         await db.close()
+
+
+@pytest.mark.parametrize(("managed", "endpoint"), [
+    pytest.param(False, "data", id="ordinary"),
+    pytest.param(False, "%0A", id="ordinary-encoded-line-end"),
+    pytest.param(True, "save", id="wiki"),
+])
+async def test_proxy_preserves_repeated_response_fields_and_applies_each_cookie(sapphire_proxy, managed, endpoint):
+    ctx = sapphire_proxy
+    path = f"{ctx['base']}/api/{endpoint}"
+    starts = []
+
+    async def capture(scope, receive, send):
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                starts.append(list(message["headers"]))
+            await send(message)
+
+        await app(scope, receive, capture_send)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=capture),
+        base_url="http://test",
+        headers={**ctx["headers"], "Accept-Encoding": "gzip"},
+    ) as client:
+        revision = (await client.get("/api/wiki/read", params={"doc": "note.md"})).json()["revision"] if managed else None
+        for action, expiry, cookies in (
+            ("set", b"Thu, 01 Jan 2099 00:00:00 GMT", {"theme": "dark", "density": "compact"}),
+            ("clear", b"Wed, 01 Jan 2020 00:00:00 GMT", {}),
+        ):
+            if managed:
+                response = await client.post(
+                    path, params={"vault": "obv", "cookie-action": action},
+                    json={"path": "note.md", "content": f"# {action}\n" + "body\n" * 300, "revision": revision},
+                )
+            else:
+                response = await client.get(path, params={"cookie-action": action})
+            assert response.status_code == 200, response.text
+            if managed:
+                revision = response.json()["revision"]
+                assert len(response.content) > 1024
+                assert response.headers["content-length"] == str(len(response.content))
+            else:
+                assert "content-length" not in response.headers
+            raw = starts[-1]
+            fields = [
+                (b"set-cookie", b"theme=dark; Expires=" + expiry + b"; Path=/"),
+                (b"x-app-tag", b"caf\xe9, first"),
+                (b"vary", b"Accept-Language"),
+                (b"set-cookie", b"density=compact; Expires=" + expiry + b"; Path=/"),
+                (b"x-app-tag", b"second"),
+                (b"vary", b"Origin" if action == "set" else b"Accept"),
+            ]
+            if action == "clear":
+                fields.append((b"vary", b"Origin"))
+            assert [(key, value) for key, value in raw if key in {b"set-cookie", b"x-app-tag", b"vary"}] == fields
+            assert not {b"connection", b"keep-alive", b"trailer", b"content-encoding"}.intersection(
+                key for key, _ in raw
+            )
+            assert dict(client.cookies) == cookies
+
+
+async def test_proxy_preserves_service_cors_and_404_cache_policy(sapphire_proxy, monkeypatch):
+    ctx = sapphire_proxy
+    client, path = ctx["client"], ctx["base"] + "/api/missing"
+    allowed = "https://allowed.example"
+    denied = "https://unlisted.example"
+    cors = next(middleware for middleware in app.user_middleware if issubclass(middleware.cls, CORSMiddleware))
+    monkeypatch.setitem(cors.kwargs, "allow_origins", [allowed])
+    monkeypatch.setattr(app, "middleware_stack", None)
+
+    for origin, status in ((allowed, 200), (denied, 400)):
+        preflight = await client.options(path, headers={
+            "Origin": origin, "Access-Control-Request-Method": "GET",
+        })
+        assert preflight.status_code == status
+        assert preflight.headers.get("access-control-allow-origin") == (allowed if origin == allowed else None)
+    assert not (ctx["data"] / "started").exists()
+
+    for origin, expected in (
+        (allowed, [allowed]),
+        (denied, ["https://upstream-one.example", "https://upstream-two.example"]),
+    ):
+        response = await client.get(path, headers={**ctx["headers"], "Origin": origin})
+        assert response.status_code == 404
+        assert response.headers.get_list("cache-control") == ["no-store"]
+        assert response.headers.get_list("access-control-allow-origin") == expected
+        assert response.headers.get_list("vary") == ["*"]
 
 
 @pytest.mark.parametrize("vaults", [

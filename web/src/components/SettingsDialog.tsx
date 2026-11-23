@@ -247,9 +247,17 @@ function NotifierPanel({ token, account }: { token: string; account: number }) {
           config: { url: url.trim() },
         }),
       });
-      if (!res.ok) throw new Error(`Server returned ${res.status}.`);
-      const created: NotifierInfo = await res.json();
+      if (res.status !== 201) throw new Error(`Server returned ${res.status}.`);
+      const created: NotifierInfo | null = await res.json();
       if (!isCurrent()) return;
+      if (
+        !created || typeof created.id !== "string" || !created.id ||
+        created.type !== "webhook" || typeof created.label !== "string" ||
+        typeof created.config?.url !== "string" || typeof created.enabled !== "boolean" ||
+        typeof created.created_at !== "string"
+      ) {
+        throw new Error("Unable to confirm the created notifier target.");
+      }
       const owner = collection.current;
       owner.revision++;
       // A read or another write may already have observed and removed this ID.
@@ -283,7 +291,7 @@ function NotifierPanel({ token, account }: { token: string; account: number }) {
         headers,
       });
       if (!isCurrent()) return;
-      if (!res.ok) throw new Error(`Server returned ${res.status}.`);
+      if (res.status !== 204) throw new Error(`Server returned ${res.status}.`);
       collection.current.revision++;
       collection.current.observation = {};
       setItems((current) => current.filter((n) => n.id !== id));

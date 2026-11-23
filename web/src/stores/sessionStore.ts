@@ -36,6 +36,21 @@ export type BackendCatalogRead =
   | { status: "idle" | "loading" | "failed" }
   | { status: "ready"; catalog: BackendCatalog };
 
+export interface FileResourceDirectory {
+  path: string;
+  path_id: string;
+}
+
+export interface FileViewerIntent {
+  id: number;
+  sessionId: string;
+  path: string;
+  fragment?: string;
+  sourceDirectory?: FileResourceDirectory;
+}
+
+let nextFileViewerId = 0;
+
 interface AcceptedTextConsumer { sessionId: string; account: number; notify: () => void }
 // Only openings waiting for their one timeout recovery subscribe. The original
 // acceptance paths notify without retaining a body or publishing another store.
@@ -448,11 +463,10 @@ interface SessionStore {
   connected: boolean;
   setConnected: (c: boolean) => void;
 
-  // FileViewerDialog is mounted at the App level and reads this slot.
-  // null = closed; non-null = open and fetching the named file. Set
-  // by ChatView when the `/showme` resolver returns a concrete path.
-  viewer: { sessionId: string; path: string } | null;
-  openViewer: (sessionId: string, path: string) => void;
+  // The App-level viewer reads this slot. Each open owns its source
+  // session, file path, source directory and fragment until replaced or closed.
+  viewer: FileViewerIntent | null;
+  openViewer: (sessionId: string, path: string, options?: Pick<FileViewerIntent, "fragment" | "sourceDirectory">) => void;
   closeViewer: () => void;
 
   // Cross-turn background tasks. Keyed by sessionId → list of tasks
@@ -1404,7 +1418,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setConnected: (c) => set({ connected: c }),
 
   viewer: null,
-  openViewer: (sessionId, path) => set({ viewer: { sessionId, path } }),
+  openViewer: (sessionId, path, options) => set({
+    viewer: { id: ++nextFileViewerId, sessionId, path, ...options },
+  }),
   closeViewer: () => set({ viewer: null }),
 
   bgTasks: {},

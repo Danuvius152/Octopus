@@ -176,14 +176,15 @@ for line in frames():
         records = [json.loads(line) for line in history.read_text().splitlines()]
         records[0]["payload"]["id"] = identifier
         copied.write_text("".join(json.dumps(record) + "\n" for record in records))
-        copied.with_suffix(".cwd").write_text(params["cwd"])
-        created_fork = identifier, params["cwd"]
+        canonical_cwd = str(Path(params["cwd"]).resolve())
+        copied.with_suffix(".cwd").write_text(canonical_cwd)
+        created_fork = identifier, canonical_cwd
         if mode == "fork_lost_ack":
             continue
         if mode == "fork_error_after_creation":
             send({"id": frame["id"], "error": {"code": -32600, "message": "Could not restore inherited settings"}})
             continue
-        result = {"thread": {"id": identifier, "path": str(copied), "cwd": params["cwd"]},
+        result = {"thread": {"id": identifier, "path": str(copied), "cwd": canonical_cwd},
                   "cwd": params["cwd"]}
         if mode == "fork_wrong_identity":
             result["thread"]["id"] = thread_id

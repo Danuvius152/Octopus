@@ -218,6 +218,151 @@ async def test_get_file_markdown(client, session_with_files):
     assert b"# plan" in r.content
 
 
+async def test_markdown_bytes_follow_the_authorized_canonical_path(client, session_with_files):
+    sid, root = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    (root / "sub" / "second.md").write_text("# replacement")
+    alias = root / "alias.md"
+    alias.symlink_to("plan.md")
+
+    meta = await client.get(f"{url}/meta", params={"path": "alias.md"})
+    assert meta.status_code == 200 and meta.json()["path"] == "plan.md"
+    params = {"path": meta.json()["path"], "canonical_path_id": meta.json()["canonical_path_id"]}
+    alias.unlink()
+    alias.symlink_to("sub/second.md")
+
+    original = await client.get(url, params=params)
+    assert original.status_code == 200 and original.text == "# plan\nstep one"
+
+    (root / "plan.md").unlink()
+    (root / "plan.md").symlink_to("sub/second.md")
+    changed = await client.get(url, params=params)
+    assert changed.status_code == 409
+
+    reopened = await client.get(f"{url}/meta", params={"path": "alias.md"})
+    assert reopened.status_code == 200 and reopened.json()["path"] == "sub/second.md"
+    replacement = await client.get(url, params={
+        "path": reopened.json()["path"], "canonical_path_id": reopened.json()["canonical_path_id"],
+    })
+    assert replacement.status_code == 200 and replacement.text == "# replacement"
+
+    (root / "~notes.md").write_text("# literal tilde")
+    tilde = await client.get(f"{url}/meta", params={"path": "./~notes.md"})
+    assert tilde.status_code == 200 and tilde.json()["path"] == "~notes.md"
+    literal = await client.get(url, params={
+        "path": tilde.json()["path"], "canonical_path_id": tilde.json()["canonical_path_id"],
+    })
+    assert literal.status_code == 200 and literal.text == "# literal tilde"
+
+
+async def test_viewer_paths_are_exact_http_query_values(client, session_with_files):
+    sid, root = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    (root / "appendix.md").write_text("ordinary")
+    assert (await client.get(f"{url}?path=appendix.md%20")).status_code == 404
+    (root / "appendix.md ").write_text("trailing space")
+    assert (await client.get(f"{url}?path=appendix.md%20")).status_code == 415
+    ordinary = await client.get(f"{url}?path=appendix.md")
+    assert ordinary.status_code == 200 and ordinary.text == "ordinary"
+
+    name = " 中文%20#图.md"
+    (root / name).write_text("literal")
+    query = "?path=%20%E4%B8%AD%E6%96%87%2520%23%E5%9B%BE.md"
+    meta = await client.get(f"{url}/meta{query}")
+    assert meta.status_code == 200 and meta.json()["path"] == name
+    body = await client.get(f"{url}{query}&canonical_path_id={meta.json()['canonical_path_id']}")
+    assert body.status_code == 200 and body.text == "literal"
+
+
+async def test_canonical_markdown_detects_a_session_root_redirect_with_the_same_relative_name(
+    client, session_with_files,
+):
+    sid, root = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    meta = await client.get(f"{url}/meta", params={"path": "plan.md"})
+    assert meta.status_code == 200 and meta.json()["path"] == "plan.md"
+
+    root.rename(root.with_name("original-wd"))
+    replacement_root = root.with_name("replacement-wd")
+    replacement_root.mkdir()
+    (replacement_root / "plan.md").write_text("# Other working directory")
+    root.symlink_to(replacement_root, target_is_directory=True)
+
+    stale = await client.get(url, params={
+        "path": meta.json()["path"], "canonical_path_id": meta.json()["canonical_path_id"],
+    })
+    assert stale.status_code == 409
+    reopened = await client.get(f"{url}/meta", params={"path": "plan.md"})
+    assert reopened.status_code == 200 and reopened.json()["path"] == "plan.md"
+    replacement = await client.get(url, params={
+        "path": reopened.json()["path"], "canonical_path_id": reopened.json()["canonical_path_id"],
+    })
+    assert replacement.status_code == 200 and replacement.text == "# Other working directory"
+
+
+async def test_canonical_and_relative_resource_reads_keep_the_session_root(client, session_with_files):
+    sid, root = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    agent = await session_manager.db.get_system_agent()
+    sibling = await session_manager.create_session(
+        agent["id"], name="other document", working_dir=str(root.parent),
+    )
+    meta = await client.get(f"{url}/meta", params={"path": "plan.md"})
+    assert meta.status_code == 200
+    canonical_path_id = meta.json()["canonical_path_id"]
+    other_url = f"/api/sessions/{sibling.id}/files"
+    assert (await client.get(other_url, params={"path": "outside.md"})).status_code == 200
+    (root / "escape.md").symlink_to("../outside.md")
+    for path in ("sub/../../outside.md", root.parent / "outside.md", "escape.md"):
+        assert (await client.get(url, params={"path": str(path)})).status_code == 403
+        assert (await client.get(url, params={"path": str(path), "canonical_path_id": canonical_path_id})).status_code == 403
+    unauthenticated = await client.get(
+        url, params={"path": "plan.md", "canonical_path_id": canonical_path_id}, headers={"Authorization": ""},
+    )
+    assert unauthenticated.status_code == 401
+
+
+async def test_relative_resources_recheck_the_document_directory(client, session_with_files):
+    sid, root = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("# Original")
+    (docs / "appendix.md").write_text("# Original appendix")
+    meta = await client.get(f"{url}/meta", params={"path": "docs/guide.md"})
+    assert meta.status_code == 200
+    directory = meta.json()["canonical_directory"]
+    source = {"source_directory": directory["path"], "source_directory_id": directory["path_id"]}
+
+    params = {"path": "appendix.md", **source}
+    resource = await client.get(url, params=params)
+    assert resource.status_code == 200 and resource.text == "# Original appendix"
+    assert resource.headers["cache-control"] == "no-store"
+    for reference, status in (("../plan.md", 200), ("../../outside.md", 403), ("../huge.md", 413), ("../blob.bin", 415)):
+        assert (await client.get(url, params={"path": reference, **source})).status_code == status
+
+    docs.rename(root / "retired")
+    alternate = root / "alternate"
+    alternate.mkdir()
+    (alternate / "guide.md").write_text("# Replacement")
+    (alternate / "appendix.md").write_text("# Replacement appendix")
+    docs.symlink_to(alternate, target_is_directory=True)
+
+    for endpoint in (url, f"{url}/meta"):
+        stale = await client.get(endpoint, params=params)
+        assert stale.status_code == 409
+        assert "document directory changed" in stale.json()["detail"]
+
+    reopened = await client.get(f"{url}/meta", params={"path": "docs/guide.md"})
+    assert reopened.status_code == 200
+    current = reopened.json()["canonical_directory"]
+    assert current["path"] == "alternate" and current["path_id"] != directory["path_id"]
+    replacement = await client.get(url, params={
+        "path": "appendix.md", "source_directory": current["path"], "source_directory_id": current["path_id"],
+    })
+    assert replacement.status_code == 200 and replacement.text == "# Replacement appendix"
+
+
 async def test_get_file_code(client, session_with_files):
     sid, _ = session_with_files
     r = await client.get(

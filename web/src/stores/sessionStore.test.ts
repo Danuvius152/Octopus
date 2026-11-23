@@ -189,12 +189,12 @@ describe("sessionStore", () => {
     const { openViewer, closeViewer } = useSessionStore.getState();
     expect(useSessionStore.getState().viewer).toBeNull();
     openViewer("s1", "docs/plan.md");
-    expect(useSessionStore.getState().viewer).toEqual({
+    expect(useSessionStore.getState().viewer).toMatchObject({
       sessionId: "s1",
       path: "docs/plan.md",
     });
     openViewer("s2", "README.md");
-    expect(useSessionStore.getState().viewer).toEqual({
+    expect(useSessionStore.getState().viewer).toMatchObject({
       sessionId: "s2",
       path: "README.md",
     });

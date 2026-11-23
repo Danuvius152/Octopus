@@ -214,9 +214,6 @@ async def test_owned_fork_survives_interrupt_refresh_and_restart(
         await ctx["db"].append_message(
             session_id=parent.id, seq=seq, role=role, type="text", content=content
         )
-    monkeypatch.setattr(
-        session_manager, "_fork_copy_dest", lambda src, sid: str(tmp_path / f"copy-{sid}")
-    )
     owner_events, other_events = [], []
 
     async def owned_event(event):
@@ -650,6 +647,8 @@ async def test_vera_cannot_reach_archers_work_through_any_surface(two_accounts):
         f"/api/sessions/{sid}/messages?before_seq=99",
         f"/api/sessions/{sid}/transcript-export",
         f"/api/sessions/{sid}/files?path=README.md",
+        f"/api/sessions/{sid}/files?path=README.md&canonical_path_id=untrusted",
+        f"/api/sessions/{sid}/files?path=README.md&source_directory=.&source_directory_id=untrusted",
         f"/api/sessions/{sid}/files/meta?path=README.md",
         f"/api/sessions/{sid}/bg-tasks",
         f"/api/sessions/{sid}/delegations",

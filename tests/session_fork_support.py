@@ -14,7 +14,7 @@ from tests.accounts import create_account
 
 
 @pytest.fixture
-async def installation(tmp_path, monkeypatch):
+async def installation(tmp_path):
     database = Database(str(tmp_path / "installation.sqlite3"))
     await database.initialize()
     _, bearer = await create_account(database, extra_roots=[tmp_path])
@@ -23,7 +23,6 @@ async def installation(tmp_path, monkeypatch):
     directory = tmp_path / "source"
     directory.mkdir()
     (directory / "original.txt").write_text("Source bytes remain unchanged.\n")
-    monkeypatch.setattr(manager, "_fork_copy_base", lambda: str(tmp_path / "copies"))
     agent = await database.get_system_agent()
     parent = await manager.create_session(agent["id"], "Source", str(directory), backend="codex")
     await database.append_message(

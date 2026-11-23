@@ -18,7 +18,9 @@ Threats addressed:
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -135,6 +137,20 @@ class UnsupportedType(FileViewerError):
     """Extension is not in the allowlist."""
 
 
+class DocumentDirectoryChanged(FileViewerError):
+    """The directory that supplied the Markdown document has changed."""
+
+
+def _path_id(path: Path) -> str:
+    return hashlib.sha256(os.fsencode(path)).hexdigest()
+
+
+@dataclass(frozen=True)
+class ResourceDirectory:
+    path: str
+    path_id: str
+
+
 @dataclass(frozen=True)
 class ResolvedFile:
     """Validated, ready-to-serve descriptor.
@@ -149,6 +165,15 @@ class ResolvedFile:
     kind: str
     mime_type: str
     size: int
+
+    @property
+    def canonical_path_id(self) -> str:
+        """Identify the resolved path across requests without returning host paths."""
+        return _path_id(self.abs_path)
+
+    @property
+    def canonical_directory(self) -> ResourceDirectory:
+        return ResourceDirectory(str(Path(self.relative_path).parent), _path_id(self.abs_path.parent))
 
 
 def _classify(path: Path) -> str:
@@ -185,30 +210,54 @@ def _mime_for(path: Path, kind: str) -> str:
     return "application/octet-stream"
 
 
-def resolve_safe_path(working_dir: str | Path, requested: str) -> ResolvedFile:
+def _resource_base(root: Path, source_directory: ResourceDirectory) -> Path:
+    directory = Path(source_directory.path)
+    if directory.is_absolute() or "\0" in source_directory.path:
+        raise PathRejected("Invalid document directory")
+    try:
+        resolved = (root / directory).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as e:
+        raise PathRejected("Invalid document directory") from e
+    if not resolved.is_relative_to(root):
+        raise PathRejected("Document directory escapes working directory")
+    if _path_id(resolved) != source_directory.path_id or not resolved.is_dir():
+        raise DocumentDirectoryChanged("The document directory changed. Reopen the source document.")
+    return resolved
+
+
+def resolve_safe_path(
+    working_dir: str | Path,
+    requested: str,
+    *,
+    canonical: bool = False,
+    source_directory: ResourceDirectory | None = None,
+) -> ResolvedFile:
     """Validate `requested` against `working_dir`. Raises on rejection.
 
     `requested` may be absolute or relative. Either way, after
     resolution it must live under `working_dir` (also resolved, so
-    symlinked roots work). Trailing whitespace, leading `~`, and
-    bare empty strings are rejected up front — they're almost always
-    a typo, not a deliberate request.
+    symlinked roots work). Preserve whitespace in file names. Canonical reads
+    and document-relative reads accept literal leading tildes. Relative
+    resources use the directory identified by the source document's metadata.
     """
     if not requested or not requested.strip():
         raise PathRejected("Empty path")
+    if "\0" in requested:
+        raise PathRejected("Invalid file path")
 
-    cleaned = requested.strip()
     # No tilde expansion — we sandbox to working_dir, full stop.
-    if cleaned.startswith("~"):
+    if not canonical and source_directory is None and requested.startswith("~"):
         raise PathRejected("Tilde paths are not allowed; use a working-dir-relative path")
 
     root = Path(working_dir).resolve(strict=False)
     if not root.is_dir():
         raise PathRejected(f"Working directory does not exist: {working_dir}")
 
-    candidate = Path(cleaned)
-    if not candidate.is_absolute():
-        candidate = root / candidate
+    if source_directory is not None:
+        base = _resource_base(root, source_directory)
+        candidate = base / requested.lstrip("/")
+    else:
+        candidate = root / requested
 
     # `strict=False`: we want to resolve symlinks even if the final
     # component doesn't exist, so we can surface "not found" cleanly

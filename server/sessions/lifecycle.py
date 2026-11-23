@@ -33,7 +33,7 @@ from ..models import (
     SessionRestoreStatus,
 )
 from ..users import owner_is_available
-from ..workspace import confine
+from ..workspace import WorkspaceError, confine
 from .base import (
     _BACKEND_RETIRE_TIMEOUT,
     ForkError,
@@ -727,9 +727,16 @@ class LifecycleMixin(SessionManagerBase):
             if self.db:
                 await self.db.repoint_schedules_origin(old.id, new.id)
         except Exception as error:
+            message = str(error)
+            if stage == "successor_creation" and isinstance(error, WorkspaceError):
+                message += (
+                    " Ask an administrator to verify ownership and grant access to this exact directory."
+                    " After access is granted, restore the archived session and run /archive again."
+                    " You can also start a new session in an allowed directory."
+                )
             failure = SessionArchiveFailed(SessionArchiveResult(
                 old_session_id=old.id, new_session_id=new.id if new is not None else None,
-                failure_stage=stage, message=str(error),
+                failure_stage=stage, message=message,
             ))
             failure.__cause__ = error
             return new, failure

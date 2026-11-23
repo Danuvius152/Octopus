@@ -142,9 +142,13 @@ function AgentFormInstance({
     return { accountGeneration, agentFormGeneration, editingAgentId };
   });
   const mounted = useRef(false);
+  const retireChat = useRef<(() => void) | null>(null);
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; };
+    return () => {
+      mounted.current = false;
+      retireChat.current?.();
+    };
   }, []);
   const isCurrent = useCallback(() => {
     const current = useSessionStore.getState();
@@ -351,20 +355,23 @@ function AgentFormInstance({
   };
 
   const chat = async (agent: Agent) => {
-    let foreground = isCurrent() && useSessionStore.getState().pageTab === "all";
-    const current = () => foreground && isCurrent() && useSessionStore.getState().pageTab === "all";
-    // Page/tab departures retire this action even if the user returns before
-    // its receipt arrives. The clicked Agent is separate from the edit target.
-    const unsubscribe = useSessionStore.subscribe(() => {
-      if (!current()) { foreground = false; unsubscribe(); }
-    });
+    const onAll = () => isCurrent() && useSessionStore.getState().pageTab === "all";
+    if (!onAll()) return;
+    retireChat.current?.();
+    const current = () => retireChat.current === retire && onAll();
+    const unsubscribe = useSessionStore.subscribe(() => { if (!current()) retire(); });
+    const retire = () => {
+      unsubscribe();
+      if (retireChat.current === retire) retireChat.current = null;
+    };
+    retireChat.current = retire;
     setError(null);
     try {
       await openAgentChat(agent.id, current);
     } catch (e) {
       if (current()) setError(e instanceof Error ? e.message : "Failed to open a session");
     } finally {
-      unsubscribe();
+      retire();
     }
   };
 

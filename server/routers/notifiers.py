@@ -2,24 +2,18 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import JSONResponse
 
 from ..auth import verify_token
 from ..deps import ScopeUser
 from ..models import (
     CreateNotifierRequest,
     NotifierInfo,
-    NotifierRefreshUnconfirmed,
     UpdateNotifierRequest,
 )
-from ..notifiers import notifier_manager
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/notifiers", tags=["notifiers"])
 
@@ -75,8 +69,6 @@ async def create_notifier(
         created_at=created_at,
         user_id=user_id,
     )
-    # Reload manager so the new target is live without restart
-    await notifier_manager.load()
     return NotifierInfo(
         id=nid,
         type=req.type,
@@ -87,10 +79,7 @@ async def create_notifier(
     )
 
 
-@router.patch(
-    "/{notifier_id}", response_model=NotifierInfo,
-    responses={503: {"model": NotifierRefreshUnconfirmed}},
-)
+@router.patch("/{notifier_id}", response_model=NotifierInfo)
 async def update_notifier(
     notifier_id: str,
     req: UpdateNotifierRequest,
@@ -108,15 +97,6 @@ async def update_notifier(
     updated = await db.update_notifier(notifier_id, user_id=user_id, **updates)
     if updated is None:
         raise HTTPException(status_code=404, detail="notifier not found")
-    if updates:
-        try:
-            await notifier_manager.load()
-        except Exception:
-            # Storage fail-stop exits through the shared boundary. A normal
-            # reload error can report this confirmed write while health permits.
-            db.health.require_healthy()
-            logger.exception("Notifier %s committed but runtime refresh failed", notifier_id)
-            return JSONResponse(status_code=503, content=NotifierRefreshUnconfirmed(notifier_id=notifier_id).model_dump())
     return _row_to_info(updated)
 
 
@@ -125,12 +105,6 @@ async def delete_notifier(
     notifier_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
     db = _require_db()
-    # Resolved inside this account's rows first: a DELETE straight to the id
-    # would remove anybody's, and answer 204 either way.
-    rows = await db.load_notifiers(user_id)
-    if not any(r["id"] == notifier_id for r in rows):
-        raise HTTPException(status_code=404, detail="notifier not found")
-    deleted = await db.delete_notifier(notifier_id)
+    deleted = await db.delete_notifier(notifier_id, user_id=user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="notifier not found")
-    await notifier_manager.load()

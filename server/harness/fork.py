@@ -36,6 +36,14 @@ class ForkArtifact:
 
 
 @dataclass(frozen=True)
+class ForkCwd:
+    """A descriptor path whose saved cwd the owning saga can recheck."""
+
+    path: str
+    require_current: Callable[[], None]
+
+
+@dataclass(frozen=True)
 class ForkHooks:
     """The existing saga commits identity and owns the short native host."""
 
@@ -43,6 +51,7 @@ class ForkHooks:
     manage: Callable[[HarnessRun], AbstractAsyncContextManager[None]]
     session_id: str
     user_id: str | None
+    cwd: ForkCwd | None = None
 
 
 class ForkCheckpoint(TypedDict):
@@ -53,7 +62,7 @@ class ForkCheckpoint(TypedDict):
     """
 
     transport: Literal["app-server"]
-    phase: Literal["unknown", "created"]
+    phase: Literal["unknown", "created", "not_sent"]
     cleanup_allowed: bool
     home: str
     source_thread_id: str
@@ -69,10 +78,10 @@ def read_fork_checkpoint(value: object) -> ForkCheckpoint:
         raise ValueError("Malformed native fork checkpoint; retain recovery material")
     transport, phase = value.get("transport"), value.get("phase")
     allowed, home, source = value.get("cleanup_allowed"), value.get("home"), value.get("source_thread_id")
-    if (transport != "app-server" or phase not in ("unknown", "created")
+    if (transport != "app-server" or phase not in ("unknown", "created", "not_sent")
             or not isinstance(allowed, bool) or not isinstance(home, str) or not isinstance(source, str)):
         raise ValueError("Malformed native fork checkpoint; retain recovery material")
-    result: ForkCheckpoint = {"transport": "app-server", "phase": "created" if phase == "created" else "unknown",
+    result: ForkCheckpoint = {"transport": "app-server", "phase": phase,
                               "cleanup_allowed": allowed, "home": home, "source_thread_id": source}
     for key in ("rpc_id", "connection_generation", "thread_id"):
         if key in value and not isinstance(value[key], str):

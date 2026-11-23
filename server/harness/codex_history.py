@@ -40,8 +40,10 @@ class _HistoryDriver(RunDriver):
     multiplexed = True
     stdout_line_limit_bytes = NATIVE_LINE_BYTES
 
-    def __init__(self, selected: RuntimeProfile, operation: Callable[[_HistoryDriver], Awaitable[dict[str, Any]]]) -> None:
+    def __init__(self, selected: RuntimeProfile, config_cwd: str,
+                 operation: Callable[[_HistoryDriver], Awaitable[dict[str, Any]]]) -> None:
         super().__init__(selected)
+        self.config_cwd = config_cwd
         self.operation = operation
         self.result: dict[str, Any] = {}
         self._io: HarnessRun | None = None
@@ -55,7 +57,7 @@ class _HistoryDriver(RunDriver):
         self._io = io  # No model input, input recorder or accepted root exists.
 
     async def start_input(self, io: HarnessRun, context: TurnContext) -> None:
-        await initialize_connection(io, context.working_dir, self.request)
+        await initialize_connection(io, self.config_cwd, self.request)
         self.result = await self.operation(self)
 
     async def request(self, method: str, params: dict[str, Any], *,
@@ -91,9 +93,9 @@ class _HistoryDriver(RunDriver):
 
 async def _operate(working_dir: str, credential: HarnessCredential | None, hooks: ForkHooks,
                    operation: Callable[[_HistoryDriver], Awaitable[dict[str, Any]]],
-                   artifact: ForkCheckpoint) -> dict[str, Any]:
+                   artifact: ForkCheckpoint, *, config_cwd: str | None = None) -> dict[str, Any]:
     selected = profile(get_harness("codex").profile)
-    driver = _HistoryDriver(selected, operation)
+    driver = _HistoryDriver(selected, config_cwd or working_dir, operation)
     run = HarnessRun(replace(selected, new_driver=lambda _: driver), RunConfig(
         session_id=hooks.session_id, user_id=hooks.user_id, mcp_servers=[],
     ))
@@ -110,12 +112,14 @@ async def _operate(working_dir: str, credential: HarnessCredential | None, hooks
             # ACK proves identity, not non-execution. Only the original host's
             # complete, trusted retirement can grant automatic compensation.
             # A failed checkpoint leaves the previously saved gate closed.
-            if (artifact.get("phase") == "created" and run.retirement_state == "proven"
+            if (artifact.get("phase") in {"created", "not_sent"} and run.retirement_state == "proven"
                     and not run.protocol_issues):
                 artifact["cleanup_allowed"] = True
                 await hooks.checkpoint(artifact)
         if run.protocol_issues:
             raise NativeProtocolError(f"Native history protocol failed: {run.protocol_issues}")
+        if run.retirement_state != "proven":
+            raise NativeProtocolError("Native history host retirement was not confirmed")
         return driver.result
     except BaseException as error:
         logger.error("Native history failed session=%s connection=%s\n%s\nstderr:\n%s",
@@ -128,8 +132,10 @@ async def fork_copy(*, parent_working_dir: str, parent_resume_id: str | None, pa
                     dest_working_dir: str, new_resume_id: str, hooks: ForkHooks | None = None) -> ForkArtifact:
     if not parent_resume_id:
         return ForkArtifact(None, True)
-    if hooks is None:
-        raise ValueError("Native fork requires its original saga and resource owner")
+    if hooks is None or hooks.cwd is None:
+        raise ValueError("Native fork requires its original saga and bound directory")
+    cwd = hooks.cwd
+    cwd.require_current()
     home = str(_codex_sessions_dir(parent_credential).parent.resolve())
     state: ForkCheckpoint = {"transport": "app-server", "phase": "unknown", "cleanup_allowed": False, "home": home,
                              "source_thread_id": parent_resume_id}
@@ -139,9 +145,15 @@ async def fork_copy(*, parent_working_dir: str, parent_resume_id: str | None, pa
             state["rpc_id"] = rpc_id
             state["connection_generation"] = driver.connection_generation
             await hooks.checkpoint(state)
+            try:
+                cwd.require_current()
+            except Exception:
+                # The check runs before the writer can send this request.
+                state["phase"] = "not_sent"
+                raise
 
         result = await driver.request("thread/fork", {"threadId": parent_resume_id,
-            "cwd": dest_working_dir, "approvalPolicy": "never", "sandbox": "danger-full-access",
+            "cwd": cwd.path, "approvalPolicy": "never", "sandbox": "danger-full-access",
             "config": _REQUIRED_FEATURES, "deferGoalContinuation": True, "excludeTurns": True}, before_write=before_write)
         thread = result.get("thread") or {}
         identity = thread.get("id")
@@ -155,11 +167,13 @@ async def fork_copy(*, parent_working_dir: str, parent_resume_id: str | None, pa
         await hooks.checkpoint(state)
         path = thread.get("path")
         if (not isinstance(path, str) or not Path(path).resolve().is_relative_to(home)
-                or result.get("cwd") != dest_working_dir):
+                or result.get("cwd") != cwd.path or thread.get("cwd") != dest_working_dir):
             raise NativeProtocolError("Native fork returned a different store or working directory")
         return result
 
-    result = await _operate(dest_working_dir, parent_credential, hooks, create, state)
+    # The app server loads startup configuration from its actual process cwd
+    # before the handshake. Only explicit copy-scoped RPCs use the descriptor.
+    result = await _operate(home, parent_credential, hooks, create, state, config_cwd=cwd.path)
     return ForkArtifact(result["thread"]["id"], False)
 
 
@@ -172,6 +186,8 @@ async def fork_cleanup(working_dir: str, resume_id_hint: str | None, fork_id: st
         return
     if hooks is None:
         raise NativeProtocolError("Native fork cleanup has no original resource owner")
+    if artifact.get("phase") == "not_sent" and artifact.get("cleanup_allowed") is True:
+        return
     if artifact.get("phase") != "created":
         raise NativeProtocolError("Native fork creation is unknown; retain the original recovery material")
     if artifact.get("cleanup_allowed") is not True:
@@ -198,4 +214,6 @@ async def fork_cleanup(working_dir: str, resume_id_hint: str | None, fork_id: st
         # external references; a refusal retains this saga, without expanding it.
         return await driver.request("thread/delete", {"threadId": identity})
 
-    await _operate(working_dir, credential, hooks, remove, artifact)
+    # Recovery can resume after removing the copy directory. Cwd is part of
+    # the saved thread identity, while the management host runs from its store.
+    await _operate(str(home), credential, hooks, remove, artifact)

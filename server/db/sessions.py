@@ -1127,6 +1127,42 @@ class SessionsMixin(DatabaseBase):
                 values,
             )
 
+    async def finish_full_copy_fork(
+        self, session_id: str, resume_id: str | None, needs_replay: bool,
+        require_current_directory: Callable[[], None],
+    ) -> None:
+        """Commit prepared artifacts; a pending delivery still needs admission."""
+        async with self.transaction() as tx:
+            require_current_directory()
+            updated = await tx.execute(
+                """UPDATE sessions SET claude_session_id=?, fork_needs_replay=?, fork_status='ready'
+                   WHERE id=? AND origin='fork' AND fork_status='initializing'""",
+                (resume_id, int(needs_replay), session_id),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("Full-copy fork lost its initializing row")
+
+    async def acknowledge_full_copy_delivery(self, session_id: str) -> str | None:
+        """Retire the publication check without replacing input-owned metadata."""
+        async with self.transaction() as tx:
+            row = await tx.fetch_one(
+                """UPDATE sessions SET fork_metadata=json_remove(fork_metadata, '$.copy_delivery_pending')
+                   WHERE id=? AND origin='fork' AND fork_status='ready'
+                     AND CASE WHEN json_valid(fork_metadata)
+                              THEN json_extract(fork_metadata, '$.copy_delivery_pending') END = 1
+                   RETURNING fork_metadata""",
+                (session_id,),
+            )
+            return row[0] if row else None
+
+    async def full_copy_has_admitted_input(self, session_id: str) -> bool:
+        """A fork copies transcript rows; only this session's own inputs prove admission."""
+        async with self.transaction(write=False) as tx:
+            return await tx.fetch_one(
+                "SELECT 1 FROM client_submissions WHERE session_id=? AND payload IS NOT NULL LIMIT 1",
+                (session_id,),
+            ) is not None
+
     async def count_active_sessions_for_agent(self, agent_id: str) -> int:
         async with self.transaction(write=False) as tx:
             return await self._count(tx,

@@ -14,9 +14,8 @@ import { accountFetch as fetch } from "../lib/accountFetch";
  *   image    → <img> with click-to-zoom
  *   pdf      → browser PDF viewer in an <iframe>
  *
- * Bytes fetched from GET /api/sessions/{id}/files?path=... with the
- * auth token in the query string (matches the attachments pattern,
- * required for <img src> and <iframe src>).
+ * The session file API supplies metadata and bytes. Direct browser
+ * resources such as images and PDFs authenticate with a query token.
  *
  * Visual reference: VM0's AttachmentLightbox
  * (vm0/turbo/apps/platform/src/views/zero-page/zero-attachment-chips.tsx)
@@ -24,7 +23,7 @@ import { accountFetch as fetch } from "../lib/accountFetch";
  * filename + actions in the top-right.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode, HTMLAttributes } from "react";
 import {
   IconCheck,
@@ -42,22 +41,50 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
+import rehypeSlug from "rehype-slug";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 
 import "highlight.js/styles/github.css";
 import "katex/dist/katex.min.css";
 import "./FileViewerDialog.css";
 
-import { useSessionStore } from "../stores/sessionStore";
+import { useSessionStore, type FileResourceDirectory, type FileViewerIntent } from "../stores/sessionStore";
 import { cn } from "../lib/utils";
 
 type FileKind = "markdown" | "code" | "text" | "image" | "pdf";
 
 interface FileMeta {
   path: string;
+  canonical_path_id: string;
+  canonical_directory: FileResourceDirectory;
   kind: FileKind;
   mime_type: string;
   size: number;
+}
+
+function fileUrl(
+  sessionId: string,
+  path: string,
+  { metadata = false, sourceDirectory }: { metadata?: boolean; sourceDirectory?: FileResourceDirectory } = {},
+): string {
+  const endpoint = metadata ? "files/meta" : "files";
+  const query = new URLSearchParams({ path });
+  if (sourceDirectory) {
+    query.set("source_directory", sourceDirectory.path);
+    query.set("source_directory_id", sourceDirectory.path_id);
+  }
+  return `${window.location.origin}/api/sessions/${encodeURIComponent(sessionId)}/${endpoint}?${query}`;
+}
+
+async function fileReadError(response: Response): Promise<Error> {
+  const body = await response.text().catch(() => "");
+  try {
+    const detail: unknown = JSON.parse(body).detail;
+    if (typeof detail === "string" && detail) return new Error(detail);
+  } catch {
+    // Use the raw body when the server did not return a JSON error.
+  }
+  return new Error(body || `HTTP ${response.status}`);
 }
 
 function formatBytes(n: number): string {
@@ -121,22 +148,6 @@ export function FileViewerDialog() {
   const closeViewer = useSessionStore((s) => s.closeViewer);
   const token = useSessionStore((s) => s.token);
 
-  // Build URLs from the open request. memoized so the effect below
-  // doesn't refetch on every keystroke elsewhere in the store.
-  const urls = useMemo(() => {
-    if (!viewer) return null;
-    const base = `${window.location.origin}/api/sessions/${encodeURIComponent(
-      viewer.sessionId
-    )}/files`;
-    const qs = `?path=${encodeURIComponent(viewer.path)}&token=${encodeURIComponent(
-      token
-    )}`;
-    return {
-      meta: `${base}/meta${qs}`,
-      bytes: `${base}${qs}`,
-    };
-  }, [viewer, token]);
-
   const open = viewer !== null;
   const onOpenChange = (next: boolean) => {
     if (!next) closeViewer();
@@ -158,13 +169,10 @@ export function FileViewerDialog() {
             "focus:outline-none"
           )}
         >
-          {viewer && urls ? (
+          {viewer ? (
             <FileViewerInner
-              key={`${viewer.sessionId}::${viewer.path}`}
-              sessionId={viewer.sessionId}
-              path={viewer.path}
-              metaUrl={urls.meta}
-              bytesUrl={urls.bytes}
+              key={viewer.id}
+              viewer={viewer}
               token={token}
               onClose={closeViewer}
             />
@@ -176,47 +184,28 @@ export function FileViewerDialog() {
 }
 
 interface InnerProps {
-  sessionId: string;
-  path: string;
-  metaUrl: string;
-  bytesUrl: string;
+  viewer: FileViewerIntent;
   token: string;
   onClose: () => void;
 }
 
-function FileViewerInner({
-  path,
-  metaUrl,
-  bytesUrl,
-  token,
-  onClose,
-}: InnerProps) {
+function FileViewerInner({ viewer, token, onClose }: InnerProps) {
+  const { sessionId, path, sourceDirectory } = viewer;
   const [meta, setMeta] = useState<FileMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
 
   // 1) Fetch metadata first. The frontend dispatches its renderer
   //    off `kind`, and we want a clear error before we'd otherwise
   //    show a "loading" spinner that never resolves.
   useEffect(() => {
     let cancelled = false;
-    setMeta(null);
-    setError(null);
     (async () => {
       try {
-        const res = await fetch(metaUrl, {
+        const res = await fetch(fileUrl(sessionId, path, { metadata: true, sourceDirectory }), {
           headers: { Authorization: `Bearer ${token}` },
+          cache: "no-store",
         });
-        if (!res.ok) {
-          const body = await res.text().catch(() => "");
-          let msg = body;
-          try {
-            msg = JSON.parse(body).detail ?? body;
-          } catch {
-            // body wasn't JSON — fall back to the raw text
-          }
-          throw new Error(msg || `HTTP ${res.status}`);
-        }
+        if (!res.ok) throw await fileReadError(res);
         const m = (await res.json()) as FileMeta;
         if (!cancelled) setMeta(m);
       } catch (e) {
@@ -226,9 +215,10 @@ function FileViewerInner({
     return () => {
       cancelled = true;
     };
-  }, [metaUrl, token, reloadKey]);
+  }, [sessionId, path, sourceDirectory, token]);
 
   const filename = path.split("/").pop() || path;
+  const bytesUrl = `${fileUrl(sessionId, path, { sourceDirectory })}&token=${encodeURIComponent(token)}`;
   const previewUrl = meta?.kind === "pdf" ? `${bytesUrl}&preview=true` : bytesUrl;
 
   return (
@@ -252,7 +242,7 @@ function FileViewerInner({
         )}
         <button
           type="button"
-          onClick={() => setReloadKey((k) => k + 1)}
+          onClick={() => useSessionStore.getState().openViewer(sessionId, path, { sourceDirectory })}
           className="flex items-center justify-center size-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
           title="Reload"
           aria-label="Reload file"
@@ -299,7 +289,7 @@ function FileViewerInner({
             meta={meta}
             bytesUrl={previewUrl}
             token={token}
-            reloadKey={reloadKey}
+            viewer={viewer}
           />
         )}
       </div>
@@ -330,18 +320,21 @@ interface BodyProps {
   meta: FileMeta;
   bytesUrl: string;
   token: string;
-  reloadKey: number;
+  viewer: FileViewerIntent;
 }
 
-function FileBody({ meta, bytesUrl, token, reloadKey }: BodyProps) {
+function FileBody({ meta, bytesUrl, token, viewer }: BodyProps) {
   if (meta.kind === "image") return <ImageBody bytesUrl={bytesUrl} alt={meta.path} />;
   if (meta.kind === "pdf") return <PdfBody bytesUrl={bytesUrl} />;
+  const textUrl = meta.kind === "markdown"
+    ? `${fileUrl(viewer.sessionId, meta.path)}&canonical_path_id=${encodeURIComponent(meta.canonical_path_id)}`
+    : bytesUrl;
   return (
     <TextBody
       meta={meta}
-      bytesUrl={bytesUrl}
+      bytesUrl={textUrl}
       token={token}
-      reloadKey={reloadKey}
+      viewer={viewer}
     />
   );
 }
@@ -392,29 +385,19 @@ function PdfBody({ bytesUrl }: { bytesUrl: string }) {
   );
 }
 
-interface TextBodyProps {
-  meta: FileMeta;
-  bytesUrl: string;
-  token: string;
-  reloadKey: number;
-}
-
-function TextBody({ meta, bytesUrl, token, reloadKey }: TextBodyProps) {
+function TextBody({ meta, bytesUrl, token, viewer }: BodyProps) {
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    setText(null);
-    setError(null);
     (async () => {
       try {
         const res = await fetch(bytesUrl, {
           headers: { Authorization: `Bearer ${token}` },
+          cache: meta.kind === "markdown" ? "no-store" : undefined,
         });
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
+        if (!res.ok) throw await fileReadError(res);
         const body = await res.text();
         if (!cancelled) setText(body);
       } catch (e) {
@@ -424,11 +407,13 @@ function TextBody({ meta, bytesUrl, token, reloadKey }: TextBodyProps) {
     return () => {
       cancelled = true;
     };
-  }, [bytesUrl, token, reloadKey]);
+  }, [bytesUrl, meta.kind, token]);
 
   if (error) return <FileError message={error} />;
   if (text === null) return <FileLoading />;
-  if (meta.kind === "markdown") return <MarkdownBody text={text} />;
+  if (meta.kind === "markdown") {
+    return <MarkdownBody text={text} directory={meta.canonical_directory} viewer={viewer} token={token} />;
+  }
   if (meta.kind === "code") return <CodeBody text={text} path={meta.path} />;
   return <PlainTextBody text={text} />;
 }
@@ -520,20 +505,95 @@ function extractText(node: ReactNode): string {
   return "";
 }
 
-const MARKDOWN_COMPONENTS: Components = {
-  pre: MarkdownPreBlock,
-};
+const HEADING_PREFIX = "file-viewer-heading-";
 
-function MarkdownBody({ text }: { text: string }) {
+function documentReference(url: string | undefined) {
+  if (!url || url.startsWith("/") || /^[a-z][a-z\d+.-]*:/i.test(url)) return;
+  const hash = url.indexOf("#");
+  const beforeFragment = hash === -1 ? url : url.slice(0, hash);
+  return {
+    path: beforeFragment.split("?", 1)[0],
+    fragment: hash === -1 ? undefined : url.slice(hash + 1),
+  };
+}
+
+function decodeReference(value: string): string | undefined {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function scrollToFragment(article: HTMLElement | null, fragment: string, footnote = false) {
+  if (!article || !fragment) return;
+  // GFM footnote ids contain literal percent escapes for non-ASCII labels.
+  const anchor = footnote ? fragment : decodeReference(fragment);
+  if (anchor === undefined) return;
+  const id = footnote ? anchor : HEADING_PREFIX + anchor;
+  const target = Array.from(article.querySelectorAll<HTMLElement>("[id]")).find((node) => node.id === id);
+  target?.scrollIntoView({ block: "start" });
+}
+
+interface MarkdownBodyProps {
+  text: string;
+  directory: FileResourceDirectory;
+  viewer: FileViewerIntent;
+  token: string;
+}
+
+function MarkdownBody({ text, directory, viewer, token }: MarkdownBodyProps) {
+  const article = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    if (viewer.fragment && useSessionStore.getState().viewer === viewer) {
+      scrollToFragment(article.current, viewer.fragment);
+    }
+  }, [viewer]);
+
+  const components = useMemo<Components>(() => {
+    return {
+      pre: MarkdownPreBlock,
+      a: ({ node, href, ...props }) => {
+        void node;
+        const reference = documentReference(href);
+        if (!reference) return <a {...props} href={href} />;
+        return <a {...props} href={href} onClick={(event) => {
+          event.preventDefault();
+          const state = useSessionStore.getState();
+          if (state.viewer !== viewer) return;
+          if (!reference.path) {
+            const anchor = event.currentTarget;
+            const footnote = anchor.hasAttribute("data-footnote-ref") || anchor.hasAttribute("data-footnote-backref");
+            scrollToFragment(article.current, reference.fragment ?? "", footnote);
+            return;
+          }
+          const target = decodeReference(reference.path);
+          if (target) state.openViewer(viewer.sessionId, target, { fragment: reference.fragment, sourceDirectory: directory });
+        }} />;
+      },
+      img: ({ node, src, alt, ...props }) => {
+        void node;
+        const reference = documentReference(src);
+        if (!reference) return <img {...props} src={src || undefined} alt={alt} />;
+        const target = decodeReference(reference.path);
+        if (!target) return <img {...props} alt={alt} />;
+        const bytes = `${fileUrl(viewer.sessionId, target, { sourceDirectory: directory })}&token=${encodeURIComponent(token)}`;
+        const fragment = reference.fragment === undefined ? "" : `#${reference.fragment}`;
+        return <img {...props} src={bytes + fragment} alt={alt} />;
+      },
+    };
+  }, [directory, viewer, token]);
+
   return (
-    <article className="markdown md-github prose prose-sm max-w-none px-8 py-6">
+    <article ref={article} className="markdown md-github prose prose-sm max-w-none px-8 py-6">
       <Markdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[
+          [rehypeSlug, { prefix: HEADING_PREFIX }],
           [rehypeHighlight, { ignoreMissing: true }],
           rehypeKatex,
         ]}
-        components={MARKDOWN_COMPONENTS}
+        components={components}
       >
         {text}
       </Markdown>

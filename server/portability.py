@@ -15,6 +15,7 @@ import sqlite3
 import stat
 import tempfile
 import zipfile
+from collections.abc import Callable
 from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -34,6 +35,7 @@ from .service_installation import (
     _service_environment,
 )
 from .storage_verification import _reader, verify_main
+from .workspace import account_fork_root, managed_fork_entries
 
 FORMAT = 1
 PATH_SETTINGS = (*_DIRECTORIES, *_FILES)
@@ -129,11 +131,13 @@ def _minimal_roots(paths: list[Path]) -> list[Path]:
     return result
 
 
-def _copy_tree(source: Path, destination: Path, home: Path, excluded: set[Path]) -> dict[str, str]:
+def _copy_tree(
+    source: Path, destination: Path, home: Path, include: Callable[[Path], bool],
+) -> dict[str, str]:
     links: dict[str, str] = {}
 
     def copy(path: Path) -> None:
-        if path in excluded or path.name == ".octopus-installation":
+        if path.name == ".octopus-installation" or not include(path):
             return
         relative = _relative(path, home)
         target = destination / relative
@@ -296,11 +300,30 @@ def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> d
         wiki = inspect_wiki(state)
         roots.append(Path(wiki["root"]))
         excluded.update(state / name for name in ("index.sqlite3", "index.sqlite3-wal", "index.sqlite3-shm", "observer.lock", "vault.lock"))
+    fork_root = account_fork_root(account)
+    managed_forks = managed_fork_entries(fork_root)
+    business_roots = roots[1:]  # The account traversal root is not a business registration.
+    retained_fork_parents = {
+        parent for path in (*business_roots, *app_files.directories)
+        if path.is_relative_to(fork_root)
+        for parent in (path, *path.parents)
+        if parent.is_relative_to(fork_root)
+    }
+
+    def include(path: Path) -> bool:
+        if path in excluded:
+            return False
+        if path == fork_root or not path.is_relative_to(fork_root):
+            return True
+        if path.relative_to(fork_root).parts[0] not in managed_forks:
+            return True
+        return path in retained_fork_parents or any(path.is_relative_to(tree) for tree in business_roots)
+
     links = {}
     for root in _minimal_roots(roots):
         if not root.is_dir():
             raise ValueError(f"Selected resource is not a directory: {root}")
-        links.update(_copy_tree(root, staging, home, excluded))
+        links.update(_copy_tree(root, staging, home, include))
     if wiki:
         target_db = staging / _relative(state / "index.sqlite3", home)
         with _reader(state / "index.sqlite3") as source, closing(sqlite3.connect(target_db)) as copied_db:

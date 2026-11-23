@@ -5,6 +5,7 @@ import { unreadList, type ListReadState, type RefreshResult } from "./listState"
 import type { DispatchState } from "./sessionDispatch";
 import { SessionRestorations } from "./sessionRestorations";
 import { ArchiveDeadline } from "./sessionArchive";
+import { AgentChatCreations } from "./agentChatCreations";
 import type { SessionArchiveResult } from "../api";
 
 type ArchiveFields = Partial<Pick<SessionInfo, "name" | "model" | "reasoning_effort" | "service_tier">>;
@@ -26,6 +27,14 @@ interface ObservationTarget {
   archiveReceipt: boolean;
   activity?: { result: SessionArchiveResult; connection: number };
 }
+interface CreatedOptions {
+  archivedId?: string;
+  deadline?: ArchiveDeadline;
+  includeArchived?: boolean;
+  active?: () => boolean;
+}
+export type LiveRowEvidence = "listed" | "confirmed";
+type LiveRowObservation = { observation: SessionObservation; evidence: LiveRowEvidence };
 
 export function isSelectedChat(sessionId: string | null, state: Pick<ReturnType<typeof useSessionStore.getState>, "activeSessionId" | "mainView">): boolean {
   return state.activeSessionId === sessionId && state.mainView === "chat";
@@ -37,6 +46,7 @@ export function isSelectedChat(sessionId: string | null, state: Pick<ReturnType<
  */
 export class SessionList {
   readonly restorations = new SessionRestorations(this);
+  readonly agentChats = new AgentChatCreations(this);
   private socket: object | null = null;
   private connection = 0;
   private change = 0;
@@ -47,6 +57,8 @@ export class SessionList {
   private engaged = false;
   private archivedRequested = false;
   private closed = false;
+  // Evidence follows projected rows without retaining rows that leave the list.
+  private liveRowObservations = new WeakMap<SessionInfo, LiveRowObservation>();
   // Only outstanding reads are retained, including targets not yet in a list.
   private observations = new Map<SessionObservation, ObservationTarget>();
   private deletionListeners = new Set<(id: string, wasActive: boolean) => void>();
@@ -66,6 +78,7 @@ export class SessionList {
       this.retire({ state: "obsolete" }); this.dirty = false;
       if (account) {
         this.restorations.retire();
+        this.agentChats.retire();
         this.unconfirmedMissing.clear();
         this.socket = null; this.connection++; this.engaged = false; this.archivedRequested = false;
         useSessionStore.setState({ sessions: [], archivedSessions: [], sessionSuccessors: {}, sessionRead: unreadList() });
@@ -87,6 +100,10 @@ export class SessionList {
   }
   accountCurrent(observation: SessionObservation): boolean {
     return this.sameAccount(observation.scope);
+  }
+  hasCurrentLiveObservation(row: SessionInfo, required: LiveRowEvidence = "listed"): boolean {
+    const fact = this.liveRowObservations.get(row);
+    return !!fact && this.current(fact.observation) && (required === "listed" || fact.evidence === "confirmed");
   }
   initialGenerationCurrent(observation: SessionObservation): boolean {
     return observation.scope.generation === null && observation.initialGeneration != null &&
@@ -195,18 +212,25 @@ export class SessionList {
         const live = rows.filter((row) => !row.archived && !archivedIds.has(row.id));
         const archived = read.archived ? observedArchived :
           useSessionStore.getState().archivedSessions.filter((row) => !live.some((item) => item.id === row.id));
+        const observation = this.capture(store);
         this.commit(live, archived);
+        if (this.active !== read || !this.current(observation)) return;
         // Only a complete list can distinguish archive from deletion. Every
         // missing known identity can still own cached inputs or late receipts.
         if (read.archived) {
           this.lastInclusiveRead = this.change;
           this.unconfirmedMissing.clear();
-          for (const id of absent) this.remove(id);
+          for (const id of absent) this.forget(id);
         } else {
           for (const id of absent) this.unconfirmedMissing.add(id);
           for (const row of rows) this.unconfirmedMissing.delete(row.id);
           if (this.unconfirmedMissing.size) { this.archivedRequested = true; this.dirty = true; }
         }
+        // Live membership can support navigation before the queued reads
+        // that confirm a write have finished.
+        this.publishChatRows(live, this.dirty ? "listed" : "confirmed", observation);
+        if (read.archived) this.publishChatRows(observedArchived, "confirmed", observation);
+        if (this.active !== read) return;
         this.retire({ state: "applied" }); this.state({ loaded: true, stale: this.dirty, error: null });
       }
       this.kick();
@@ -228,6 +252,14 @@ export class SessionList {
     // afterward still owns a follow-up, even if the older read failed.
     if (this.dirty) this.kick();
   }
+  private publishChatRows(rows: SessionInfo[], evidence: LiveRowEvidence, observation: SessionObservation): void {
+    if (!this.current(observation)) return;
+    for (const row of rows) {
+      if (row.archived || this.hasCurrentLiveObservation(row, "confirmed")) continue;
+      this.liveRowObservations.set(row, { observation, evidence });
+    }
+    this.agentChats.observeRows(rows);
+  }
   private commit(sessions: SessionInfo[], archivedSessions: SessionInfo[], links = useSessionStore.getState().sessionSuccessors,
     activity?: SessionArchiveResult,
   ): void {
@@ -242,7 +274,12 @@ export class SessionList {
     }
     for (const row of [...before.sessions, ...before.archivedSessions]) {
       const next = nextRows.get(row.id);
+      if (row.archived && !next) this.agentChats.rememberArchivedRow(row);
       if (!next || Boolean(next.archived) !== Boolean(row.archived)) this.invalidateTarget(row.id, !next || !!next.archived);
+      if (next && next !== row && !next.archived && !row.archived) {
+        const fact = this.liveRowObservations.get(row);
+        if (fact && this.current(fact.observation)) this.liveRowObservations.set(next, fact);
+      }
     }
     // Missing live-list rows await inclusive confirmation. An archive receipt
     // survives that gap, but a source returning live is restoration evidence;
@@ -283,34 +320,43 @@ export class SessionList {
     this.engaged = true; this.invalidate();
     return false;
   }
-  private async confirmLive(id: string, observation: SessionObservation, includeArchived: boolean, deadline?: ArchiveDeadline): Promise<boolean> {
+  /** Follow coalesced reads while the caller still owns this confirmation. */
+  async settledRead(includeArchived: boolean, current: () => boolean, deadline?: ArchiveDeadline): Promise<SessionObservation | null> {
+    while (current() && (!deadline || deadline.active)) {
+      const observation = this.capture();
+      const read = this.refresh(includeArchived);
+      const result = await (deadline ? deadline.wait(read) : read);
+      if (!result || !current()) return null;
+      if (!this.current(observation) || result.state === "pending" ||
+          result.state === "applied" && useSessionStore.getState().sessionRead.stale) continue;
+      return result.state === "applied" ? observation : null;
+    }
+    return null;
+  }
+  private async confirmLive(id: string, observation: SessionObservation, includeArchived: boolean,
+    deadline?: ArchiveDeadline, active?: () => boolean,
+  ): Promise<boolean> {
     const state = useSessionStore.getState();
     if (state.archivedSessions.some((row) => row.id === id) || state.sessionSuccessors[id]) return false;
     const target = this.observe(id, state);
-    const current = () => this.current(observation) && this.current(target.observation);
+    const current = () => (active?.() ?? true) && this.current(observation) && this.current(target.observation);
     try {
-      while (current() && (!deadline || deadline.active)) {
-        const read = this.refresh(includeArchived);
-        const result = await (deadline ? deadline.wait(read) : read);
-        if (!result || !current()) return false;
-        // An accepted snapshot can still predate a later write receipt. Wait
-        // through the coalesced confirmation already owned by this list.
-        if (result.state === "pending" || result.state === "applied" && useSessionStore.getState().sessionRead.stale) continue;
-        return result.state === "applied" && useSessionStore.getState().sessions.some((row) => row.id === id);
-      }
-      return false;
+      const accepted = await this.settledRead(includeArchived, current, deadline);
+      return !!accepted && current() && useSessionStore.getState().sessions.some((row) => row.id === id);
     } finally {
       target.finish();
     }
   }
-  async created(info: SessionInfo, observation: SessionObservation, archivedId?: string, deadline?: ArchiveDeadline): Promise<boolean> {
-    if (deadline && !deadline.active) return false;
+  async created(info: SessionInfo, observation: SessionObservation,
+    { archivedId, deadline, includeArchived = !!archivedId, active }: CreatedOptions = {},
+  ): Promise<boolean> {
+    if (active?.() === false || deadline && !deadline.active) return false;
     if (archivedId && !this.archiveObservationCurrent(archivedId, observation)) {
       this.canConfirm(observation, true);
       return false;
     }
-    const adopted = this.adoptCreated(info, observation, archivedId);
-    const accepted = adopted || await this.confirmLive(info.id, observation, !!archivedId, deadline);
+    const adopted = this.adoptCreated(info, observation, includeArchived, archivedId);
+    const accepted = adopted || await this.confirmLive(info.id, observation, includeArchived, deadline, active);
     if (!accepted || !this.current(observation) || !useSessionStore.getState().sessions.some((row) => row.id === info.id)) return false;
     if (archivedId) {
       if (!this.archiveObservationCurrent(archivedId, observation)) return false;
@@ -325,18 +371,20 @@ export class SessionList {
     if (archivedId && !useSessionStore.getState().archivedSessions.some((row) => row.id === archivedId)) void this.refresh(true);
     return this.current(observation);
   }
-  private adoptCreated(info: SessionInfo, observation: SessionObservation, archivedId?: string): boolean {
-    if (!this.current(observation)) { this.canConfirm(observation, !!archivedId); return false; }
+  private adoptCreated(info: SessionInfo, observation: SessionObservation, includeArchived: boolean, archivedId?: string): boolean {
+    if (!this.current(observation)) { this.canConfirm(observation, includeArchived); return false; }
     const store = useSessionStore.getState();
     // A preceding event/read can already confirm this new live identity.
     // Navigation may follow that fact without copying the receipt's old fields.
     if (store.sessions.some((row) => row.id === info.id) &&
         (!archivedId || store.archivedSessions.some((row) => row.id === archivedId))) return true;
-    if (!this.canConfirm(observation, !!archivedId) || store.archivedSessions.some((row) => row.id === info.id)) return false;
+    if (!this.canConfirm(observation, includeArchived) || store.archivedSessions.some((row) => row.id === info.id)) return false;
     if (archivedId) {
       const old = store.sessions.find((row) => row.id === archivedId);
+      this.agentChats.observeClosed(archivedId);
       this.commit([...store.sessions.filter((row) => row.id !== archivedId), info], old ?
         [...store.archivedSessions.filter((row) => row.id !== archivedId), { ...old, archived: true }] : store.archivedSessions);
+      this.publishChatRows([info], "confirmed", observation);
       return true;
     }
     return this.row(info);
@@ -361,7 +409,7 @@ export class SessionList {
     const { sessions, archivedSessions } = useSessionStore.getState();
     // A read may already have observed this identity with newer fields or membership.
     if (sessions.some((row) => row.id === id) || archivedSessions.some((row) => row.id === id)) return;
-    if (info) this.commit([...sessions, info], archivedSessions);
+    if (info) this.row(info);
     else {
       // The summary exceeded the wire budget. An in-flight list may predate it.
       this.change++;
@@ -377,6 +425,7 @@ export class SessionList {
   row(info: SessionInfo, observation?: SessionObservation, establishedGeneration?: string | null): boolean {
     if (!info.id || !this.canApply(observation, establishedGeneration)) return false;
     const store = useSessionStore.getState();
+    const liveObservation = this.capture(store);
     // Details and events update existing rows in place; opening a session
     // must not move it down the sidebar. Only a new identity is appended.
     const replace = (rows: SessionInfo[], belongs: boolean) => {
@@ -386,6 +435,7 @@ export class SessionList {
         : [...rows, info];
     };
     this.commit(replace(store.sessions, !info.archived), replace(store.archivedSessions, !!info.archived));
+    this.publishChatRows([info], "confirmed", liveObservation);
     return true;
   }
   patch(id: string, fields: Partial<SessionInfo>, observation?: SessionObservation): boolean {
@@ -426,6 +476,7 @@ export class SessionList {
       else links[id] = successorId;
     }
     const shared = activity?.old_session_id === id && activity.new_session_id === successorId ? activity : undefined;
+    this.agentChats.observeClosed(id);
     this.commit(live, archived, links, shared);
     if (!old || targetId && !rows.some((row) => row.id === targetId)) void this.refresh(true);
     return true;
@@ -522,6 +573,11 @@ export class SessionList {
   }
   remove(id: string, observation?: SessionObservation): boolean {
     if (!this.canConfirm(observation)) return false;
+    this.agentChats.observeClosed(id);
+    this.forget(id);
+    return true;
+  }
+  private forget(id: string): void {
     this.invalidateTarget(id);
     this.unconfirmedMissing.delete(id);
     const store = useSessionStore.getState();
@@ -531,10 +587,10 @@ export class SessionList {
     useSessionStore.getState().forgetSession(id);
     this.restorations.deleted(id);
     for (const listener of this.deletionListeners) listener(id, wasActive);
-    return true;
   }
   dispose(): void {
     this.restorations.retire();
+    this.agentChats.retire();
     this.unconfirmedMissing.clear();
     this.deletionListeners.clear();
     this.observations.clear();
